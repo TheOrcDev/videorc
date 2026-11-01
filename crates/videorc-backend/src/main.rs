@@ -8979,8 +8979,6 @@ fn publish_stream_screen_list(state: &AppState) -> anyhow::Result<Vec<protocol::
     Ok(screens)
 }
 
-// Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
-#[allow(deprecated)]
 async fn handle_text_message_with_role(
     state: &AppState,
     text: &str,
@@ -9008,33 +9006,55 @@ async fn handle_text_message_with_role(
         return ServerResponse::error(command.id, "managed-background-rejected", error.to_string());
     }
 
-    let mut response = match command.method.as_str() {
+    let mut response = dispatch_authorized_backend_command(state, command, role).await;
+    if role == BackendRole::Renderer
+        && let Some(payload) = response.payload.as_mut()
+    {
+        resource_authority::redact_managed_background_paths(payload);
+        resource_authority::redact_managed_screen_paths(payload);
+    }
+    response
+}
+
+// Construct one future per authorized method. Polling a single async match for
+// every RPC made its unoptimized stack frame about 1.7 MiB, leaving too little
+// room for nested scene transactions on the default worker/test stack.
+// Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
+#[allow(deprecated)]
+fn dispatch_authorized_backend_command(
+    state: &AppState,
+    command: ClientCommand,
+    role: BackendRole,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ServerResponse> + Send + '_>> {
+    match command.method.as_str() {
         #[cfg(debug_assertions)]
         COMMAND_LANE_SMOKE_BLOCK_METHOD | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD => {
-            if !rpc_params_are_empty(&command.params) {
-                ServerResponse::error(
-                    command.id,
-                    "invalid-params",
-                    "The command-lane blocker does not accept parameters.",
-                )
-            } else {
-                match state.command_lane_smoke_blocker.block().await {
-                    Ok(generation) => ServerResponse::ok(
+            Box::pin(async move {
+                if !rpc_params_are_empty(&command.params) {
+                    ServerResponse::error(
                         command.id,
-                        serde_json::json!({ "generation": generation, "released": true }),
-                    ),
-                    Err(active_generation) => ServerResponse::error(
-                        command.id,
-                        "command-lane-smoke-blocker-active",
-                        format!(
-                            "Command-lane smoke blocker generation {active_generation} is already active."
+                        "invalid-params",
+                        "The command-lane blocker does not accept parameters.",
+                    )
+                } else {
+                    match state.command_lane_smoke_blocker.block().await {
+                        Ok(generation) => ServerResponse::ok(
+                            command.id,
+                            serde_json::json!({ "generation": generation, "released": true }),
                         ),
-                    ),
+                        Err(active_generation) => ServerResponse::error(
+                            command.id,
+                            "command-lane-smoke-blocker-active",
+                            format!(
+                                "Command-lane smoke blocker generation {active_generation} is already active."
+                            ),
+                        ),
+                    }
                 }
-            }
+            })
         }
         #[cfg(debug_assertions)]
-        COMMAND_LANE_SMOKE_STATUS_METHOD => {
+        COMMAND_LANE_SMOKE_STATUS_METHOD => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -9053,13 +9073,13 @@ async fn handle_text_message_with_role(
                     }),
                 )
             }
-        }
+        }),
         // Plan 094 (S4): the quota-outage drill. Debug builds only, admitted
         // through the explicit smoke RPC switch, and only while the dev-only
         // `VIDEORC_YOUTUBE_API_BASE_URL` points YouTube at a local fake, so no
         // seeded token or forced expiry can ever reach Google.
         #[cfg(debug_assertions)]
-        "test.youtubeQuota.forceExpiry" => {
+        "test.youtubeQuota.forceExpiry" => Box::pin(async move {
             if youtube_quota::youtube_api_base_url_override().is_none() {
                 ServerResponse::error(
                     command.id,
@@ -9088,12 +9108,12 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
+        }),
         // Plan 140 (S9): the drill sets the daily budget (`limit`, units; null
         // restores the compiled default) to prove a removal sheds at 100%.
         // Same gates as the hooks above.
         #[cfg(debug_assertions)]
-        "test.youtubeQuota.setBudget" => {
+        "test.youtubeQuota.setBudget" => Box::pin(async move {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase", deny_unknown_fields)]
             struct BudgetParams {
@@ -9120,9 +9140,9 @@ async fn handle_text_message_with_role(
                     }
                 }
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        "test.youtubeQuota.seedAccount" => {
+        "test.youtubeQuota.seedAccount" => Box::pin(async move {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct SeedParams {
@@ -9192,9 +9212,9 @@ async fn handle_text_message_with_role(
                     }
                 }
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        COMMAND_LANE_SMOKE_RELEASE_METHOD => {
+        COMMAND_LANE_SMOKE_RELEASE_METHOD => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -9211,9 +9231,9 @@ async fn handle_text_message_with_role(
                     }),
                 )
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        CAPTURE_RECOVERY_SMOKE_INJECT_METHOD => {
+        CAPTURE_RECOVERY_SMOKE_INJECT_METHOD => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -9230,9 +9250,9 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD => {
+        CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -9249,10 +9269,10 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
+        }),
         #[cfg(debug_assertions)]
         CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD
-        | CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD => {
+        | CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -9276,8 +9296,8 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
-        "resource.capability.issue" => {
+        }),
+        "resource.capability.issue" => Box::pin(async move {
             match serde_json::from_value::<resource_authority::IssueResourceCapabilityParams>(
                 command.params,
             ) {
@@ -9293,8 +9313,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "resource.capability.revoke" => {
+        }),
+        "resource.capability.revoke" => Box::pin(async move {
             let capability_id = command
                 .params
                 .get("capabilityId")
@@ -9306,8 +9326,8 @@ async fn handle_text_message_with_role(
                     "revoked": state.resource_authority.revoke(capability_id)
                 }),
             )
-        }
-        "resource.capability.register_thumbnail" => {
+        }),
+        "resource.capability.register_thumbnail" => Box::pin(async move {
             let result = state.resource_authority.register_managed_thumbnail(
                 command.params["assetId"].as_str().unwrap_or_default(),
                 command.params["path"].as_str().unwrap_or_default(),
@@ -9318,8 +9338,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "thumbnail-rejected", error.to_string())
                 }
             }
-        }
-        "resource.capability.register_background" => {
+        }),
+        "resource.capability.register_background" => Box::pin(async move {
             let asset_id = command
                 .params
                 .get("assetId")
@@ -9344,8 +9364,8 @@ async fn handle_text_message_with_role(
                     error.to_string(),
                 ),
             }
-        }
-        "resource.admin.resolve_session_path" => {
+        }),
+        "resource.admin.resolve_session_path" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -9359,8 +9379,8 @@ async fn handle_text_message_with_role(
                     error.to_string(),
                 ),
             }
-        }
-        "resource.admin.resolve_screen_path" => {
+        }),
+        "resource.admin.resolve_screen_path" => Box::pin(async move {
             let screen_id = command
                 .params
                 .get("screenId")
@@ -9384,8 +9404,8 @@ async fn handle_text_message_with_role(
                     error.to_string(),
                 ),
             }
-        }
-        "resource.admin.resolve_background_path" => {
+        }),
+        "resource.admin.resolve_background_path" => Box::pin(async move {
             let asset_id = command
                 .params
                 .get("assetId")
@@ -9405,8 +9425,8 @@ async fn handle_text_message_with_role(
                     error.to_string(),
                 ),
             }
-        }
-        "health.ping" => {
+        }),
+        "health.ping" => Box::pin(async move {
             let ffmpeg_path = resolve_trusted_ffmpeg_path(
                 command
                     .params
@@ -9421,12 +9441,12 @@ async fn handle_text_message_with_role(
                 health.ffmpeg.path = "trusted-bundled-ffmpeg".to_string();
             }
             ServerResponse::ok(command.id, health)
-        }
-        "account.get" => {
+        }),
+        "account.get" => Box::pin(async move {
             let session = state.account_session.lock().await;
             ServerResponse::ok(command.id, account::current_account(session.as_ref()))
-        }
-        "account.auth.begin_intent" => {
+        }),
+        "account.auth.begin_intent" => Box::pin(async move {
             let _account_transition = state.account_auth_transition.lock().await;
             match account::advance_sign_in_intent_generation() {
                 Ok(intent_generation) => ServerResponse::ok(
@@ -9439,8 +9459,8 @@ async fn handle_text_message_with_role(
                     error.to_string(),
                 ),
             }
-        }
-        "account.sign_out" => {
+        }),
+        "account.sign_out" => Box::pin(async move {
             let account_transition = state.account_auth_transition.lock().await;
             let mut clear_result = None;
             let caption_shutdown = clear_account_credentials_after_caption_shutdown(state, || {
@@ -9472,8 +9492,8 @@ async fn handle_text_message_with_role(
             *state.account_session.lock().await = Some(signed_out.clone());
             drop(account_transition);
             ServerResponse::ok(command.id, signed_out)
-        }
-        "account.complete_sign_in" => {
+        }),
+        "account.complete_sign_in" => Box::pin(async move {
             match serde_json::from_value::<protocol::AccountCompleteSignInParams>(command.params) {
                 Ok(params) => {
                     let account_transition = state.account_auth_transition.lock().await;
@@ -9515,8 +9535,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "account.windows_pilot_update_token" => {
+        }),
+        "account.windows_pilot_update_token" => Box::pin(async move {
             // Main's updater asks for a short-lived token that reads only the
             // Windows pilot feed. The account session never leaves the backend;
             // `null` means signed out, pilot closed, or the web was unreachable
@@ -9538,8 +9558,8 @@ async fn handle_text_message_with_role(
                 },
             };
             ServerResponse::ok(command.id, token)
-        }
-        "account.refresh" => {
+        }),
+        "account.refresh" => Box::pin(async move {
             // Capture generation + token atomically with account transitions,
             // release the lock for bounded network I/O, then reacquire it for
             // compare+commit. A stale refresh can never undo sign-out or
@@ -9610,9 +9630,13 @@ async fn handle_text_message_with_role(
                 tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
             }
             ServerResponse::ok(command.id, resolved)
+        }),
+        "entitlements.get" => {
+            Box::pin(
+                async move { ServerResponse::ok(command.id, entitlements::current_entitlements()) },
+            )
         }
-        "entitlements.get" => ServerResponse::ok(command.id, entitlements::current_entitlements()),
-        "entitlements.refresh" => {
+        "entitlements.refresh" => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -9630,8 +9654,8 @@ async fn handle_text_message_with_role(
                 .await;
                 ServerResponse::ok(command.id, entitlements::current_entitlements())
             }
-        }
-        "captions.start" => {
+        }),
+        "captions.start" => Box::pin(async move {
             let language = command
                 .params
                 .get("language")
@@ -9644,12 +9668,16 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "captions-start-failed", error.to_string())
                 }
             }
+        }),
+        "captions.stop" => {
+            Box::pin(
+                async move { ServerResponse::ok(command.id, captions::stop_captions(state).await) },
+            )
         }
-        "captions.stop" => ServerResponse::ok(command.id, captions::stop_captions(state).await),
-        "captions.status.get" => {
+        "captions.status.get" => Box::pin(async move {
             ServerResponse::ok(command.id, captions::captions_status(state).await)
-        }
-        "captions.style.set" => {
+        }),
+        "captions.style.set" => Box::pin(async move {
             match serde_json::from_value::<captions::SetCaptionStyleParams>(command.params) {
                 Ok(params) => match captions::update_caption_style(state, params).await {
                     Ok(style) => ServerResponse::ok(command.id, style),
@@ -9663,9 +9691,9 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        "captions.test.inject-audio" => {
+        "captions.test.inject-audio" => Box::pin(async move {
             let duration_ms = command
                 .params
                 .get("durationMs")
@@ -9687,17 +9715,19 @@ async fn handle_text_message_with_role(
                     error.to_string(),
                 ),
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        "captions.test.snapshot" => match captions::caption_contract_test_snapshot(state).await {
-            Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
-            Err(error) => ServerResponse::error(
-                command.id,
-                "caption-contract-test-disabled",
-                error.to_string(),
-            ),
-        },
-        "captions.overlay.set" => {
+        "captions.test.snapshot" => Box::pin(async move {
+            match captions::caption_contract_test_snapshot(state).await {
+                Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "caption-contract-test-disabled",
+                    error.to_string(),
+                ),
+            }
+        }),
+        "captions.overlay.set" => Box::pin(async move {
             match serde_json::from_value::<captions::SetCaptionOverlayParams>(command.params) {
                 Ok(params) => {
                     match captions::install_caption_overlays(&state.caption_overlay, params) {
@@ -9713,20 +9743,26 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "comments.highlight.status" => ServerResponse::ok(
-            command.id,
-            comment_highlight::comment_highlight_status(state).await,
-        ),
-        "comments.highlight.canvases" => ServerResponse::ok(
-            command.id,
-            comment_highlight::comment_highlight_canvases(state).await,
-        ),
-        "overlays.layout.get" => ServerResponse::ok(
-            command.id,
-            overlay_layout::load_overlay_layout(&state.database),
-        ),
-        "overlays.layout.set" => {
+        }),
+        "comments.highlight.status" => Box::pin(async move {
+            ServerResponse::ok(
+                command.id,
+                comment_highlight::comment_highlight_status(state).await,
+            )
+        }),
+        "comments.highlight.canvases" => Box::pin(async move {
+            ServerResponse::ok(
+                command.id,
+                comment_highlight::comment_highlight_canvases(state).await,
+            )
+        }),
+        "overlays.layout.get" => Box::pin(async move {
+            ServerResponse::ok(
+                command.id,
+                overlay_layout::load_overlay_layout(&state.database),
+            )
+        }),
+        "overlays.layout.set" => Box::pin(async move {
             match serde_json::from_value::<overlay_layout::OverlayLayout>(command.params) {
                 Ok(layout) => match overlay_layout::set_overlay_layout(state, layout).await {
                     Ok(saved) => ServerResponse::ok(command.id, saved),
@@ -9740,8 +9776,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "overlays.layout.migrate_highlight_anchor" => {
+        }),
+        "overlays.layout.migrate_highlight_anchor" => Box::pin(async move {
             match serde_json::from_value::<overlay_layout::MigrateHighlightAnchorParams>(
                 command.params,
             ) {
@@ -9759,8 +9795,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "comments.highlight.set" => {
+        }),
+        "comments.highlight.set" => Box::pin(async move {
             match serde_json::from_value::<comment_highlight::SetCommentHighlightParams>(
                 command.params,
             ) {
@@ -9774,13 +9810,19 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }),
+        "comments.highlight.clear" => Box::pin(async move {
+            ServerResponse::ok(
+                command.id,
+                comment_highlight::clear_comment_highlight(state).await,
+            )
+        }),
+        "cohost.status" => {
+            Box::pin(
+                async move { ServerResponse::ok(command.id, cohost::cohost_status(state).await) },
+            )
         }
-        "comments.highlight.clear" => ServerResponse::ok(
-            command.id,
-            comment_highlight::clear_comment_highlight(state).await,
-        ),
-        "cohost.status" => ServerResponse::ok(command.id, cohost::cohost_status(state).await),
-        "cohost.start" => {
+        "cohost.start" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostStartParams>(command.params) {
                 Ok(params) => match cohost::start_cohost(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9792,9 +9834,13 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }),
+        "cohost.stop" => {
+            Box::pin(
+                async move { ServerResponse::ok(command.id, cohost::stop_cohost(state).await) },
+            )
         }
-        "cohost.stop" => ServerResponse::ok(command.id, cohost::stop_cohost(state).await),
-        "cohost.question.answered" => {
+        "cohost.question.answered" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostQuestionParams>(command.params) {
                 Ok(params) => match cohost::mark_question_answered(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9806,8 +9852,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.question.dismiss" => {
+        }),
+        "cohost.question.dismiss" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostQuestionParams>(command.params) {
                 Ok(params) => match cohost::dismiss_question(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9819,8 +9865,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.question.restore" => {
+        }),
+        "cohost.question.restore" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostQuestionParams>(command.params) {
                 Ok(params) => match cohost::restore_question(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9832,8 +9878,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.flag.dismiss" => {
+        }),
+        "cohost.flag.dismiss" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostFlagParams>(command.params) {
                 Ok(params) => match cohost::dismiss_flag(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9845,8 +9891,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.promise.done" => {
+        }),
+        "cohost.promise.done" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostPromiseParams>(command.params) {
                 Ok(params) => match cohost::promise_done(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9858,8 +9904,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.promise.dismiss" => {
+        }),
+        "cohost.promise.dismiss" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostPromiseParams>(command.params) {
                 Ok(params) => match cohost::dismiss_promise(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9871,8 +9917,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.recap.dismiss" => {
+        }),
+        "cohost.recap.dismiss" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostRecapParams>(command.params) {
                 Ok(params) => match cohost::dismiss_recap(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9884,8 +9930,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.recap.draft" => {
+        }),
+        "cohost.recap.draft" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostRecapParams>(command.params) {
                 Ok(params) => match cohost::draft_recap(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9897,8 +9943,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.author.greeted" => {
+        }),
+        "cohost.author.greeted" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostAuthorParams>(command.params) {
                 Ok(params) => match cohost::mark_author_greeted(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9910,11 +9956,11 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 140 S3: answers to the card a voice command opened. Quick
         // replies: a confirmed removal runs in the background and its outcome
         // arrives as `cohost.state`. Never routed by the LAN listener.
-        "cohost.command.choose" => {
+        "cohost.command.choose" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostCommandChooseParams>(command.params) {
                 Ok(params) => match cohost::choose_command(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9924,8 +9970,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.command.confirm" => {
+        }),
+        "cohost.command.confirm" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostCommandParams>(command.params) {
                 Ok(params) => match cohost::confirm_command(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9935,8 +9981,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.command.cancel" => {
+        }),
+        "cohost.command.cancel" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostCommandParams>(command.params) {
                 Ok(params) => match cohost::cancel_command(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9946,11 +9992,11 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 209 S20: `/buddy <words>` from the Stream Manager. Answers at
         // once (a gate's sentence, or `working`); the result follows as
         // `cohost.act.result`. Never routed by the LAN listener.
-        "cohost.act" => {
+        "cohost.act" => Box::pin(async move {
             match serde_json::from_value::<buddy_act::CohostActParams>(command.params) {
                 Ok(params) => match cohost::act_typed(state, params).await {
                     Ok(answer) => ServerResponse::ok(command.id, answer),
@@ -9960,10 +10006,10 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 164 Phase D: the Stream Manager's answers to the Buddy's
         // proposed cards, and the Say box. Never routed by the LAN listener.
-        "cohost.utterance.approve" => {
+        "cohost.utterance.approve" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
                 Ok(params) => match cohost::approve_utterance(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9975,8 +10021,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.utterance.dismiss" => {
+        }),
+        "cohost.utterance.dismiss" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
                 Ok(params) => match cohost::dismiss_utterance(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -9988,8 +10034,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.utterance.say" => {
+        }),
+        "cohost.utterance.say" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostSayParams>(command.params) {
                 Ok(params) => match cohost::say_utterance(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -10001,13 +10047,17 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.settings.get" => {
+        }),
+        "cohost.settings.get" => Box::pin(async move {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
-        }
+        }),
         // --- Buddy overlay (plan 164 Phase C) ---
-        "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
-        "buddy.overlay.set" => {
+        "cohost.buddy.status" => {
+            Box::pin(
+                async move { ServerResponse::ok(command.id, buddy_overlay::status(state).await) },
+            )
+        }
+        "buddy.overlay.set" => Box::pin(async move {
             match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
                 Ok(params) => {
                     match buddy_overlay::set_buddy_overlay(&state.buddy_overlay, params).await {
@@ -10023,9 +10073,9 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // --- Buddy pets (plan 168, Phase B) ---
-        "buddy.overlay.clear" => {
+        "buddy.overlay.clear" => Box::pin(async move {
             match serde_json::from_value::<buddy_overlay::ClearBuddyOverlayParams>(command.params) {
                 Ok(params) => {
                     match buddy_overlay::clear_buddy_overlay(&state.buddy_overlay, params) {
@@ -10041,11 +10091,11 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // --- end Buddy pets (plan 168, Phase B) ---
         // --- end Buddy overlay ---
         // --- Buddy look (plan 169 Phase B) ---
-        "cohost.avatar.create" => {
+        "cohost.avatar.create" => Box::pin(async move {
             match serde_json::from_value::<cohost_avatar::CohostAvatarCreateParams>(command.params)
             {
                 Ok(params) => match cohost_avatar::create(state, params).await {
@@ -10058,8 +10108,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.avatar.redo" => {
+        }),
+        "cohost.avatar.redo" => Box::pin(async move {
             match serde_json::from_value::<cohost_avatar::CohostAvatarRedoParams>(command.params) {
                 Ok(params) => match cohost_avatar::redo(state, params).await {
                     Ok(accepted) => ServerResponse::ok(command.id, accepted),
@@ -10071,8 +10121,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.avatar.keep" => {
+        }),
+        "cohost.avatar.keep" => Box::pin(async move {
             match serde_json::from_value::<cohost_avatar::CohostAvatarRequestIdParams>(
                 command.params,
             ) {
@@ -10086,8 +10136,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.avatar.discard" => {
+        }),
+        "cohost.avatar.discard" => Box::pin(async move {
             match serde_json::from_value::<cohost_avatar::CohostAvatarRequestIdParams>(
                 command.params,
             ) {
@@ -10101,14 +10151,16 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.avatar.draft.get" => match cohost_avatar::draft_status(state).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
-        },
+        }),
+        "cohost.avatar.draft.get" => Box::pin(async move {
+            match cohost_avatar::draft_status(state).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
+            }
+        }),
         // --- end Buddy look (plan 169 Phase B) ---
         // --- Buddy library (plan 170 D12, D13) ---
-        "cohost.library.get" => {
+        "cohost.library.get" => Box::pin(async move {
             if rpc_params_are_empty(&command.params) {
                 ServerResponse::ok(command.id, cohost_library::get(state).await)
             } else {
@@ -10118,8 +10170,8 @@ async fn handle_text_message_with_role(
                     "cohost.library.get does not accept parameters.",
                 )
             }
-        }
-        "cohost.library.sync" => {
+        }),
+        "cohost.library.sync" => Box::pin(async move {
             match serde_json::from_value::<cohost_library::CohostLibrarySyncParams>(command.params)
             {
                 Ok(params) => match cohost_library::sync(state, params).await {
@@ -10132,8 +10184,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.library.use" => {
+        }),
+        "cohost.library.use" => Box::pin(async move {
             match serde_json::from_value::<cohost_library::CohostLibraryAvatarParams>(
                 command.params,
             ) {
@@ -10147,8 +10199,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.library.update" => {
+        }),
+        "cohost.library.update" => Box::pin(async move {
             match serde_json::from_value::<cohost_library::CohostLibraryUpdateParams>(
                 command.params,
             ) {
@@ -10162,8 +10214,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.library.delete" => {
+        }),
+        "cohost.library.delete" => Box::pin(async move {
             match serde_json::from_value::<cohost_library::CohostLibraryAvatarParams>(
                 command.params,
             ) {
@@ -10177,9 +10229,9 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 172 D10: a Buddy made only here joins the library.
-        "cohost.library.saveToLibrary" => {
+        "cohost.library.saveToLibrary" => Box::pin(async move {
             if rpc_params_are_empty(&command.params) {
                 match cohost_library::save_to_library(state).await {
                     Ok(accepted) => ServerResponse::ok(command.id, accepted),
@@ -10194,14 +10246,16 @@ async fn handle_text_message_with_role(
                     "cohost.library.saveToLibrary does not accept parameters.",
                 )
             }
-        }
+        }),
         // --- end Buddy library (plan 170) ---
         // --- Buddy pets (plan 168, Phase A) ---
-        "cohost.pet.list" => match buddy_pet_store::list(state).await {
-            Ok(packs) => ServerResponse::ok(command.id, packs),
-            Err(error) => ServerResponse::error(command.id, error.code, error.message),
-        },
-        "cohost.pet.import" => {
+        "cohost.pet.list" => Box::pin(async move {
+            match buddy_pet_store::list(state).await {
+                Ok(packs) => ServerResponse::ok(command.id, packs),
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
+            }
+        }),
+        "cohost.pet.import" => Box::pin(async move {
             match serde_json::from_value::<buddy_pet_store::CohostPetImportParams>(command.params) {
                 Ok(params) => match buddy_pet_store::import(state, params).await {
                     Ok(summary) => ServerResponse::ok(command.id, summary),
@@ -10211,8 +10265,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.pet.remove" => {
+        }),
+        "cohost.pet.remove" => Box::pin(async move {
             match serde_json::from_value::<buddy_pet_store::CohostPetRemoveParams>(command.params) {
                 Ok(params) => match buddy_pet_store::remove(state, params).await {
                     Ok(removed) => ServerResponse::ok(command.id, removed),
@@ -10222,8 +10276,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.pet.react" => {
+        }),
+        "cohost.pet.react" => Box::pin(async move {
             match serde_json::from_value::<buddy_pet_store::CohostPetReactParams>(command.params) {
                 Ok(params) => {
                     match buddy_pet_store::request_reaction(state, &params.reaction).await {
@@ -10235,18 +10289,22 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // --- end Buddy pets (plan 168, Phase A) ---
         // --- Buddy pets (plan 168, Phase F) ---
-        "cohost.pet.creation.start" => match buddy_pet_create::start(state).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => ServerResponse::error(command.id, error.code, error.message),
-        },
-        "cohost.pet.creation.status" => match buddy_pet_create::status(state).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => ServerResponse::error(command.id, error.code, error.message),
-        },
-        "cohost.pet.creation.cancel" => {
+        "cohost.pet.creation.start" => Box::pin(async move {
+            match buddy_pet_create::start(state).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
+            }
+        }),
+        "cohost.pet.creation.status" => Box::pin(async move {
+            match buddy_pet_create::status(state).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, error.code, error.message),
+            }
+        }),
+        "cohost.pet.creation.cancel" => Box::pin(async move {
             match serde_json::from_value::<buddy_pet_create::CohostPetBuildIdParams>(command.params)
             {
                 Ok(params) => match buddy_pet_create::cancel(state, params).await {
@@ -10257,8 +10315,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.pet.identity" => {
+        }),
+        "cohost.pet.identity" => Box::pin(async move {
             match serde_json::from_value::<buddy_pet_create::CohostPetIdentityParams>(
                 command.params,
             ) {
@@ -10270,8 +10328,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.pet.sheet.generate" => {
+        }),
+        "cohost.pet.sheet.generate" => Box::pin(async move {
             match serde_json::from_value::<buddy_pet_create::CohostPetSheetGenerateParams>(
                 command.params,
             ) {
@@ -10283,8 +10341,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.pet.build" => {
+        }),
+        "cohost.pet.build" => Box::pin(async move {
             match serde_json::from_value::<buddy_pet_create::CohostPetBuildIdParams>(command.params)
             {
                 Ok(params) => match buddy_pet_create::build(state, params).await {
@@ -10295,8 +10353,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.pet.save" => {
+        }),
+        "cohost.pet.save" => Box::pin(async move {
             match serde_json::from_value::<buddy_pet_create::CohostPetSaveParams>(command.params) {
                 Ok(params) => match buddy_pet_create::save(state, params).await {
                     Ok(saved) => ServerResponse::ok(command.id, saved),
@@ -10306,9 +10364,9 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // --- end Buddy pets (plan 168, Phase F) ---
-        "cohost.settings.set" => {
+        "cohost.settings.set" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
                 Ok(patch) => match cohost::set_cohost_settings(state, patch).await {
                     Ok(settings) => ServerResponse::ok(command.id, settings),
@@ -10320,8 +10378,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.report.get" => {
+        }),
+        "cohost.report.get" => Box::pin(async move {
             match serde_json::from_value::<protocol::CohostReportGetParams>(command.params) {
                 Ok(params) if params.session_id.trim().is_empty() => {
                     ServerResponse::error(command.id, "invalid-params", "sessionId is required")
@@ -10340,14 +10398,16 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cohost.report.latest" => match cohost::latest_session_report(state).await {
-            Ok(payload) => ServerResponse::ok(command.id, payload),
-            Err(error) => {
-                ServerResponse::error(command.id, "cohost-report-failed", error.to_string())
+        }),
+        "cohost.report.latest" => Box::pin(async move {
+            match cohost::latest_session_report(state).await {
+                Ok(payload) => ServerResponse::ok(command.id, payload),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cohost-report-failed", error.to_string())
+                }
             }
-        },
-        "captions.overlay.clear" => {
+        }),
+        "captions.overlay.clear" => Box::pin(async move {
             match serde_json::from_value::<captions::ClearCaptionOverlayParams>(command.params) {
                 Ok(params) => {
                     match captions::clear_caption_overlays(&state.caption_overlay, params) {
@@ -10363,8 +10423,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "captions.cues.submit" => {
+        }),
+        "captions.cues.submit" => Box::pin(async move {
             let request_id = command
                 .params
                 .get("requestId")
@@ -10389,18 +10449,24 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "captions-cue-invalid", error.to_string())
                 }
             }
-        }
-        "ai.capabilities.get" => match get_ai_capabilities().await {
-            Ok(capabilities) => ServerResponse::ok(command.id, capabilities),
-            Err(error) => {
-                ServerResponse::error(command.id, "ai-capabilities-failed", error.to_string())
+        }),
+        "ai.capabilities.get" => Box::pin(async move {
+            match get_ai_capabilities().await {
+                Ok(capabilities) => ServerResponse::ok(command.id, capabilities),
+                Err(error) => {
+                    ServerResponse::error(command.id, "ai-capabilities-failed", error.to_string())
+                }
             }
-        },
-        "ai.quota.get" => match get_ai_quota().await {
-            Ok(quota) => ServerResponse::ok(command.id, quota),
-            Err(error) => ServerResponse::error(command.id, "ai-quota-failed", error.to_string()),
-        },
-        "sources.app_previews" => {
+        }),
+        "ai.quota.get" => Box::pin(async move {
+            match get_ai_quota().await {
+                Ok(quota) => ServerResponse::ok(command.id, quota),
+                Err(error) => {
+                    ServerResponse::error(command.id, "ai-quota-failed", error.to_string())
+                }
+            }
+        }),
+        "sources.app_previews" => Box::pin(async move {
             let params = if command.params.is_null() {
                 Ok(screen_capture::AppPreviewsParams::default())
             } else {
@@ -10428,8 +10494,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sources.resolve_app_window" => {
+        }),
+        "sources.resolve_app_window" => Box::pin(async move {
             match serde_json::from_value::<protocol::ResolveAppWindowParams>(command.params) {
                 Ok(params) if !params.bundle_id.trim().is_empty() => {
                     match tokio::task::spawn_blocking(move || {
@@ -10454,8 +10520,8 @@ async fn handle_text_message_with_role(
                     "Expected a non-empty bundleId and optional window id and minimum dimensions.",
                 ),
             }
-        }
-        "devices.list" => {
+        }),
+        "devices.list" => Box::pin(async move {
             let ffmpeg_path = resolve_trusted_ffmpeg_path(
                 command
                     .params
@@ -10472,8 +10538,8 @@ async fn handle_text_message_with_role(
                 .observe_devices(&devices.devices);
             state.emit_event("devices.changed", &devices);
             ServerResponse::ok(command.id, devices)
-        }
-        "diagnostics.supportBundle.export" => {
+        }),
+        "diagnostics.supportBundle.export" => Box::pin(async move {
             if role == BackendRole::Renderer
                 && command
                     .params
@@ -10508,14 +10574,16 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "diagnostics.stats" => {
+        }),
+        "diagnostics.stats" => Box::pin(async move {
             ServerResponse::ok(command.id, current_diagnostics_stats(state).await)
-        }
+        }),
         "diagnostics.metricsJournal.get" => {
-            ServerResponse::ok(command.id, metrics_journal::current_state())
+            Box::pin(
+                async move { ServerResponse::ok(command.id, metrics_journal::current_state()) },
+            )
         }
-        "diagnostics.metricsJournal.set" => {
+        "diagnostics.metricsJournal.set" => Box::pin(async move {
             match serde_json::from_value::<metrics_journal::MetricsJournalSetParams>(command.params)
             {
                 Ok(params) => match state
@@ -10542,12 +10610,14 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "capture.recovery.status" => ServerResponse::ok(
-            command.id,
-            capture_recovery::capture_recovery_status(state).await,
-        ),
-        "capture.recovery.retry" => {
+        }),
+        "capture.recovery.status" => Box::pin(async move {
+            ServerResponse::ok(
+                command.id,
+                capture_recovery::capture_recovery_status(state).await,
+            )
+        }),
+        "capture.recovery.retry" => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -10560,8 +10630,8 @@ async fn handle_text_message_with_role(
                     capture_recovery::retry_capture_recovery(state.clone()).await,
                 )
             }
-        }
-        "diagnostics.preview_baseline.record" => {
+        }),
+        "diagnostics.preview_baseline.record" => Box::pin(async move {
             match serde_json::from_value::<protocol::PreviewBaselineParams>(command.params) {
                 Ok(params) => {
                     let payload = serde_json::to_string(&params)
@@ -10576,14 +10646,14 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "diagnostics.preview_surface.resize" => {
+        }),
+        "diagnostics.preview_surface.resize" => Box::pin(async move {
             register_preview_surface_resize(state).await;
             let stats = state.diagnostics.lock().await.clone();
             ServerResponse::ok(command.id, stats)
-        }
+        }),
         #[cfg(debug_assertions)]
-        "encoder_bridge.synthetic_record" => {
+        "encoder_bridge.synthetic_record" => Box::pin(async move {
             match serde_json::from_value::<protocol::EncoderBridgeSyntheticParams>(command.params) {
                 Ok(params) => match run_synthetic_encoder_bridge(state.clone(), params).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -10597,8 +10667,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.surface.create" => {
+        }),
+        "preview.surface.create" => Box::pin(async move {
             match serde_json::from_value::<protocol::PreviewSurfaceCreateParams>(command.params) {
                 Ok(params) => match create_preview_surface(state.clone(), params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -10612,8 +10682,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.surface.update_bounds" => {
+        }),
+        "preview.surface.update_bounds" => Box::pin(async move {
             match serde_json::from_value::<protocol::PreviewSurfaceBoundsParams>(command.params) {
                 Ok(params) => match update_preview_surface_bounds(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -10627,8 +10697,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.surface.present" => {
+        }),
+        "preview.surface.present" => Box::pin(async move {
             match serde_json::from_value::<protocol::PreviewSurfacePresentParams>(command.params) {
                 Ok(params) => {
                     let status = update_preview_surface_present(state, params).await;
@@ -10638,24 +10708,26 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.surface.destroy" => match destroy_preview_surface(state).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(PreviewSurfaceBusy) => ServerResponse::error(
-                command.id,
-                PreviewSurfaceBusy::CODE,
-                PreviewSurfaceBusy::MESSAGE.to_string(),
-            ),
-        },
-        "preview.surface.status" => {
+        }),
+        "preview.surface.destroy" => Box::pin(async move {
+            match destroy_preview_surface(state).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(PreviewSurfaceBusy) => ServerResponse::error(
+                    command.id,
+                    PreviewSurfaceBusy::CODE,
+                    PreviewSurfaceBusy::MESSAGE.to_string(),
+                ),
+            }
+        }),
+        "preview.surface.status" => Box::pin(async move {
             let status = preview_surface_status(state).await;
             ServerResponse::ok(command.id, status)
-        }
-        "preview.surface.take_native_host_commands" => {
+        }),
+        "preview.surface.take_native_host_commands" => Box::pin(async move {
             let commands = take_native_preview_host_commands(state).await;
             ServerResponse::ok(command.id, commands)
-        }
-        "resource.admin.preview_surface_bounds" => {
+        }),
+        "resource.admin.preview_surface_bounds" => Box::pin(async move {
             match serde_json::from_value::<protocol::MainOwnedPreviewSurfaceBoundsParams>(
                 command.params,
             ) {
@@ -10671,19 +10743,25 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 209 S2: the Agents section's RPCs (renderer and admin).
-        "agents.status" => ServerResponse::ok(command.id, crate::agent_mcp::status(state)),
-        "agents.enable" => match crate::agent_mcp::enable(state).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
-        },
+        "agents.status" => {
+            Box::pin(async move { ServerResponse::ok(command.id, crate::agent_mcp::status(state)) })
+        }
+        "agents.enable" => Box::pin(async move {
+            match crate::agent_mcp::enable(state).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+            }
+        }),
         // Stop (D12) is Off: every agent is cut and the port closes.
-        "agents.disable" | "agents.stop" => match crate::agent_mcp::disable(state) {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
-        },
-        "agents.create" => {
+        "agents.disable" | "agents.stop" => Box::pin(async move {
+            match crate::agent_mcp::disable(state) {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+            }
+        }),
+        "agents.create" => Box::pin(async move {
             match serde_json::from_value::<crate::agent_mcp::CreateAgentParams>(command.params) {
                 Ok(params) => match crate::agent_mcp::create_agent(state, params) {
                     Ok(created) => ServerResponse::ok(command.id, created),
@@ -10693,8 +10771,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "agents.remove" => {
+        }),
+        "agents.remove" => Box::pin(async move {
             match serde_json::from_value::<crate::agent_mcp::AgentIdParams>(command.params) {
                 Ok(params) => match crate::agent_mcp::remove_agent(state, params) {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -10704,8 +10782,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "agents.activity.list" => {
+        }),
+        "agents.activity.list" => Box::pin(async move {
             match serde_json::from_value::<crate::agent_mcp::ActivityListParams>(
                 if command.params.is_null() {
                     serde_json::json!({})
@@ -10721,11 +10799,11 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 209 S3 (renderer-only, `backend_authority`): the Studio's
         // answer to an `agent.intent`. A late or unknown id is still `ok`:
         // the agent's call already ended with its timeout sentence.
-        "agent.intent.ack" => {
+        "agent.intent.ack" => Box::pin(async move {
             match serde_json::from_value::<crate::agent_mcp::AgentIntentAck>(command.params) {
                 Ok(ack) => {
                     crate::agent_call::ack_studio_intent(state, ack);
@@ -10735,38 +10813,54 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 209 S3 (renderer-only): the Studio's projection for
         // `get_status` and the `list_*` tools. Stored, deduped, never relayed
         // to any socket.
-        "agent.surface.publish" => match command.params.get("surface") {
-            Some(surface) if surface.is_object() => {
-                crate::agent_call::publish_surface(state, surface.clone());
-                ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+        "agent.surface.publish" => Box::pin(async move {
+            match command.params.get("surface") {
+                Some(surface) if surface.is_object() => {
+                    crate::agent_call::publish_surface(state, surface.clone());
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                _ => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "agent.surface.publish needs a surface object.".to_string(),
+                ),
             }
-            _ => ServerResponse::error(
-                command.id,
-                "invalid-params",
-                "agent.surface.publish needs a surface object.".to_string(),
-            ),
-        },
-        "remote.control.status" => ServerResponse::ok(command.id, remote_control_status(state)),
-        "remote.control.enable" => match enable_remote_control(state) {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => ServerResponse::error(command.id, "remote-control", error.to_string()),
-        },
-        "remote.control.disable" => match disable_remote_control(state) {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => ServerResponse::error(command.id, "remote-control", error.to_string()),
-        },
-        "remote.control.regenerate" => match regenerate_remote_control_token(state) {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => ServerResponse::error(command.id, "remote-control", error.to_string()),
-        },
-        "remote.lan.status" => {
-            ServerResponse::ok(command.id, crate::remote_lan_server::status(state))
+        }),
+        "remote.control.status" => {
+            Box::pin(async move { ServerResponse::ok(command.id, remote_control_status(state)) })
         }
-        "remote.lan.enable" => {
+        "remote.control.enable" => Box::pin(async move {
+            match enable_remote_control(state) {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => {
+                    ServerResponse::error(command.id, "remote-control", error.to_string())
+                }
+            }
+        }),
+        "remote.control.disable" => Box::pin(async move {
+            match disable_remote_control(state) {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => {
+                    ServerResponse::error(command.id, "remote-control", error.to_string())
+                }
+            }
+        }),
+        "remote.control.regenerate" => Box::pin(async move {
+            match regenerate_remote_control_token(state) {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => {
+                    ServerResponse::error(command.id, "remote-control", error.to_string())
+                }
+            }
+        }),
+        "remote.lan.status" => Box::pin(async move {
+            ServerResponse::ok(command.id, crate::remote_lan_server::status(state))
+        }),
+        "remote.lan.enable" => Box::pin(async move {
             // Phones ride the remote-control intent bus: the master switch
             // comes on with them.
             let enabled = match enable_remote_control(state) {
@@ -10777,12 +10871,14 @@ async fn handle_text_message_with_role(
                 Ok(status) => ServerResponse::ok(command.id, status),
                 Err(error) => ServerResponse::error(command.id, "remote-lan", error.to_string()),
             }
-        }
-        "remote.lan.disable" => match crate::remote_lan_server::disable(state) {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => ServerResponse::error(command.id, "remote-lan", error.to_string()),
-        },
-        "remote.lan.pairing.begin" => {
+        }),
+        "remote.lan.disable" => Box::pin(async move {
+            match crate::remote_lan_server::disable(state) {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, "remote-lan", error.to_string()),
+            }
+        }),
+        "remote.lan.pairing.begin" => Box::pin(async move {
             match serde_json::from_value::<crate::remote_lan_server::BeginPairingParams>(
                 if command.params.is_null() {
                     serde_json::json!({})
@@ -10798,11 +10894,11 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "remote.lan.pairing.cancel" => {
+        }),
+        "remote.lan.pairing.cancel" => Box::pin(async move {
             ServerResponse::ok(command.id, crate::remote_lan_server::cancel_pairing(state))
-        }
-        "remote.lan.devices.revoke" | "remote.lan.devices.rename" => {
+        }),
+        "remote.lan.devices.revoke" | "remote.lan.devices.rename" => Box::pin(async move {
             match serde_json::from_value::<crate::remote_lan_server::DeviceParams>(command.params) {
                 Ok(params) => {
                     let result = if command.method == "remote.lan.devices.revoke" {
@@ -10821,8 +10917,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "remote.chat.snapshot" => {
+        }),
+        "remote.chat.snapshot" => Box::pin(async move {
             // Same whitelist projection as the live events — a remote socket
             // never sees a raw LiveChatMessage.
             let snapshot = serde_json::to_value(live_chat::current_status(state).await)
@@ -10840,8 +10936,8 @@ async fn handle_text_message_with_role(
                     "highlight": crate::remote_lan::project_highlight(&highlight),
                 }),
             )
-        }
-        "remote.surface.publish" => {
+        }),
+        "remote.surface.publish" => Box::pin(async move {
             // Renderer-published catalog + state projection. The state event
             // is the ONLY payload remote sockets receive (their event filter
             // is locked to remote.state/remote.ack).
@@ -10859,12 +10955,12 @@ async fn handle_text_message_with_role(
                 state.emit_event("remote.state", snapshot);
             }
             ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
-        }
-        "remote.intent.ack" => {
+        }),
+        "remote.intent.ack" => Box::pin(async move {
             state.emit_event("remote.ack", command.params);
             ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
-        }
-        "remote.describe" => {
+        }),
+        "remote.describe" => Box::pin(async move {
             let (describe, snapshot) = state
                 .remote_control
                 .lock()
@@ -10874,8 +10970,8 @@ async fn handle_text_message_with_role(
                 command.id,
                 serde_json::json!({ "describe": describe, "state": snapshot, "protocol": 1 }),
             )
-        }
-        "remote.intent" => {
+        }),
+        "remote.intent" => Box::pin(async move {
             match serde_json::from_value::<crate::remote_control::RemoteIntent>(
                 command.params.clone(),
             ) {
@@ -10904,8 +11000,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-intent", error.to_string())
                 }
             }
-        }
-        "preview.debug.sample" => {
+        }),
+        "preview.debug.sample" => Box::pin(async move {
             if !cfg!(debug_assertions) {
                 ServerResponse::error(
                     command.id,
@@ -10920,12 +11016,12 @@ async fn handle_text_message_with_role(
                     }
                 }
             }
-        }
-        "compositor.status" => {
+        }),
+        "compositor.status" => Box::pin(async move {
             let status = compositor_status(state).await;
             ServerResponse::ok(command.id, status)
-        }
-        "compositor.scene.update" => {
+        }),
+        "compositor.scene.update" => Box::pin(async move {
             match serde_json::from_value::<protocol::CompositorSceneUpdateParams>(command.params) {
                 Ok(params) => {
                     let _scene_commit = state.scene_commit.lock().await;
@@ -10936,8 +11032,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.camera.start" => {
+        }),
+        "preview.camera.start" => Box::pin(async move {
             match serde_json::from_value::<protocol::PreviewCameraStartParams>(command.params) {
                 Ok(params) => {
                     let status = start_preview_camera(state.clone(), params).await;
@@ -10947,16 +11043,16 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.camera.stop" => {
+        }),
+        "preview.camera.stop" => Box::pin(async move {
             let status = stop_preview_camera(state).await;
             ServerResponse::ok(command.id, status)
-        }
-        "preview.camera.status" => {
+        }),
+        "preview.camera.status" => Box::pin(async move {
             let status = preview_camera_status(state).await;
             ServerResponse::ok(command.id, status)
-        }
-        "preview.screen.start" => {
+        }),
+        "preview.screen.start" => Box::pin(async move {
             match serde_json::from_value::<protocol::PreviewScreenStartParams>(command.params) {
                 Ok(params) => {
                     let status = start_preview_screen(state.clone(), params).await;
@@ -10966,16 +11062,16 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.screen.stop" => {
+        }),
+        "preview.screen.stop" => Box::pin(async move {
             let status = stop_preview_screen(state).await;
             ServerResponse::ok(command.id, status)
-        }
-        "preview.screen.status" => {
+        }),
+        "preview.screen.status" => Box::pin(async move {
             let status = preview_screen_status(state).await;
             ServerResponse::ok(command.id, status)
-        }
-        "audio.meter.sample" => {
+        }),
+        "audio.meter.sample" => Box::pin(async move {
             match serde_json::from_value::<protocol::AudioMeterParams>(command.params) {
                 Ok(params) => {
                     let microphone_id = params.microphone_id.clone();
@@ -10994,8 +11090,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "audio.mic.arm" => {
+        }),
+        "audio.mic.arm" => Box::pin(async move {
             match serde_json::from_value::<protocol::WarmMicrophoneArmParams>(command.params) {
                 Ok(params) => ServerResponse::ok(
                     command.id,
@@ -11005,11 +11101,11 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "audio.mic.disarm" => {
+        }),
+        "audio.mic.disarm" => Box::pin(async move {
             ServerResponse::ok(command.id, warm_microphone::disarm_warm_microphone(state))
-        }
-        "audio.meter.probeNative" => {
+        }),
+        "audio.meter.probeNative" => Box::pin(async move {
             match serde_json::from_value::<protocol::AudioMeterProbeParams>(command.params) {
                 Ok(params) => ServerResponse::ok(
                     command.id,
@@ -11019,8 +11115,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "audio.processing.update" => {
+        }),
+        "audio.processing.update" => Box::pin(async move {
             match serde_json::from_value::<protocol::AudioProcessingUpdateParams>(command.params) {
                 Ok(params) => ServerResponse::ok(
                     command.id,
@@ -11030,9 +11126,9 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        "audio.test.output-timing" => {
+        "audio.test.output-timing" => Box::pin(async move {
             // A read-only, admin-only smoke receipt for real capture workers.
             // Keep it independent of the synthetic caption injector and bind
             // it to both owners. No paths, destinations or PCM are returned.
@@ -11064,9 +11160,9 @@ async fn handle_text_message_with_role(
                     "The matching active session has no unambiguous output audio timing receipt.",
                 ),
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        "audio.test.disconnect" => {
+        "audio.test.disconnect" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -11105,9 +11201,9 @@ async fn handle_text_message_with_role(
                     "The matching caption contract test microphone session is not active.",
                 ),
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        "audio.test.inject-pcm" => {
+        "audio.test.inject-pcm" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -11153,12 +11249,12 @@ async fn handle_text_message_with_role(
                     "The matching caption contract test microphone session is not active.",
                 ),
             }
-        }
-        "scene.get" => {
+        }),
+        "scene.get" => Box::pin(async move {
             let scene = state.scene.lock().await.clone();
             ServerResponse::ok(command.id, scene)
-        }
-        "scene.load_from_capture_config" => {
+        }),
+        "scene.load_from_capture_config" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
                 Ok(params) => {
                     let scene = scene_from_capture_config(params.clone());
@@ -11182,8 +11278,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "scene.layout.apply_live" => {
+        }),
+        "scene.layout.apply_live" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneLayoutApplyParams>(command.params) {
                 Ok(params) => match live_layout::apply_layout_live(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -11195,8 +11291,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "scene.layout.apply_preview" => {
+        }),
+        "scene.layout.apply_preview" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneLayoutApplyParams>(command.params) {
                 Ok(params) => match live_layout::apply_layout_preview(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -11210,28 +11306,31 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "session.sources.get" => match serde_json::from_value::<
-            live_source_switch::SessionSourcesParams,
-        >(command.params)
-        {
-            Ok(params) => match live_source_switch::get(state, &params.session_id).await {
-                Ok(status) => ServerResponse::ok(command.id, status),
-                Err(error) => ServerResponse::error(command.id, error.code(), error.message()),
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "session.source.switch" => match serde_json::from_value::<
-            live_source_switch::SourceSwitchParams,
-        >(command.params)
-        {
-            Ok(params) => match live_source_switch::switch(state, params).await {
-                Ok(status) => ServerResponse::ok(command.id, status),
-                Err(error) => ServerResponse::error(command.id, error.code(), error.message()),
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "scene.source.device.switch" => {
+        }),
+        "session.sources.get" => Box::pin(async move {
+            match serde_json::from_value::<live_source_switch::SessionSourcesParams>(command.params)
+            {
+                Ok(params) => match live_source_switch::get(state, &params.session_id).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code(), error.message()),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
+        "session.source.switch" => Box::pin(async move {
+            match serde_json::from_value::<live_source_switch::SourceSwitchParams>(command.params) {
+                Ok(params) => match live_source_switch::switch(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code(), error.message()),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
+        "scene.source.device.switch" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
                 Ok(params) => {
                     match live_layout::apply_source_device_switch_live(state, params).await {
@@ -11247,8 +11346,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "scene.source.transform.update" => {
+        }),
+        "scene.source.transform.update" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneTransformUpdateParams>(command.params) {
                 Ok(params) => {
                     // Plan 058: a live editor draft for this source ends exactly
@@ -11292,8 +11391,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "scene.editor.draft.set" => {
+        }),
+        "scene.editor.draft.set" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneEditorDraftParams>(command.params) {
                 Ok(params) => match compositor::set_editor_draft(state, params).await {
                     Ok(ack) => ServerResponse::ok(command.id, ack),
@@ -11307,8 +11406,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "scene.editor.draft.clear" => {
+        }),
+        "scene.editor.draft.clear" => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -11318,8 +11417,8 @@ async fn handle_text_message_with_role(
             } else {
                 ServerResponse::ok(command.id, compositor::clear_editor_draft(state).await)
             }
-        }
-        "scene.source.transform.reset" => {
+        }),
+        "scene.source.transform.reset" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneSourceParams>(command.params) {
                 Ok(params) => {
                     let result = {
@@ -11347,8 +11446,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "scene.source.visibility.update" => {
+        }),
+        "scene.source.visibility.update" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneSourceVisibilityParams>(command.params) {
                 Ok(params) => {
                     let result = {
@@ -11376,8 +11475,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "scene.source.nudge" => {
+        }),
+        "scene.source.nudge" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneSourceNudgeParams>(command.params) {
                 Ok(params) => {
                     let result = {
@@ -11411,8 +11510,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "scene.sources.reorder" => {
+        }),
+        "scene.sources.reorder" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneSourceOrderParams>(command.params) {
                 Ok(params) => {
                     let result = {
@@ -11440,9 +11539,9 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         #[cfg(debug_assertions)]
-        "recording.start_test" => {
+        "recording.start_test" => Box::pin(async move {
             match serde_json::from_value::<protocol::StartSessionParams>(command.params) {
                 Ok(params) => match start_session(state.clone(), params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -11456,8 +11555,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "stream.output.topology.probe" => {
+        }),
+        "stream.output.topology.probe" => Box::pin(async move {
             match serde_json::from_value::<protocol::StreamOutputTopologyProbeParams>(
                 command.params,
             ) {
@@ -11487,12 +11586,14 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "performance.check.get" => {
+        }),
+        "performance.check.get" => Box::pin(async move {
             ServerResponse::ok(command.id, performance_check::current_state(state).await)
+        }),
+        "encoder.preference.get" => {
+            Box::pin(async move { ServerResponse::ok(command.id, encoder_preference_state()) })
         }
-        "encoder.preference.get" => ServerResponse::ok(command.id, encoder_preference_state()),
-        "encoder.preference.set" => {
+        "encoder.preference.set" => Box::pin(async move {
             match serde_json::from_value::<protocol::EncoderPreferenceSetParams>(command.params) {
                 Ok(params) => match state
                     .database
@@ -11512,8 +11613,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "performance.check.run" => {
+        }),
+        "performance.check.run" => Box::pin(async move {
             match serde_json::from_value::<protocol::PerformanceCheckRunParams>(command.params) {
                 Ok(params) => match performance_check::start(state.clone(), params).await {
                     Ok(()) => ServerResponse::ok(
@@ -11530,12 +11631,12 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "performance.check.cancel" => {
+        }),
+        "performance.check.cancel" => Box::pin(async move {
             state.performance_check.request_cancel();
             ServerResponse::ok(command.id, performance_check::current_state(state).await)
-        }
-        "session.start" => {
+        }),
+        "session.start" => Box::pin(async move {
             let mut params_value = command.params;
             if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
                 return ServerResponse::error(
@@ -11585,8 +11686,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "session.stop" => {
+        }),
+        "session.stop" => Box::pin(async move {
             // Buddy's listen task drains with this capture (plan 068 review).
             live_chat::stop_live_chat_for_capture_end(state).await;
             // Older renderers send no params; the click timestamp is telemetry
@@ -11603,8 +11704,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "session-stop-failed", error.to_string())
                 }
             }
-        }
-        "sessions.list" => {
+        }),
+        "sessions.list" => Box::pin(async move {
             match serde_json::from_value::<protocol::SessionListParams>(command.params) {
                 Ok(params) => match state
                     .database
@@ -11632,8 +11733,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sessions.healthEvents.list" => {
+        }),
+        "sessions.healthEvents.list" => Box::pin(async move {
             match serde_json::from_value::<protocol::SessionDetailListParams>(command.params) {
                 Ok(params) => match state.database.list_health_events_page(
                     &params.session_id,
@@ -11651,8 +11752,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sessions.logs.list" => {
+        }),
+        "sessions.logs.list" => Box::pin(async move {
             match serde_json::from_value::<protocol::SessionDetailListParams>(command.params) {
                 Ok(params) => match state.database.list_session_logs_page(
                     &params.session_id,
@@ -11670,15 +11771,17 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "stream.audience.snapshot" => {
+        }),
+        "stream.audience.snapshot" => Box::pin(async move {
             let snapshot = state.audience.lock().ok().and_then(|hub| hub.snapshot());
             ServerResponse::ok(command.id, snapshot)
-        }
+        }),
         // Plan 094: the shared quota breaker, for windows that open after the
         // `youtube.quota` event fired.
-        "youtube.quota.status" => ServerResponse::ok(command.id, youtube_quota::status(state)),
-        "sessions.audience.get" => {
+        "youtube.quota.status" => {
+            Box::pin(async move { ServerResponse::ok(command.id, youtube_quota::status(state)) })
+        }
+        "sessions.audience.get" => Box::pin(async move {
             match serde_json::from_value::<audience::SessionAudienceParams>(command.params) {
                 Ok(params) => match audience::session_audience(&state.database, &params.session_id)
                 {
@@ -11693,8 +11796,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sessions.viewers.list" => {
+        }),
+        "sessions.viewers.list" => Box::pin(async move {
             match serde_json::from_value::<viewer_stats::SessionViewersListParams>(command.params) {
                 Ok(params) => {
                     match viewer_stats::session_viewer_history(&state.database, &params.session_id)
@@ -11714,8 +11817,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sessions.aiArtifacts.list" => {
+        }),
+        "sessions.aiArtifacts.list" => Box::pin(async move {
             match serde_json::from_value::<protocol::SessionDetailListParams>(command.params) {
                 Ok(params) => match state.database.list_ai_artifacts_page(
                     &params.session_id,
@@ -11733,8 +11836,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sessions.poster" => {
+        }),
+        "sessions.poster" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -11762,8 +11865,8 @@ async fn handle_text_message_with_role(
                 _ => posters::poster_path(&session_id).exists(),
             };
             ServerResponse::ok(command.id, serde_json::json!({ "available": available }))
-        }
-        "sessions.rename" => {
+        }),
+        "sessions.rename" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -11799,8 +11902,8 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
-        "sessions.delete" => {
+        }),
+        "sessions.delete" => Box::pin(async move {
             match serde_json::from_value::<protocol::SessionDeleteParams>(command.params) {
                 Ok(params) if params.session_ids.is_empty() => ServerResponse::error(
                     command.id,
@@ -11857,8 +11960,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sessions.delete.complete" => {
+        }),
+        "sessions.delete.complete" => Box::pin(async move {
             match serde_json::from_value::<protocol::SessionDeleteCompleteParams>(command.params) {
                 Ok(params) if params.operation_id.is_empty() => ServerResponse::error(
                     command.id,
@@ -11888,8 +11991,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sessions.delete.resolve" => {
+        }),
+        "sessions.delete.resolve" => Box::pin(async move {
             let operation_id = command
                 .params
                 .get("operationId")
@@ -11921,22 +12024,24 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
-        "sessions.delete.pending" => match pending_session_deletions_exclusively(state).await {
-            Ok(operations) => ServerResponse::ok(
-                command.id,
-                operations
-                    .iter()
-                    .map(session_deletion_handle)
-                    .collect::<Vec<_>>(),
-            ),
-            Err(error) => ServerResponse::error(
-                command.id,
-                "session-delete-pending-failed",
-                error.to_string(),
-            ),
-        },
-        "sessions.duplicate" => {
+        }),
+        "sessions.delete.pending" => Box::pin(async move {
+            match pending_session_deletions_exclusively(state).await {
+                Ok(operations) => ServerResponse::ok(
+                    command.id,
+                    operations
+                        .iter()
+                        .map(session_deletion_handle)
+                        .collect::<Vec<_>>(),
+                ),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "session-delete-pending-failed",
+                    error.to_string(),
+                ),
+            }
+        }),
+        "sessions.duplicate" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -11964,8 +12069,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "session-duplicate-failed", error.to_string())
                 }
             }
-        }
-        "sessions.import" => {
+        }),
+        "sessions.import" => Box::pin(async move {
             let mut params_value = command.params;
             if let Err(error) = resolve_import_resources(state, &mut params_value, role) {
                 return ServerResponse::error(
@@ -11996,14 +12101,16 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "session-import-failed", error.to_string())
                 }
             }
-        }
-        "sessions.storage" => match state.database.session_storage_totals() {
-            Ok(totals) => ServerResponse::ok(command.id, totals),
-            Err(error) => {
-                ServerResponse::error(command.id, "sessions-storage-failed", error.to_string())
+        }),
+        "sessions.storage" => Box::pin(async move {
+            match state.database.session_storage_totals() {
+                Ok(totals) => ServerResponse::ok(command.id, totals),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sessions-storage-failed", error.to_string())
+                }
             }
-        },
-        "sessions.comments.totals" => {
+        }),
+        "sessions.comments.totals" => Box::pin(async move {
             match serde_json::from_value::<storage::SessionChatTotalsParams>(command.params) {
                 Ok(params) => match state.database.session_chat_totals(&params.session_id) {
                     Ok(totals) => ServerResponse::ok(command.id, totals),
@@ -12017,8 +12124,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sessions.comments.list" => {
+        }),
+        "sessions.comments.list" => Box::pin(async move {
             match serde_json::from_value::<protocol::SessionCommentsListParams>(command.params) {
                 Ok(params) => match state.database.list_live_chat_messages_page(
                     &params.session_id,
@@ -12036,30 +12143,38 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "platformAccounts.list" => match state.database.list_platform_accounts() {
-            Ok(accounts) => ServerResponse::ok(command.id, accounts),
-            Err(error) => ServerResponse::error(
-                command.id,
-                "platform-accounts-list-failed",
-                error.to_string(),
-            ),
-        },
-        "liveChat.capability" => match state.database.list_platform_accounts() {
-            // Plan 140: the YouTube quota pause shows as `moderate: paused`.
-            Ok(accounts) => ServerResponse::ok(
-                command.id,
-                live_chat::chat_capabilities_with_quota(
-                    &accounts,
-                    crate::youtube_quota::paused_until(state).is_some(),
+        }),
+        "platformAccounts.list" => Box::pin(async move {
+            match state.database.list_platform_accounts() {
+                Ok(accounts) => ServerResponse::ok(command.id, accounts),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "platform-accounts-list-failed",
+                    error.to_string(),
                 ),
-            ),
-            Err(error) => {
-                ServerResponse::error(command.id, "live-chat-capability-failed", error.to_string())
             }
-        },
-        "liveChat.status" => ServerResponse::ok(command.id, live_chat::current_status(state).await),
-        "liveChat.start" => {
+        }),
+        "liveChat.capability" => Box::pin(async move {
+            match state.database.list_platform_accounts() {
+                // Plan 140: the YouTube quota pause shows as `moderate: paused`.
+                Ok(accounts) => ServerResponse::ok(
+                    command.id,
+                    live_chat::chat_capabilities_with_quota(
+                        &accounts,
+                        crate::youtube_quota::paused_until(state).is_some(),
+                    ),
+                ),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "live-chat-capability-failed",
+                    error.to_string(),
+                ),
+            }
+        }),
+        "liveChat.status" => Box::pin(async move {
+            ServerResponse::ok(command.id, live_chat::current_status(state).await)
+        }),
+        "liveChat.start" => Box::pin(async move {
             match serde_json::from_value::<live_chat::LiveChatStartParams>(command.params) {
                 Ok(params) => {
                     ServerResponse::ok(command.id, live_chat::start_live_chat(state, params).await)
@@ -12068,8 +12183,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "liveChat.x.start" => {
+        }),
+        "liveChat.x.start" => Box::pin(async move {
             match serde_json::from_value::<live_chat::StartXLiveChatParams>(command.params) {
                 Ok(params) => match live_chat::start_x_live_chat(state, params).await {
                     Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
@@ -12083,13 +12198,17 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "liveChat.stop" => ServerResponse::ok(command.id, live_chat::stop_live_chat(state).await),
+        }),
+        "liveChat.stop" => Box::pin(async move {
+            ServerResponse::ok(command.id, live_chat::stop_live_chat(state).await)
+        }),
         // Settings → General → "Show 7TV emotes in chat" (plan 089).
         "liveChat.emotes.get" => {
-            ServerResponse::ok(command.id, seventv::current_state(state).await)
+            Box::pin(
+                async move { ServerResponse::ok(command.id, seventv::current_state(state).await) },
+            )
         }
-        "liveChat.emotes.set" => {
+        "liveChat.emotes.set" => Box::pin(async move {
             match serde_json::from_value::<seventv::ChatEmoteSettingsPatch>(command.params) {
                 Ok(patch) => match seventv::set_settings(state, patch).await {
                     Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
@@ -12101,17 +12220,17 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "liveChat.diagnostics" => {
+        }),
+        "liveChat.diagnostics" => Box::pin(async move {
             ServerResponse::ok(command.id, live_chat::current_diagnostics(state).await)
-        }
+        }),
         // Settings → General → Privacy → "Share anonymous usage stats".
         // Plan 187: the Discord go-live announcement. The webhook URL goes in
         // through `discord.webhook.save` and never comes back out.
-        "discord.announce.get" => {
+        "discord.announce.get" => Box::pin(async move {
             ServerResponse::ok(command.id, discord_announce::snapshot(state).await)
-        }
-        "discord.announce.update" => {
+        }),
+        "discord.announce.update" => Box::pin(async move {
             match serde_json::from_value::<discord_announce::UpdateParams>(command.params) {
                 Ok(params) => {
                     discord_rpc(command.id, discord_announce::update(state, params).await)
@@ -12120,8 +12239,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "discord.webhook.save" => {
+        }),
+        "discord.webhook.save" => Box::pin(async move {
             match serde_json::from_value::<discord_announce::SaveWebhookParams>(command.params) {
                 Ok(params) => discord_rpc(
                     command.id,
@@ -12134,8 +12253,8 @@ async fn handle_text_message_with_role(
                     "Expected { url }.".to_string(),
                 ),
             }
-        }
-        "discord.webhook.remove" => {
+        }),
+        "discord.webhook.remove" => Box::pin(async move {
             match serde_json::from_value::<discord_announce::RemoveWebhookParams>(command.params) {
                 Ok(params) => discord_rpc(
                     command.id,
@@ -12145,8 +12264,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "discord.webhook.sendTest" => {
+        }),
+        "discord.webhook.sendTest" => Box::pin(async move {
             match serde_json::from_value::<discord_announce::TestParams>(command.params) {
                 Ok(params) => {
                     discord_rpc(command.id, discord_announce::send_test(state, params).await)
@@ -12155,8 +12274,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "discord.links.preview" => {
+        }),
+        "discord.links.preview" => Box::pin(async move {
             match serde_json::from_value::<discord_announce::TargetsParams>(command.params) {
                 Ok(params) => discord_rpc(
                     command.id,
@@ -12166,9 +12285,13 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }),
+        "usageStats.get" => {
+            Box::pin(
+                async move { ServerResponse::ok(command.id, usage_stats::current_state(state)) },
+            )
         }
-        "usageStats.get" => ServerResponse::ok(command.id, usage_stats::current_state(state)),
-        "usageStats.set" => {
+        "usageStats.set" => Box::pin(async move {
             match serde_json::from_value::<usage_stats::UsageStatsSetParams>(command.params) {
                 Ok(params) => match usage_stats::set_enabled(state, params.enabled).await {
                     Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
@@ -12180,8 +12303,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "liveChat.send" => {
+        }),
+        "liveChat.send" => Box::pin(async move {
             match serde_json::from_value::<live_chat::CommentsSendParams>(command.params) {
                 Ok(params) => match live_chat::send_live_chat_message(state, params).await {
                     Ok(operation) => ServerResponse::ok(command.id, operation),
@@ -12191,8 +12314,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "liveChat.sendOperations.list" => {
+        }),
+        "liveChat.sendOperations.list" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -12210,8 +12333,8 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
-        "liveChat.sendOperations.latest" => {
+        }),
+        "liveChat.sendOperations.latest" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -12229,10 +12352,10 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
+        }),
         // Chat moderation (plan 140 S4). Refusal codes are the contract's
         // closed set; the operation itself travels on `liveChat.moderationOperation`.
-        "liveChat.moderation.request" => {
+        "liveChat.moderation.request" => Box::pin(async move {
             match serde_json::from_value::<live_chat_moderation::ModerationRequestParams>(
                 command.params,
             ) {
@@ -12254,8 +12377,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "liveChat.moderation.confirm" => {
+        }),
+        "liveChat.moderation.confirm" => Box::pin(async move {
             match serde_json::from_value::<live_chat_moderation::ModerationOperationParams>(
                 command.params,
             ) {
@@ -12271,8 +12394,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "liveChat.moderation.cancel" => {
+        }),
+        "liveChat.moderation.cancel" => Box::pin(async move {
             match serde_json::from_value::<live_chat_moderation::ModerationOperationParams>(
                 command.params,
             ) {
@@ -12288,8 +12411,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "liveChat.moderationOperations.list" => {
+        }),
+        "liveChat.moderationOperations.list" => Box::pin(async move {
             let session_id = command
                 .params
                 .get("sessionId")
@@ -12310,11 +12433,11 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
-        "liveChat.clearLocal" => {
+        }),
+        "liveChat.clearLocal" => Box::pin(async move {
             ServerResponse::ok(command.id, live_chat::clear_local_live_chat(state).await)
-        }
-        "liveChat.xCommentsReadiness" => {
+        }),
+        "liveChat.xCommentsReadiness" => Box::pin(async move {
             let has_x_account = state
                 .database
                 .list_platform_accounts()
@@ -12325,8 +12448,8 @@ async fn handle_text_message_with_role(
                 })
                 .unwrap_or(false);
             ServerResponse::ok(command.id, x_chat::x_chat_readiness(has_x_account))
-        }
-        "platformAccounts.oauth.start" => {
+        }),
+        "platformAccounts.oauth.start" => Box::pin(async move {
             match serde_json::from_value::<OAuthStartParams>(command.params) {
                 Ok(params) => match state.oauth.start(params, state.oauth_redirect_port()).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12340,8 +12463,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "platformAccounts.oauth.startProvider" => {
+        }),
+        "platformAccounts.oauth.startProvider" => Box::pin(async move {
             let parsed = serde_json::from_value::<OAuthStartProviderParams>(command.params).map(
                 |mut params| {
                     // A reconnect keeps the optional scopes the account already
@@ -12403,8 +12526,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "platformAccounts.oauth.complete" => {
+        }),
+        "platformAccounts.oauth.complete" => Box::pin(async move {
             match serde_json::from_value::<OAuthCompleteParams>(command.params) {
                 Ok(params) => {
                     let result = complete_oauth_callback(state, params).await;
@@ -12415,8 +12538,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "platformAccounts.disconnect" => {
+        }),
+        "platformAccounts.disconnect" => Box::pin(async move {
             match serde_json::from_value::<streaming::PlatformAccountPlatformParams>(command.params)
             {
                 Ok(params) => {
@@ -12569,23 +12692,27 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "platformAccounts.validate" => {
+        }),
+        "platformAccounts.validate" => Box::pin(async move {
             ServerResponse::ok(command.id, validate_platform_accounts(state).await)
-        }
-        "platformAccounts.refresh" => {
+        }),
+        "platformAccounts.refresh" => Box::pin(async move {
             ServerResponse::ok(command.id, validate_platform_accounts(state).await)
-        }
-        "platformAccounts.oauth.providerCredentials" => {
+        }),
+        "platformAccounts.oauth.providerCredentials" => Box::pin(async move {
             ServerResponse::ok(command.id, oauth::provider_credential_statuses())
-        }
-        "streamTargets.metadata.get" => match state.database.stream_metadata_draft() {
-            Ok(draft) => ServerResponse::ok(command.id, draft),
-            Err(error) => {
-                ServerResponse::error(command.id, "stream-metadata-get-failed", error.to_string())
+        }),
+        "streamTargets.metadata.get" => Box::pin(async move {
+            match state.database.stream_metadata_draft() {
+                Ok(draft) => ServerResponse::ok(command.id, draft),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "stream-metadata-get-failed",
+                    error.to_string(),
+                ),
             }
-        },
-        "streamTargets.metadata.update" => {
+        }),
+        "streamTargets.metadata.update" => Box::pin(async move {
             match serde_json::from_value::<StreamMetadataDraft>(command.params) {
                 Ok(draft) => match check_stream_metadata_thumbnail(state, &draft)
                     .and_then(|()| state.database.save_stream_metadata_draft(draft))
@@ -12604,8 +12731,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.metadata.validate" => {
+        }),
+        "streamTargets.metadata.validate" => Box::pin(async move {
             match serde_json::from_value::<StreamMetadataDraft>(command.params) {
                 Ok(mut draft) => {
                     normalize_stream_metadata_draft(&mut draft);
@@ -12615,8 +12742,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.manualKey.store" => {
+        }),
+        "streamTargets.manualKey.store" => Box::pin(async move {
             match serde_json::from_value::<StoreManualStreamKeyParams>(command.params) {
                 Ok(params) => match store_manual_stream_key(params) {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12630,8 +12757,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.manualKey.restorePrevious" => {
+        }),
+        "streamTargets.manualKey.restorePrevious" => Box::pin(async move {
             match serde_json::from_value::<ManualStreamKeyRefParams>(command.params) {
                 Ok(params) => match restore_previous_manual_stream_key(params) {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12645,8 +12772,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.manualKey.inspect" => {
+        }),
+        "streamTargets.manualKey.inspect" => Box::pin(async move {
             match serde_json::from_value::<ManualStreamKeyRefParams>(command.params) {
                 Ok(params) => match inspect_manual_stream_key(params) {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12660,8 +12787,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.confirmation.validate" => {
+        }),
+        "streamTargets.confirmation.validate" => Box::pin(async move {
             match serde_json::from_value::<GoLivePreflightParams>(command.params) {
                 Ok(mut params) => match (
                     state.database.stream_metadata_draft(),
@@ -12700,7 +12827,7 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         "scheduledStreams.saveDraft"
         | "scheduledStreams.schedule"
         | "scheduledStreams.update"
@@ -12717,7 +12844,7 @@ async fn handle_text_message_with_role(
         | "scheduledStreams.get"
         | "scheduledStreams.operation"
         | "scheduledStreams.resolveTime"
-        | "scheduledStreams.candidates" => {
+        | "scheduledStreams.candidates" => Box::pin(async move {
             match scheduled_streams_service::dispatch(state, &command.method, command.params).await
             {
                 Ok(value) => ServerResponse::ok(command.id, value),
@@ -12725,8 +12852,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "scheduled-stream-error", error.to_string())
                 }
             }
-        }
-        "streamTargets.youtube.prepare" => {
+        }),
+        "streamTargets.youtube.prepare" => Box::pin(async move {
             match serde_json::from_value::<YouTubePrepareParams>(command.params) {
                 Ok(params) => match prepare_youtube_stream_target(state, params).await {
                     Ok(prepared) => ServerResponse::ok(command.id, prepared),
@@ -12743,8 +12870,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.youtube.thumbnail.retry" => {
+        }),
+        "streamTargets.youtube.thumbnail.retry" => Box::pin(async move {
             match serde_json::from_value::<YouTubeThumbnailRetryParams>(command.params) {
                 Ok(params) => match retry_youtube_stream_thumbnail(state, params).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12758,8 +12885,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.youtube.transition" => {
+        }),
+        "streamTargets.youtube.transition" => Box::pin(async move {
             match serde_json::from_value::<YouTubeBroadcastTransitionParams>(command.params) {
                 Ok(params) => {
                     let step = match params.status {
@@ -12792,8 +12919,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.youtube.streamStatus" => {
+        }),
+        "streamTargets.youtube.streamStatus" => Box::pin(async move {
             match serde_json::from_value::<YouTubeStreamStatusParams>(command.params) {
                 Ok(params) => match youtube_stream_status(state, params).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12807,8 +12934,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "platformAccounts.youtube.channels" => {
+        }),
+        "platformAccounts.youtube.channels" => Box::pin(async move {
             match serde_json::from_value::<YouTubeChannelListParams>(command.params) {
                 Ok(params) => match list_youtube_channels(state, params).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12822,8 +12949,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "platformAccounts.youtube.selectChannel" => {
+        }),
+        "platformAccounts.youtube.selectChannel" => Box::pin(async move {
             match serde_json::from_value::<YouTubeChannelSelectParams>(command.params) {
                 Ok(params) => match select_youtube_channel_account(state, params).await {
                     Ok(account) => ServerResponse::ok(command.id, account),
@@ -12837,8 +12964,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.twitch.searchCategories" => {
+        }),
+        "streamTargets.twitch.searchCategories" => Box::pin(async move {
             match serde_json::from_value::<TwitchCategorySearchParams>(command.params) {
                 Ok(params) => match search_twitch_categories(state, params).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12852,8 +12979,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.twitch.prepare" => {
+        }),
+        "streamTargets.twitch.prepare" => Box::pin(async move {
             match serde_json::from_value::<TwitchPrepareParams>(command.params) {
                 Ok(params) => match prepare_twitch_stream_target(state, params).await {
                     Ok(prepared) => ServerResponse::ok(command.id, prepared),
@@ -12867,8 +12994,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.twitch.applyMetadata" => {
+        }),
+        "streamTargets.twitch.applyMetadata" => Box::pin(async move {
             match serde_json::from_value::<TwitchPrepareParams>(command.params) {
                 Ok(params) => match apply_twitch_stream_target_metadata(state, params).await {
                     Ok(applied) => ServerResponse::ok(command.id, applied),
@@ -12882,8 +13009,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.kick.searchCategories" => {
+        }),
+        "streamTargets.kick.searchCategories" => Box::pin(async move {
             match serde_json::from_value::<kick::KickCategorySearchParams>(command.params) {
                 Ok(params) => match search_kick_categories(state, params).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -12897,8 +13024,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.kick.prepare" => {
+        }),
+        "streamTargets.kick.prepare" => Box::pin(async move {
             match serde_json::from_value::<kick::KickPrepareParams>(command.params) {
                 Ok(params) => match prepare_kick_stream_target(state, params).await {
                     Ok(prepared) => ServerResponse::ok(command.id, prepared),
@@ -12910,8 +13037,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.kick.applyMetadata" => {
+        }),
+        "streamTargets.kick.applyMetadata" => Box::pin(async move {
             match serde_json::from_value::<kick::KickPrepareParams>(command.params) {
                 Ok(params) => match apply_kick_stream_target_metadata(state, params).await {
                     Ok(applied) => ServerResponse::ok(command.id, applied),
@@ -12925,8 +13052,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.x.capability" => {
+        }),
+        "streamTargets.x.capability" => Box::pin(async move {
             match serde_json::from_value::<XNativeLiveCapabilityParams>(command.params) {
                 Ok(params) => match x_native_live_capability(state, params) {
                     Ok(capability) => ServerResponse::ok(command.id, capability),
@@ -12938,14 +13065,18 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.x.startLiveAuthorization" => match start_x_live_authorization(state).await {
-            Ok(result) => ServerResponse::ok(command.id, result),
-            Err(error) => {
-                ServerResponse::error(command.id, "x-live-authorization-failed", error.to_string())
+        }),
+        "streamTargets.x.startLiveAuthorization" => Box::pin(async move {
+            match start_x_live_authorization(state).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "x-live-authorization-failed",
+                    error.to_string(),
+                ),
             }
-        },
-        "streamTargets.x.prepare" => {
+        }),
+        "streamTargets.x.prepare" => Box::pin(async move {
             match serde_json::from_value::<XPrepareParams>(command.params) {
                 Ok(params) => match prepare_x_native_live(state, params).await {
                     Ok(prepared) => ServerResponse::ok(command.id, prepared),
@@ -12959,8 +13090,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.x.publish" => {
+        }),
+        "streamTargets.x.publish" => Box::pin(async move {
             match serde_json::from_value::<XPublishParams>(command.params) {
                 Ok(params) => match publish_x_native_live(state, params.clone()).await {
                     Ok(result) => {
@@ -12979,24 +13110,32 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "streamTargets.x.end" => match serde_json::from_value::<XEndParams>(command.params) {
-            Ok(params) => match end_x_native_live(state, params).await {
-                Ok(result) => ServerResponse::ok(command.id, result),
-                Err(error) => ServerResponse::error(command.id, "x-end-failed", error.to_string()),
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
+        }),
+        "streamTargets.x.end" => Box::pin(async move {
+            match serde_json::from_value::<XEndParams>(command.params) {
+                Ok(params) => match end_x_native_live(state, params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "x-end-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
         // Plan 186: banners. Every mutation ends in `banners::on_banners_changed`,
         // which republishes the list (and, from S3, installs the compositor set).
         // Refusals come back as the verbatim sentences from the plan.
-        "banners.list" => match state.database.list_banners() {
-            Ok(banners) => ServerResponse::ok(command.id, banners),
-            Err(error) => {
-                ServerResponse::error(command.id, "banners-list-failed", error.to_string())
+        "banners.list" => Box::pin(async move {
+            match state.database.list_banners() {
+                Ok(banners) => ServerResponse::ok(command.id, banners),
+                Err(error) => {
+                    ServerResponse::error(command.id, "banners-list-failed", error.to_string())
+                }
             }
-        },
-        "banners.importImage" => {
+        }),
+        "banners.importImage" => Box::pin(async move {
             let mut params_value = command.params;
             if let Err(error) = resolve_banner_import_resource(state, &mut params_value, role) {
                 return ServerResponse::error(
@@ -13037,8 +13176,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "banners.update" => {
+        }),
+        "banners.update" => Box::pin(async move {
             match serde_json::from_value::<protocol::UpdateBannerParams>(command.params) {
                 Ok(params) => {
                     let update = match banners::BannerUpdate::from_params(&params) {
@@ -13067,8 +13206,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "banners.reorder" => {
+        }),
+        "banners.reorder" => Box::pin(async move {
             match serde_json::from_value::<protocol::ReorderBannersParams>(command.params) {
                 Ok(params) => match state.database.reorder_banners(&params.ids) {
                     Ok(banners) => {
@@ -13085,8 +13224,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "banners.delete" => {
+        }),
+        "banners.delete" => Box::pin(async move {
             match serde_json::from_value::<protocol::BannerIdParams>(command.params) {
                 Ok(params) => {
                     // D9: a showing banner is burned into the running session;
@@ -13112,8 +13251,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "banners.show" => {
+        }),
+        "banners.show" => Box::pin(async move {
             match serde_json::from_value::<protocol::BannerIdParams>(command.params) {
                 Ok(params) => match banners::show_banner(
                     &state.database,
@@ -13137,8 +13276,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "banners.hide" => {
+        }),
+        "banners.hide" => Box::pin(async move {
             match serde_json::from_value::<protocol::HideBannerParams>(command.params) {
                 Ok(params) => {
                     let hidden = match params.id.as_deref() {
@@ -13165,18 +13304,20 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 189: the soundboard. Every store mutation ends in
         // `sound_store::on_sounds_changed`, which republishes the board;
         // every playback change ends in `sounds.playback` from the player.
         // Refusals come back as the verbatim sentences from the plan.
-        "sounds.list" => match state.database.soundboard_state() {
-            Ok(board) => ServerResponse::ok(command.id, board),
-            Err(error) => {
-                ServerResponse::error(command.id, "sounds-list-failed", error.to_string())
+        "sounds.list" => Box::pin(async move {
+            match state.database.soundboard_state() {
+                Ok(board) => ServerResponse::ok(command.id, board),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sounds-list-failed", error.to_string())
+                }
             }
-        },
-        "sounds.import" => {
+        }),
+        "sounds.import" => Box::pin(async move {
             let mut params_value = command.params;
             if let Err(error) = resolve_sound_import_resource(state, &mut params_value, role) {
                 return ServerResponse::error(
@@ -13221,8 +13362,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sounds.update" => {
+        }),
+        "sounds.update" => Box::pin(async move {
             match serde_json::from_value::<protocol::UpdateSoundParams>(command.params) {
                 Ok(params) => {
                     let update = match sound_store::SoundUpdate::from_params(&params) {
@@ -13251,8 +13392,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sounds.reorder" => {
+        }),
+        "sounds.reorder" => Box::pin(async move {
             match serde_json::from_value::<protocol::ReorderSoundsParams>(command.params) {
                 Ok(params) => match state.database.reorder_sounds(&params.ids) {
                     Ok(sounds) => {
@@ -13267,8 +13408,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sounds.delete" => {
+        }),
+        "sounds.delete" => Box::pin(async move {
             match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
                 Ok(params) => {
                     // Its voices stop first, so a deleted sound never plays on.
@@ -13293,8 +13434,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sounds.settings" => {
+        }),
+        "sounds.settings" => Box::pin(async move {
             match serde_json::from_value::<protocol::SoundboardSettingsParams>(command.params) {
                 Ok(params) => {
                     if let Err(error) = sound_store::validate_soundboard_settings(&params) {
@@ -13328,26 +13469,34 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "sounds.play" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
-            Ok(params) => match state.soundboard.play(state, &params.id).await {
-                Ok(result) => ServerResponse::ok(command.id, result),
+        }),
+        "sounds.play" => Box::pin(async move {
+            match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+                Ok(params) => match state.soundboard.play(state, &params.id).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                    }
+                },
                 Err(error) => {
-                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "sounds.press" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
-            Ok(params) => match state.soundboard.press(state, &params.id).await {
-                Ok(result) => ServerResponse::ok(command.id, result),
+            }
+        }),
+        "sounds.press" => Box::pin(async move {
+            match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+                Ok(params) => match state.soundboard.press(state, &params.id).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                    }
+                },
                 Err(error) => {
-                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "sounds.stop" => {
+            }
+        }),
+        "sounds.stop" => Box::pin(async move {
             match serde_json::from_value::<protocol::StopSoundParams>(command.params) {
                 Ok(params) => ServerResponse::ok(
                     command.id,
@@ -13357,20 +13506,24 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "screens.list" => match state.database.list_stream_screens() {
-            Ok(screens) => ServerResponse::ok(command.id, screens),
-            Err(error) => {
-                ServerResponse::error(command.id, "screens-list-failed", error.to_string())
+        }),
+        "screens.list" => Box::pin(async move {
+            match state.database.list_stream_screens() {
+                Ok(screens) => ServerResponse::ok(command.id, screens),
+                Err(error) => {
+                    ServerResponse::error(command.id, "screens-list-failed", error.to_string())
+                }
             }
-        },
-        "screens.active" => match read_active_screen_transition(state).await {
-            Ok(screen) => ServerResponse::ok(command.id, screen),
-            Err(error) => {
-                ServerResponse::error(command.id, "screen-active-failed", error.to_string())
+        }),
+        "screens.active" => Box::pin(async move {
+            match read_active_screen_transition(state).await {
+                Ok(screen) => ServerResponse::ok(command.id, screen),
+                Err(error) => {
+                    ServerResponse::error(command.id, "screen-active-failed", error.to_string())
+                }
             }
-        },
-        "screens.importImage" => {
+        }),
+        "screens.importImage" => Box::pin(async move {
             let mut params_value = command.params;
             if let Err(error) = resolve_screen_import_resource(state, &mut params_value, role) {
                 return ServerResponse::error(
@@ -13409,8 +13562,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "screens.rename" => {
+        }),
+        "screens.rename" => Box::pin(async move {
             match serde_json::from_value::<protocol::RenameScreenParams>(command.params) {
                 Ok(params) => match state
                     .database
@@ -13433,8 +13586,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "screens.delete" => {
+        }),
+        "screens.delete" => Box::pin(async move {
             match serde_json::from_value::<protocol::ScreenIdParams>(command.params) {
                 Ok(params) => {
                     let delete_result =
@@ -13464,8 +13617,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "screens.reorder" => {
+        }),
+        "screens.reorder" => Box::pin(async move {
             match serde_json::from_value::<protocol::ReorderScreensParams>(command.params) {
                 Ok(params) => match state.database.reorder_stream_screens(&params.screen_ids) {
                     Ok(screens) => {
@@ -13482,8 +13635,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "screens.activate" => {
+        }),
+        "screens.activate" => Box::pin(async move {
             match serde_json::from_value::<protocol::ScreenIdParams>(command.params) {
                 Ok(params) => {
                     let screen = match state.database.stream_screen_by_id(&params.screen_id) {
@@ -13525,8 +13678,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "screens.clear" => {
+        }),
+        "screens.clear" => Box::pin(async move {
             match commit_active_screen_transition(state, None, || {
                 state.database.clear_active_stream_screen()
             })
@@ -13543,39 +13696,42 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "screen-clear-failed", error.to_string())
                 }
             }
-        }
+        }),
         // Plan 210 S7: Hide screen. Renderer and admin sockets only (the
         // remote and agent roles never reach these methods); the LiveControl
         // lane, so a hide never queues behind a scene commit.
-        "screen.hide" => match serde_json::from_value::<protocol::ScreenHideParams>(command.params)
-        {
-            Ok(params) => {
-                if recording::active_session_reads_display_directly(state)
-                    .await
-                    .is_some()
-                {
-                    // The legacy FFmpeg graph grabs the display itself and
-                    // never reads the gated store: refuse, never succeed
-                    // uncovered.
-                    ServerResponse::error(
-                        command.id,
-                        "screen-hide-unavailable",
-                        screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY,
-                    )
-                } else {
-                    let privacy = state
-                        .screen_privacy
-                        .hide(params.reason, chrono::Utc::now().to_rfc3339());
-                    // The gate is hidden before this runs, so a frame landing
-                    // in between frosts itself; this covers a static screen.
-                    preview_screen::hold_screen_now(state).await;
-                    state.emit_event("screen.privacy.changed", privacy.clone());
-                    ServerResponse::ok(command.id, privacy)
+        "screen.hide" => Box::pin(async move {
+            match serde_json::from_value::<protocol::ScreenHideParams>(command.params) {
+                Ok(params) => {
+                    if recording::active_session_reads_display_directly(state)
+                        .await
+                        .is_some()
+                    {
+                        // The legacy FFmpeg graph grabs the display itself and
+                        // never reads the gated store: refuse, never succeed
+                        // uncovered.
+                        ServerResponse::error(
+                            command.id,
+                            "screen-hide-unavailable",
+                            screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY,
+                        )
+                    } else {
+                        let privacy = state
+                            .screen_privacy
+                            .hide(params.reason, chrono::Utc::now().to_rfc3339());
+                        // The gate is hidden before this runs, so a frame landing
+                        // in between frosts itself; this covers a static screen.
+                        preview_screen::hold_screen_now(state).await;
+                        state.emit_event("screen.privacy.changed", privacy.clone());
+                        ServerResponse::ok(command.id, privacy)
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "screen.show" => {
+        }),
+        "screen.show" => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -13588,8 +13744,8 @@ async fn handle_text_message_with_role(
                 state.emit_event("screen.privacy.changed", privacy.clone());
                 ServerResponse::ok(command.id, privacy)
             }
-        }
-        "screen.privacy.get" => {
+        }),
+        "screen.privacy.get" => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -13607,8 +13763,8 @@ async fn handle_text_message_with_role(
                 }
                 ServerResponse::ok(command.id, privacy)
             }
-        }
-        "session.remux_mp4" => {
+        }),
+        "session.remux_mp4" => Box::pin(async move {
             match serde_json::from_value::<protocol::RemuxSessionParams>(command.params) {
                 Ok(params)
                     if state
@@ -13654,95 +13810,109 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "repair.assess_file" => match resolve_repair_file_params(state, command.params, role) {
-            Ok(params) => match repair_service::assess_file(state.clone(), params).await {
-                Ok(result) => ServerResponse::ok(command.id, result),
-                Err(error) => ServerResponse::error(command.id, "repair-assess-failed", error),
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "repair.repair_file" => match resolve_repair_file_params(state, command.params, role) {
-            Ok(params)
-                if state
-                    .database
-                    .session_id_for_media_path(&params.path)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|session_id| {
-                        noise_cleanup::session_mutation_blocked(state, &session_id).unwrap_or(true)
-                    }) =>
-            {
-                ServerResponse::error(
-                    command.id,
-                    "noise-cleanup-mutation-blocked",
-                    "This recording cannot be repaired while Noise Cleanup is active.",
-                )
-            }
-            Ok(params)
-                if state
-                    .database
-                    .session_id_for_media_path(&params.path)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|session_id| {
-                        clean_cut::session_mutation_blocked(state, &session_id).unwrap_or(true)
-                    }) =>
-            {
-                ServerResponse::error(
-                    command.id,
-                    "clean-cut-mutation-blocked",
-                    "This recording cannot be repaired while Clean cut is working on it.",
-                )
-            }
-            Ok(params) => match repair_service::repair_file(state.clone(), params).await {
-                Ok(status) => ServerResponse::ok(command.id, status),
-                Err(error) => ServerResponse::error(command.id, "repair-failed", error),
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "repair.restore_file" => match resolve_repair_restore_params(state, command.params, role) {
-            Ok(params)
-                if state
-                    .database
-                    .session_id_for_media_path(&params.path)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|session_id| {
-                        noise_cleanup::session_mutation_blocked(state, &session_id).unwrap_or(true)
-                    }) =>
-            {
-                ServerResponse::error(
-                    command.id,
-                    "noise-cleanup-mutation-blocked",
-                    "This recording cannot be restored while Noise Cleanup is active.",
-                )
-            }
-            Ok(params)
-                if state
-                    .database
-                    .session_id_for_media_path(&params.path)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|session_id| {
-                        clean_cut::session_mutation_blocked(state, &session_id).unwrap_or(true)
-                    }) =>
-            {
-                ServerResponse::error(
-                    command.id,
-                    "clean-cut-mutation-blocked",
-                    "This recording cannot be restored while Clean cut is working on it.",
-                )
-            }
-            Ok(params) => match repair_service::restore_file(state.clone(), params).await {
-                Ok(restored) => {
-                    ServerResponse::ok(command.id, serde_json::json!({ "restored": restored }))
+        }),
+        "repair.assess_file" => Box::pin(async move {
+            match resolve_repair_file_params(state, command.params, role) {
+                Ok(params) => match repair_service::assess_file(state.clone(), params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(command.id, "repair-assess-failed", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
-                Err(error) => ServerResponse::error(command.id, "repair-restore-failed", error),
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "noiseCleanup.start" => {
+            }
+        }),
+        "repair.repair_file" => Box::pin(async move {
+            match resolve_repair_file_params(state, command.params, role) {
+                Ok(params)
+                    if state
+                        .database
+                        .session_id_for_media_path(&params.path)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|session_id| {
+                            noise_cleanup::session_mutation_blocked(state, &session_id)
+                                .unwrap_or(true)
+                        }) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "noise-cleanup-mutation-blocked",
+                        "This recording cannot be repaired while Noise Cleanup is active.",
+                    )
+                }
+                Ok(params)
+                    if state
+                        .database
+                        .session_id_for_media_path(&params.path)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|session_id| {
+                            clean_cut::session_mutation_blocked(state, &session_id).unwrap_or(true)
+                        }) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "clean-cut-mutation-blocked",
+                        "This recording cannot be repaired while Clean cut is working on it.",
+                    )
+                }
+                Ok(params) => match repair_service::repair_file(state.clone(), params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, "repair-failed", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
+        "repair.restore_file" => Box::pin(async move {
+            match resolve_repair_restore_params(state, command.params, role) {
+                Ok(params)
+                    if state
+                        .database
+                        .session_id_for_media_path(&params.path)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|session_id| {
+                            noise_cleanup::session_mutation_blocked(state, &session_id)
+                                .unwrap_or(true)
+                        }) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "noise-cleanup-mutation-blocked",
+                        "This recording cannot be restored while Noise Cleanup is active.",
+                    )
+                }
+                Ok(params)
+                    if state
+                        .database
+                        .session_id_for_media_path(&params.path)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|session_id| {
+                            clean_cut::session_mutation_blocked(state, &session_id).unwrap_or(true)
+                        }) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "clean-cut-mutation-blocked",
+                        "This recording cannot be restored while Clean cut is working on it.",
+                    )
+                }
+                Ok(params) => match repair_service::restore_file(state.clone(), params).await {
+                    Ok(restored) => {
+                        ServerResponse::ok(command.id, serde_json::json!({ "restored": restored }))
+                    }
+                    Err(error) => ServerResponse::error(command.id, "repair-restore-failed", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
+        "noiseCleanup.start" => Box::pin(async move {
             match serde_json::from_value::<protocol::NoiseCleanupStartParams>(command.params) {
                 Ok(params) => match noise_cleanup::start(state.clone(), params).await {
                     Ok(job) => ServerResponse::ok(command.id, job),
@@ -13761,8 +13931,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "noiseCleanup.cancel" => {
+        }),
+        "noiseCleanup.cancel" => Box::pin(async move {
             match serde_json::from_value::<protocol::NoiseCleanupCancelParams>(command.params) {
                 Ok(params) => match noise_cleanup::cancel(state.clone(), params).await {
                     Ok(job) => ServerResponse::ok(command.id, job),
@@ -13774,8 +13944,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "noiseCleanup.list" => {
+        }),
+        "noiseCleanup.list" => Box::pin(async move {
             let valid = rpc_params_are_empty(&command.params);
             if !valid {
                 ServerResponse::error(
@@ -13791,8 +13961,8 @@ async fn handle_text_message_with_role(
                     }
                 }
             }
-        }
-        "cleanCut.start" => {
+        }),
+        "cleanCut.start" => Box::pin(async move {
             match serde_json::from_value::<protocol::CleanCutStartParams>(command.params) {
                 Ok(params) => match clean_cut::start(state.clone(), params).await {
                     Ok(job) => ServerResponse::ok(command.id, job),
@@ -13804,8 +13974,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cleanCut.get" => {
+        }),
+        "cleanCut.get" => Box::pin(async move {
             match serde_json::from_value::<protocol::CleanCutGetParams>(command.params) {
                 Ok(params) => match clean_cut::get(state, params).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
@@ -13815,8 +13985,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cleanCut.list" => {
+        }),
+        "cleanCut.list" => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -13829,8 +13999,8 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(command.id, "clean-cut-list-failed", error),
                 }
             }
-        }
-        "cleanCut.cancel" => {
+        }),
+        "cleanCut.cancel" => Box::pin(async move {
             match serde_json::from_value::<protocol::CleanCutCancelParams>(command.params) {
                 Ok(params) => match clean_cut::cancel(state.clone(), params).await {
                     Ok(job) => ServerResponse::ok(command.id, job),
@@ -13842,8 +14012,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cleanCut.updateEdl" => {
+        }),
+        "cleanCut.updateEdl" => Box::pin(async move {
             match serde_json::from_value::<protocol::CleanCutUpdateEdlParams>(command.params) {
                 Ok(params) => match clean_cut::update_edl(state, params).await {
                     Ok(detail) => ServerResponse::ok(command.id, detail),
@@ -13855,8 +14025,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cleanCut.render" => {
+        }),
+        "cleanCut.render" => Box::pin(async move {
             match serde_json::from_value::<protocol::CleanCutRenderParams>(command.params) {
                 Ok(params) => match clean_cut::render(state.clone(), params).await {
                     Ok(job) => ServerResponse::ok(command.id, job),
@@ -13868,8 +14038,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "cleanCut.transcript" => {
+        }),
+        "cleanCut.transcript" => Box::pin(async move {
             match serde_json::from_value::<protocol::CleanCutTranscriptParams>(command.params) {
                 Ok(params) => match clean_cut::transcript(state, params).await {
                     Ok(transcript) => ServerResponse::ok(command.id, transcript),
@@ -13881,8 +14051,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "session.marker.voice.configure" => {
+        }),
+        "session.marker.voice.configure" => Box::pin(async move {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase", deny_unknown_fields)]
             struct Params {
@@ -13908,40 +14078,40 @@ async fn handle_text_message_with_role(
                     "Invalid marker voice scope.",
                 ),
             }
-        }
-        "session.marker.create" => {
+        }),
+        "session.marker.create" => Box::pin(async move {
             match session_markers::dispatch(state, &command.method, command.params).await {
                 Ok(value) => ServerResponse::ok(command.id, value),
                 Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
             }
-        }
-        "session.marker.rename" => {
+        }),
+        "session.marker.rename" => Box::pin(async move {
             match session_markers::dispatch(state, &command.method, command.params).await {
                 Ok(value) => ServerResponse::ok(command.id, value),
                 Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
             }
-        }
-        "session.marker.delete" => {
+        }),
+        "session.marker.delete" => Box::pin(async move {
             match session_markers::dispatch(state, &command.method, command.params).await {
                 Ok(value) => ServerResponse::ok(command.id, value),
                 Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
             }
-        }
-        "session.markers.list" => {
+        }),
+        "session.markers.list" => Box::pin(async move {
             match session_markers::dispatch(state, &command.method, command.params).await {
                 Ok(value) => ServerResponse::ok(command.id, value),
                 Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
             }
-        }
-        "session.marker.get" => {
+        }),
+        "session.marker.get" => Box::pin(async move {
             match session_markers::dispatch(state, &command.method, command.params).await {
                 Ok(value) => ServerResponse::ok(command.id, value),
                 Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
             }
-        }
+        }),
         // Plan 199: both take an optional `{ seconds?: 30 | 60 }`. Older
         // callers send no params (or null): that is `{}`, today's 30 s.
-        "clip.mark" => {
+        "clip.mark" => Box::pin(async move {
             match serde_json::from_value::<protocol::ClipMarkParams>(if command.params.is_null() {
                 serde_json::json!({})
             } else {
@@ -13957,22 +14127,30 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }),
+        "replay.status" => {
+            Box::pin(async move { ServerResponse::ok(command.id, replay_buffer::snapshot(state)) })
         }
-        "replay.status" => ServerResponse::ok(command.id, replay_buffer::snapshot(state)),
-        "replay.save" => match serde_json::from_value::<protocol::ReplaySaveParams>(
-            if command.params.is_null() {
-                serde_json::json!({})
-            } else {
-                command.params
-            },
-        ) {
-            Ok(params) => match replay_buffer::request_save(state, None, params.seconds) {
-                Ok(accepted) => ServerResponse::ok(command.id, accepted),
-                Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
-        },
-        "clip.marks.list" => {
+        "replay.save" => Box::pin(async move {
+            match serde_json::from_value::<protocol::ReplaySaveParams>(
+                if command.params.is_null() {
+                    serde_json::json!({})
+                } else {
+                    command.params
+                },
+            ) {
+                Ok(params) => match replay_buffer::request_save(state, None, params.seconds) {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
+        "clip.marks.list" => Box::pin(async move {
             match serde_json::from_value::<protocol::ClipMarksListParams>(command.params) {
                 Ok(params) => match clip_marks::list_marks(state, &params.session_id) {
                     Ok(marks) => ServerResponse::ok(command.id, marks),
@@ -13984,8 +14162,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.snapshot" => {
+        }),
+        "preview.snapshot" => Box::pin(async move {
             match serde_json::from_value::<protocol::PreviewSnapshotParams>(command.params) {
                 Ok(params) => match create_preview_snapshot(state.clone(), params).await {
                     Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
@@ -13997,8 +14175,8 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.live.start" => {
+        }),
+        "preview.live.start" => Box::pin(async move {
             match serde_json::from_value::<protocol::PreviewLiveParams>(command.params) {
                 Ok(params) => match start_live_preview(state.clone(), params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
@@ -14012,25 +14190,31 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
-        }
-        "preview.live.stop" => match stop_live_preview(state.clone()).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => {
-                ServerResponse::error(command.id, "preview-live-stop-failed", error.to_string())
+        }),
+        "preview.live.stop" => Box::pin(async move {
+            match stop_live_preview(state.clone()).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => {
+                    ServerResponse::error(command.id, "preview-live-stop-failed", error.to_string())
+                }
             }
-        },
-        "preview.live.status" => {
+        }),
+        "preview.live.status" => Box::pin(async move {
             let status = live_preview_status(state).await;
             ServerResponse::ok(command.id, status)
-        }
-        "recording.stop" => match stop_recording(state.clone()).await {
-            Ok(status) => ServerResponse::ok(command.id, status),
-            Err(error) => {
-                ServerResponse::error(command.id, "recording-stop-failed", error.to_string())
+        }),
+        "recording.stop" => Box::pin(async move {
+            match stop_recording(state.clone()).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => {
+                    ServerResponse::error(command.id, "recording-stop-failed", error.to_string())
+                }
             }
-        },
-        "recording.status" => ServerResponse::ok(command.id, current_recording_status(state).await),
-        "stream.targets.snapshot" => {
+        }),
+        "recording.status" => Box::pin(async move {
+            ServerResponse::ok(command.id, current_recording_status(state).await)
+        }),
+        "stream.targets.snapshot" => Box::pin(async move {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -14047,20 +14231,15 @@ async fn handle_text_message_with_role(
                     ),
                 }
             }
-        }
-        method => ServerResponse::error(
-            command.id,
-            "unknown-method",
-            format!("Unknown backend method: {method}"),
-        ),
-    };
-    if role == BackendRole::Renderer
-        && let Some(payload) = response.payload.as_mut()
-    {
-        resource_authority::redact_managed_background_paths(payload);
-        resource_authority::redact_managed_screen_paths(payload);
+        }),
+        _ => Box::pin(async move {
+            ServerResponse::error(
+                command.id,
+                "unknown-method",
+                format!("Unknown backend method: {}", command.method),
+            )
+        }),
     }
-    response
 }
 
 async fn clear_account_credentials_after_caption_shutdown(
@@ -17093,10 +17272,13 @@ mod tests {
         // multiline arms, and fails closed on every unknown top-level arm shape.
         let source = include_str!("main.rs");
         let handler_source = source
-            .split_once("let mut response = match command.method.as_str() {")
+            .split_once("fn dispatch_authorized_backend_command(")
+            .expect("authorized websocket RPC dispatcher")
+            .1
+            .split_once("    match command.method.as_str() {")
             .expect("websocket RPC dispatch start")
             .1
-            .split_once("\n        method => ServerResponse::error(")
+            .split_once("\n        _ => Box::pin(async move {")
             .expect("websocket RPC fallback arm")
             .0;
         let methods = parse_websocket_rpc_arm_methods(handler_source)

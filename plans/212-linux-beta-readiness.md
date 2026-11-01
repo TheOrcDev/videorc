@@ -1830,3 +1830,74 @@ cleanup. Receipt: `/tmp/videorc-beta-status-rpc-stack-native-wtwbZP/report.json`
 The old runtime dispatcher was held before launch because main changes the
 smoke harness. Source and runtime verification of this integration is pending;
 these build results are not a first-run or Beta acceptance pass.
+
+The merged `ac5af551` source verification is complete: 457 focused desktop
+tests pass, all 606 desktop test files pass (6,670 passing tests, one existing
+skip), all 3,000 Node tests pass without skips, and typecheck, lint, formatting
+and the production frontend build pass. The source supervisor reaped only
+its owned descendants and required no forced orphan cleanup. Receipt:
+`/tmp/videorc-beta-main-e66c5cd4-source-To38gH/summary.json`. Runtime checks
+wait for the separate diagnostic Rust compile below before launching, so the
+compiler does not contend with app performance measurements.
+
+The Linux hosted job `124684626545` passed FFmpeg policy/provisioning and
+Clippy, then received a runner shutdown signal during test compilation after
+about 6 minutes 40 seconds. It exited 143 without a test result; the external
+cause is unknown and this was not the 45-minute job limit. One fresh attempt
+was requested. The macOS job `124684715557` now compiles tests in 11 minutes
+4 seconds, then fails both Metal golden-image cases and aborts on a stack
+overflow in `live_chat::tests::session_chat_totals_fake_provider_rpc`. Its
+84 MCP helper tests pass, but the backend suite and process/memory sentinel
+do not complete. The abort loses the captured Metal failure measurements;
+their magnitude and cause remain unknown. The existing image tolerances and
+default test stack are unchanged. Classification receipts:
+`/tmp/videorc-beta-linux-124684626545-classification.json` and
+`/tmp/videorc-beta-rust-124684715557-classification.json`. The local chat RPC reproduction also aborts with the same stack overflow at
+the default stack after a successful compile. Its supervisor reports no
+forced orphan cleanup, and no saved core or OOM evidence was found. The
+test-only shared helper now uses the production boxed Admin dispatcher;
+verification of the original failing case and the other helper callers is
+pending. No production router, assertion, readiness channel or stack limit
+is changed. Before-failure receipt:
+`/tmp/videorc-beta-chat-rpc-before-owned-cleanup.json`.
+
+The first merged-source runtime attempt was stopped before readiness: the dev
+app invoked `cargo run` and started compiling the backend despite the existing
+verified binary. No first-run assertion ran, and the preview, recording and
+latency steps never started. This interrupted setup is not runtime evidence.
+The owned supervisor terminated and reaped only descendants of this run; the
+queue and compiler PIDs are gone. The follow-up native queue puts the optimized
+backend/MCP build after all tests, with no later compile before app launch.
+Stopped-run receipt:
+`/tmp/videorc-beta-main-e66c5cd4-runtime-27o6QR/report.json`.
+
+### RPC stack regression, 2026-11-01
+
+Local commit `13f7ad4f` fixes the original chat fixture at the default stack:
+all 72 live-chat tests and eight other distinct shared-helper RPC tests pass,
+with no skips or forced child cleanup. The broader native queue then aborts
+in `preview_layout_public_api_cancels_an_older_in_flight_warmup`; the fresh
+runtime dispatcher refuses that failed prerequisite and launches no app.
+Receipt: `/tmp/videorc-beta-chat-helper-focused-summary.json`.
+
+GDB reproduces the new failure while polling the real preview-layout handler.
+The monolithic RPC dispatcher consumes 1,763,056 bytes of stack in this
+unoptimized test build; its wrapper consumes another 109,536 bytes. Nested
+scene-readiness calls cross the default test thread's stack boundary. The
+captured call chain is not recursive, no core was retained, and no concurrent
+OOM event was found. Trace: `/tmp/videorc-beta-preview-stack-frames.log`.
+
+The follow-up constructs one boxed future for each authorized command instead
+of polling every method through one large async match. Authorization and
+input sanitization still precede dispatch; renderer resource redaction still
+follows it. A syntax-tree comparison preserves all 309 method/fallback entries,
+feature guards and command bodies; the fallback now owns its method string.
+The exhaustive execution-policy test reads the new dispatcher. No stack size,
+assertion, timing or artifact limit changes. The backend and test targets pass
+`cargo check --locked -p videorc-backend --bin videorc-backend --tests` with
+the existing unoptimized test-profile override; the owned supervisor reports
+exit 0 with no interruption, forced cleanup or leaked children. All 54 desktop
+RPC contract tests and Rust formatting also pass. Default-stack behavior
+verification is next; this is not yet a runtime or Beta acceptance pass.
+Comparison receipt: `/tmp/videorc-beta-rpc-router-equivalence.json`.
+Compile receipt: `/tmp/videorc-beta-rpc-router-check-owned-cleanup.json`.
