@@ -1,3 +1,9 @@
+import {
+  cameraIsAvailable,
+  cameraPreviewStartAllowed,
+  returningSourceChoices,
+  sourceReturnAction
+} from '@/lib/source-return'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 import {
@@ -51,6 +57,7 @@ import {
   WORKING_SCENE_KEY,
   normalizeSceneVisual,
   visualSources,
+  usingVisualSources,
   snapshotBackground,
   resolveSavedBackground,
   sameSceneAudio,
@@ -179,6 +186,7 @@ import {
   auxiliaryStreamOutputVideoSettings,
   bridgeStreamingToLegacy,
   buildCameraSources,
+  buildCaptureSources,
   areEnabledStreamTargetsStartReady,
   coerceVideoToOrientation,
   defaultSettings,
@@ -10009,7 +10017,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             options?.sourcesOverride ??
             reconcileSourceSelectionForLayoutTransaction(
               requestedConfig.sources,
-              deviceListRef.current.devices
+              deviceListRef.current.devices,
+              // Plan 213 D6: a stand-in never gives way mid-session without a
+              // click, not even on a scene switch.
+              { holdStandIns: sessionOwnsTransport(recordingRef.current) }
             )
           const requestedBackground =
             options && 'backgroundOverride' in options
@@ -10023,7 +10034,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             ? (savedSceneApplyChunk ?? (await loadSavedSceneApply())).runSavedScenePreflight({
                 visual: {
                   layout,
-                  sources: { ...visualSources(requestedSources), app: undefined },
+                  sources: { ...usingVisualSources(requestedSources), app: undefined },
                   background: snapshotBackground(requestedBackground)
                 },
                 sceneApp: options.sceneApp,
@@ -10389,7 +10400,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const issues = sceneSourceProblems(
           {
             layout: { ...current.layout, layoutPreset: nextPreset, arrangementMode: 'preset' },
-            sources: visualSources(current.sources),
+            sources: usingVisualSources(current.sources),
             background: null
           },
           deviceListRef.current.devices
@@ -11015,18 +11026,43 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Plan 080 S4: the backend confirms only the device; the Off intent
         // is renderer state, so it must be recorded here to outlive the
         // session's end (reconcile would otherwise fill in the first camera).
+        // Plan 213 E1: a pick ends the wish a stand-in was holding, the same way.
         setCaptureConfig((current) =>
-          current.sources.cameraOff === sources.cameraOff
+          current.sources.cameraOff === sources.cameraOff &&
+          current.sources.wantedCameraId === sources.wantedCameraId &&
+          current.sources.wantedCameraName === sources.wantedCameraName
             ? current
-            : { ...current, sources: { ...current.sources, cameraOff: sources.cameraOff } }
+            : {
+                ...current,
+                sources: {
+                  ...current.sources,
+                  cameraOff: sources.cameraOff,
+                  wantedCameraId: sources.wantedCameraId,
+                  wantedCameraName: sources.wantedCameraName
+                }
+              }
         )
       }
       if (sourceKind === 'capture') {
         // Plan 0002 (release test 146): the same for a screen set to None.
         setCaptureConfig((current) =>
-          current.sources.captureOff === sources.captureOff
+          current.sources.captureOff === sources.captureOff &&
+          current.sources.wantedScreenId === sources.wantedScreenId &&
+          current.sources.wantedScreenName === sources.wantedScreenName &&
+          current.sources.wantedWindowId === sources.wantedWindowId &&
+          current.sources.wantedWindowName === sources.wantedWindowName
             ? current
-            : { ...current, sources: { ...current.sources, captureOff: sources.captureOff } }
+            : {
+                ...current,
+                sources: {
+                  ...current.sources,
+                  captureOff: sources.captureOff,
+                  wantedScreenId: sources.wantedScreenId,
+                  wantedScreenName: sources.wantedScreenName,
+                  wantedWindowId: sources.wantedWindowId,
+                  wantedWindowName: sources.wantedWindowName
+                }
+              }
         )
       }
       if (sourceKind === 'microphone') {
@@ -11061,6 +11097,70 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       persistWorkingVisual
     ]
   )
+
+  const announcedSourceReturnsRef = useRef(new Set<string>())
+  useEffect(() => {
+    const sources = captureConfigRef.current.sources
+    // A missing camera may be retried only after discovery finds it again.
+    if (!cameraIsAvailable(sources.cameraId, deviceList.devices)) {
+      nativePreviewCameraKeyRef.current = null
+    }
+    const returns =
+      sourceStatusKnown &&
+      !startRequestPending &&
+      !stopRequestPending &&
+      isActiveRecordingState(recording.state)
+        ? returningSourceChoices(sources, deviceList.devices)
+        : []
+    const keys = new Set(returns.map(({ kind, device }) => `${kind}:${device.id}`))
+    for (const old of announcedSourceReturnsRef.current) {
+      if (!keys.has(old)) toast.dismiss(`source-return:${old}`)
+    }
+    for (const { kind, device } of returns) {
+      const key = `${kind}:${device.id}`
+      if (announcedSourceReturnsRef.current.has(key)) continue
+      const applyDevice = () => {
+        const current = captureConfigRef.current.sources
+        if (
+          !returningSourceChoices(current, deviceListRef.current.devices).some(
+            (choice) => choice.kind === kind && choice.device.id === device.id
+          )
+        )
+          return
+        const next =
+          kind === 'camera'
+            ? buildCameraSources(current, deviceListRef.current.devices, device.id)
+            : buildCaptureSources(current, deviceListRef.current.devices, device.id)
+        void switchSourceDeviceLive(kind, next).catch((error) => toastUserError(error))
+      }
+      if (
+        sourceReturnAction({ state: recording.state, replayOnly: recording.replayOnly }) ===
+        'restore'
+      ) {
+        if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current) {
+          keys.delete(key)
+          continue
+        }
+        applyDevice()
+        continue
+      }
+      toast(`${device.name} is back`, {
+        id: `source-return:${key}`,
+        duration: Infinity,
+        action: { label: 'Use it', onClick: applyDevice }
+      })
+    }
+    announcedSourceReturnsRef.current = keys
+  }, [
+    captureConfig.sources,
+    deviceList,
+    recording.state,
+    recording.replayOnly,
+    sourceStatusKnown,
+    startRequestPending,
+    stopRequestPending,
+    switchSourceDeviceLive
+  ])
 
   const ensureNativePreviewCamera = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
@@ -11106,20 +11206,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     const current = previewCameraStatusRef.current
     if (
-      nativePreviewCameraKeyRef.current === key &&
-      current.cameraId === cameraId &&
-      (current.state === 'starting' || current.state === 'live')
-    ) {
+      !cameraPreviewStartAllowed(
+        cameraId,
+        deviceListRef.current.devices,
+        key,
+        nativePreviewCameraKeyRef.current,
+        current.state
+      )
+    )
       return current
-    }
 
     const status = await client.request<PreviewCameraStatus>('preview.camera.start', {
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       video: captureConfig.video
     })
-    nativePreviewCameraKeyRef.current =
-      status.state === 'failed' || status.state === 'device-missing' ? null : key
+    nativePreviewCameraKeyRef.current = key
     applyPreviewCameraStatus(status)
     if (status.state === 'permission-needed') {
       const permissionReport = window.videorc?.reportPreviewPermissionRequired?.(
@@ -13902,7 +14004,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       const config = captureConfigForIntent(captureConfig, intent)
       const turnedOff = sceneSourcesTurnedOff(
-        { layout: config.layout, sources: visualSources(config.sources), background: null },
+        { layout: config.layout, sources: usingVisualSources(config.sources), background: null },
         deviceList.devices
       )
       // Plan 210 D1: a scene made for an app whose window isn't there holds
@@ -17925,7 +18027,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneSourceProblems(
               {
                 layout: { ...current.layout, layoutPreset: id, arrangementMode: 'preset' },
-                sources: visualSources(current.sources),
+                sources: usingVisualSources(current.sources),
                 background: null
               },
               deviceListRef.current.devices

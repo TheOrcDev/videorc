@@ -3,7 +3,7 @@ import {
   orientationSwitchPreset,
   sceneGalleryReason,
   sceneSourceGaps,
-  visualSources
+  usingVisualSources
 } from '@/lib/scene-presets'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { DisplayIcon, MobileIcon } from '@/components/icons'
@@ -97,7 +97,7 @@ export function ScenesGallery(): ReactElement {
     gaps: sceneSourceGaps(
       {
         layout: { ...captureConfig.layout, layoutPreset: preset.id, arrangementMode: 'preset' },
-        sources: visualSources(captureConfig.sources),
+        sources: usingVisualSources(captureConfig.sources),
         background: null
       },
       deviceList.devices
@@ -116,7 +116,7 @@ export function ScenesGallery(): ReactElement {
       sceneSourceGaps(
         {
           layout: { ...captureConfig.layout, layoutPreset, arrangementMode: 'preset' },
-          sources: visualSources(captureConfig.sources),
+          sources: usingVisualSources(captureConfig.sources),
           background: null
         },
         deviceList.devices

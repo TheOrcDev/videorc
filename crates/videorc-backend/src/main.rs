@@ -50,6 +50,7 @@ mod color;
 mod comment_highlight;
 mod compositor;
 mod compositor_synthetic;
+mod device_watch;
 mod devices;
 mod diagnostics;
 mod discord_announce;
@@ -408,11 +409,13 @@ fn block_on_backend(runtime: &tokio::runtime::Runtime) -> Result<()> {
     const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
     const RUN_LOOP_SLICE_SECONDS: f64 = 0.1;
 
+    let (changes, receiver) = device_watch::channel();
+    let _device_watch = device_watch::install(changes);
     std::thread::scope(|scope| {
         let backend = std::thread::Builder::new()
             .name("videorc-backend-main".to_string())
             .stack_size(BACKEND_THREAD_STACK_BYTES)
-            .spawn_scoped(scope, || runtime.block_on(run_backend()))
+            .spawn_scoped(scope, || runtime.block_on(run_backend(receiver)))
             .context("could not start the backend thread")?;
         while !backend.is_finished() {
             let mode = unsafe { kCFRunLoopDefaultMode };
@@ -431,7 +434,9 @@ fn block_on_backend(runtime: &tokio::runtime::Runtime) -> Result<()> {
 
 #[cfg(not(target_os = "macos"))]
 fn block_on_backend(runtime: &tokio::runtime::Runtime) -> Result<()> {
-    runtime.block_on(run_backend())
+    let (changes, receiver) = device_watch::channel();
+    device_watch::install(changes);
+    runtime.block_on(run_backend(receiver))
 }
 
 fn backend_process_ownership_marker(token: &str) -> Result<String> {
@@ -455,7 +460,7 @@ fn publish_backend_process_ownership() -> Result<()> {
     Ok(())
 }
 
-async fn run_backend() -> Result<()> {
+async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Result<()> {
     // One JSON line on stderr per panic so the supervisor's crash record
     // (backend-crashes.json) names the cause; see panic_hook.rs.
     panic_hook::install();
@@ -602,6 +607,7 @@ async fn run_backend() -> Result<()> {
     }
     let mut state = AppState::new(token.clone(), port, events, database);
     state.oauth_callback_port = oauth_callback_port;
+    tokio::spawn(device_watch::run(device_changes, state.clone()));
     // Plan 181: a crash leaves replay rings behind; nothing can reuse them.
     replay_buffer::clean_leftovers(&state);
     // Plan 186 D3: a banner that was showing is showing again after a relaunch.
