@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON } from '@/hooks/use-studio'
 
 import type {
+  PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult
 } from '../../../shared/backend'
@@ -86,6 +87,21 @@ describe('settleGoLiveSessionOutput (plan 090)', () => {
     expect(output.sharedFallbackVideo).toMatchObject({ bitrateKbps: 6000 })
     expect(output.steppedDown).toBeNull()
     expect(output.streaming).toBe(config.streaming)
+  })
+
+  // Plan 0016: Linux's raw bridge never splits. With the default 720p record
+  // and 1080p stream (or only a lower recording bitrate) Go Live was refused.
+  it.each([
+    ['a smaller recording', { ...videoPresets['tutorial-720p30'] }],
+    ['a lower recording bitrate', { ...stream, preset: 'custom' as const, bitrateKbps: 4000 }]
+  ])('raises %s to the stream profile when the host cannot split', async (_, video) => {
+    const config = recordAndStreamConfig({ video })
+    const output = await settleGoLiveSessionOutput(deps(config))
+
+    expect(output.reason).toBeNull()
+    expect(output.video).toMatchObject({ width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 })
+    expect(output.sharedFallbackVideo).toMatchObject({ width: 1920, bitrateKbps: 6000 })
+    expect(goLiveSessionOutputNotice(output)?.title).toBe('Recording will match the stream.')
   })
 
   it('materializes the shared effective profile before preparing mixed destinations', async () => {
@@ -210,15 +226,98 @@ describe('goLiveSessionOutputNotice', () => {
       goLiveSessionOutputNotice({
         steppedDown: {
           kind: 'step-down',
+          reason: 'encoder',
           requested: stream,
           video: videoPresets['tutorial-720p30']
         },
         sharedFallbackVideo: null
       })
-    ).toMatchObject({ title: 'Streaming at 720p 30.' })
+    ).toMatchObject({ title: 'Streaming at 720p · 30 fps' })
 
     const shared = goLiveSessionOutputNotice({ steppedDown: null, sharedFallbackVideo: stream })
     expect(shared?.title).toBe('Recording will match the stream.')
-    expect(shared?.description).toContain('1920×1080, 30 fps, 6000 kbps')
+    expect(shared?.description).toContain('1080p · 30 fps · 6 Mbps')
+  })
+})
+
+describe('Go Live on a CPU compositor (retest 153)', () => {
+  // ogre: VAAPI on the raw bridge, CPU compositor; the check passed 1080p30
+  // for a Record, which Go Live does at about half the frame rate.
+  const vaapiHost = (params: StreamOutputTopologyProbeParams): StreamOutputTopologyProbeResult => ({
+    ...softwareHost(params),
+    requestedBridgeOutput: 'raw-yuv420p',
+    effectiveEncodeBackend: 'hardware-vaapi',
+    probeState: params.outputRoles.includes('stream') ? 'rejected' : 'passed',
+    fallbackReason: undefined
+  })
+  const ogreCheck: PerformanceCheckState = {
+    running: false,
+    stale: false,
+    result: {
+      capabilityKey: 'performance-check-v2:ogre',
+      checkedAt: '2026-10-27T00:00:00Z',
+      appVersion: '0.13.0',
+      durationMs: 9000,
+      recommended: videoPresets['tutorial-1080p30'],
+      belowFloor: false,
+      rungs: (['tutorial-1080p30', 'tutorial-720p30'] as const).map((preset) => ({
+        video: videoPresets[preset],
+        verdict: 'passed' as const,
+        compositorBackend: 'cpu' as const,
+        encodeBackend: 'hardware-vaapi' as const,
+        reasons: []
+      }))
+    }
+  }
+  const linuxDefaults = (): CaptureConfig => {
+    const config = recordAndStreamConfig({ video: { ...videoPresets['tutorial-720p30'] } })
+    return {
+      ...config,
+      streaming: { ...config.streaming, defaultOutputPreset: 'tutorial-1080p30' }
+    }
+  }
+  const linuxDeps = (config: CaptureConfig) =>
+    deps(config, {
+      performanceCheck: ogreCheck,
+      request: vi.fn(async (params: StreamOutputTopologyProbeParams) => vaapiHost(params)),
+      probeSaved: async (params) => vaapiHost(params)
+    })
+
+  it('streams and records an untouched default at 720p30 and says so', async () => {
+    const config = linuxDefaults()
+    const output = await settleGoLiveSessionOutput(linuxDeps(config))
+
+    expect(output.reason).toBeNull()
+    expect(output.steppedDown).toMatchObject({ reason: 'go-live-headroom' })
+    expect(output.video).toMatchObject({ width: 1280, height: 720, fps: 30 })
+    for (const target of output.streaming.targets.filter((target) => target.enabled)) {
+      expect(target).toMatchObject({ outputPreset: 'tutorial-720p30', outputBitrateKbps: 4000 })
+    }
+    const notice = goLiveSessionOutputNotice(output)
+    expect(notice?.title).toBe('Streaming at 720p · 30 fps')
+    expect(notice?.description).toContain('Pick 1080p · 30 fps')
+    // The saved settings are untouched.
+    expect(config.streaming.defaultOutputPreset).toBe('tutorial-1080p30')
+  })
+
+  it('keeps a 1080p stream the user picked', async () => {
+    const config = linuxDefaults()
+    config.streaming = { ...config.streaming, defaultOutputPreset: 'stream-safe-1080p30' }
+    const output = await settleGoLiveSessionOutput(linuxDeps(config))
+
+    expect(output.reason).toBeNull()
+    expect(output.steppedDown).toBeNull()
+    expect(output.video).toMatchObject({ width: 1920, height: 1080 })
+  })
+
+  it('never refuses a 4K recording for a headroom default', async () => {
+    const config = { ...linuxDefaults(), recordEnabled: false, video: videoPresets['record-4k30'] }
+    const output = await settleGoLiveSessionOutput(linuxDeps(config))
+    expect(output.steppedDown).toMatchObject({ reason: 'go-live-headroom' })
+
+    const recording4k = { ...linuxDefaults(), video: videoPresets['record-4k30'] }
+    const kept = await settleGoLiveSessionOutput(linuxDeps(recording4k))
+    expect(kept.reason ?? '').not.toContain('4K recording')
+    expect(kept.steppedDown).toBeNull()
   })
 })

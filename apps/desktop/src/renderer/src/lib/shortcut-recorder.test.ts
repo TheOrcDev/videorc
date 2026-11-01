@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import type { AcceleratorKeyInput } from '../../../shared/accelerator'
-import { acceleratorInlineLabel, shortcutRecorderStep } from './shortcut-recorder'
+import {
+  acceleratorInlineLabel,
+  appShortcutOwner,
+  shortcutRecorderName,
+  shortcutRecorderStep
+} from './shortcut-recorder'
 
 const press = (
   code: string,
@@ -58,9 +63,23 @@ describe('shortcutRecorderStep', () => {
       shortcutRecorderStep(
         press('KeyR', { meta: true, shift: true }),
         'darwin',
-        () => 'Already used by Start / stop recording.'
+        () => 'Already used by Record / stop recording.'
       )
-    ).toEqual({ type: 'reject', message: 'Already used by Start / stop recording.' })
+    ).toEqual({ type: 'reject', message: 'Already used by Record / stop recording.' })
+  })
+
+  it("refuses Videorc's own keys and names what they do (plan 174 I-17)", () => {
+    expect(shortcutRecorderStep(press('KeyK', { meta: true }), 'darwin', free)).toEqual({
+      type: 'reject',
+      message: "⌘K is Videorc's shortcut for “Search”. Pick another."
+    })
+    expect(shortcutRecorderStep(press('Digit1', { control: true }), 'win32', free)).toEqual({
+      type: 'reject',
+      message: "Ctrl+1 is Videorc's shortcut for “Studio”. Pick another."
+    })
+    expect(
+      shortcutRecorderStep(press('KeyJ', { meta: true, shift: true }), 'darwin', free)
+    ).toMatchObject({ type: 'reject', message: expect.stringContaining('Open Stream Manager') })
   })
 
   it('refuses keys Electron cannot name', () => {
@@ -74,5 +93,63 @@ describe('acceleratorInlineLabel', () => {
   it('joins glyphs on macOS and words with + elsewhere', () => {
     expect(acceleratorInlineLabel('Cmd+Shift+M', 'darwin')).toBe('⇧⌘M')
     expect(acceleratorInlineLabel('Ctrl+Shift+M', 'win32')).toBe('Ctrl+Shift+M')
+  })
+})
+
+describe('appShortcutOwner', () => {
+  it('matches across spellings of the same keys', () => {
+    expect(appShortcutOwner('Cmd+P', 'darwin')?.id).toBe('preview-window')
+    expect(appShortcutOwner('Ctrl+P', 'win32')?.id).toBe('preview-window')
+    expect(appShortcutOwner('Command+,', 'darwin')?.id).toBe('nav-settings')
+  })
+
+  it('leaves combinations Videorc does not use alone', () => {
+    expect(appShortcutOwner('Cmd+Shift+R', 'darwin')).toBeNull()
+    // ⌃P is text editing on a Mac, not Videorc's preview key.
+    expect(appShortcutOwner('Ctrl+P', 'darwin')).toBeNull()
+    expect(appShortcutOwner('', 'darwin')).toBeNull()
+  })
+})
+
+describe('shortcutRecorderName (plan 174 I-17)', () => {
+  it('carries the binding the field holds', () => {
+    expect(
+      shortcutRecorderName({
+        label: 'Mark a clip',
+        value: 'Cmd+Shift+M',
+        armed: false,
+        platform: 'darwin'
+      })
+    ).toBe('Mark a clip: ⇧⌘M')
+    expect(
+      shortcutRecorderName({ label: 'Mark a clip', value: '', armed: false, platform: 'win32' })
+    ).toBe('Mark a clip: Unassigned')
+  })
+
+  it("names Videorc's own key while no global key is set", () => {
+    const appKey = { accelerator: 'Space', where: 'in Studio' }
+    expect(
+      shortcutRecorderName({ label: 'Record', value: '', appKey, armed: false, platform: 'darwin' })
+    ).toBe('Record: Space in Studio')
+    expect(
+      shortcutRecorderName({
+        label: 'Record',
+        value: 'Cmd+Shift+R',
+        appKey,
+        armed: false,
+        platform: 'darwin'
+      })
+    ).toBe('Record: ⇧⌘R')
+  })
+
+  it('says what to do while it records', () => {
+    expect(
+      shortcutRecorderName({
+        label: 'Mark a clip',
+        value: 'Cmd+Shift+M',
+        armed: true,
+        platform: 'darwin'
+      })
+    ).toBe('Mark a clip: press the new shortcut')
   })
 })

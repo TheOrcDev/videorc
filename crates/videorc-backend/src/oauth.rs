@@ -117,6 +117,15 @@ pub const TWITCH_SUBSCRIPTIONS_SCOPE: &str = "channel:read:subscriptions";
 /// What follow alerts and the sub count need. Not every optional Twitch scope:
 /// the moderation scope has nothing to do with Activity.
 pub const TWITCH_AUDIENCE_SCOPES: &[&str] = &[TWITCH_FOLLOWERS_SCOPE, TWITCH_SUBSCRIPTIONS_SCOPE];
+/// Twitch `channel.bits.use`: Power-ups paid with bits for Activity (plan 162).
+pub const TWITCH_BITS_SCOPE: &str = "bits:read";
+/// Twitch channel point redemptions (custom and automatic rewards) for
+/// Activity (plan 162). Read only: Videorc never fulfils or refunds them.
+pub const TWITCH_REDEMPTIONS_SCOPE: &str = "channel:read:redemptions";
+/// What Activity's Power-ups and channel point rows need (plan 162). Apart
+/// from the audience scopes, so an account without them still names
+/// followers.
+pub const TWITCH_BITS_POINTS_SCOPES: &[&str] = &[TWITCH_BITS_SCOPE, TWITCH_REDEMPTIONS_SCOPE];
 /// Twitch `DELETE /helix/moderation/chat`: remove one chat message (plan 140).
 pub const TWITCH_MODERATION_SCOPE: &str = "moderator:manage:chat_messages";
 /// Kick `DELETE /public/v1/chat/{message_id}`: remove one chat message (plan 140).
@@ -135,6 +144,8 @@ pub fn optional_scopes_for(platform: StreamPlatform) -> &'static [&'static str] 
             TWITCH_FOLLOWERS_SCOPE,
             TWITCH_SUBSCRIPTIONS_SCOPE,
             TWITCH_MODERATION_SCOPE,
+            TWITCH_BITS_SCOPE,
+            TWITCH_REDEMPTIONS_SCOPE,
         ],
         StreamPlatform::Kick => &[KICK_MODERATION_SCOPE],
         _ => &[],
@@ -603,9 +614,10 @@ impl OAuthSessions {
             StreamPlatform::Twitch => &self.twitch_finalization,
             StreamPlatform::Kick => &self.kick_finalization,
             StreamPlatform::X => &self.x_finalization,
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {
-                &self.custom_finalization
-            }
+            StreamPlatform::Facebook
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => &self.custom_finalization,
         };
         lock.clone().lock_owned().await
     }
@@ -2609,6 +2621,7 @@ fn parse_provider_profile(
         StreamPlatform::X => parse_x_profile(value),
         StreamPlatform::Kick => parse_kick_profile(value),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth profiles."),
+        StreamPlatform::Facebook => anyhow::bail!(FACEBOOK_SIGN_IN_UNAVAILABLE),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
             "{} livestreams use a manual stream key. There is no OAuth to connect.",
             crate::streaming::stream_platform_label(platform)
@@ -2920,8 +2933,14 @@ impl OAuthTokenResponse {
     }
 }
 
+/// Facebook is a stream-key destination until its Page sign-in passes Meta's
+/// App Review (plan 206 S7); the renderer shows the same words on the card.
+pub const FACEBOOK_SIGN_IN_UNAVAILABLE: &str =
+    "Signing in with Facebook isn't available yet. Use a stream key.";
+
 fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     match platform {
+        StreamPlatform::Facebook => anyhow::bail!(FACEBOOK_SIGN_IN_UNAVAILABLE),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
             "{} livestreams use a manual stream key. There is no OAuth to connect.",
             crate::streaming::stream_platform_label(platform)
@@ -5425,6 +5444,21 @@ mod tests {
     }
 
     #[test]
+    fn facebook_sign_in_is_refused_until_meta_approves_it() {
+        let config = provider_config(StreamPlatform::Facebook).unwrap_err();
+        assert_eq!(config.to_string(), FACEBOOK_SIGN_IN_UNAVAILABLE);
+        let profile =
+            parse_provider_profile(StreamPlatform::Facebook, serde_json::json!({})).unwrap_err();
+        assert_eq!(profile.to_string(), FACEBOOK_SIGN_IN_UNAVAILABLE);
+        assert!(optional_scopes_for(StreamPlatform::Facebook).is_empty());
+        assert!(
+            provider_credential_statuses()
+                .iter()
+                .all(|status| status.platform != StreamPlatform::Facebook)
+        );
+    }
+
+    #[test]
     fn provider_credential_statuses_cover_native_platforms_without_secret_values() {
         let statuses = provider_credential_statuses();
 
@@ -6058,6 +6092,8 @@ mod tests {
                 "moderator:read:followers",
                 "channel:read:subscriptions",
                 "moderator:manage:chat_messages",
+                "bits:read",
+                "channel:read:redemptions",
             ]
         );
         assert_eq!(
@@ -6069,6 +6105,7 @@ mod tests {
         for platform in [
             StreamPlatform::Youtube,
             StreamPlatform::X,
+            StreamPlatform::Facebook,
             StreamPlatform::Tiktok,
             StreamPlatform::Instagram,
             StreamPlatform::Custom,
@@ -6084,6 +6121,10 @@ mod tests {
             "user:write:chat",
         ];
         assert!(!twitch_base.contains(&TWITCH_MODERATION_SCOPE));
+        for scope in TWITCH_BITS_POINTS_SCOPES {
+            assert!(!twitch_base.contains(scope));
+            assert!(optional_scopes_for(StreamPlatform::Twitch).contains(scope));
+        }
         assert!(!KICK_OAUTH_SCOPES.contains(&KICK_MODERATION_SCOPE));
     }
 

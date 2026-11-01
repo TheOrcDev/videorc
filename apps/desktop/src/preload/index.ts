@@ -12,6 +12,7 @@ import {
   type ElectronInvokeResult
 } from '../shared/electron-ipc-contract'
 import { rendererRoleFromArguments } from '../shared/renderer-security-policy'
+import { windowGroundFromArguments } from '../shared/window-ground'
 import { apiForRendererRole } from './api-policy'
 
 async function invoke<TChannel extends ElectronInvokeChannel>(
@@ -35,13 +36,36 @@ function subscribe<TChannel extends ElectronEventChannel>(
 }
 
 const api: VideorcApi = {
+  onFrontAppChanged: (callback) => subscribe('app:front-changed', callback),
+  setFrontWindowWatch: (enabled) => invoke('app:front-window-watch', { enabled }),
+  getSelfBundleIds: () => invoke('app:self-bundle-ids'),
+  getAppIcons: (bundleIds) => invoke('app:icons', bundleIds),
+  // What this window sits on (plan 208): main's call, off the window's argv,
+  // so the theme bootstrap can set data-ground before the first paint. Every
+  // Videorc window names one; a missing value leaves the bootstrap's default
+  // (solid).
+  ...(() => {
+    const windowGround = windowGroundFromArguments(process.argv)
+    return windowGround ? { windowGround } : {}
+  })(),
   getBackendConnection: () => invoke('backend:get-connection'),
   getBackendLogs: () => invoke('backend:get-logs'),
   getRuntimeInfo: () => invoke('app:get-runtime-info'),
   retryHardwareAcceleration: () => invoke('app:retry-hardware-acceleration'),
+  exitApp: (kind) => invoke('app:exit', kind),
   pickScreenImage: () => invoke('screens:pick-image'),
+  pickBannerImage: () => invoke('banners:pick-image'),
+  pickSoundFiles: () => invoke('sounds:pick-files'),
+  getStarterSounds: () => invoke('sounds:starter-list'),
+  getStarterSoundFiles: (slugs) => invoke('sounds:starter-files', slugs),
   importBackgroundImage: () => invoke('backgrounds:import-image'),
   importScheduledThumbnail: () => invoke('scheduled-streams:import-thumbnail'),
+  removeBuddyPersona: (personaId) => invoke('buddy-assets:remove', personaId),
+  readBuddyImage: (relativePath) => invoke('buddy-assets:read-image', relativePath),
+  readBuddyPetFile: (personaId, packId, file) => invoke('buddy-pets:read', personaId, packId, file),
+  importBuddyPetFolder: (personaId) => invoke('buddy-pets:import-folder', personaId),
+  readBuddyCreationFile: (personaId, buildId, file) =>
+    invoke('buddy-pets:read-creation', personaId, buildId, file),
   backgroundAssetExists: (assetId) => invoke('backgrounds:asset-exists', assetId),
   cacheChatAvatar: (url) => invoke('avatars:cache', url),
   cacheChatGif: (url) => invoke('chat-gifs:cache', url),
@@ -86,9 +110,25 @@ const api: VideorcApi = {
   markClipFromCommentsWindow: (command) => invoke('comments-window:clip-mark', command),
   onClipMarkRequest: (callback) => subscribe('comments-window:clip-mark-request', callback),
   pushClipMarkResult: (resolution) => invoke('comments-window:clip-mark-result-push', resolution),
+  getCommentsBanners: () => invoke('comments-window:banners-get'),
+  pushCommentsBanners: (banners) => invoke('comments-window:banners-push', banners),
+  onCommentsBanners: (callback) => subscribe('comments-window:banners', callback),
+  bannerFromCommentsWindow: (command) => invoke('comments-window:banner', command),
+  onBannerRequest: (callback) => subscribe('comments-window:banner-request', callback),
+  pushBannerResult: (resolution) => invoke('comments-window:banner-result-push', resolution),
+  getCommentsSounds: () => invoke('comments-window:sounds-get'),
+  pushCommentsSounds: (board) => invoke('comments-window:sounds-push', board),
+  onCommentsSounds: (callback) => subscribe('comments-window:sounds', callback),
+  soundFromCommentsWindow: (command) => invoke('comments-window:sound', command),
+  onSoundRequest: (callback) => subscribe('comments-window:sound-request', callback),
+  pushSoundResult: (resolution) => invoke('comments-window:sound-result-push', resolution),
+  buddyActFromCommentsWindow: (command) => invoke('comments-window:buddy-act', command),
+  onBuddyActRequest: (callback) => subscribe('comments-window:buddy-act-request', callback),
+  pushBuddyActResult: (resolution) => invoke('comments-window:buddy-act-result-push', resolution),
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),
+  openBuddyTabFromCommentsWindow: (command) => invoke('comments-window:open-buddy-tab', command),
   moderateFromCommentsWindow: (command) => invoke('comments-window:moderation', command),
   onModerationRequest: (callback) => subscribe('comments-window:moderation-request', callback),
   pushModerationResult: (resolution) =>
@@ -185,12 +225,19 @@ const api: VideorcApi = {
   openSystemPermissions: (pane) => invoke('system:open-permissions', pane),
   getMediaAccessStatus: () => invoke('system:media-access-status'),
   requestMediaAccess: (pane) => invoke('system:request-media-access', pane),
+  requestScreenAccess: () => invoke('system:request-screen-access'),
+  recheckPermissionGrants: () => invoke('system:recheck-permission-grants'),
+  relaunchForPermission: () => invoke('app:relaunch-for-permission'),
+  workspaceShown: () => invoke('app:workspace-shown'),
   revealPermissionTarget: () => invoke('system:reveal-permission-target'),
   revealSelectedResource: (capabilityId) => invoke('resource:reveal-selection', capabilityId),
   authorizeOutputDirectory: (directoryHandleId) =>
     invoke('resource:authorize-output-directory', directoryHandleId),
   revealSession: (sessionId) => invoke('resource:reveal-session', sessionId),
   revealBackgroundAsset: (assetId) => invoke('resource:reveal-background', assetId),
+  revealSupportBundle: (path) => invoke('resource:reveal-support-bundle', path),
+  getAgentBridge: (install) => invoke('agents:bridge', install),
+  addAgentToApp: (app, token) => invoke('agents:add-to-app', app, token),
   obsDiscover: () => invoke('obs:discover'),
   obsRead: (collection, profile) => invoke('obs:read', collection, profile),
   obsReadStreamKey: (profile) => invoke('obs:read-stream-key', profile),
@@ -208,6 +255,8 @@ const api: VideorcApi = {
   checkDirectory: (capabilityId) => invoke('system:check-directory', capabilityId),
   onOAuthCallbackUrl: (callback) => subscribe('oauth:callback-url', callback),
   onShortcutNavigate: (callback) => subscribe('shortcut:navigate', callback),
+  onExitRequest: (callback) => subscribe('app:exit-request', callback),
+  onBuddyDeepLink: (callback) => subscribe('buddy:deep-link', callback),
   onShortcutModifier: (callback) => subscribe('shortcut:modifier', callback),
   onWindowVisible: (callback) => subscribe('window:visible', callback),
   onBackendConnection: (callback) => subscribe('backend:connection', callback),

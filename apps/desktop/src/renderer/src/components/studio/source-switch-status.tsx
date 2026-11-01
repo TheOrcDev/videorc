@@ -1,10 +1,18 @@
 import type { ReactElement } from 'react'
+import { LCD_VALUE_BUTTON } from '@/components/lcd-panel'
 import { Button } from '@/components/ui/button'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { SessionSourceKind } from '@/lib/backend'
 
 /** Both picker surfaces describe the same backend operation and recovery. */
-export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): ReactElement | null {
+export function SourceSwitchStatus({
+  kind,
+  look = 'default'
+}: {
+  kind: SessionSourceKind
+  /** `lcd`: on a Studio screen (plan 197), so its one action is the screen's too. */
+  look?: 'default' | 'lcd'
+}): ReactElement | null {
   const {
     sourceSelectionState: state,
     sourceSwitchReason,
@@ -12,10 +20,13 @@ export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): React
     deviceList
   } = useStudioCore()
   const pending = state.snapshot?.pending
+  // A switch to no device turns the source off: "Turning off…", never
+  // "Preparing None…" (plan 174 C-PAT: Off, not None).
+  const turningOff = !state.targetName && pending?.deviceId === null
   const targetName =
     state.targetName ??
     (pending?.deviceId === null
-      ? 'None'
+      ? null
       : (deviceList.devices.find((device) => device.id === pending?.deviceId)?.name ??
         pending?.deviceId))
   const health = state.snapshot?.health.find((item) => item.kind === kind)
@@ -26,9 +37,11 @@ export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): React
       : state.pending === kind || pending?.kind === kind
         ? pending?.stage === 'restoring'
           ? 'Restoring previous source…'
-          : `Preparing ${targetName ?? 'source'}…`
+          : turningOff
+            ? 'Turning off…'
+            : `Preparing ${targetName ?? 'source'}…`
         : health?.health === 'unavailable'
-          ? 'Source unavailable. Select it again to retry, or choose another.'
+          ? 'Source unavailable. Choose it again to retry, or choose another.'
           : state.snapshot?.lastOperation?.kind === kind &&
               state.snapshot.lastOperation.stage === 'applied' &&
               !state.snapshot.lastOperation.outputObserved
@@ -41,9 +54,19 @@ export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): React
     <span className="flex flex-col items-start gap-1" role="status">
       <span>{message}</span>
       {(state.checking || state.outputPending) && state.error ? (
-        <Button size="sm" variant="outline" onClick={() => void retrySourceStatus()}>
-          Retry status
-        </Button>
+        look === 'lcd' ? (
+          <button
+            className={LCD_VALUE_BUTTON}
+            type="button"
+            onClick={() => void retrySourceStatus()}
+          >
+            Check again
+          </button>
+        ) : (
+          <Button variant="outline" onClick={() => void retrySourceStatus()}>
+            Check again
+          </Button>
+        )
       ) : null}
     </span>
   )

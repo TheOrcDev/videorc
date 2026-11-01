@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest'
 import type { PreviewSupervisorState } from '@/lib/backend'
 
 import {
+  PREVIEW_FALLBACK_LABEL,
   previewDisabledCopy,
+  previewFallbackLabel,
   previewPermissionPane,
   previewSupervisorDisplay
 } from './preview-stage'
@@ -52,6 +54,7 @@ describe('previewSupervisorDisplay', () => {
         action: null,
         row: {
           id: 'camera',
+          required: false,
           label: 'Camera',
           purpose: 'Camera overlay in your scenes.',
           state: 'device-issue',
@@ -76,6 +79,7 @@ describe('previewSupervisorDisplay', () => {
           action: null,
           row: {
             id: 'screen-recording',
+            required: true,
             label: 'Screen Recording',
             purpose: 'Capture displays, app windows and system audio.',
             state: 'granted',
@@ -99,6 +103,7 @@ describe('previewSupervisorDisplay', () => {
           action: 'open-settings',
           row: {
             id: 'screen-recording',
+            required: true,
             label: 'Screen Recording',
             purpose: 'Capture displays, app windows and system audio.',
             state: 'not-granted',
@@ -111,11 +116,10 @@ describe('previewSupervisorDisplay', () => {
 })
 
 describe('previewDisabledCopy', () => {
-  it('names the Linux CPU proof preview instead of a fault or a native surface', () => {
+  it('names the Linux CPU preview in plain words, never the proof surface', () => {
     expect(previewDisabledCopy('linux', 'Native preview addon is not built on linux')).toEqual({
-      title: 'Linux CPU preview',
-      detail:
-        'Open the Preview window to see the Electron proof surface (CPU composition, not a native surface).',
+      title: 'Preview runs on the CPU',
+      detail: 'Open Preview to watch your scene. Linux draws it on the CPU, so it can lag.',
       retryable: true,
       tone: 'expected'
     })
@@ -124,11 +128,74 @@ describe('previewDisabledCopy', () => {
   it('keeps the retryable warning everywhere a native preview exists', () => {
     for (const platform of ['darwin', 'win32', undefined]) {
       expect(previewDisabledCopy(platform, 'The addon failed to load.')).toEqual({
-        title: 'Native preview is disabled',
+        title: 'The fast preview is off',
         detail: 'The addon failed to load.',
         retryable: true,
         tone: 'warn'
       })
     }
+  })
+})
+
+describe('preview copy (plan 174 S2.3a, B-23)', () => {
+  it('names the path only when it is a fallback for this platform', () => {
+    expect(previewFallbackLabel('native-surface', 'cametal-layer', undefined, 'darwin')).toBeNull()
+    expect(previewFallbackLabel('latest-jpeg-polling', 'none', undefined, 'darwin')).toBe(
+      PREVIEW_FALLBACK_LABEL
+    )
+    expect(
+      previewFallbackLabel('electron-proof-surface', 'electron-browser-window', undefined, 'darwin')
+    ).toBe('Using a slower preview path')
+    // Windows ships the proof surface; Linux has no other path. Neither is a fallback.
+    expect(
+      previewFallbackLabel('electron-proof-surface', 'electron-browser-window', undefined, 'win32')
+    ).toBeNull()
+    expect(
+      previewFallbackLabel('electron-proof-surface', 'electron-browser-window', undefined, 'linux')
+    ).toBeNull()
+    expect(
+      previewFallbackLabel(
+        'd3d11-shared-texture',
+        'directcomposition-swapchain',
+        'backend-d3d11-presenter',
+        'win32'
+      )
+    ).toBeNull()
+    expect(previewFallbackLabel('none', 'none', undefined, 'darwin')).toBeNull()
+  })
+
+  it('says Opening preview… and Closing preview…, never the surface or the compositor', () => {
+    const opening = previewSupervisorDisplay(true, supervisor('ok', 'opening-window'))
+    const starting = previewSupervisorDisplay(true, supervisor('ok', 'starting-surface'))
+    const closing = previewSupervisorDisplay(true, supervisor('ok', 'closing'))
+    expect(opening.title).toBe('Opening preview…')
+    expect(starting.title).toBe('Opening preview…')
+    expect(closing.title).toBe('Closing preview…')
+    for (const state of [
+      'surface-live',
+      'surface-fallback',
+      'opening-window',
+      'starting-surface',
+      'closing',
+      'open-no-surface',
+      'closed'
+    ] as const) {
+      const display = previewSupervisorDisplay(true, supervisor('ok', state))
+      expect(`${display.title} ${display.detail} ${display.transportLabel ?? ''}`).not.toMatch(
+        /surface|compositor|proof|electron|tearing|detached|native|live in/i
+      )
+    }
+  })
+
+  it('never lets a fallback pass silently (AGENTS.md)', () => {
+    const fallback = previewSupervisorDisplay(true, {
+      ...supervisor('ok', 'surface-fallback'),
+      fallbackReason: 'The Metal device was lost.'
+    })
+    expect(fallback).toMatchObject({
+      title: PREVIEW_FALLBACK_LABEL,
+      detail: 'The Metal device was lost.',
+      tone: 'warn'
+    })
   })
 })

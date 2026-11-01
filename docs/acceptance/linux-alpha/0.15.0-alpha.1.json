@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "kind": "videorc-linux-alpha-owner-waiver",
+  "status": "OWNER_WAIVED",
+  "releaseId": "0.15.0-alpha.1",
+  "sourceCommit": "939700f09ee648d7e9d0650f0c91d16af7cf4937",
+  "candidateIdentity": "linux:0.15.0-alpha.1:939700f09ee648d7e9d0650f0c91d16af7cf4937a.1/939700f09ee648d7e9d0650f0c91d16af7cf4937",
+  "artifact": {
+    "filename": "Videorc-0.15.0-linux-x64.AppImage",
+    "sha256": "80c47c70f44a87331cffd4d96b314147a0197d77f918611cf5181b48ccc877ef"
+  },
+  "decidedAt": "2026-10-28T09:18:11.000Z",
+  "decidedBy": "release-owner",
+  "basis": "field-use-by-alpha-testers",
+  "physicalAcceptance": {
+    "performed": false
+  }
+}

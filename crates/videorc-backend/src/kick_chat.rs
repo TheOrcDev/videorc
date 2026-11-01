@@ -998,7 +998,7 @@ impl RelayClient {
                 .to_string(),
             session_token,
             http: reqwest::Client::builder()
-                .user_agent(concat!("Videorc-Desktop/", env!("CARGO_PKG_VERSION")))
+                .user_agent(crate::performance_check::desktop_user_agent())
                 .build()
                 .context("Could not build the Kick chat relay HTTP client.")?,
         })
@@ -1237,7 +1237,7 @@ pub const KICK_CHAT_MODERATE_SCOPE: &str = crate::oauth::KICK_MODERATION_SCOPE;
 
 /// The hide reason the moderation engine shows after "Viewers on Kick still
 /// see it."
-pub const KICK_MODERATE_RECONNECT_REASON: &str = "Reconnect Kick to let Orcle remove messages.";
+pub const KICK_MODERATE_RECONNECT_REASON: &str = "Reconnect Kick to let Buddy remove messages.";
 
 /// Kick message ids are UUIDs; anything else never becomes a path segment.
 fn kick_message_id_is_safe(message_id: &str) -> bool {
@@ -1410,7 +1410,9 @@ fn relay_event_to_message(
         details: None,
         reply: None,
         first_message: false,
+        first_in_session: false,
         author_affiliation: None,
+        author_verified: None,
     };
     match event.kind.as_str() {
         "chat" => {

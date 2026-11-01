@@ -301,6 +301,49 @@ describe('captionOverlayTargetPlan', () => {
     streamVideo: { width: 1920, height: 1080 }
   }
 
+  it('attaches the captions rect for each canvas orientation (plan 164)', () => {
+    const captionsLayout = {
+      horizontal: { x: 0.1, y: 0.7, w: 0.8, h: 0.2 },
+      vertical: { x: 0.2, y: 0.6, w: 0.6, h: 0.1 },
+      showOnStream: true,
+      showInRecording: false
+    }
+    expect(
+      captionOverlayTargetPlan({
+        ...base,
+        burnTarget: 'stream',
+        recordEnabled: true,
+        streamEnabled: true,
+        verticalLeg: { width: 1080, height: 1920 },
+        captionsLayout
+      })
+    ).toEqual([
+      {
+        target: 'primary',
+        outputLeg: 'stream',
+        canvasWidth: 3840,
+        canvasHeight: 2160,
+        rect: captionsLayout.horizontal
+      },
+      {
+        target: 'auxiliary',
+        outputLeg: 'stream',
+        canvasWidth: 1080,
+        canvasHeight: 1920,
+        rect: captionsLayout.vertical
+      }
+    ])
+    // Without a layout the legacy plan is unchanged: no rect key at all.
+    expect(
+      captionOverlayTargetPlan({
+        ...base,
+        burnTarget: 'stream',
+        recordEnabled: false,
+        streamEnabled: true
+      })
+    ).toEqual([{ target: 'primary', outputLeg: 'stream', canvasWidth: 3840, canvasHeight: 2160 }])
+  })
+
   it('rasterizes both legs beside a vertical destination (plan 077)', () => {
     const verticalLeg = { width: 1080, height: 1920 }
     const bothLegs = [

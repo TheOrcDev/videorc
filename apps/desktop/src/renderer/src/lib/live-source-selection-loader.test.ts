@@ -112,13 +112,28 @@ describe('lazy live source controller admission', () => {
     controller.setSession('new', 'recording')
     await controller.refresh()
     expect(callbacks.changed).toHaveBeenLastCalledWith(
-      expect.objectContaining({ checking: true, error: expect.stringContaining('Retry') })
+      expect.objectContaining({ checking: true, error: expect.stringContaining('Check again') })
     )
     await expect(controller.select('microphone', null, Promise.resolve([]))).rejects.toThrow(
       'loading'
     )
     await controller.retryStatus()
     expect(callbacks.get).toHaveBeenCalledExactlyOnceWith('new')
+    expect(controller.reason('microphone')).toBeNull()
+    controller.dispose()
+  })
+
+  it('treats a buffer-only session as idle so pickers stay unlocked', async () => {
+    const callbacks = options()
+    const controller = new LazyLiveSourceSelectionController(
+      callbacks,
+      async () => controllerModule
+    )
+    controller.setSession('session-a', 'recording', true)
+    await controller.refresh()
+    expect(callbacks.get).not.toHaveBeenCalled()
+    expect(controller.reason('capture')).toBeNull()
+    expect(controller.reason('camera')).toBeNull()
     expect(controller.reason('microphone')).toBeNull()
     controller.dispose()
   })

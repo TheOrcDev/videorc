@@ -49,17 +49,32 @@ export function micMeterInput(input: {
 
 /**
  * System audio's meter input (plan 093): the bus measures System audio only
- * while a session mixes it. Outside one nothing measures it, and a source
- * would read silence, which is not the same as "no reading".
+ * while a recording, livestream or Clips ring mixes it. Outside a running
+ * bus nothing measures it, and a source would read silence, which is not the
+ * same as "no reading".
  */
 export function systemAudioMeterInput(input: {
-  sessionActive: boolean
+  audioBusActive: boolean
   /** `SystemAudioSwitchView.meter`: requested or confirmed, no change pending. */
   mixed: boolean
   backendLevelsLive: boolean
   source: FrameSource<MeterFrame>
 }): MeterInput {
-  return input.sessionActive && input.mixed && input.backendLevelsLive
+  return input.audioBusActive && input.mixed && input.backendLevelsLive
+    ? { kind: 'source', source: input.source }
+    : NO_READING
+}
+
+/**
+ * Plan 189: the soundboard's sounds as mixed, a reading only while a session's
+ * bus runs (between sessions the monitor plays them, and no meter reads it).
+ */
+export function soundsMeterInput(input: {
+  sessionActive: boolean
+  backendLevelsLive: boolean
+  source: FrameSource<MeterFrame>
+}): MeterInput {
+  return input.sessionActive && input.backendLevelsLive
     ? { kind: 'source', source: input.source }
     : NO_READING
 }
@@ -69,19 +84,21 @@ export function systemAudioMeterInput(input: {
  * once the OS has granted the mic, so only a real refusal may mention
  * permission. Since plan 093 it explains a microphone level with no live
  * reading (the Sources meter), where it used to explain a waveform preview.
+ * Plan 174 S3.8 (C-14): the fix for a refusal is the page's Microphone
+ * permission alert, so the line no longer points at Settings.
  */
 export function micLevelUnavailableCopy(reason: MicStreamFailureReason | undefined): string {
   switch (reason) {
     case 'permission-denied':
-      return "Videorc can't use this mic. Check Settings → Permissions."
+      return "Videorc doesn't have permission to use this microphone."
     case 'device-busy':
-      return "Another app is using this mic. Its level comes back when it's free. Recording still works."
+      return "Another app is using this microphone. Its level comes back when it's free. Recording still works."
     case 'no-label-match':
     case 'ambiguous-label':
     case 'labels-hidden':
     case 'device-missing':
     case 'overconstrained':
-      return 'No live level for this mic. Recording still works.'
+      return 'No live level for this microphone. Recording still works.'
     default:
       return 'Live level unavailable. Recording still works.'
   }

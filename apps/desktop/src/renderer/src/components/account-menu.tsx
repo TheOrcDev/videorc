@@ -28,15 +28,19 @@ import {
 } from '@/lib/account'
 import type { EntitlementTier } from '@/lib/backend'
 import { VIDEORC_WEB_LINKS, openVideorcWebLink } from '@/lib/videorc-web-links'
+import { WORKSPACE_NAVIGATE_EVENT } from '@/lib/workspace-navigation'
 
 // The Videorc product-account control that replaces the bottom-left "connected"
-// status dot. Signed-out shows "Sign in" and links out to the web; backend
-// status stays as secondary metadata (a small dot on the trigger + the Health
-// row). No platform accounts appear here, and no username is fabricated.
+// status dot. Signed-out shows "Sign in" and links out to the web. Backend
+// status lives in the status bar's state button, Health's door (D9), and in
+// the menu's Health row; the trigger carries no dot, so its name stays the
+// words it shows (A-21). No platform accounts appear here, and no username is
+// fabricated.
 export function AccountMenu({
   tier,
   statusTone,
   statusLabel,
+  statusPulse,
   live,
   onOpenHealth,
   onOpenSettings
@@ -44,6 +48,7 @@ export function AccountMenu({
   tier: EntitlementTier | null
   statusTone: StatusDotTone
   statusLabel: string
+  statusPulse: boolean
   live: boolean
   onOpenHealth: () => void
   onOpenSettings: () => void
@@ -52,10 +57,11 @@ export function AccountMenu({
   const signedIn = isSignedIn(account)
   const displayName = accountDisplayName(account)
   const tierLabel = entitlementTierLabel(tier)
+  const signOutLocked = isSignOutDisabled(account, live)
   const [open, setOpen] = useState(false)
 
   // FX5: workspace navigation arrives via main-process IPC (⌘1–9) or the
-  // custom navigate event — neither is a DOM interaction Radix can see, so
+  // custom navigate event — neither is a DOM interaction the menu can see, so
   // the uncontrolled menu floated over the next tab. Close on any navigation
   // signal, and on Escape regardless of where focus sits.
   useEffect(() => {
@@ -69,37 +75,38 @@ export function AccountMenu({
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
-    window.addEventListener('videorc:navigate-workspace', close)
+    window.addEventListener(WORKSPACE_NAVIGATE_EVENT, close)
     const offShortcut = window.videorc?.onShortcutNavigate?.(close)
     return () => {
       window.removeEventListener('keydown', onKeyDown, true)
-      window.removeEventListener('videorc:navigate-workspace', close)
+      window.removeEventListener(WORKSPACE_NAVIGATE_EVENT, close)
       offShortcut?.()
     }
   }, [open])
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label="Open account menu"
-          className="flex min-w-0 items-center gap-1.5 rounded-row px-1.5 py-1 text-sm transition-colors hover:bg-sidebar-accent/60"
-        >
-          {/* The web account's avatar (uploaded on videorc.com or the Google
+      {/* Named by what it shows, "Sign in" or the account's name (plan 174
+          S0.5, A-21): an aria-label hid the words a voice user would say, and
+          the trigger already announces its menu. */}
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className="flex h-7 min-w-0 items-center gap-1.5 rounded-row px-1.5 text-sm transition-colors hover:bg-sidebar-accent/60"
+          />
+        }
+      >
+        {/* The web account's avatar (uploaded on videorc.com or the Google
               photo) through main's allowlisted cache; a signed-in account
-              without one gets initials — a face beats a generic glyph. */}
-          {account.status === 'signed-in' ? (
-            <AvatarCircle
-              avatarUrl={account.avatarUrl}
-              className="size-4 text-[7px]"
-              name={displayName}
-            />
-          ) : (
-            <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
-          )}
-          <span className="truncate text-xs font-medium">{displayName}</span>
-        </button>
+              without one gets initials — a face beats a generic glyph. 20 px,
+              so the initials keep the 11 px floor (A-21). */}
+        {account.status === 'signed-in' ? (
+          <AvatarCircle avatarUrl={account.avatarUrl} className="size-5" name={displayName} />
+        ) : (
+          <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
+        )}
+        <span className="truncate text-xs font-medium">{displayName}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-56">
         <DropdownMenuLabel className="flex items-center justify-between gap-2 py-1.5">
@@ -117,31 +124,31 @@ export function AccountMenu({
         <DropdownMenuSeparator />
 
         {signedIn ? (
-          <DropdownMenuItem onSelect={openAccount}>
+          <DropdownMenuItem onClick={openAccount}>
             <AccountIcon />
             Account
           </DropdownMenuItem>
         ) : (
-          <DropdownMenuItem onSelect={signIn}>
+          <DropdownMenuItem onClick={signIn}>
             <SignInIcon />
             Sign in
           </DropdownMenuItem>
         )}
-        <DropdownMenuItem onSelect={() => openVideorcWebLink(VIDEORC_WEB_LINKS.premium)}>
+        <DropdownMenuItem onClick={() => openVideorcWebLink(VIDEORC_WEB_LINKS.premium)}>
           <SparkleIcon />
           View Premium
         </DropdownMenuItem>
 
         <DropdownMenuSeparator />
 
-        <DropdownMenuItem onSelect={onOpenHealth}>
+        <DropdownMenuItem onClick={onOpenHealth}>
           <HealthIcon />
           Health
           <span className="ml-auto">
-            <StatusDot tone={statusTone} label={statusLabel} pulse={live} />
+            <StatusDot tone={statusTone} label={statusLabel} pulse={statusPulse} />
           </span>
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onOpenSettings}>
+        <DropdownMenuItem onClick={onOpenSettings}>
           <SettingsIcon />
           Settings
         </DropdownMenuItem>
@@ -149,14 +156,17 @@ export function AccountMenu({
         {signedIn ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              disabled={isSignOutDisabled(account, live)}
-              variant="destructive"
-              onSelect={signOut}
-            >
+            <DropdownMenuItem disabled={signOutLocked} variant="destructive" onClick={signOut}>
               <SignOutIcon />
               Sign out
             </DropdownMenuItem>
+            {/* Locked means disabled, with one reason (A-21): a menu skips a
+                disabled item, so the reason is text under it, not a tooltip. */}
+            {signOutLocked ? (
+              <DropdownMenuLabel>
+                Sign out is locked while you're recording or live.
+              </DropdownMenuLabel>
+            ) : null}
           </>
         ) : null}
       </DropdownMenuContent>

@@ -10,6 +10,7 @@ import {
 } from './lib/captions-live-artifact.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Plan 077 gate: live captions on BOTH legs of a dual-orientation stream.
@@ -311,8 +312,13 @@ function streamingSettings() {
     selectedTargetId: horizontalTarget.id,
     enabledTargetIds: [horizontalTarget.id, verticalTarget.id],
     // Targets carry no preset of their own: horizontal ones share the
-    // session profile, which dual orientation requires anyway.
-    defaultOutputPreset: 'tutorial-1080p30',
+    // session profile, which dual orientation requires anyway. The vertical
+    // leg follows the YouTube target's preset since #616
+    // (`simulcastStreamVideo`), so the preset is the 720p one: the renderer
+    // then rasterizes the portrait bar for the same 720x1280 canvas the
+    // backend session below streams (`verticalVideo`), exactly as a
+    // user-started session derives both from one config.
+    defaultOutputPreset: 'tutorial-720p30',
     defaultBitrateKbps: 6000
   }
 }
@@ -378,7 +384,7 @@ async function seedRendererDualProfile(smoke) {
       }
       localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
       localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
-      window.setTimeout(() => window.location.reload(), 150)
+      ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}
       return true
     `
   })
@@ -441,8 +447,20 @@ async function waitForBothCaptionOverlays(smoke) {
     const { primary, auxiliary } = latest?.overlays ?? {}
     if (primary?.active && auxiliary?.active) {
       // The auxiliary raster must be the PORTRAIT bar, sized for the
-      // vertical canvas, not a landscape bar squeezed onto it.
-      if (auxiliary.width > verticalVideo.width || primary.width <= auxiliary.width) {
+      // vertical canvas, not a landscape bar squeezed onto it. The bar is
+      // content-sized (`lib/caption-overlay.ts`): a portrait bar is at most
+      // 76% of its canvas width plus the shadow pad (0.65 x the 32 px font
+      // the 1280 px long edge gives, on both sides), and the proof line
+      // wraps there into two lines while the landscape bar keeps one, so
+      // the portrait raster is narrower and taller than the landscape one.
+      const portraitFontPx = Math.max(24, Math.round(verticalVideo.height / 40))
+      const portraitBarMaxWidth =
+        Math.floor(verticalVideo.width * 0.76) + 2 * Math.ceil(portraitFontPx * 0.65)
+      if (
+        auxiliary.width > portraitBarMaxWidth ||
+        primary.width <= auxiliary.width ||
+        auxiliary.height <= primary.height
+      ) {
         throw new Error(`Caption rasters have the wrong geometry: ${JSON.stringify(latest)}`)
       }
       return latest

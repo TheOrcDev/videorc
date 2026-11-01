@@ -1,12 +1,6 @@
-import type {
-  AudioMeterResult,
-  BackendHealth,
-  Device,
-  RecordingStatus,
-  StreamHealth
-} from '../../../shared/backend'
+import type { Device, RecordingStatus, StreamHealth } from '../../../shared/backend'
 import { isActiveRecordingState as isSharedActiveRecordingState } from '../../../shared/capture-state'
-import type { CaptureConfig, SetupStep, SetupTone, WsStatus } from './capture'
+import { formatTimecode } from '../../../shared/timecode'
 
 export function compactTime(timestamp: string): string {
   try {
@@ -33,48 +27,36 @@ export function dayLabel(timestamp: string): string {
   }
 }
 
-export function durationLabel(startedAt: string, now: number): string {
-  const started = new Date(startedAt).getTime()
-  if (!Number.isFinite(started)) {
-    return '00:00'
-  }
-
-  const totalSeconds = Math.max(0, Math.floor((now - started) / 1000))
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+/**
+ * The backend names an unnamed session after its start, "Session 2026-10-02
+ * 14:55" (`session_title` in recording.rs), in the time zone it was recorded
+ * in. A list that already shows when it ran should not repeat that clock.
+ */
+export function isAutoSessionTitle(title: string): boolean {
+  return /^Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(title.trim())
 }
 
+/**
+ * A recording's length as the one timecode (plan 174 S1.4, E-20): "12:34",
+ * "1:12:00", never "1 hour and 12 minutes". Unknown is the placeholder.
+ */
 export function durationMsLabel(durationMs?: number): string {
   if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) {
-    return '--:--'
+    return NO_VALUE
   }
-
-  const totalSeconds = Math.max(0, Math.round(durationMs / 1000))
-  const hours = Math.floor(totalSeconds / 3600)
-  if (hours > 0) {
-    const minutes = Math.floor((totalSeconds % 3600) / 60)
-    const hourLabel = formatDurationUnit(hours, 'hour')
-    return minutes > 0 ? `${hourLabel} and ${formatDurationUnit(minutes, 'minute')}` : hourLabel
-  }
-
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+  return formatTimecode(durationMs)
 }
 
-function formatDurationUnit(value: number, unit: 'hour' | 'minute'): string {
-  return `${value} ${unit}${value === 1 ? '' : 's'}`
-}
-
+/** A measured value and its unit ("29.9 fps"), or the placeholder. */
 export function formatMetric(value: number | undefined, suffix: string): string {
   return typeof value === 'number'
     ? `${value.toFixed(suffix === 'fps' ? 1 : 2)} ${suffix}`
-    : `-- ${suffix}`
+    : NO_VALUE
 }
 
+/** "1 drop", "12 drops", or the placeholder. */
 export function formatDroppedFrames(value: number | undefined): string {
-  return typeof value === 'number' ? `${value} drop` : '-- drop'
+  return typeof value === 'number' ? plural(value, 'drop') : NO_VALUE
 }
 
 export function mergeStreamHealth(
@@ -111,96 +93,6 @@ export function findDevice(devices: Device[], id?: string): Device | undefined {
   return id ? devices.find((device) => device.id === id) : undefined
 }
 
-export function setupChecklist({
-  audioMeter,
-  captureConfig,
-  health,
-  selectedCamera,
-  selectedCaptureDevice,
-  selectedMicrophone,
-  streamReady,
-  wsStatus
-}: {
-  audioMeter: AudioMeterResult | null
-  captureConfig: CaptureConfig
-  health: BackendHealth | null
-  selectedCamera?: Device
-  selectedCaptureDevice?: Device
-  selectedMicrophone?: Device
-  streamReady: boolean
-  wsStatus: WsStatus
-}): SetupStep[] {
-  const microphoneTone: SetupTone =
-    audioMeter?.status === 'ready'
-      ? 'good'
-      : audioMeter?.status === 'silent' ||
-          audioMeter?.status === 'no-frames' ||
-          audioMeter?.status === 'permission-required' ||
-          !selectedMicrophone
-        ? 'warn'
-        : 'neutral'
-
-  return [
-    {
-      label: 'Backend',
-      detail:
-        wsStatus === 'connected'
-          ? 'Local backend is connected.'
-          : wsStatus === 'waiting' || wsStatus === 'connecting'
-            ? 'Connecting to the local backend…'
-            : 'Backend not connected. It restarts automatically; give it a moment.',
-      tone: wsStatus === 'connected' ? 'good' : 'warn'
-    },
-    {
-      label: 'FFmpeg',
-      detail: health?.ffmpeg.available
-        ? (health.ffmpeg.version ?? 'FFmpeg is available.')
-        : (health?.ffmpeg.message ?? 'Waiting for FFmpeg.'),
-      tone: health?.ffmpeg.available ? 'good' : 'warn'
-    },
-    {
-      label: 'Capture',
-      detail: selectedCaptureDevice
-        ? selectedCaptureDevice.name
-        : 'No screen or window source selected.',
-      tone: selectedCaptureDevice?.status === 'available' ? 'good' : 'warn'
-    },
-    {
-      label: 'Camera',
-      detail: selectedCamera ? selectedCamera.name : 'Camera overlay is off.',
-      tone: selectedCamera?.status === 'available' || !selectedCamera ? 'good' : 'warn'
-    },
-    {
-      label: 'Microphone',
-      detail:
-        audioMeter?.message ??
-        (selectedMicrophone ? selectedMicrophone.name : 'No microphone selected.'),
-      tone: microphoneTone
-    },
-    {
-      label: 'Output',
-      detail: captureConfig.recordEnabled
-        ? captureConfig.streamEnabled
-          ? `${captureConfig.video.width}x${captureConfig.video.height} ${captureConfig.video.fps} FPS record+stream.`
-          : `${captureConfig.video.width}x${captureConfig.video.height} ${captureConfig.video.fps} FPS recording.`
-        : captureConfig.streamEnabled
-          ? `${captureConfig.video.width}x${captureConfig.video.height} ${captureConfig.video.fps} FPS streaming.`
-          : 'No output is enabled.',
-      tone: captureConfig.recordEnabled || captureConfig.streamEnabled ? 'good' : 'warn'
-    },
-    {
-      label: 'Stream',
-      detail: captureConfig.streamEnabled
-        ? streamReady
-          ? 'RTMP target is set.'
-          : 'Manual RTMP credentials are required.'
-        : 'Streaming is off.',
-      tone: streamReady ? 'good' : 'warn'
-    }
-  ]
-}
-
-/** "742 MB" / "1.2 GB" — the Library's size column and storage footer. */
 export function formatBytes(bytes?: number | null): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
     return '-'
@@ -209,15 +101,38 @@ export function formatBytes(bytes?: number | null): string {
     return `${Math.round(bytes)} B`
   }
   const units = ['KB', 'MB', 'GB', 'TB']
+  const shown = (value: number): number =>
+    value >= 100 ? Math.round(value) : Math.round(value * 10) / 10
   let value = bytes
   let unit = 'B'
   for (const candidate of units) {
     value /= 1024
     unit = candidate
-    if (value < 1024) {
+    // Pick the unit by the value as it will be shown: 1023.9 KB rounds to
+    // 1024, which belongs in the next unit as 1 MB, never "1024 KB".
+    if (shown(value) < 1024) {
       break
     }
   }
-  const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10
-  return `${rounded} ${unit}`
+  return `${shown(value)} ${unit}`
+}
+
+/**
+ * The one placeholder for a value that cannot be shown (plan 174 S1.4,
+ * I-25, H-10): an en dash, never "-", "--", "--:--" or "Unknown". Show it
+ * with its reason (a tooltip, a hover card or a note), never alone.
+ */
+export const NO_VALUE = '–'
+
+/** A placeholder and why it is one: `{ value: '–', reason: 'Not measured yet' }`. */
+export function missingValue(reason: string): { value: typeof NO_VALUE; reason: string } {
+  return { value: NO_VALUE, reason }
+}
+
+/**
+ * A count and its noun, agreeing: "1 drop", "12 drops", "1,204 viewers".
+ * `many` defaults to the noun plus "s".
+ */
+export function plural(count: number, one: string, many = `${one}s`): string {
+  return `${count.toLocaleString()} ${count === 1 ? one : many}`
 }

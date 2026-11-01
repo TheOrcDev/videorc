@@ -1,5 +1,7 @@
 import type { GlobalShortcutsConfig } from '../../../shared/backend'
+import { formatBitrate, formatResolution, formatVideoQuality, resolutionName } from './format-video'
 import { normalizeLayoutFramingMemory, type LayoutFramingMemory } from './layout-framing-memory'
+import { destinationLabel, platformLabel } from './platform-copy'
 import type {
   AudioSettings,
   CaptionStyleId,
@@ -12,6 +14,7 @@ import type {
   LayoutSettings,
   RtmpPreset,
   SceneConfigParams,
+  SeparateSourceRecordingsSettings,
   SideBySideSplit,
   SimulcastParams,
   StreamOutputOrientation,
@@ -32,6 +35,7 @@ import {
   SYSTEM_AUDIO_GAIN_DB_MIN,
   VERTICAL_LAYOUT_PRESETS
 } from '../../../shared/backend'
+import { STREAM_PLATFORMS } from '../../../shared/stream-platforms'
 
 export type SettingsState = {
   /** Human-readable picker label only; never a filesystem path. */
@@ -53,6 +57,17 @@ export type SettingsState = {
    * Default off: the window otherwise remembers whether it was open.
    */
   openStreamManagerOnLive?: boolean
+  /**
+   * Retro LCD (plan 197, owner 2026-10-25): the Studio inspector draws every
+   * section on an audiocn LCD screen. Default off: the inspector's own rows.
+   */
+  retroLcdStudio?: boolean
+  /**
+   * Chat in Studio (plan 204, owner 2026-10-27): while on air, the Studio
+   * inspector shows the livestream's chat under Session, and a click puts a
+   * message on stream. Default off (owner answer): an absent key is off.
+   */
+  studioChat?: boolean
   /**
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
@@ -124,12 +139,150 @@ export type CaptureConfig = {
    */
   simulcastFollowsProgram: boolean
   recordEnabled: boolean
+  /**
+   * Separate source recordings (Plan 157): also save a clean Screen (+ system
+   * audio) take and a Camera (+ microphone) take. Needs recordEnabled plus a
+   * camera and a screen/window; the backend refuses otherwise.
+   */
+  separateSourceRecordings: SeparateSourceRecordingsSettings
   streamEnabled: boolean
   rtmpPreset: RtmpPreset
   rtmpServerUrl: string
   streamKey: string
   streaming: StreamingSettings
   captions: CaptionsCaptureSettings
+  /** The replay buffer's settings (plan 181 S5.6). Arming is runtime state. */
+  replayBuffer: ReplayBufferSettings
+}
+
+/**
+ * Clips (plan 181, the owner's redesign R2): the ring keeps the last minute
+ * whenever Videorc is open (plan 199: [`REPLAY_RING_SECONDS`], no setting).
+ * `enabled` is the one switch on the Output page, on by default; `explicit`
+ * says the user set it, so a default that the backend refuses (a software
+ * encoder path) stays off and says why, while a choice runs anywhere.
+ */
+export type ReplayBufferSettings = {
+  enabled: boolean
+  explicit: boolean
+  /** Smokes only (`__videorcSmokeSetReplayBuffer`): a shorter ring for an
+   * investigative run. Nothing in the UI sets it, and the normalizer drops
+   * it, so it never survives a reload. */
+  smokeRingSeconds?: number
+}
+
+/** Plan 199 D2: the ring always keeps the 1-minute clip
+ * (`LONG_CLIP_SECONDS`), so both clip lengths work at any moment. */
+export const REPLAY_RING_SECONDS = 60
+
+/** Plan 199: a stored `seconds` (the removed Length setting) is dropped. */
+export function normalizeReplayBufferSettings(value: unknown): ReplayBufferSettings {
+  const loaded = (value ?? {}) as Partial<ReplayBufferSettings>
+  return {
+    enabled: typeof loaded.enabled === 'boolean' ? loaded.enabled : true,
+    explicit: typeof loaded.explicit === 'boolean' ? loaded.explicit : false
+  }
+}
+
+export function defaultSeparateSourceRecordings(): SeparateSourceRecordingsSettings {
+  return { enabled: false, keepCombined: true }
+}
+
+/**
+ * `keepCombined` is a reserved setting: this release has no control for it and
+ * the backend refuses `false`, so a stored `false` (a future build, a hand
+ * edit) is normalized back to `true` instead of turning Record into a refusal
+ * the Recording tab cannot explain.
+ */
+export function normalizeSeparateSourceRecordings(
+  loaded: Partial<SeparateSourceRecordingsSettings> | undefined
+): SeparateSourceRecordingsSettings {
+  const defaults = defaultSeparateSourceRecordings()
+  return {
+    enabled: loaded?.enabled === true,
+    keepCombined: defaults.keepCombined
+  }
+}
+
+/** Stable reasons mirrored from `crates/videorc-backend/src/source_iso.rs`. */
+export type SeparateSourceRecordingsIneligibility =
+  | 'unsupported-platform'
+  | 'record-disabled'
+  | 'missing-camera'
+  | 'missing-screen'
+
+/**
+ * Release test 146, plan 0001: the ISO writers need the VideoToolbox MPEG-TS
+ * bridge, so only macOS can save the Screen and Camera files. An unknown
+ * platform (runtime info not loaded yet) is not refused here; the backend
+ * refuses an unsupported start before any Library row exists.
+ */
+export function separateSourceRecordingsSupported(platform: string | undefined): boolean {
+  return platform === undefined || platform === 'darwin'
+}
+
+/**
+ * Why Separate source recordings cannot arm for this config, or null when it
+ * can. Pure mirror of the backend start-session validation so the Recording
+ * tab can explain the refusal before Record is pressed.
+ */
+export function separateSourceRecordingsIneligibility(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources'>,
+  platform?: string
+): SeparateSourceRecordingsIneligibility | null {
+  if (!separateSourceRecordingsSupported(platform)) return 'unsupported-platform'
+  if (!config.recordEnabled) return 'record-disabled'
+  if (!config.sources.cameraId?.trim()) return 'missing-camera'
+  if (!config.sources.screenId?.trim() && !config.sources.windowId?.trim()) {
+    return 'missing-screen'
+  }
+  return null
+}
+
+/** Recording-tab copy for an ineligible selection; the next session records Combined only. */
+export function separateSourceRecordingsIneligibilityCopy(
+  reason: SeparateSourceRecordingsIneligibility
+): string {
+  switch (reason) {
+    case 'unsupported-platform':
+      return 'Works on Mac only for now. On this computer every recording is the Combined file.'
+    case 'record-disabled':
+      return 'Turn on local recording to save separate source files.'
+    case 'missing-camera':
+      return 'Needs a camera source. Without one the next session records the Combined file only.'
+    case 'missing-screen':
+      return 'Needs a screen or window source. Without one the next session records the Combined file only.'
+  }
+}
+
+/**
+ * The settings the start request carries: present only when the switch is on
+ * AND the selection can produce both files, so a stale switch never blocks
+ * Record (the Recording tab shows the exact reason instead).
+ */
+export function separateSourceRecordingsForSession(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources' | 'separateSourceRecordings'>,
+  platform?: string
+): SeparateSourceRecordingsSettings | undefined {
+  if (!config.separateSourceRecordings.enabled) return undefined
+  if (separateSourceRecordingsIneligibility(config, platform)) return undefined
+  return config.separateSourceRecordings
+}
+
+/**
+ * Plan 200 D4: the Output row's notice before Record. At 4K or 60 fps the
+ * Screen and Camera files triple the encoder work, and a Mac that falls
+ * behind stops them to keep the Combined recording smooth (plan 200 D1).
+ * Null unless the next take would really write the separate files.
+ */
+export function separateSourceRecordingsEncoderNotice(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources' | 'separateSourceRecordings' | 'video'>,
+  platform?: string
+): string | null {
+  if (!separateSourceRecordingsForSession(config, platform)) return null
+  const { video } = config
+  if (Math.min(video.width, video.height) < 2160 && video.fps < 60) return null
+  return `Separate files at ${formatVideoQuality(video)} use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.`
 }
 
 /** The vertical simulcast leg's user-facing settings. */
@@ -349,18 +502,29 @@ export type ResolutionOption = {
 // Studio mode gets its own list — the vertical options are the transposed
 // twins of the landscape ones, so orientation can never contradict the mode
 // (the mode toggle is the one home for orientation).
+// Named and spelled by the one video formatter (plan 174 S1.4): "1440p",
+// never "2K"; "2560 × 1440".
+function resolutionOption(width: number, height: number): ResolutionOption {
+  return {
+    label: resolutionName({ width, height }),
+    detail: formatResolution({ width, height }),
+    width,
+    height
+  }
+}
+
 const HORIZONTAL_RESOLUTION_OPTIONS: ResolutionOption[] = [
-  { label: '4K', detail: '3840 × 2160', width: 3840, height: 2160 },
-  { label: '2K', detail: '2560 × 1440', width: 2560, height: 1440 },
-  { label: '1080p', detail: '1920 × 1080', width: 1920, height: 1080 },
-  { label: '720p', detail: '1280 × 720', width: 1280, height: 720 }
+  resolutionOption(3840, 2160),
+  resolutionOption(2560, 1440),
+  resolutionOption(1920, 1080),
+  resolutionOption(1280, 720)
 ]
 
 const VERTICAL_RESOLUTION_OPTIONS: ResolutionOption[] = [
-  { label: '4K', detail: '2160 × 3840', width: 2160, height: 3840 },
-  { label: '2K', detail: '1440 × 2560', width: 1440, height: 2560 },
-  { label: '1080p', detail: '1080 × 1920', width: 1080, height: 1920 },
-  { label: '720p', detail: '720 × 1280', width: 720, height: 1280 }
+  resolutionOption(2160, 3840),
+  resolutionOption(1440, 2560),
+  resolutionOption(1080, 1920),
+  resolutionOption(720, 1280)
 ]
 
 export function resolutionOptionsForOrientation(
@@ -370,10 +534,25 @@ export function resolutionOptionsForOrientation(
 }
 
 /**
+ * The portrait twin of a landscape canvas: the size and frame rate the user
+ * (or the performance check) chose, turned on its side. 1080p30 maps to the
+ * named vertical profile; every other size keeps its own pixels and fps
+ * (720p → 720×1280, 1440p → 1440×2560, 4K → 2160×3840, the 360p floor →
+ * 360×640) as Custom, never silently upscaled to 1080×1920.
+ */
+export function verticalTwinVideo(video: VideoSettings): VideoSettings {
+  const named = videoPresets['vertical-1080x1920']
+  if (video.width === named.height && video.height === named.width && video.fps === named.fps) {
+    return named
+  }
+  return coerceVideoToOrientation(video, 'vertical')
+}
+
+/**
  * Off-air orientation coupling for the Studio modes: entering a vertical
- * scene flips the canvas to the portrait profile and remembers the landscape
- * settings; leaving restores exactly what was there. Returns null when no
- * video change is needed — same orientation class (scene switches WITHIN a
+ * scene flips the canvas to its portrait twin (verticalTwinVideo) and
+ * remembers the landscape settings; leaving restores exactly what was there.
+ * Returns null when no video change is needed — same orientation class (scene switches WITHIN a
  * mode never touch the canvas), a canvas the user already made portrait
  * (entering), or a canvas the user already made landscape while in vertical
  * mode (leaving — their explicit choice wins). Callers MUST NOT apply this
@@ -395,7 +574,7 @@ export function verticalOrientationVideoPatch(
     if (video.height > video.width) {
       return null
     }
-    return { video: videoPresets['vertical-1080x1920'], verticalRestoreVideo: video }
+    return { video: verticalTwinVideo(video), verticalRestoreVideo: video }
   }
   if (video.height <= video.width) {
     return { video, verticalRestoreVideo: null }
@@ -468,17 +647,11 @@ export type AudioSyncRecommendationParseResult =
   | { ok: false; error: string }
 
 export type WsStatus = 'waiting' | 'connecting' | 'connected' | 'failed' | 'closed'
-export type SetupTone = 'good' | 'warn' | 'neutral'
-export type SetupStep = {
-  label: string
-  detail: string
-  tone: SetupTone
-}
-
 export const STORAGE_KEYS = {
   settings: 'videorc.settings',
   captureConfig: 'videorc.captureConfig',
   onboarding: 'videorc.onboardingComplete',
+  firstRun: 'videorc.firstRun',
   theme: 'videorc.theme',
   backgroundAssets: 'videorc.backgroundAssets',
   // Set once the user picks an output themselves; from then on a performance
@@ -486,14 +659,17 @@ export const STORAGE_KEYS = {
   outputChosenByUser: 'videorc.outputChosenByUser',
   // The Settings tab used last (plan 064), so Settings reopens where it was left.
   settingsTab: 'videorc.settingsTab',
-  // The Orcle tab's own tab used last (plan 150), so Orcle reopens where it was left.
-  orcleTab: 'videorc.orcleTab'
+  // The Buddy tab's own tab used last (plan 150), so Buddy reopens where it was left.
+  // The stored key keeps its old name (plan 170 D22): renaming it would
+  // forget every saved Buddy sub-tab.
+  buddyTab: 'videorc.orcleTab',
+  // The Livestream page's view used last (plan 174 S1.6b, A-14): Setup or Upcoming.
+  livestreamView: 'videorc.livestreamView'
 } as const
 
-// Permissions onboarding: ANY stored value means "seen/dismissed" — the gate
-// itself is permission state, not this flag. Older installs hold
-// 'creator-ux-v1' from the retired 4-step tour and stay suppressed; the UI
-// probe scripts seed that same value, which must keep working.
+// Legacy onboarding: ANY stored value marks an existing install. Older apps
+// and seeded smoke profiles keep working; first-run setup also writes this
+// flag when completed or skipped so a downgrade stays dismissed.
 export const ONBOARDING_DISMISSED_VALUE = 'permissions-v1'
 export const MICROPHONE_SYNC_OFFSET_MIN_MS = -1000
 export const MICROPHONE_SYNC_OFFSET_MAX_MS = 1000
@@ -515,32 +691,23 @@ export const rtmpDefaults: Record<RtmpPreset, string> = {
   custom: ''
 }
 
-// Fixed destination order for the Streaming tab (YouTube, Twitch, Kick, X, Custom).
-export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
-  'youtube',
-  'twitch',
-  'kick',
-  'x',
-  'tiktok',
-  'instagram',
-  'custom'
-]
+// Fixed platform order for the Streaming tab: YouTube, Twitch, Kick, X,
+// Facebook, TikTok, Instagram, Custom RTMP.
+export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = STREAM_PLATFORMS
 
-const STREAM_PLATFORM_LABELS: Record<StreamPlatform, string> = {
-  youtube: 'YouTube',
-  twitch: 'Twitch',
-  kick: 'Kick',
-  x: 'X / Twitter',
-  tiktok: 'TikTok',
-  instagram: 'Instagram',
-  custom: 'Custom RTMP'
-}
+/**
+ * The RTMPS server Facebook Live Producer shows for "Streaming software"
+ * (plan 206). The card is stream-key only until Meta approves Page sign-in.
+ */
+export const FACEBOOK_STREAM_SERVER_URL = 'rtmps://live-api-s.facebook.com:443/rtmp/'
+/** Where the key comes from, and where the streamer presses Go live. */
+export const FACEBOOK_LIVE_PRODUCER_URL = 'https://www.facebook.com/live/producer'
 
 /**
  * The built-in destination cards, ID-keyed (two YouTube cards share one
- * platform): the horizontal group (YouTube, Twitch, Kick, X), the vertical trio (YouTube Vertical is a
- * SECOND broadcast on the same channel; TikTok and Instagram are manual-key
- * only), then Custom RTMP.
+ * platform): the horizontal group (YouTube, Twitch, Kick, X, Facebook), the
+ * vertical trio (YouTube Vertical is a SECOND broadcast on the same channel;
+ * TikTok and Instagram are manual-key only), then Custom RTMP.
  */
 export const STREAM_TARGET_DEFS: ReadonlyArray<{
   id: string
@@ -552,7 +719,13 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
   { id: 'youtube', platform: 'youtube', label: 'YouTube', serverUrl: rtmpDefaults.youtube },
   { id: 'twitch', platform: 'twitch', label: 'Twitch', serverUrl: rtmpDefaults.twitch },
   { id: 'kick', platform: 'kick', label: 'Kick', serverUrl: rtmpDefaults.kick },
-  { id: 'x', platform: 'x', label: 'X / Twitter', serverUrl: '' },
+  { id: 'x', platform: 'x', label: 'X', serverUrl: '' },
+  {
+    id: 'facebook',
+    platform: 'facebook',
+    label: 'Facebook',
+    serverUrl: FACEBOOK_STREAM_SERVER_URL
+  },
   {
     id: 'youtube-vertical',
     platform: 'youtube',
@@ -577,12 +750,19 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
   { id: 'custom', platform: 'custom', label: 'Custom RTMP', serverUrl: '' }
 ]
 
+/** The card's sign-in note; the backend refuses with the same words. */
+export const FACEBOOK_SIGN_IN_UNAVAILABLE =
+  "Signing in with Facebook isn't available yet. Use a stream key."
+
 export function oauthUnavailableReason(platform: StreamPlatform): string | null {
+  if (platform === 'facebook') {
+    return FACEBOOK_SIGN_IN_UNAVAILABLE
+  }
   if (platform === 'custom') {
-    return 'Custom RTMP does not support OAuth.'
+    return "Custom RTMP uses a stream key. There's no account to sign in to."
   }
   if (platform === 'tiktok' || platform === 'instagram') {
-    return `${STREAM_PLATFORM_LABELS[platform]} livestreams use a manual stream key. There is no OAuth to connect.`
+    return `${platformLabel(platform)} livestreams use a stream key. There's no account to sign in to.`
   }
   return null
 }
@@ -744,26 +924,45 @@ export interface VideoPresetOption {
   tone?: 'default' | 'warning'
 }
 
+/**
+ * A preset's name is what it records, in the one video spelling (plan 174
+ * S1.4): "1080p · 30 fps · 6 Mbps". The group it sits in says what it is for;
+ * a qualifier is added only where two presets would otherwise read alike.
+ */
+function presetQuality(preset: VideoPreset): string {
+  return formatVideoQuality(videoPresets[preset], { bitrate: true })
+}
+
 export const recordingVideoPresetOptions: VideoPresetOption[] = [
-  { value: 'record-4k30', label: 'Record 4K30' },
-  { value: 'record-4k60-experimental', label: 'Record 4K60 experimental', tone: 'warning' },
-  { value: 'tutorial-1440p30', label: 'Tutorial 1440p30' },
-  { value: 'tutorial-1080p30', label: 'Tutorial 1080p30' },
-  { value: 'tutorial-720p30', label: 'Tutorial 720p30' },
-  { value: 'tutorial-540p30', label: 'Tutorial 540p30' },
-  { value: 'vertical-1080x1920', label: 'Vertical 1080×1920 (9:16)' }
+  { value: 'record-4k30', label: presetQuality('record-4k30') },
+  {
+    value: 'record-4k60-experimental',
+    label: `${presetQuality('record-4k60-experimental')} · experimental`,
+    tone: 'warning'
+  },
+  { value: 'tutorial-1440p30', label: presetQuality('tutorial-1440p30') },
+  { value: 'tutorial-1080p30', label: presetQuality('tutorial-1080p30') },
+  { value: 'tutorial-720p30', label: presetQuality('tutorial-720p30') },
+  { value: 'tutorial-540p30', label: presetQuality('tutorial-540p30') },
+  { value: 'vertical-1080x1920', label: presetQuality('vertical-1080x1920') }
 ]
 
 export const streamingVideoPresetOptions: VideoPresetOption[] = [
-  { value: 'stream-safe-1080p30', label: 'Stream-safe 1080p30' },
-  { value: 'stream-safe-1080p60', label: 'Stream-safe 1080p60' },
-  { value: 'stream-youtube-1080p30', label: 'YouTube 1080p30 · 10 Mbps' },
-  { value: 'stream-youtube-1080p60', label: 'YouTube 1080p60 · 12 Mbps' },
-  { value: 'stream-youtube-4k30', label: 'YouTube 4K30' }
+  { value: 'stream-safe-1080p30', label: presetQuality('stream-safe-1080p30') },
+  { value: 'stream-safe-1080p60', label: presetQuality('stream-safe-1080p60') },
+  {
+    value: 'stream-youtube-1080p30',
+    label: `YouTube · ${presetQuality('stream-youtube-1080p30')}`
+  },
+  {
+    value: 'stream-youtube-1080p60',
+    label: `YouTube · ${presetQuality('stream-youtube-1080p60')}`
+  },
+  { value: 'stream-youtube-4k30', label: `YouTube · ${presetQuality('stream-youtube-4k30')}` }
 ]
 
 export const legacyVideoPresetOptions: VideoPresetOption[] = [
-  { value: 'stream-1080p60', label: 'Legacy Stream 1080p60', tone: 'warning' }
+  { value: 'stream-1080p60', label: presetQuality('stream-1080p60'), tone: 'warning' }
 ]
 
 export const customVideoPresetOption: VideoPresetOption = { value: 'custom', label: 'Custom' }
@@ -812,6 +1011,15 @@ export const streamPlatformOutputCapabilities: Record<
     maxWidth: 1920,
     maxHeight: 1080,
     maxFps: 30,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
+  // Facebook takes 1080p60 (up to 9,000 kbps); 6,000 kbps is the shared
+  // non-YouTube cap in recording.rs.
+  facebook: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 60,
     maxBitrateKbps: 6000,
     true4k: false
   },
@@ -1058,7 +1266,7 @@ export function streamVideoProfileValidationReason(
       named.fps !== video.fps ||
       named.bitrateKbps !== video.bitrateKbps)
   ) {
-    return `${video.preset} must use its exact ${named?.width ?? video.width}×${named?.height ?? video.height} @ ${named?.fps ?? video.fps} FPS and ${named?.bitrateKbps ?? video.bitrateKbps} kbps profile.`
+    return `${video.preset} must use its exact ${formatVideoQuality(named ?? video, { size: 'full', bitrate: true })} profile.`
   }
 
   if (platform && platform !== 'youtube' && isYouTubeProviderPreset(video.preset)) {
@@ -1083,7 +1291,7 @@ export function streamVideoProfileValidationReason(
     video.preset !== 'stream-youtube-1080p30' &&
     video.preset !== 'stream-youtube-1080p60'
   ) {
-    return 'Livestream output above 6000 kbps requires an exact YouTube 1080p30 or 1080p60 profile.'
+    return `Livestream output above ${formatBitrate(6000)} requires an exact YouTube 1080p30 or 1080p60 profile.`
   }
   return null
 }
@@ -1278,12 +1486,14 @@ export const defaultCaptureConfig: CaptureConfig = {
   // 1440p default sent an Intel UHD 600 into a 0.28x software encode.
   video: videoPresets['tutorial-1080p30'],
   recordEnabled: true,
+  separateSourceRecordings: { enabled: false, keepCombined: true },
   streamEnabled: false,
   rtmpPreset: 'youtube',
   rtmpServerUrl: rtmpDefaults.youtube,
   streamKey: '',
   streaming: defaultStreamingSettings(),
-  captions: defaultCaptionsCaptureSettings()
+  captions: defaultCaptionsCaptureSettings(),
+  replayBuffer: { enabled: true, explicit: false }
 }
 
 export function defaultCaptionsCaptureSettings(): CaptionsCaptureSettings {
@@ -1396,6 +1606,7 @@ export function loadCaptureConfig(): CaptureConfig {
       typeof loaded.recordEnabled === 'boolean'
         ? loaded.recordEnabled
         : defaultCaptureConfig.recordEnabled,
+    separateSourceRecordings: normalizeSeparateSourceRecordings(loaded.separateSourceRecordings),
     streamEnabled:
       typeof loaded.streamEnabled === 'boolean'
         ? loaded.streamEnabled
@@ -1404,7 +1615,8 @@ export function loadCaptureConfig(): CaptureConfig {
     rtmpServerUrl: loaded.rtmpServerUrl ?? defaultCaptureConfig.rtmpServerUrl,
     streamKey: loaded.streamKey ?? defaultCaptureConfig.streamKey,
     streaming: migrateStreamingSettings(loaded),
-    captions: normalizeCaptionsCaptureSettings(loaded.captions)
+    captions: normalizeCaptionsCaptureSettings(loaded.captions),
+    replayBuffer: normalizeReplayBufferSettings(loaded.replayBuffer)
   }
 }
 
@@ -1504,16 +1716,16 @@ export function parseAudioSyncRecommendationJson(text: string): AudioSyncRecomme
   try {
     parsed = JSON.parse(text)
   } catch {
-    return { ok: false, error: 'Measurement JSON could not be parsed.' }
+    return { ok: false, error: "Couldn't read the measurement JSON." }
   }
 
   if (!parsed || typeof parsed !== 'object') {
-    return { ok: false, error: 'Measurement JSON must be an object.' }
+    return { ok: false, error: "The measurement JSON isn't an object." }
   }
 
   const candidate = parsed as Record<string, unknown>
   if (candidate.schemaVersion !== 1) {
-    return { ok: false, error: 'Measurement JSON must use schemaVersion 1.' }
+    return { ok: false, error: 'The measurement JSON needs schemaVersion 1.' }
   }
 
   return {
@@ -1536,7 +1748,7 @@ export function parseAudioSyncRecommendationJson(text: string): AudioSyncRecomme
 export function formatMeasuredAudioLag(offsetMs: number | null | undefined): string {
   const offset = typeof offsetMs === 'number' && Number.isFinite(offsetMs) ? offsetMs : null
   if (offset == null) {
-    return 'No paired flash/click measurement'
+    return 'Not measured yet'
   }
 
   const rounded = Math.round(offset)
@@ -1566,7 +1778,7 @@ export function audioSyncCalibrationState(
       status: 'unavailable',
       canApply: false,
       measuredLagLabel,
-      detail: 'Record a flash/click sample before applying calibration.',
+      detail: 'Record a flash-and-click test first, then import its JSON.',
       recommendedOffsetMs: null
     }
   }
@@ -1577,7 +1789,7 @@ export function audioSyncCalibrationState(
       status: 'current',
       canApply: false,
       measuredLagLabel,
-      detail: 'Current microphone sync offset already matches this recommendation.',
+      detail: 'Microphone sync already matches this measurement.',
       recommendedOffsetMs
     }
   }
@@ -1593,8 +1805,8 @@ export function audioSyncCalibrationState(
     canApply: true,
     measuredLagLabel,
     detail: withinTarget
-      ? 'Measurement is within target; applying the recommendation is optional.'
-      : 'Apply the measured recommendation, then record another flash/click sample.',
+      ? 'Within target. Applying it is optional.'
+      : 'Apply it, then record another flash-and-click test to check.',
     recommendedOffsetMs
   }
 }
@@ -2023,6 +2235,27 @@ export function migrateStreamingSettings(loaded: Partial<CaptureConfig>): Stream
   }
 }
 
+/**
+ * Why a stream URL can't work, in the field's words, or null when it can (or
+ * is still empty). Videorc publishes only over rtmp:// and rtmps://, the
+ * backend's own rule, so a wrong URL is caught as it is typed instead of at
+ * Go Live (plan 174 S3.5a, D-19). `full` names a full URL (server and key).
+ */
+export function streamServerUrlIssue(url: string, full = false): string | null {
+  const value = url.trim()
+  if (!value) return null
+  if (!/^rtmps?:\/\//i.test(value)) {
+    return `${full ? 'Full URLs' : 'Server URLs'} start with rtmp:// or rtmps://.`
+  }
+  let host: string
+  try {
+    host = new URL(value).hostname
+  } catch {
+    host = ''
+  }
+  return host ? null : 'Add the server name after rtmp://, as your platform shows it.'
+}
+
 export function isStreamTargetReady(target: StreamTargetSettings): boolean {
   if (target.urlMode === 'full-url') {
     return (
@@ -2031,7 +2264,7 @@ export function isStreamTargetReady(target: StreamTargetSettings): boolean {
       target.streamKeyPresent
     )
   }
-  if (!target.serverUrl.trim()) {
+  if (!target.serverUrl.trim() || streamServerUrlIssue(target.serverUrl)) {
     return false
   }
   return (
@@ -2051,7 +2284,7 @@ export function isStreamTargetStartReady(target: StreamTargetSettings): boolean 
 export function readyStreamTargetLabels(streaming: StreamingSettings): string[] {
   return streaming.targets
     .filter((target) => target.enabled && isStreamTargetStartReady(target))
-    .map((target) => target.label)
+    .map((target) => destinationLabel(target.label))
 }
 
 export function areEnabledStreamTargetsStartReady(streaming: StreamingSettings): boolean {
@@ -2071,7 +2304,9 @@ export function bridgeStreamingToLegacy(config: CaptureConfig): CaptureConfig {
 
   if (primary) {
     const legacyPreset: RtmpPreset =
-      primary.platform === 'tiktok' || primary.platform === 'instagram'
+      primary.platform === 'facebook' ||
+      primary.platform === 'tiktok' ||
+      primary.platform === 'instagram'
         ? 'custom'
         : primary.platform
     return {
@@ -2521,12 +2756,17 @@ export function buildCaptureSources(
   captureId: string | undefined
 ): SourceSelection {
   const selected = captureDevices.find((device) => device.id === captureId)
+  const next = { ...current }
+  delete (next as SourceSelection & { app?: unknown }).app
   return {
-    ...current,
+    ...next,
     screenId: selected?.kind === 'screen' ? captureId : undefined,
     screenName: selected?.kind === 'screen' ? selected.name : undefined,
     windowId: selected?.kind === 'window' ? captureId : undefined,
     windowName: selected?.kind === 'window' ? selected.name : undefined,
+    // Plan 0002 (release test 146): None is a choice that must outlive
+    // reconcile, the way camera Off is (plan 080 S4).
+    captureOff: captureId ? undefined : true,
     testPattern: false
   }
 }
@@ -2549,13 +2789,16 @@ export function buildMicrophoneSources(
   microphoneId: string | undefined
 ): SourceSelection {
   const selected = microphones.find((device) => device.id === microphoneId)
-  return { ...current, microphoneId, microphoneName: selected?.name }
+  // Plan 0027: None is a choice too, the same way camera Off is (plan 080 S4).
+  return microphoneId
+    ? { ...current, microphoneId, microphoneName: selected?.name, microphoneOff: undefined }
+    : { ...current, microphoneId: undefined, microphoneName: undefined, microphoneOff: true }
 }
 
 const SOURCE_KIND_FIELDS = {
-  capture: ['screenId', 'screenName', 'windowId', 'windowName', 'testPattern'],
+  capture: ['screenId', 'screenName', 'windowId', 'windowName', 'captureOff', 'testPattern'],
   camera: ['cameraId', 'cameraName', 'cameraOff'],
-  microphone: ['microphoneId', 'microphoneName']
+  microphone: ['microphoneId', 'microphoneName', 'microphoneOff']
 } as const satisfies Record<string, readonly (keyof SourceSelection)[]>
 
 /**
@@ -2569,6 +2812,7 @@ export function mergeSourceKind(
   kind: keyof typeof SOURCE_KIND_FIELDS
 ): SourceSelection {
   const next: Record<string, unknown> = { ...current }
+  if (kind === 'capture') delete next.app
   for (const field of SOURCE_KIND_FIELDS[kind]) next[field] = picked[field]
   return next as SourceSelection
 }
@@ -2639,6 +2883,12 @@ export function reconcileSourceSelection(
     nextSources.screenName = undefined
     nextSources.windowId = undefined
     nextSources.windowName = undefined
+  } else if (nextSources.captureOff === true && !nextSources.screenId && !nextSources.windowId) {
+    // Plan 0002 (release test 146): an explicit None stays None. Falling back
+    // to the first screen here re-selected it on every scene click and device
+    // refresh, and on Linux that opened the compositor's share dialog.
+    nextSources.screenName = undefined
+    nextSources.windowName = undefined
   } else {
     const selectedCapture = nextSources.windowId
       ? (findRememberedSource(
@@ -2655,6 +2905,7 @@ export function reconcileSourceSelection(
     nextSources.screenName = selectedCapture?.kind === 'screen' ? selectedCapture.name : undefined
     nextSources.windowId = selectedCapture?.kind === 'window' ? selectedCapture.id : undefined
     nextSources.windowName = selectedCapture?.kind === 'window' ? selectedCapture.name : undefined
+    nextSources.captureOff = undefined
   }
 
   // Plan 080 S4: an explicit Off stays off. Only a camera that was never
@@ -2674,12 +2925,16 @@ export function reconcileSourceSelection(
     nativeMicrophoneAvailable && isAvFoundationMicrophoneId(nextSources.microphoneId)
       ? undefined
       : nextSources.microphoneId
-  const selectedMicrophone =
-    findRememberedSource(
-      rememberedMicrophoneId,
-      nativeMicrophoneNameFor(nextSources.microphoneName),
-      microphones
-    ) ?? microphones[0]
+  // Plan 0027: an explicit None stays None, like camera Off above.
+  const microphoneOff = nextSources.microphoneOff === true && !nextSources.microphoneId
+  const selectedMicrophone = microphoneOff
+    ? undefined
+    : (findRememberedSource(
+        rememberedMicrophoneId,
+        nativeMicrophoneNameFor(nextSources.microphoneName),
+        microphones
+      ) ?? microphones[0])
+  nextSources.microphoneOff = microphoneOff ? true : undefined
 
   const cameraIdentity = sourceIdentityFor(selectedCamera)
   nextSources.cameraId = cameraIdentity.id
@@ -2764,23 +3019,6 @@ function sourceChangeEvent(
     return { ...event, reason: 'restored-by-name' }
   }
   return { ...event, reason: 'unavailable-selected' }
-}
-
-export function startButtonLabel(recordEnabled: boolean, streamEnabled: boolean): string {
-  if (recordEnabled && streamEnabled) {
-    return 'Start Livestream + Record'
-  }
-  if (streamEnabled) {
-    return 'Start Livestream'
-  }
-  if (recordEnabled) {
-    return 'Start Recording'
-  }
-  return 'Start Session'
-}
-
-export function startButtonPendingLabel(streamEnabled: boolean): string {
-  return streamEnabled ? 'Starting Livestream...' : 'Starting Recording...'
 }
 
 export function clampNumber(value: unknown, fallback: number, min: number, max: number): number {

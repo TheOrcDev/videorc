@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -111,8 +111,8 @@ use crate::recording_timeline::{
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, QualityVerdict,
-    RepairJob, analyze_recording_cancellable, gate_recording_cancellable, has_user_impacting_issue,
-    issue_reasons,
+    RepairJob, assess_recording_after_capture_cancellable, gate_recording_cancellable,
+    has_user_impacting_issue, issue_reasons,
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
 use crate::scene_geometry::{
@@ -180,7 +180,7 @@ const TRANSIENT_FIFO_TEST_PAUSE_MS_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_MS";
 /// incidents showed ~50ms FIFO writes only on the record-only path that lacked
 /// this demux thread, while the live auxiliary input keeps its smaller
 /// latency-first queue.
-const ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
+pub(crate) const ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
 const SPLIT_STREAM_INPUT_THREAD_QUEUE_PACKETS: usize = 8;
 /// FFmpeg starts per-input demux threads only after `avformat_find_stream_info`.
 /// Its default multi-megabyte MPEG-TS probe can therefore hold an entire short
@@ -277,6 +277,9 @@ struct PublishedSessionStartTerminal {
     state: AppState,
     session_id: String,
     output_path: Option<PathBuf>,
+    /// Plan 181: the terminal replacement keeps the buffer-only mark, so the
+    /// renderer's session chrome never flashes a failed recording.
+    replay_only: bool,
     pipeline: RecordingPipeline,
     failed_stage: RecordingPipelineStage,
     message: String,
@@ -319,15 +322,14 @@ impl PublishedSessionStartTerminal {
     fn publish(mut self) {
         self.pipeline
             .mark_failed(self.failed_stage.clone(), &self.message);
-        self.state.emit_event(
-            "recording.status",
-            recording_start_rejected_status(
-                &self.session_id,
-                self.output_path.as_deref(),
-                &self.pipeline,
-                &self.message,
-            ),
+        let mut rejected = recording_start_rejected_status(
+            &self.session_id,
+            self.output_path.as_deref(),
+            &self.pipeline,
+            &self.message,
         );
+        rejected.replay_only = self.replay_only;
+        self.state.emit_event("recording.status", rejected);
         // Keep SessionStarting authoritative through the terminal event. A
         // replacement start cannot be admitted on another runtime worker and
         // then be overwritten by this old session's delayed Idle push.
@@ -351,6 +353,7 @@ impl PublishedSessionStartGuard {
         state: AppState,
         session_id: &str,
         output_path: Option<PathBuf>,
+        replay_only: bool,
         pipeline: &RecordingPipeline,
         session_start_admission: SessionStartAdmission,
     ) {
@@ -359,6 +362,7 @@ impl PublishedSessionStartGuard {
             state,
             session_id: session_id.to_string(),
             output_path,
+            replay_only,
             pipeline: pipeline.clone(),
             failed_stage: RecordingPipelineStage::Muxer,
             message: "Session start did not reach a running capture pipeline.".to_string(),
@@ -401,9 +405,38 @@ enum WorkerMicrophoneFallback {
     /// Keep the resolved Windows DirectShow input; FFmpeg opens it directly
     /// as it did before the worker existed. Live replacement is unavailable.
     DirectDshow,
+    /// Keep the resolved Linux Pulse input, FFmpeg opening it directly as it
+    /// did before Linux microphones joined the session audio bus (release
+    /// test 147, plan 0001). The soundboard can't reach such a session.
+    DirectPulse,
     /// Record silence: no Windows input to fall back to, or the device is
-    /// not in the DirectShow inventory, so a direct input would fail too.
+    /// not in the DirectShow inventory or the Pulse source list (unplugged),
+    /// so a direct input would fail too or, on Linux, fall back to another
+    /// microphone (retest 154, C4).
     Silence,
+}
+
+/// Opts a Linux session back into FFmpeg's direct Pulse microphone input,
+/// the path before release test 147 plan 0001 (sounds can't reach it).
+const LINUX_MICROPHONE_DIRECT_ENV: &str = "VIDEORC_LINUX_MICROPHONE_DIRECT";
+
+/// The capture-worker device for a Linux Pulse microphone: the session audio
+/// bus takes it, like every other platform's microphone, so the soundboard,
+/// the mic gain/mute and the level meters run on the one PCM timeline
+/// (release test 147, plan 0001). `None` keeps every other input as it was,
+/// and keeps the direct input when `direct` is asked for.
+fn linux_pulse_worker_device(
+    microphone: Option<&MicrophoneInput>,
+    microphone_id: Option<&String>,
+    linux: bool,
+    direct: bool,
+) -> Option<String> {
+    match microphone {
+        Some(MicrophoneInput::LinuxPulse { .. }) if linux && !direct => microphone_id
+            .filter(|id| crate::linux_pulse_audio::parse_linux_pulse_microphone_id(id).is_some())
+            .cloned(),
+        _ => None,
+    }
 }
 
 fn worker_microphone_fallback(
@@ -416,13 +449,32 @@ fn worker_microphone_fallback(
         Some(MicrophoneInput::WindowsDshow { .. }) if !device_missing => {
             WorkerMicrophoneFallback::DirectDshow
         }
+        Some(MicrophoneInput::LinuxPulse { .. }) if !device_missing => {
+            WorkerMicrophoneFallback::DirectPulse
+        }
         _ => WorkerMicrophoneFallback::Silence,
+    }
+}
+
+/// Retest 154 (C4): FFmpeg's direct Pulse input is pinned to its source like
+/// the capture worker, so pipewire-pulse never hands it the default mic.
+fn pin_direct_pulse_microphone(command: &mut Command, microphone: Option<&MicrophoneInput>) {
+    if matches!(microphone, Some(MicrophoneInput::LinuxPulse { .. })) {
+        command.envs(crate::linux_pulse_audio::pulse_pinned_source_env());
     }
 }
 
 fn worker_microphone_fallback_message(reason: &str) -> String {
     format!(
         "The microphone is live, but it can't be changed until this session ends. The capture worker could not open it ({reason}), so Videorc is recording it directly."
+    )
+}
+
+/// Release test 147, plan 0001: the direct Pulse input bypasses the session
+/// audio bus, so the soundboard can't reach this session; say so.
+fn linux_direct_microphone_message(reason: &str) -> String {
+    format!(
+        "The microphone is live, but soundboard sounds can't reach this recording or stream: Videorc couldn't put the microphone on its audio mix ({reason}), so it is recording it directly."
     )
 }
 
@@ -480,6 +532,30 @@ fn ensure_session_start_process_live(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// Drains the older source transitions, but never behind a person: a Linux
+/// share dialog has no device deadline, so a start that queued behind it held
+/// the ordered command lane until the dialog closed and then ran admission for
+/// an abandoned Record (plan 0010 addendum 3). Fail fast with the reason.
+async fn wait_for_prior_source_transitions(
+    state: &AppState,
+    transitions: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    tokio::pin!(transitions);
+    loop {
+        if let Some(reason) =
+            crate::preview_screen::session_start_blocked_by_share_dialog(state).await
+        {
+            anyhow::bail!(reason);
+        }
+        tokio::select! {
+            () = &mut transitions => return Ok(()),
+            () = tokio::time::sleep(SESSION_START_SHARE_DIALOG_POLL) => {}
+        }
+    }
+}
+
+const SESSION_START_SHARE_DIALOG_POLL: Duration = Duration::from_millis(250);
+
 async fn admit_session_start(
     state: &AppState,
 ) -> Result<(
@@ -513,7 +589,7 @@ async fn admit_session_start(
     // and therefore drains the exact camera/screen supervisors admitted by
     // those older commands before capture ownership can be published.
     let prior_source_transitions = state.source_transition_fence.observe();
-    prior_source_transitions.wait().await;
+    wait_for_prior_source_transitions(state, prior_source_transitions.wait()).await?;
     ensure_session_start_process_live(state)?;
 
     // Native transition waits deliberately never own the publication/shutdown
@@ -567,6 +643,47 @@ impl Drop for CaptureStartupResources {
     }
 }
 
+/// A failed/cancelled ISO start must release its exact compositor membership
+/// before reconciling any native source it reacquired. Reconciliation waits for
+/// the startup admission fence after this stack has unwound; it never stops a
+/// source required by a newer recording or preview scene.
+struct SourceIsoCaptureStartupGuard {
+    state: Option<AppState>,
+    batches: Option<Arc<crate::compositor::source_iso_batch::SourceIsoBatchStore>>,
+    #[cfg(test)]
+    cleanup_done: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for SourceIsoCaptureStartupGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        if let Some(batches) = self.batches.take() {
+            for role in 0..3 {
+                batches.retire(role, None);
+            }
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // Bounded native start replies can still be Starting. Wait only
+            // transitions already admitted when this owner unwinds; a later
+            // native completion must not strand a newly-live hidden source.
+            let transitions = state.source_transition_fence.observe();
+            #[cfg(test)]
+            let cleanup_done = self.cleanup_done.take();
+            let cleanup_state = state.clone();
+            state.spawn_process_task(async move {
+                transitions.wait().await;
+                crate::live_layout::reconcile_source_iso_capture_demand(&cleanup_state).await;
+                #[cfg(test)]
+                if let Some(done) = cleanup_done {
+                    let _ = done.send(());
+                }
+            });
+        }
+    }
+}
+
 /// Deletes only the empty MKV reserved for this exact session when a
 /// post-spawn start is rejected. The owner runs it only after FFmpeg has been
 /// reaped, so Windows never races an open output handle and nonempty recovery
@@ -587,6 +704,10 @@ impl PostSpawnRejectedStartCleanup {
     }
 
     async fn run(self) {
+        let _ = self
+            .state
+            .database
+            .fail_uncommitted_source_iso_sessions(&self.session_id);
         let Some(output_path) = self.output_path.as_deref() else {
             return;
         };
@@ -934,7 +1055,34 @@ const FFMPEG_LIVE_MIC_FILTER_TARGET: &str = "videorc_live_mic";
 // established two-second cadence.
 const FFMPEG_PROGRESS_REPORT_PERIOD: Duration = Duration::from_millis(500);
 const FFMPEG_DIAGNOSTICS_PUBLISH_PERIOD: Duration = Duration::from_secs(2);
+// Windows software fallback can spend several seconds draining the first
+// 1080p raw frame when GPU acceleration is unavailable. Keep startup truth
+// tied to positive FFmpeg media progress, but do not reject that slow, live
+// process on the normal eight-second deadline used elsewhere.
+#[cfg(target_os = "windows")]
+const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(not(target_os = "windows"))]
 const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// The output-startup deadline for one FFmpeg graph (plan 195 S3, #769).
+/// FIFO-only graphs keep the platform base: 8 s on macOS/Linux (fast fail
+/// for a wedged pipe) and 20 s on Windows (software-fallback OpenH264 can
+/// spend several seconds before the first positive output clock at 1080p).
+/// A direct live device input (DirectShow on Windows, Pulse on Linux) opens
+/// inside the graph and needs the DirectShow readiness budget on top of the
+/// 8 s FIFO deadline. Windows already has a 20 s window, which covers that
+/// 18 s need; stacking the budget on 20 s would meet the 30 s renderer RPC
+/// deadline, so Windows live-device graphs stay at the 20 s base.
+fn ffmpeg_output_startup_deadline(microphone: Option<&MicrophoneInput>) -> Duration {
+    match microphone {
+        Some(MicrophoneInput::WindowsDshow { .. } | MicrophoneInput::LinuxPulse { .. }) => {
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT.max(
+                Duration::from_secs(8) + crate::session_audio::DSHOW_MICROPHONE_READINESS_BUDGET,
+            )
+        }
+        _ => FFMPEG_OUTPUT_STARTUP_TIMEOUT,
+    }
+}
 // Once the child exits, stderr is already closed and its reader should drain
 // immediately. Keep the final snapshot behind a short bounded join so fatal
 // lines and the last progress sample belong to this session, never the next.
@@ -1005,7 +1153,7 @@ impl FfmpegProgressBeacon {
         self.media_micros.fetch_max(micros, Ordering::Relaxed);
     }
 
-    fn media_micros(&self) -> u64 {
+    pub(crate) fn media_micros(&self) -> u64 {
         self.media_micros.load(Ordering::Relaxed)
     }
 
@@ -1016,6 +1164,17 @@ impl FfmpegProgressBeacon {
     fn stop_escalated(&self) -> bool {
         self.stop_escalated.load(Ordering::Acquire)
     }
+}
+
+/// The running session's FFmpeg output clock, for the performance check's
+/// encoder pace.
+pub(crate) async fn active_ffmpeg_progress(state: &AppState) -> Option<FfmpegProgressBeacon> {
+    state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .map(|active| active.ffmpeg_progress.clone())
 }
 
 const FFMPEG_STDERR_TAIL_LINES: usize = 5;
@@ -1180,7 +1339,15 @@ fn stop_term_grace_decision(
 
 #[derive(Debug)]
 enum FfmpegStderrEvent {
+    /// A line FFmpeg printed at warning level or above, a stats/progress line,
+    /// or an untagged `fprintf` (command replies and prompts). Exactly what the
+    /// pre-161 `-loglevel warning` stream carried, with level tags removed.
     Line(String),
+    /// An informational `av_log` line (`-loglevel level+info`): the startup
+    /// stream dump, fifo recovery progress, the end-of-run summary. Only the
+    /// stream-leg monitor reads these (plan 161); they never reach the stderr
+    /// tail, the fatal classifier or the bounded log ring.
+    Info(String),
     ReadFailed,
     Eof,
 }
@@ -1193,6 +1360,7 @@ fn spawn_ffmpeg_stderr_reader(
     stderr: Option<ChildStderr>,
     mut startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
     progress: FfmpegProgressBeacon,
+    tee: Option<crate::metrics_journal::FfmpegStderrTee>,
 ) -> Option<mpsc::Receiver<FfmpegStderrEvent>> {
     let Some(stderr) = stderr else {
         if let Some(sender) = startup_ready.take() {
@@ -1204,11 +1372,12 @@ fn spawn_ffmpeg_stderr_reader(
         return None;
     };
     let (sender, receiver) = mpsc::channel(256);
-    tokio::spawn(relay_ffmpeg_stderr(
+    tokio::spawn(relay_ffmpeg_stderr_teed(
         BufReader::new(stderr),
         sender,
         startup_ready,
         progress,
+        tee,
     ));
     Some(receiver)
 }
@@ -1238,17 +1407,48 @@ async fn read_bounded_ffmpeg_line<R: AsyncBufRead + Unpin>(
     }
 }
 
+#[cfg(test)]
 async fn relay_ffmpeg_stderr<R>(
+    reader: R,
+    sender: mpsc::Sender<FfmpegStderrEvent>,
+    startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    progress: FfmpegProgressBeacon,
+) where
+    R: AsyncBufRead + Unpin,
+{
+    relay_ffmpeg_stderr_teed(reader, sender, startup_ready, progress, None).await;
+}
+
+/// `tee` (metrics journal on, plan 166 S3) receives every raw line before
+/// any filtering; it never blocks and redacts at write time.
+async fn relay_ffmpeg_stderr_teed<R>(
     mut reader: R,
     sender: mpsc::Sender<FfmpegStderrEvent>,
     mut startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
     progress: FfmpegProgressBeacon,
+    tee: Option<crate::metrics_journal::FfmpegStderrTee>,
 ) where
     R: AsyncBufRead + Unpin,
 {
     loop {
         match read_bounded_ffmpeg_line(&mut reader).await {
-            Ok(Some(line)) => {
+            Ok(Some(raw_line)) => {
+                if let Some(tee) = tee.as_ref() {
+                    tee.offer(&raw_line);
+                }
+                // Plan 161: bridge FFmpeg runs with `-loglevel level+info` so
+                // fifo reconnects are visible. Informational chatter goes to
+                // its own event; every existing reader below sees the same
+                // untagged text the warning-level stream used to carry.
+                let (line, level) = strip_ffmpeg_log_levels(&raw_line);
+                if level.is_some_and(FfmpegLogLevel::is_informational)
+                    && !is_ffmpeg_progress_noise(&line)
+                {
+                    if sender.send(FfmpegStderrEvent::Info(line)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
                 progress
                     .evidence
                     .lock()
@@ -1303,10 +1503,11 @@ fn spawn_ffmpeg_output_startup_watchdog(
     session_id: String,
     receiver: oneshot::Receiver<std::result::Result<(), String>>,
     started_at: Instant,
+    deadline: Duration,
     pid: u32,
 ) {
     tokio::spawn(async move {
-        match wait_for_ffmpeg_output_startup(receiver, started_at).await {
+        match wait_for_ffmpeg_output_startup(receiver, started_at, deadline).await {
             Ok(()) => {
                 let _ = emit_session_log(
                     &state,
@@ -1351,9 +1552,44 @@ fn spawn_ffmpeg_output_startup_watchdog(
     });
 }
 
+/// Which session consumers may take over the live preview run in place
+/// (instant-record P4.1). macOS arms its VideoToolbox consumer. On Linux the
+/// preview run and the raw-YUV encoder consumer share the same CPU compositor,
+/// so arming there skips a full run restart and lets the startup barrier
+/// accept the run's own frame history (retest 151: the restart and the full
+/// barrier cost ~230 ms of every Record).
+const fn compositor_consumer_arms_in_place(consumer: CompositorFrameConsumer) -> bool {
+    match consumer {
+        CompositorFrameConsumer::VideoToolboxEncoder => cfg!(target_os = "macos"),
+        CompositorFrameConsumer::RawYuvEncoder => cfg!(target_os = "linux"),
+        _ => false,
+    }
+}
+
+/// Instant record (P4): on the VideoToolbox bridge the first frame is already
+/// in the encoder once the bridge is ready, so `Recording` does not wait for
+/// FFmpeg's first output clock (~700 ms of MPEG-TS probing). On Linux the
+/// raw-YUV bridge is ready only once FFmpeg's reader has taken a complete first
+/// frame, so the same holds there; waiting for the first progress report cost
+/// a fixed ~510 ms of every Record (one 500 ms `-stats_period`, retest 151).
+/// For both the proof becomes a watchdog that fails the session if FFmpeg never
+/// reports progress. Windows keeps the synchronous proof: its raw-pipe and
+/// Media Foundation outputs can spend seconds on a software first frame.
+const fn defers_ffmpeg_output_startup_proof(output: EncoderBridgeVideoOutput) -> bool {
+    match output {
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => true,
+        EncoderBridgeVideoOutput::RawYuv420p => cfg!(target_os = "linux"),
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => false,
+    }
+}
+
+/// `deadline` is absolute from `started_at` (the process spawn); see
+/// [`ffmpeg_output_startup_deadline`] for its value per input topology.
 async fn wait_for_ffmpeg_output_startup(
     mut receiver: oneshot::Receiver<std::result::Result<(), String>>,
     started_at: Instant,
+    deadline: Duration,
 ) -> Result<()> {
     // A bridge can finish its own first-frame proof after FFmpeg has already
     // reported output progress. Observe that completed ACK before applying the
@@ -1369,7 +1605,7 @@ async fn wait_for_ffmpeg_output_startup(
         Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
     }
 
-    let remaining = FFMPEG_OUTPUT_STARTUP_TIMEOUT.saturating_sub(started_at.elapsed());
+    let remaining = deadline.saturating_sub(started_at.elapsed());
     match timeout(remaining, receiver).await {
         Ok(Ok(Ok(()))) => Ok(()),
         Ok(Ok(Err(message))) => Err(anyhow::anyhow!(message)),
@@ -1378,7 +1614,7 @@ async fn wait_for_ffmpeg_output_startup(
         )),
         Err(_) => Err(anyhow::anyhow!(
             "FFmpeg did not confirm positive output media progress within {}ms of process spawn",
-            FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_millis()
+            deadline.as_millis()
         )),
     }
 }
@@ -1961,6 +2197,8 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// Plan 157: the Screen/Camera ISO writers of a separate-source take.
+    source_iso: Option<crate::source_iso::SourceIsoRuntime>,
     /// Owns monitor cancellation and task lifetime. It is declared before the
     /// pump so an unexpected `ActiveRecording` drop aborts the monitor before
     /// releasing the generation-scoped media authority.
@@ -1998,6 +2236,9 @@ pub struct ActiveRecording {
     /// Benchmark session owned by the performance check: hidden row, no
     /// background export/poster/quality job, discarded by its owner.
     performance_check: bool,
+    /// Plan 181: the session exists only for the replay buffer. No file, no
+    /// stream, no Library row; `recording.status` says so.
+    pub replay_only: bool,
     /// True only when this session has a viewer-facing stream leg rendered by
     /// the compositor bridge. Legacy FFmpeg and record-only paths must reject
     /// comment highlights before touching the overlay slot.
@@ -2005,6 +2246,16 @@ pub struct ActiveRecording {
     /// Portrait canvas `(width, height)` of the vertical simulcast leg when it
     /// burns the comment card. The renderer rasterizes a second card for it.
     pub comment_highlight_vertical_canvas: Option<(u32, u32)>,
+    /// The session shape the overlay leg plan was built for (plan 164), kept
+    /// so a layout saved mid-session can re-plan the compositor flags. None
+    /// on paths without the compositor bridge (nothing draws overlays there).
+    pub overlay_session_shape: Option<crate::overlay_layout::OverlaySessionShape>,
+    /// Whether a banner shown after the start reaches this session's picture
+    /// (plan 186 S4): the compositor paths read the banner set every tick; the
+    /// legacy FFmpeg graph only through its overlay FIFO, and the direct D3D11
+    /// recording draws nothing over the screen. `banners.show` refuses a new
+    /// banner while this is false.
+    accepts_banners: bool,
     pub _capture_permit: Option<CapturePermit>,
     /// Signals the process monitor at the exact user-stop edge. The monitor
     /// orders this against FFmpeg exit readiness before it touches the shared
@@ -2017,6 +2268,14 @@ pub struct ActiveRecording {
     /// it in place (instant-record P4.1). Released after bridge teardown so
     /// the preview returns to its own dimensions and fps.
     compositor_capture_lease: Option<CompositorCaptureLeaseGuard>,
+    /// The compositor run this session started itself (the restart path:
+    /// Linux, and macOS sessions that can't arm in place). Stopped by exact
+    /// run id after bridge teardown so the idle preview goes back to its own
+    /// surface size and fps instead of rendering the session's output with
+    /// no consumer (retest 150: ~2.3 cores at 720p, ~5.5 at 1080p, idle).
+    /// Windows restores its own D3D11 preview in its teardown.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    restarted_compositor_run_id: Option<String>,
     /// FFmpeg output clock published by the stderr monitor; the stop ladder
     /// extends its quit grace while this keeps advancing.
     ffmpeg_progress: FfmpegProgressBeacon,
@@ -2082,6 +2341,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         session_id: session_id.to_string(),
         pid: 0,
         stdin: None,
+        replay_only: false,
         output_path: None,
         stream_url: None,
         ffmpeg_path: "test-ffmpeg".to_string(),
@@ -2101,6 +2361,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         screen_overlay: None,
         encoder_bridge: None,
         encoder_bridge_stream: None,
+        source_iso: None,
         #[cfg(target_os = "windows")]
         windows_d3d11_monitor: None,
         #[cfg(target_os = "windows")]
@@ -2120,10 +2381,13 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         performance_check: false,
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
+        overlay_session_shape: None,
+        accepts_banners: true,
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
         compositor_capture_lease: None,
+        restarted_compositor_run_id: None,
         ffmpeg_progress: FfmpegProgressBeacon::default(),
     }
 }
@@ -2211,11 +2475,41 @@ pub struct ScreenOverlaySession {
     /// frame may outlive the short recording-lock snapshot which described
     /// it, so installation must compare this token before touching pixels.
     generation_token: Arc<()>,
+    /// What the frame is composed from (plan 186 S4): the takeover and the
+    /// banners. Shared with the preparation tickets, which replace one part
+    /// under this lock and compose off every lock.
+    inputs: Arc<StdMutex<LegacyOverlayInputs>>,
     current_frame: Arc<StdMutex<Vec<u8>>>,
+    /// The inputs revision the installed frame was composed from, so a slow
+    /// composition never replaces a newer one that already carried its
+    /// change.
+    installed_revision: StdMutex<u64>,
     stop: Arc<AtomicBool>,
     writer: Option<JoinHandle<()>>,
     #[cfg(test)]
     preparation_blocker: Option<ScreenOverlayPreparationBlocker>,
+}
+
+/// The legacy FFmpeg graph's live layer is one full-canvas RGBA frame at
+/// `SCREEN_OVERLAY_FPS`; it is composed from these (plan 186 S4): the takeover
+/// image scaled to the canvas and the banners prepared for the canvas. Every
+/// replacement bumps `revision`.
+#[derive(Debug, Default)]
+struct LegacyOverlayInputs {
+    takeover: Option<Arc<Vec<u8>>>,
+    banners: Arc<Vec<LegacyBannerLayer>>,
+    revision: u64,
+}
+
+/// One banner on the legacy overlay frame: its bitmap prepared once for the
+/// canvas (straight-alpha BGRA at its contained size, opacity baked;
+/// `banner_prepare::prepare_banner_bitmap`) at its canvas position
+/// (`banners::banner_draw_rect`). Show and Hide are instant here: no fade.
+#[derive(Debug, Clone)]
+pub(crate) struct LegacyBannerLayer {
+    x: usize,
+    y: usize,
+    bitmap: Arc<crate::banner_prepare::BannerBitmap>,
 }
 
 #[derive(Debug, Clone)]
@@ -2224,6 +2518,7 @@ pub(crate) struct ScreenOverlayPreparationTicket {
     generation_token: Arc<()>,
     width: u32,
     height: u32,
+    inputs: Arc<StdMutex<LegacyOverlayInputs>>,
     #[cfg(test)]
     blocker: Option<ScreenOverlayPreparationBlocker>,
 }
@@ -2235,6 +2530,8 @@ pub(crate) struct PreparedScreenOverlayFrame {
     width: u32,
     height: u32,
     frame: Vec<u8>,
+    /// The inputs revision this frame was composed from.
+    revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2287,25 +2584,203 @@ impl ScreenOverlayPreparationBlocker {
 }
 
 impl ScreenOverlayPreparationTicket {
+    /// The frame with `path` as the takeover (none clears it) over the
+    /// banners installed now. Decode, scale and compose run here, off every
+    /// lock; the takeover is replaced under the inputs lock first, so any
+    /// composition that starts later carries it too.
     pub(crate) fn prepare(self, path: Option<String>) -> Result<PreparedScreenOverlayFrame> {
         #[cfg(test)]
         if let Some(blocker) = self.blocker.as_ref() {
             blocker.block();
         }
-        let frame = match path {
-            Some(path) => {
-                screen_overlay_frame_from_path(Path::new(&path), self.width, self.height)?
-            }
-            None => transparent_overlay_frame(self.width, self.height),
+        let takeover = match path {
+            Some(path) => Some(Arc::new(screen_overlay_frame_from_path(
+                Path::new(&path),
+                self.width,
+                self.height,
+            )?)),
+            None => None,
         };
-        Ok(PreparedScreenOverlayFrame {
+        let (takeover, banners, revision) = {
+            let mut inputs = self
+                .inputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inputs.takeover = takeover;
+            inputs.revision += 1;
+            (
+                inputs.takeover.clone(),
+                Arc::clone(&inputs.banners),
+                inputs.revision,
+            )
+        };
+        Ok(self.composed(takeover, &banners, revision))
+    }
+
+    /// The frame with `shown` as the banners (bottom to top; plan 186 S4)
+    /// over the takeover installed now. Each banner is decoded and scaled
+    /// once to its contained size on this canvas, opacity baked, on this
+    /// thread; the writer thread only ever copies the composed frame.
+    pub(crate) fn prepare_banners(
+        self,
+        shown: Vec<crate::banners::BannerWithFile>,
+    ) -> Result<PreparedScreenOverlayFrame> {
+        #[cfg(test)]
+        if let Some(blocker) = self.blocker.as_ref() {
+            blocker.block();
+        }
+        let banners = Arc::new(prepare_legacy_banner_layers(
+            &shown,
+            self.width,
+            self.height,
+        ));
+        let (takeover, banners, revision) = {
+            let mut inputs = self
+                .inputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inputs.banners = banners;
+            inputs.revision += 1;
+            (
+                inputs.takeover.clone(),
+                Arc::clone(&inputs.banners),
+                inputs.revision,
+            )
+        };
+        Ok(self.composed(takeover, &banners, revision))
+    }
+
+    fn composed(
+        self,
+        takeover: Option<Arc<Vec<u8>>>,
+        banners: &[LegacyBannerLayer],
+        revision: u64,
+    ) -> PreparedScreenOverlayFrame {
+        let frame = legacy_overlay_frame(
+            takeover.as_deref().map(Vec::as_slice),
+            banners,
+            self.width,
+            self.height,
+        );
+        PreparedScreenOverlayFrame {
             session_id: self.session_id,
             generation_token: self.generation_token,
             width: self.width,
             height: self.height,
             frame,
-        })
+            revision,
+        }
     }
+}
+
+/// The banners shown at a legacy session's start, prepared for its canvas
+/// (plan 186 S4): decoded, scaled to the contained rect of the canvas's
+/// orientation and opacity-baked, the same recipe as the compositor's
+/// prepare worker. A banner whose file cannot be read is skipped with a
+/// warning; the others still draw.
+fn prepare_legacy_banner_layers(
+    shown: &[crate::banners::BannerWithFile],
+    width: u32,
+    height: u32,
+) -> Vec<LegacyBannerLayer> {
+    let orientation = crate::overlay_layout::OverlayOrientation::for_canvas(width, height);
+    shown
+        .iter()
+        .filter_map(|(banner, path, _)| {
+            let image = match crate::banner_prepare::decode_banner_file(path) {
+                Ok(image) => image,
+                Err(error) => {
+                    tracing::warn!(
+                        banner = %banner.id,
+                        path = %path.display(),
+                        "Could not prepare a banner for the legacy overlay frame: {error}"
+                    );
+                    return None;
+                }
+            };
+            let rect = crate::banners::banner_rect_for(banner, orientation, None);
+            let (x, y, draw_width, draw_height) = crate::banners::banner_draw_rect(
+                image.width(),
+                image.height(),
+                width.max(1) as usize,
+                height.max(1) as usize,
+                rect,
+            );
+            let bitmap = crate::banner_prepare::prepare_banner_bitmap(
+                &image,
+                draw_width as u32,
+                draw_height as u32,
+                banner.opacity,
+            );
+            Some(LegacyBannerLayer {
+                x,
+                y,
+                bitmap: Arc::new(bitmap),
+            })
+        })
+        .collect()
+}
+
+/// The legacy FFmpeg graph's overlay frame (plan 186 S4): full-canvas
+/// straight-alpha RGBA, transparent where nothing is drawn, the takeover
+/// first (when it is a full-canvas frame) and then each banner, bottom to
+/// top, source-over at its canvas position. Pure.
+fn legacy_overlay_frame(
+    takeover: Option<&[u8]>,
+    banners: &[LegacyBannerLayer],
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let canvas_width = width as usize;
+    let canvas_height = height as usize;
+    let mut frame = match takeover {
+        Some(takeover) if takeover.len() == canvas_width * canvas_height * 4 => takeover.to_vec(),
+        _ => transparent_overlay_frame(width, height),
+    };
+    for layer in banners {
+        let bitmap = &*layer.bitmap;
+        let bitmap_width = bitmap.width as usize;
+        let bitmap_height = bitmap.height as usize;
+        if bitmap.bgra.len() < bitmap_width * bitmap_height * 4
+            || layer.x >= canvas_width
+            || layer.y >= canvas_height
+        {
+            continue;
+        }
+        let draw_width = bitmap_width.min(canvas_width - layer.x);
+        let draw_height = bitmap_height.min(canvas_height - layer.y);
+        for row in 0..draw_height {
+            let source_row = &bitmap.bgra[row * bitmap_width * 4..][..draw_width * 4];
+            let dest_start = ((layer.y + row) * canvas_width + layer.x) * 4;
+            let dest_row = &mut frame[dest_start..dest_start + draw_width * 4];
+            for (source, dest) in source_row.chunks_exact(4).zip(dest_row.chunks_exact_mut(4)) {
+                blend_bgra_over_rgba(source, dest);
+            }
+        }
+    }
+    frame
+}
+
+/// Straight-alpha source-over of one BGRA pixel onto one RGBA pixel, both
+/// un-premultiplied: `a = sa + da(1 − sa)`, `c = (sc·sa + dc·da(1 − sa)) / a`.
+fn blend_bgra_over_rgba(source: &[u8], dest: &mut [u8]) {
+    let source_alpha = u32::from(source[3]);
+    if source_alpha == 0 {
+        return;
+    }
+    if source_alpha == 255 {
+        dest.copy_from_slice(&[source[2], source[1], source[0], 255]);
+        return;
+    }
+    let dest_alpha = u32::from(dest[3]);
+    // Alphas in 1/255 units; the result alpha here is in 1/(255·255) units.
+    let out_alpha = source_alpha * 255 + dest_alpha * (255 - source_alpha);
+    for (channel, source_channel) in [source[2], source[1], source[0]].into_iter().enumerate() {
+        let source_weight = u32::from(source_channel) * source_alpha * 255;
+        let dest_weight = u32::from(dest[channel]) * dest_alpha * (255 - source_alpha);
+        dest[channel] = ((source_weight + dest_weight + out_alpha / 2) / out_alpha).min(255) as u8;
+    }
+    dest[3] = ((out_alpha + 127) / 255).min(255) as u8;
 }
 
 impl ScreenOverlaySession {
@@ -2314,13 +2789,23 @@ impl ScreenOverlaySession {
         width: u32,
         height: u32,
         initial_image_path: Option<String>,
+        initial_banners: Vec<LegacyBannerLayer>,
     ) -> Result<Self> {
-        let transparent = transparent_overlay_frame(width, height);
-        let initial = match initial_image_path {
-            Some(path) => screen_overlay_frame_from_path(Path::new(&path), width, height)
-                .unwrap_or_else(|_| transparent.clone()),
-            None => transparent,
-        };
+        let takeover = initial_image_path
+            .and_then(|path| screen_overlay_frame_from_path(Path::new(&path), width, height).ok())
+            .map(Arc::new);
+        let banners = Arc::new(initial_banners);
+        let initial = legacy_overlay_frame(
+            takeover.as_deref().map(Vec::as_slice),
+            &banners,
+            width,
+            height,
+        );
+        let inputs = Arc::new(StdMutex::new(LegacyOverlayInputs {
+            takeover,
+            banners,
+            revision: 0,
+        }));
         let current_frame = Arc::new(StdMutex::new(initial));
         let stop = Arc::new(AtomicBool::new(false));
         let writer_path = fifo_path.clone();
@@ -2335,7 +2820,9 @@ impl ScreenOverlaySession {
             width,
             height,
             generation_token: Arc::new(()),
+            inputs,
             current_frame,
+            installed_revision: StdMutex::new(0),
             stop,
             writer: Some(writer),
             #[cfg(test)]
@@ -2349,11 +2836,16 @@ impl ScreenOverlaySession {
             generation_token: self.generation_token.clone(),
             width: self.width,
             height: self.height,
+            inputs: Arc::clone(&self.inputs),
             #[cfg(test)]
             blocker: self.preparation_blocker.clone(),
         }
     }
 
+    /// `false` when the frame belongs to another overlay generation or
+    /// canvas. `true` when its change is on the picture: installed, or
+    /// already carried by a newer composition (which read the inputs after
+    /// this one replaced its part), which an older frame must not undo.
     fn install_prepared_frame(&self, prepared: PreparedScreenOverlayFrame) -> bool {
         if !Arc::ptr_eq(&self.generation_token, &prepared.generation_token)
             || self.width != prepared.width
@@ -2361,9 +2853,17 @@ impl ScreenOverlaySession {
         {
             return false;
         }
+        let mut installed = self
+            .installed_revision
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if prepared.revision < *installed {
+            return true;
+        }
         if let Ok(mut current) = self.current_frame.lock() {
             *current = prepared.frame;
         }
+        *installed = prepared.revision;
         true
     }
 
@@ -2379,7 +2879,9 @@ impl ScreenOverlaySession {
             width,
             height,
             generation_token: Arc::new(()),
+            inputs: Arc::new(StdMutex::new(LegacyOverlayInputs::default())),
             current_frame: Arc::new(StdMutex::new(transparent_overlay_frame(width, height))),
+            installed_revision: StdMutex::new(0),
             stop: Arc::new(AtomicBool::new(false)),
             writer: None,
             preparation_blocker: Some(blocker),
@@ -2477,6 +2979,7 @@ impl ActiveRecording {
             pipeline: Some(self.pipeline.status()),
             duration_ms: None,
             message,
+            replay_only: self.replay_only,
         }
     }
 
@@ -2545,6 +3048,128 @@ impl ActiveRecording {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
+}
+
+impl ActiveRecording {
+    /// See the `accepts_banners` field (plan 186 S4).
+    pub(crate) fn accepts_banners(&self) -> bool {
+        self.accepts_banners
+    }
+
+    /// A stub session that cannot draw a banner added after its start, for
+    /// the RPC tests of the show gate (`banners.show`, `banners.importImage`).
+    #[cfg(test)]
+    pub(crate) fn set_accepts_banners_for_test(&mut self, accepts: bool) {
+        self.accepts_banners = accepts;
+    }
+}
+
+/// Whether a session can take a banner shown after it started (plan 186 S4).
+/// The compositor paths (Metal, CPU, the Windows D3D11 media session) read
+/// the banner set every tick. The legacy FFmpeg graph is static; its only
+/// live layer is the overlay FIFO, created only when the session starts with
+/// a takeover, a stream or a banner. The direct D3D11 recording path draws
+/// nothing over the screen (it is never chosen with a banner showing).
+fn session_accepts_banners(
+    use_encoder_bridge: bool,
+    direct_d3d11_recording: bool,
+    legacy_overlay_fifo: bool,
+) -> bool {
+    if use_encoder_bridge {
+        !direct_d3d11_recording
+    } else {
+        legacy_overlay_fifo
+    }
+}
+
+/// `Some(accepts)` for the active session, `None` when nothing runs
+/// (`banners.show` refuses a new banner on a session that cannot draw it).
+pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
+    let recording = state.recording.lock().await;
+    recording.as_ref().map(ActiveRecording::accepts_banners)
+}
+
+/// Plan 210 S7.5: whether this session's screen reaches its output through
+/// FFmpeg's own display grab (the legacy graph: avfoundation, gdigrab or
+/// x11grab) instead of the gated frame store. Every compositor path (the
+/// encoder bridge on Metal, CPU and Linux, the direct D3D11 recording, the
+/// Windows D3D11 media session) reads the store Hide screen covers; the
+/// legacy graph never does, so Hide screen cannot cover it.
+fn session_reads_display_directly(active: &ActiveRecording) -> bool {
+    let bridge = active.encoder_bridge.is_some() || active.encoder_bridge_stream.is_some();
+    #[cfg(target_os = "windows")]
+    let bridge = bridge || active.windows_d3d11_media.is_some();
+    !bridge
+}
+
+/// What a refused legacy start says after the exact Hide screen copy.
+pub const SCREEN_HIDE_LEGACY_START_DETAIL: &str = "This profile records through the legacy FFmpeg capture path, which cannot hide the screen; show the screen first, or choose a profile the encoder bridge supports.";
+
+/// Plan 210 S7.5 at start: the start path's check once the bridge decision is
+/// made and before any process spawns. A session that will read the display
+/// through FFmpeg itself (no encoder bridge) cannot carry the still, so while
+/// the screen is hidden it is refused with the exact copy and the reason. The
+/// bridge records the gated store's still and starts as always.
+fn refuse_legacy_start_while_hidden(use_encoder_bridge: bool, hidden: bool) -> Result<()> {
+    if !use_encoder_bridge && hidden {
+        bail!(
+            "{} {}",
+            crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY,
+            SCREEN_HIDE_LEGACY_START_DETAIL
+        );
+    }
+    Ok(())
+}
+
+/// `Some(session_id)` while a session that reads the display directly runs:
+/// `screen.hide` refuses with [`crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY`]
+/// and `screen.privacy.get` says why.
+pub async fn active_session_reads_display_directly(state: &AppState) -> Option<String> {
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| session_reads_display_directly(active))
+        .map(|active| active.session_id.clone())
+}
+
+/// Plan 186 S4: recompose the legacy FFmpeg overlay frame when the banner
+/// set changes mid-session (Show, Hide, a rect or opacity change, a reorder).
+/// The compositor paths read the set on their next tick; only the legacy
+/// graph's FIFO holds pixels. Decode and compose run off `state.recording`,
+/// like the takeover's, so Stop never waits on them. A session without the
+/// FIFO is left alone: `banners.show` already refused a new banner there, and
+/// hiding one that never drew changes nothing.
+pub async fn apply_banners_to_legacy_overlay(state: &AppState) -> Result<()> {
+    let preparation = {
+        let recording = state.recording.lock().await;
+        recording
+            .as_ref()
+            .and_then(ActiveRecording::active_screen_overlay_preparation)
+    };
+    let Some(preparation) = preparation else {
+        return Ok(());
+    };
+    let shown = crate::banners::banners_with_files(
+        crate::banners::shown_banners_for_compositor(&state.database)?,
+        &state.database.banner_assets_dir(),
+    );
+    let prepared = tokio::task::spawn_blocking(move || preparation.prepare_banners(shown))
+        .await
+        .context("Legacy banner overlay preparation task stopped")??;
+    let commit = {
+        let recording = state.recording.lock().await;
+        recording
+            .as_ref()
+            .map_or(PreparedScreenOverlayCommit::Retired, |recording| {
+                recording.commit_prepared_active_screen(prepared)
+            })
+    };
+    if commit == PreparedScreenOverlayCommit::Superseded {
+        tracing::debug!(
+            "The legacy overlay session changed while the banners were prepared; the new session composed its own frame."
+        );
+    }
+    Ok(())
 }
 
 /// Returns the current session's authoritative per-destination runtime state.
@@ -2801,6 +3426,45 @@ pub fn resolve_output_directory(configured: Option<&str>) -> Result<PathBuf> {
     Ok(expanded)
 }
 
+/// Prove the recordings folder takes a new file: create a uniquely named
+/// hidden probe in it and remove it again. Permissions, read-only mounts and
+/// ACLs all show up here on every platform; nothing else is touched. The OS
+/// error goes to the log, the user gets the Output page's plain copy.
+async fn ensure_output_directory_writable(output_dir: &Path) -> Result<()> {
+    let probe = output_dir.join(format!(".videorc-write-check-{}", Uuid::new_v4()));
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .await;
+    match created {
+        Ok(file) => {
+            drop(file);
+            if let Err(error) = fs::remove_file(&probe).await {
+                tracing::warn!(
+                    path = %probe.display(),
+                    "Could not remove the recordings folder write check: {error}"
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(
+                folder = %output_dir.display(),
+                "Recordings folder is not writable: {error}"
+            );
+            bail!(output_directory_not_writable_message(output_dir))
+        }
+    }
+}
+
+fn output_directory_not_writable_message(output_dir: &Path) -> String {
+    format!(
+        "Videorc can't save to {}. Choose another recordings folder in Output.",
+        output_dir.display()
+    )
+}
+
 pub fn default_recordings_dir() -> PathBuf {
     // Harness isolation (F-016): smokes must never write into the user's real
     // media library — Electron main forces this env for isolated backend
@@ -2810,19 +3474,81 @@ pub fn default_recordings_dir() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    // macOS keeps captures under ~/Movies; Windows uses ~/Videos (the
-    // platform's Known Folder for the same content).
     #[cfg(target_os = "windows")]
-    let (home_var, media_dir) = ("USERPROFILE", "Videos");
+    let home_var = "USERPROFILE";
     #[cfg(not(target_os = "windows"))]
-    let (home_var, media_dir) = ("HOME", "Movies");
-
-    std::env::var_os(home_var)
+    let home_var = "HOME";
+    let home = std::env::var_os(home_var)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(media_dir)
-        .join("Videorc")
-        .join("Recordings")
+        .unwrap_or_else(|| PathBuf::from("."));
+    platform_recordings_dir(&home)
+}
+
+/// macOS keeps captures under ~/Movies; Windows uses ~/Videos (the
+/// platform's Known Folder for the same content).
+#[cfg(not(target_os = "linux"))]
+fn platform_recordings_dir(home: &Path) -> PathBuf {
+    let media_dir = if cfg!(target_os = "windows") {
+        "Videos"
+    } else {
+        "Movies"
+    };
+    home.join(media_dir).join("Videorc").join("Recordings")
+}
+
+/// Linux: the XDG videos folder, see [`linux_default_recordings_dir`].
+#[cfg(target_os = "linux")]
+fn platform_recordings_dir(home: &Path) -> PathBuf {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
+    let legacy = home.join("Movies").join("Videorc").join("Recordings");
+    let legacy_has_recordings = std::fs::read_dir(&legacy)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    linux_default_recordings_dir(
+        home,
+        std::env::var_os("XDG_VIDEOS_DIR").map(PathBuf::from),
+        user_dirs.as_deref(),
+        legacy_has_recordings,
+    )
+}
+
+/// Linux plan 0019 item 4: recordings go to the XDG videos folder
+/// (`XDG_VIDEOS_DIR`, else `user-dirs.dirs`, else `~/Videos`), not a macOS
+/// `~/Movies` the app had to create. Someone who already recorded into
+/// `~/Movies/Videorc/Recordings` keeps that folder, so a take never lands
+/// somewhere new without being asked.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_default_recordings_dir(
+    home: &Path,
+    env_videos: Option<PathBuf>,
+    user_dirs: Option<&str>,
+    legacy_has_recordings: bool,
+) -> PathBuf {
+    if legacy_has_recordings {
+        return home.join("Movies").join("Videorc").join("Recordings");
+    }
+    let from_user_dirs = || {
+        user_dirs?.lines().find_map(|line| {
+            let value = line.trim().strip_prefix("XDG_VIDEOS_DIR=")?;
+            let value = value.trim().trim_matches('"');
+            let path = match value.strip_prefix("$HOME") {
+                Some(rest) => home.join(rest.trim_start_matches('/')),
+                None => PathBuf::from(value),
+            };
+            Some(path)
+        })
+    };
+    // A videos folder set to home itself means "disabled" in xdg-user-dirs.
+    let videos = env_videos
+        .filter(|dir| dir.is_absolute())
+        .or_else(from_user_dirs)
+        .filter(|dir| dir.is_absolute() && dir.as_path() != home)
+        .unwrap_or_else(|| home.join("Videos"));
+    videos.join("Videorc").join("Recordings")
 }
 
 /// FX8: Library titles read in the user's wall clock. Generic over the zone so
@@ -2916,6 +3642,7 @@ pub fn idle_status() -> RecordingStatus {
         pipeline: None,
         duration_ms: None,
         message: Some("Ready to start a capture session.".to_string()),
+        replay_only: false,
     }
 }
 
@@ -2939,6 +3666,7 @@ fn recording_start_rejected_status(
         pipeline: Some(pipeline.status()),
         duration_ms: None,
         message: Some(message.to_string()),
+        replay_only: false,
     }
 }
 
@@ -2953,6 +3681,7 @@ async fn commit_recording_startup_scene_at_time(
     layout: LayoutSettings,
     active_screen: Option<StreamScreen>,
     now_millis: u64,
+    selected_sources: Option<&crate::protocol::SourceSelection>,
 ) -> RecordingStartupSceneLease {
     // Recording startup and live/idle scene transactions share one commit edge.
     // Keep this lease alive until the exact startup revision reaches compositor
@@ -2965,22 +3694,58 @@ async fn commit_recording_startup_scene_at_time(
     }
     let current_revision = state.compositor.lock().await.status.scene_revision;
     let scene_revision = crate::live_layout::next_scene_revision(current_revision, now_millis);
-    update_compositor_scene(
-        state,
-        CompositorSceneUpdateParams {
-            revision: scene_revision,
-            scene: Some(scene.clone()),
-            layout,
-            active_screen,
-            transition_ms: None,
-        },
-    )
-    .await;
+    let compositor_params = CompositorSceneUpdateParams {
+        revision: scene_revision,
+        scene: Some(scene.clone()),
+        layout,
+        active_screen,
+        transition_ms: None,
+    };
+    if let Some(selected_sources) = selected_sources {
+        crate::compositor::update_compositor_scene_with_selected_sources(
+            state,
+            compositor_params,
+            selected_sources,
+        )
+        .await;
+    } else {
+        update_compositor_scene(state, compositor_params).await;
+    }
 
     RecordingStartupSceneLease {
         scene_revision,
         _scene_commit: scene_commit,
     }
+}
+
+/// Plan 212 S2: a performance check's benchmark scene is committed beside
+/// the user's scene (`commit_benchmark_scene`): `state.scene`, the
+/// compositor's scene and its status keep the user's. The returned lease
+/// carries the benchmark revision the startup barrier waits for, and holds
+/// the scene-commit edge like a recording's, so an idle reload cannot race
+/// the barrier. `None` when the run is not the benchmark's.
+async fn commit_benchmark_startup_scene_at_time(
+    state: &AppState,
+    scene: &Scene,
+    layout: LayoutSettings,
+    now_millis: u64,
+    selected_sources: &crate::protocol::SourceSelection,
+) -> Option<RecordingStartupSceneLease> {
+    let scene_commit = state.scene_commit.clone().lock_owned().await;
+    let current_revision = state.compositor.lock().await.status.scene_revision;
+    let scene_revision = crate::live_layout::next_scene_revision(current_revision, now_millis);
+    crate::compositor::commit_benchmark_scene(
+        state,
+        scene_revision,
+        scene.clone(),
+        layout,
+        selected_sources.clone(),
+    )
+    .await
+    .then_some(RecordingStartupSceneLease {
+        scene_revision,
+        _scene_commit: scene_commit,
+    })
 }
 
 pub async fn start_session(state: AppState, params: StartSessionParams) -> Result<RecordingStatus> {
@@ -2995,7 +3760,15 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
         .recording_started_once
         .swap(true, std::sync::atomic::Ordering::AcqRel);
     let mut timeline = RecordingStartTimeline::start(params.requested_at_ms, cold);
-    let result = start_session_with_timeline(state.clone(), params, &mut timeline).await;
+    let failure_log = SessionStartFailureLog::new(state.database.clone());
+    let result =
+        start_session_with_timeline(state.clone(), params, &mut timeline, failure_log.pending())
+            .await;
+    if let Err(error) = &result
+        && let Some(reason) = failure_log.report(error)
+    {
+        state.emit_log("warn", format!("Session start refused: {reason}"));
+    }
     let outcome = if result.is_ok() { "running" } else { "refused" };
     let snapshot = timeline.snapshot(outcome);
     let summary = timeline.summary_line(outcome);
@@ -3012,11 +3785,100 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
     result
 }
 
+/// A buffer-only start the renderer made on its own (plan 181): the only
+/// start the software-encoder guard may refuse.
+fn replay_auto_start_requested(replay_only: bool, params: &StartSessionParams) -> bool {
+    replay_only && params.replay.as_ref().is_some_and(|replay| replay.auto)
+}
+
+/// An automatic ring on the bridge waits for a visible camera's first frame:
+/// the bridge refuses a scene source with no frames, and the ring is the one
+/// start nobody pressed, so it can wait instead of failing.
+fn automatic_ring_waits_for_camera(
+    automatic_ring: bool,
+    bridge_ruled_out: bool,
+    scene: &Scene,
+    has_camera_frame: bool,
+) -> bool {
+    automatic_ring
+        && !bridge_ruled_out
+        && !has_camera_frame
+        && scene
+            .sources
+            .iter()
+            .any(|source| source.visible && source.kind == SceneSourceKind::Camera)
+}
+
+/// The scene a session composes: the request's own, else the one its capture
+/// config describes.
+fn requested_session_scene(params: &StartSessionParams) -> Scene {
+    params.scene.clone().unwrap_or_else(|| {
+        scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: params.sources.clone(),
+            layout: params.layout.clone(),
+            video: Some(params.output.video.clone()),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        })
+    })
+}
+
+/// Plan 181: a buffer-only session composes exactly like a record-only
+/// session (same bridge, encoder posture, overlay plan) and writes no file;
+/// the replay ring is its only output. The request shape is kept in the
+/// returned `replay_only`, `record_enabled` is raised for every pipeline
+/// decision, and every file-only step checks `replay_only` instead. Plan 198:
+/// the ring has no file for Screen and Camera files to sit beside, so a
+/// buffer-only session never arms them; Record and Go Live hand-overs carry
+/// their own request.
+fn normalize_replay_only_params(params: &mut StartSessionParams) -> bool {
+    let replay_only = params.replay_only();
+    if replay_only {
+        params.output.record_enabled = true;
+        params.captions = None;
+        params.output.separate_source_recordings = None;
+    }
+    replay_only
+}
+
 async fn start_session_with_timeline(
     state: AppState,
     mut params: StartSessionParams,
     timeline: &mut RecordingStartTimeline,
+    start_failure: PendingStartFailure,
 ) -> Result<RecordingStatus> {
+    let replay_only = normalize_replay_only_params(&mut params);
+    // Held until this start has run or failed, so a Record or Go Live that
+    // lands meanwhile waits in `hand_over_replay_only_session`.
+    let _replay_start_in_flight =
+        replay_only.then(|| crate::replay_buffer::begin_start_in_flight(&state));
+    if let Some(replay) = params.replay.as_mut() {
+        replay.seconds = crate::replay_buffer::clamp_seconds(replay.seconds);
+    }
+    // Decided before admission, the probes and the microphone: an automatic
+    // ring whose camera has no frame yet would be refused at the bridge's
+    // source wait anyway, after holding the ordered lane for seconds.
+    if automatic_ring_waits_for_camera(
+        replay_auto_start_requested(replay_only, &params),
+        compositor_encoder_bridge_ruled_out(&params),
+        &requested_session_scene(&params),
+        preview_camera_latest_frame_info(&state).await.is_some(),
+    ) {
+        return Err(crate::replay_buffer::AutoStartSourcesNotReady.into());
+    }
+    // Plan 181 S7: Record or Go Live while a buffer-only session runs hands
+    // over here, so no caller meets "A capture session is already running"
+    // because of the buffer. The new session carries its own ring.
+    if !replay_only {
+        // A request that will be refused anyway must not stop the clip buffer
+        // first: the ring that re-arms after the refusal starts empty
+        // (retest 152: 24 s buffered -> 2 s). The same checks run again below.
+        if replay_hand_over_pending(&state).await {
+            refuse_invalid_request(&state, &params)?;
+        }
+        hand_over_replay_only_session(&state).await?;
+    }
     // Once armed at the Starting edge this guard owns the admission itself, so
     // every uncommitted return publishes the exact-session terminal replacement
     // before another start can be admitted.
@@ -3035,12 +3897,25 @@ async fn start_session_with_timeline(
             "The standby microphone is still opening. Wait for it to finish before starting the session."
         );
     }
-    if crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count())
-        && state.recording.lock().await.is_none()
-    {
-        bail!(
-            "The previous microphone is still opening or closing. Wait for cleanup before starting another session."
-        );
+    // With the ring on by default (plan 181) the previous session's
+    // microphone teardown and the standby microphone's re-open can still be
+    // in flight when the next start lands (the re-arm right after a Stop, a
+    // Record that hands over from it): give them a moment under this
+    // admission instead of refusing outright.
+    let cleanup_deadline = Instant::now() + MICROPHONE_CLEANUP_GRACE;
+    loop {
+        let pending =
+            crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count())
+                && state.recording.lock().await.is_none();
+        if !pending {
+            break;
+        }
+        if Instant::now() >= cleanup_deadline {
+            bail!(
+                "The previous microphone is still opening or closing. Wait for cleanup before starting another session."
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     timeline.mark(RecordingStartPhase::Admission);
     let mut session_start_admission = Some(session_start_admission);
@@ -3075,8 +3950,27 @@ async fn start_session_with_timeline(
     let session_id = Uuid::new_v4().to_string();
     timeline.set_session_id(&session_id);
     wait_for_encoder_bridge_start_admission(&session_id, Duration::from_secs(2)).await?;
+    timeline.mark(RecordingStartPhase::BridgeAdmission);
 
-    let capture_permit = state.ffmpeg_work.begin_capture_when_available().await;
+    // Plan 181: the default ring's capture is light to the FFmpeg work
+    // coordinator, so posters, quality checks and repairs run beside it and
+    // its re-arm after every Stop never cancels a maintenance job.
+    let maintenance_running_before_permit = state.ffmpeg_work.snapshot().maintenance_running;
+    let capture_permit = if replay_only {
+        state.ffmpeg_work.begin_light_capture_when_available().await
+    } else {
+        state.ffmpeg_work.begin_capture_when_available().await
+    };
+    if maintenance_running_before_permit && !replay_only {
+        // Plan 195 F3: on a weak CPU a post-recording quality check runs for
+        // minutes, and Record waits for it to cancel; the timeline mark below
+        // shows how long, this line says why.
+        tracing::info!(
+            session = %session_id,
+            "A recording maintenance job was running when Record asked for the FFmpeg work permit; it was asked to cancel"
+        );
+    }
+    timeline.mark(RecordingStartPhase::FfmpegWorkPermit);
     validate_outputs(&params)?;
     if let Some(scene) = params.scene.as_ref()
         && let Err(message) = validate_scene_background(scene)
@@ -3090,7 +3984,7 @@ async fn start_session_with_timeline(
     #[cfg(target_os = "windows")]
     let recordable_video_notice = {
         let requested_output_video = params.output.video.clone();
-        resolve_windows_recordable_video(&ffmpeg_path, &params)
+        resolve_windows_recordable_video(&state, &ffmpeg_path, &params)
             .await
             .and_then(|selected| {
                 let message =
@@ -3101,22 +3995,57 @@ async fn start_session_with_timeline(
     };
     #[cfg(not(target_os = "windows"))]
     let recordable_video_notice: Option<String> = None;
+    // Marked on every platform so the start timeline keeps one phase order;
+    // only Windows spends time here.
+    timeline.mark(RecordingStartPhase::RecordableVideoProbe);
+    // Plan 181 guard, decided early: a refused automatic ring must not first
+    // open the microphone and wait on preview sources. When either failed,
+    // the start never reached the guard below, so the renderer retried it
+    // as a plain failure and kept reopening the microphone (2026-10-25 Iris
+    // Xe tester). It asks for the path the session will take: the legacy
+    // raw path when the request rules the bridge out, else the bridge. The
+    // probes are cached, so the later check repeats this decision for free.
+    if replay_auto_start_requested(replay_only, &params) {
+        let encoder_output_topology = encoder_output_topology_plan_from_session(&params)?;
+        let decision = resolve_windows_encoded_bridge_decision(
+            &ffmpeg_path,
+            &encoder_output_topology,
+            requested_session_video_output(&params, !compositor_encoder_bridge_ruled_out(&params)),
+        )
+        .await?;
+        if let Some(refusal) =
+            crate::replay_buffer::auto_start_refusal(decision.effective_encode_backend)
+        {
+            return Err(refusal.into());
+        }
+    }
     let output_dir = resolve_output_directory(params.output.output_directory.as_deref())?;
 
-    if params.output.record_enabled {
+    if params.output.record_enabled && !replay_only {
         fs::create_dir_all(&output_dir)
             .await
             .with_context(|| format!("Could not create {}", output_dir.display()))?;
+        // Retest 154 A4: a read-only folder used to start the session, then
+        // FFmpeg failed to open its output and the Library kept a failed row.
+        // Refuse here, before the session row and any FFmpeg process exist.
+        ensure_output_directory_writable(&output_dir).await?;
     }
 
     let started_at = Utc::now();
     // FX8: the display title reads in the user's wall clock — it sat next to
     // Library's locally-rendered date column showing a different time. The
     // stored `started_at` (RFC3339 UTC) and the output filename stay UTC.
-    let output_path = params
-        .output
-        .record_enabled
+    let output_path = (params.output.record_enabled && !replay_only)
         .then(|| recording_output_path(&output_dir, &started_at, &session_id));
+    // Plan 157: separate source recordings. Validated above; `Some` means the
+    // session must carry Screen + Camera ISO legs or fail to start.
+    let source_iso_plan = crate::source_iso::armed_plan(&params.output);
+    let mut source_iso_capture_startup = SourceIsoCaptureStartupGuard {
+        state: source_iso_plan.as_ref().map(|_| state.clone()),
+        batches: None,
+        #[cfg(test)]
+        cleanup_done: None,
+    };
     let stream_resolution = if params.output.stream_enabled {
         match params
             .streaming
@@ -3151,38 +4080,72 @@ async fn start_session_with_timeline(
             .collect::<Vec<_>>()
             .join(", ")
     });
-    let mode = output_mode(params.output.record_enabled, params.output.stream_enabled);
+    let mode = if replay_only {
+        "replay"
+    } else {
+        output_mode(params.output.record_enabled, params.output.stream_enabled)
+    };
     let container =
         container_for_outputs(params.output.record_enabled, params.output.stream_enabled);
 
     // F-017: every early error below this point used to leave a permanent
     // 'running' Library row pointing at a file that never existed. The guard
     // marks the row failed on ANY exit path that doesn't reach the pipeline.
-    let mut session_row_guard = SessionStartRowGuard::new(state.database.clone(), &session_id);
+    let mut session_row_guard =
+        SessionStartRowGuard::reporting_to(state.database.clone(), &session_id, start_failure);
 
-    state.database.create_session(&NewSession {
-        id: session_id.clone(),
-        title: session_title(&started_at, &chrono::Local),
-        started_at: started_at.to_rfc3339(),
-        mode: mode.to_string(),
-        output_path: output_path.as_ref().map(|path| path.display().to_string()),
-        container: Some(container_key(&container).to_string()),
-        stream_preset: params
-            .output
-            .stream_enabled
-            .then(|| format!("{:?}", params.output.rtmp.preset)),
-        sources: params.sources.clone(),
-        layout: params.layout.clone(),
-        output: params.output.clone(),
-    })?;
-    if params.purpose.is_performance_check() {
-        // Benchmark rows never reach the Library and must not replace the
-        // user's remembered capture; the performance check deletes them.
-        state.database.mark_session_performance_check(&session_id)?;
+    if replay_only {
+        // Plan 181: no Library row, no remembered capture. Its logs and
+        // health events skip the sessions foreign key from here on.
+        crate::replay_buffer::register_rowless_session(&state, &session_id);
     } else {
-        state
-            .database
-            .save_setting("last_capture_session", &params)?;
+        state.database.create_session(&NewSession {
+            id: session_id.clone(),
+            title: session_title(&started_at, &chrono::Local),
+            started_at: started_at.to_rfc3339(),
+            mode: mode.to_string(),
+            output_path: output_path.as_ref().map(|path| path.display().to_string()),
+            container: Some(container_key(&container).to_string()),
+            stream_preset: params
+                .output
+                .stream_enabled
+                .then(|| format!("{:?}", params.output.rtmp.preset)),
+            sources: params.sources.clone(),
+            layout: params.layout.clone(),
+            output: params.output.clone(),
+        })?;
+        if let (Some(plan), Some(path)) = (source_iso_plan.as_ref(), output_path.as_deref()) {
+            let roles = plan
+                .iso_roles()
+                .map(|role| {
+                    (
+                        role.as_str(),
+                        role.title_suffix(),
+                        crate::source_iso::recording_role_mkv_path(path, role)
+                            .display()
+                            .to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (_, _, path) in &roles {
+                anyhow::ensure!(
+                    !Path::new(path).exists(),
+                    "Separate recording path already exists: {path}"
+                );
+            }
+            state
+                .database
+                .reserve_source_iso_sessions(&session_id, &roles)?;
+        }
+        if params.purpose.is_performance_check() {
+            // Benchmark rows never reach the Library and must not replace the
+            // user's remembered capture; the performance check deletes them.
+            state.database.mark_session_performance_check(&session_id)?;
+        } else {
+            state
+                .database
+                .save_setting("last_capture_session", &params)?;
+        }
     }
     if !stream_targets.is_empty() {
         // Label + composed leg per destination: a dual-orientation session
@@ -3230,18 +4193,19 @@ async fn start_session_with_timeline(
         None,
     );
 
-    if params.output.record_enabled {
-        // Advisory only: `df` and the health-event write stay off the start path.
-        let disk_state = state.clone();
-        let disk_session_id = session_id.clone();
-        let disk_output_dir = output_dir.clone();
-        tokio::spawn(async move {
-            let _ =
-                emit_disk_space_health_event(&disk_state, &disk_session_id, &disk_output_dir).await;
-        });
-    }
+    // Plan 200 C5: the notice counts minutes, from the bitrate of every file
+    // this take writes. Sent once the Starting status is out (below).
+    let disk_space_check = (params.output.record_enabled && !replay_only).then(|| {
+        (
+            output_dir.clone(),
+            params.output.video.bitrate_kbps,
+            crate::source_iso::armed_plan(&params.output)
+                .map_or(0, |plan| plan.iso_roles().count()),
+        )
+    });
 
     let recording_preview_generation = stop_idle_live_preview_for_recording(state.clone()).await;
+    timeline.mark(RecordingStartPhase::PreviewStop);
 
     let mut startup_resources = CaptureStartupResources::default();
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &params).await;
@@ -3324,6 +4288,12 @@ async fn start_session_with_timeline(
         {
             params.sources.microphone_id.clone()
         }
+        microphone @ Some(MicrophoneInput::LinuxPulse { .. }) => linux_pulse_worker_device(
+            microphone,
+            params.sources.microphone_id.as_ref(),
+            cfg!(target_os = "linux"),
+            std::env::var(LINUX_MICROPHONE_DIRECT_ENV).as_deref() == Ok("1"),
+        ),
         _ => None,
     };
     if let Some(id) = worker_device {
@@ -3362,20 +4332,54 @@ async fn start_session_with_timeline(
                         );
                         worker_fallback_reason = Some(reason);
                     }
+                    WorkerMicrophoneFallback::DirectPulse => {
+                        capture.microphone = resolved_microphone.clone();
+                        let reason = format!("{error:#}");
+                        state.emit_log(
+                            "warn",
+                            format!(
+                                "Linux microphone capture fell back to FFmpeg's direct Pulse input: {reason}"
+                            ),
+                        );
+                        let _ = emit_health_event(
+                            &state,
+                            Some(&session_id),
+                            HealthLevel::Warn,
+                            WORKER_MICROPHONE_FALLBACK_CODE,
+                            &linux_direct_microphone_message(&reason),
+                        );
+                        worker_fallback_reason = Some(reason);
+                    }
                     WorkerMicrophoneFallback::Silence => {
                         capture.microphone = None;
                         state.emit_log(
                             "warn",
                             format!("Capture-worker microphone unavailable: {error:#}"),
                         );
+                        // Retest 154 (C4): an unplugged Linux mic says so
+                        // in the "Going on without a microphone" toast.
+                        let message = match &resolved_microphone {
+                            Some(MicrophoneInput::LinuxPulse { source_name })
+                                if crate::audio_capture_adapter::worker_start_failure_kind(
+                                    &error,
+                                ) == Some(
+                                    crate::audio_capture_adapter::WorkerStartFailureKind::DeviceNotInInventory,
+                                ) =>
+                            {
+                                crate::linux_pulse_audio::pulse_source_not_connected_message(
+                                    source_name,
+                                )
+                            }
+                            _ => format!(
+                                "The selected microphone could not supply timestamped audio: {error:#}"
+                            ),
+                        };
                         let _ = emit_health_event(
                             &state,
                             Some(&session_id),
                             HealthLevel::Warn,
                             "microphone-capture-worker-unavailable",
-                            &format!(
-                                "The selected microphone could not supply timestamped audio: {error:#}"
-                            ),
+                            &message,
                         );
                     }
                 }
@@ -3422,8 +4426,16 @@ async fn start_session_with_timeline(
     let has_session_audio = has_native_audio || silent_audio_fifo.is_some();
     let audio_tracks = capture_audio_tracks(&capture);
     let active_screen = state.database.active_stream_screen()?;
+    // Plan 186 S4: the banners showing when the session starts decide whether
+    // the legacy graph gets its overlay FIFO and whether the direct D3D11
+    // recording (which draws nothing over the screen) may be chosen.
+    let shown_banners_at_start = crate::banners::shown_banners_for_compositor(&state.database)?;
     let use_encoder_bridge =
         should_use_compositor_encoder_bridge(&state, &params, active_screen.as_ref()).await?;
+    // Plan 210 S7.5: the legacy graph grabs the display through FFmpeg itself,
+    // outside the gated frame store. Starting it while the screen is hidden
+    // would record the live screen under a "Screen hidden" chip: refuse.
+    refuse_legacy_start_while_hidden(use_encoder_bridge, state.screen_privacy.view().hidden)?;
     if matches!(capture.video, VideoInput::TestPattern)
         && !linux_bridge_composes_native_sources(use_encoder_bridge, &params)
     {
@@ -3496,14 +4508,29 @@ async fn start_session_with_timeline(
     } else {
         None
     };
-    let requested_encoder_bridge_video_output = if use_encoder_bridge {
-        recording_encoder_bridge_video_output(
-            params.output.record_enabled,
-            params.output.stream_enabled,
-        )
-    } else {
-        EncoderBridgeVideoOutput::RawYuv420p
+    // Plan 157: the PCM taps exist before the audio bus so it can be handed
+    // them at attach; their writers wait for the ISO muxers to open.
+    let source_iso_taps = match source_iso_plan.as_ref() {
+        Some(plan) => {
+            if !use_encoder_bridge {
+                bail!(
+                    "{}: Separate source recordings need the compositor encoder bridge; this session's capture path cannot carry them.",
+                    crate::source_iso::HEALTH_UNAVAILABLE
+                );
+            }
+            let taps = crate::source_iso::prepare_source_audio_taps(&session_id, plan)?;
+            if let Some(tap) = taps.microphone.as_ref() {
+                startup_resources.track_fifo(tap.path());
+            }
+            if let Some(tap) = taps.system.as_ref() {
+                startup_resources.track_fifo(tap.path());
+            }
+            Some(Arc::new(taps))
+        }
+        None => None,
     };
+    let requested_encoder_bridge_video_output =
+        requested_session_video_output(&params, use_encoder_bridge);
     let encoder_output_topology = encoder_output_topology_plan_from_session(&params)?;
     let windows_encoded_bridge_decision = resolve_windows_encoded_bridge_decision(
         &ffmpeg_path,
@@ -3511,7 +4538,27 @@ async fn start_session_with_timeline(
         requested_encoder_bridge_video_output,
     )
     .await?;
+    // Plan 181 (owner redesign, guard): the ring runs by default whenever
+    // Videorc is open, but never on its own on a software encoder path (the
+    // raw CPU encode of a weak Windows or Linux box), where it would be a
+    // second encode. The decision above is the one the session would use;
+    // nothing has been spawned yet, so the typed refusal costs nothing. A
+    // start the user chose (`auto: false`) runs anywhere. The early check
+    // already decided this from the request; this one stays the authority.
+    if replay_auto_start_requested(replay_only, &params)
+        && let Some(refusal) = crate::replay_buffer::auto_start_refusal(
+            windows_encoded_bridge_decision.effective_encode_backend,
+        )
+    {
+        return Err(refusal.into());
+    }
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
+    if source_iso_plan.is_some() {
+        anyhow::ensure!(
+            encoder_bridge_video_output == EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            "Separate source recordings require the timestamped MPEG-TS recording transport"
+        );
+    }
     // Intel iGPU MFTs that reject the requested CBR at probe time are only kept
     // alive if every MF leg encodes at the bitrate the probe validated; encode
     // config must match the probe or the MFT fails mid-session with
@@ -3626,6 +4673,10 @@ async fn start_session_with_timeline(
         None
     };
     let session_caption_plan = caption_leg_plan(&params);
+    // Plan 164: the highlight card and the Buddy follow the streamer's
+    // per-output switches in the backend-owned overlay layout; captions keep
+    // `burnTarget` (derived from the same switches by the renderer).
+    let overlay_layout = crate::overlay_layout::load_overlay_layout(&state.database);
     // A new session must never inherit a composited caption bar. The overlay
     // slot is app-global and the renderer's stop-time clear is best-effort
     // (fire-and-forget, and a closed renderer never sends it) — clearing here
@@ -3637,6 +4688,9 @@ async fn start_session_with_timeline(
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
+    // The Buddy's bubble too (plan 164): the avatar stays (its raster is the
+    // renderer's, re-pushed for this session's canvases), the words do not.
+    let _ = crate::buddy_overlay::clear(&state).await;
     // Burn-in needs the synthetic compositor (encoder-bridge path) and, for a
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
@@ -3786,26 +4840,83 @@ async fn start_session_with_timeline(
                 None
             }
             WindowsD3d11SessionSelection::Candidate(plan) => {
-                let (highlight_on_primary, highlight_on_auxiliary) =
-                    crate::captions::highlight_overlay_leg_plan(
-                        params.output.record_enabled,
-                        params.output.stream_enabled,
-                        // The D3D11 path refuses simulcast sessions above, so
-                        // its auxiliary is always a split stream leg.
-                        if plan.auxiliary.is_some() {
-                            crate::captions::HighlightAuxLeg::Stream
-                        } else {
-                            crate::captions::HighlightAuxLeg::None
-                        },
-                    );
+                let d3d11_overlay_shape = crate::overlay_layout::OverlaySessionShape {
+                    record_enabled: params.output.record_enabled,
+                    stream_enabled: params.output.stream_enabled,
+                    // The D3D11 path refuses simulcast sessions above, so its
+                    // auxiliary is always a split stream leg.
+                    aux_leg: if plan.auxiliary.is_some() {
+                        crate::overlay_layout::OverlayAuxLeg::Stream
+                    } else {
+                        crate::overlay_layout::OverlayAuxLeg::None
+                    },
+                };
+                let d3d11_overlay_plans = crate::overlay_layout::overlay_session_plans(
+                    d3d11_overlay_shape,
+                    &overlay_layout,
+                );
+                let (highlight_on_primary, highlight_on_auxiliary) = (
+                    d3d11_overlay_plans.highlight.primary,
+                    d3d11_overlay_plans.highlight.aux,
+                );
+                // Plan 205 S8: the session's Preview draws the program. A
+                // buffer-only session's ring keeps the recording plan (D2;
+                // `normalize_replay_only_params` raised `record_enabled`)
+                // while its Preview shows the idle program, so its program
+                // shape is `None`; every other session's is its own shape.
+                // The Buddy and highlight switches still apply at the next
+                // start on this path (`apply_overlay_layout_to_active_session`
+                // says so in the log).
+                let d3d11_program_shape = (!replay_only).then_some(d3d11_overlay_shape);
+                let highlight_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.highlight.show_on_stream,
+                    overlay_layout.highlight.show_in_recording,
+                );
+                let buddy_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.buddy.show_on_stream,
+                    overlay_layout.buddy.show_in_recording,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
+                    buddy: state.buddy_overlay.clone(),
+                    buddy_sprite: state.buddy_sprite.clone(),
                     caption_on_primary: session_caption_plan.primary,
                     caption_on_auxiliary: session_caption_plan.aux,
                     highlight_on_primary,
                     highlight_on_auxiliary,
+                    buddy_on_primary: d3d11_overlay_plans.buddy.primary,
+                    buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
+                    highlight_in_program,
+                    buddy_in_program,
+                    // Plan 186 S4: banners follow this session's leg plan
+                    // live, from the compositor's banner set.
+                    banner_shape: d3d11_overlay_shape,
+                    program_shape: d3d11_program_shape,
+                    banner_prepare: state.banner_prepare.clone(),
                 };
+                // The pet's atlases for the legs that draw it, including the
+                // primary canvas when only the Preview does (plan 205 S8):
+                // the Preview is composed on the primary's canvas.
+                let buddy_sprite_targets = crate::windows_d3d11_session::windows_d3d11_item_targets(
+                    d3d11_overlay_plans.buddy.primary,
+                    d3d11_overlay_plans.buddy.aux,
+                    buddy_in_program,
+                );
+                state.buddy_sprite.prepare(&buddy_sprite_legs(
+                    crate::overlay_layout::OverlayLegPlan {
+                        primary: buddy_sprite_targets.primary_canvas.is_some(),
+                        aux: buddy_sprite_targets.auxiliary_canvas.is_some(),
+                        needs_split: false,
+                    },
+                    // The D3D11 session draws the program itself (S8); its
+                    // targets above already include it.
+                    false,
+                    (plan.primary.width, plan.primary.height),
+                    plan.auxiliary.map(|video| (video.width, video.height)),
+                ));
                 match WindowsD3d11SessionPump::start(
                     &state.windows_d3d11_media,
                     plan.clone(),
@@ -3958,17 +5069,46 @@ async fn start_session_with_timeline(
             .lock()
             .await
             .release_native_session_output(&session_id);
+        // A Record click right after launch queues the renderer's
+        // preview.screen.start behind this session.start; without this the
+        // startup barrier refused with 0 fresh screen frames.
+        if windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            windows_d3d11_media_mode,
+            use_encoder_bridge,
+            recording_encoder_bridge_video_output(
+                params.output.record_enabled,
+                params.output.stream_enabled,
+            ),
+        ) {
+            let screen = ensure_selected_preview_screen_live(&state, &params, &ffmpeg_path).await;
+            anyhow::ensure!(
+                matches!(screen.state, crate::protocol::PreviewScreenState::Live),
+                "Cannot start: the GPU recording path fell back and the selected Screen could not be prepared ({:?}): {}",
+                screen.state,
+                screen
+                    .message
+                    .as_deref()
+                    .unwrap_or("capture did not become live")
+            );
+        }
     }
 
-    let screen_overlay_fifo =
-        if !use_encoder_bridge && (active_screen.is_some() || params.output.stream_enabled) {
-            let fifo_path = screen_overlay_fifo_path(&session_id);
-            create_screen_overlay_fifo(&fifo_path)?;
-            startup_resources.track_fifo(&fifo_path);
-            Some(fifo_path)
-        } else {
-            None
-        };
+    // The legacy graph's only live layer: the full-canvas RGBA FIFO. It exists
+    // when the session starts with a takeover, a stream, or (plan 186 S4) a
+    // banner; a banner shown later on a session without it is refused.
+    let screen_overlay_fifo = if !use_encoder_bridge
+        && (active_screen.is_some()
+            || params.output.stream_enabled
+            || !shown_banners_at_start.is_empty())
+    {
+        let fifo_path = screen_overlay_fifo_path(&session_id);
+        create_screen_overlay_fifo(&fifo_path)?;
+        startup_resources.track_fifo(&fifo_path);
+        Some(fifo_path)
+    } else {
+        None
+    };
 
     let mut pipeline = RecordingPipeline::new(
         params.output.record_enabled,
@@ -4079,11 +5219,34 @@ async fn start_session_with_timeline(
     } else {
         None
     };
-    let highlight_overlay_plan = crate::captions::highlight_overlay_leg_plan(
-        params.output.record_enabled,
-        params.output.stream_enabled,
-        highlight_aux_leg(encoder_bridge_stream_output.as_ref()),
+    let overlay_session_shape = crate::overlay_layout::OverlaySessionShape {
+        record_enabled: params.output.record_enabled,
+        stream_enabled: params.output.stream_enabled,
+        aux_leg: highlight_aux_leg(encoder_bridge_stream_output.as_ref()),
+    };
+    let overlay_plans =
+        crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
+    // Plan 205 S6: the same plans plus the program's verdict for the Preview
+    // (idle for a buffer-only session, D2), which the Preview's own picture
+    // draws when the primary leg does not.
+    let overlay_flags = crate::compositor::OverlayLegFlags::for_session(
+        overlay_session_shape,
+        replay_only,
+        &overlay_layout,
     );
+    // Plan 168 S-B1: the pet's atlases start building now (off this task),
+    // so the session's first frame already has the Buddy.
+    if use_encoder_bridge {
+        state.buddy_sprite.prepare(&buddy_sprite_legs(
+            overlay_plans.buddy,
+            overlay_flags.buddy_on_program,
+            (params.output.video.width, params.output.video.height),
+            encoder_bridge_stream_output
+                .as_ref()
+                .map(|output| (output.width, output.height)),
+        ));
+    }
+    let highlight_overlay_plan = (overlay_plans.highlight.primary, overlay_plans.highlight.aux);
     let comment_highlight_vertical_canvas = comment_highlight_vertical_canvas(
         encoder_bridge_stream_output.as_ref(),
         highlight_overlay_plan,
@@ -4093,8 +5256,56 @@ async fn start_session_with_timeline(
             session = %session_id,
             primary = highlight_overlay_plan.0,
             aux = highlight_overlay_plan.1,
+            buddy_primary = overlay_plans.buddy.primary,
+            buddy_aux = overlay_plans.buddy.aux,
+            // S-B2.2: any item (not only captions) whose switches disagree
+            // on a shared leg asks for the split; the topology decides.
+            needs_split = crate::overlay_layout::overlay_layout_needs_split(
+                overlay_session_shape,
+                &overlay_layout
+            ),
             vertical_canvas = ?comment_highlight_vertical_canvas,
-            "comment highlight leg plan"
+            "overlay leg plan"
+        );
+    }
+    // D13: every switch pair this session cannot honour is said out loud
+    // (the Go Live sheet already showed the same sentence before start).
+    // Plan 186 D6: the shown banners are one more item, `banners`.
+    if use_encoder_bridge {
+        let banner_switches = crate::banners::shown_banner_switches(&state.database)
+            .unwrap_or_else(|error| {
+                tracing::warn!("Could not read the shown banners for the start notices: {error:#}");
+                Vec::new()
+            });
+        for notice in crate::overlay_layout::overlay_start_notices(
+            overlay_session_shape,
+            &overlay_layout,
+            &banner_switches,
+        ) {
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Info,
+                "overlay-start-notice",
+                &notice.notice,
+            );
+        }
+    }
+    // Plan 190 D7: the legacy graph (4K60, bridge off) is static, so a live
+    // background records as its poster. Say so once, at start.
+    if !use_encoder_bridge
+        && params
+            .scene
+            .as_ref()
+            .and_then(|scene| scene.background.as_ref())
+            .is_some_and(|background| background.live.is_some())
+    {
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            "live-background-still",
+            crate::live_background::runtime::LEGACY_GRAPH_NOTICE,
         );
     }
     #[cfg(target_os = "windows")]
@@ -4110,6 +5321,9 @@ async fn start_session_with_timeline(
         && params.output.record_enabled
         && !params.output.stream_enabled
         && params.scene.is_none()
+        // Plan 186 S4: the direct path draws nothing over the screen, so a
+        // banner showing at start keeps the session on the D3D11 compositor.
+        && shown_banners_at_start.is_empty()
         && matches!(
             params.layout.layout_preset,
             LayoutPreset::ScreenOnly | LayoutPreset::ScreenCamera
@@ -4119,6 +5333,8 @@ async fn start_session_with_timeline(
         && !session_caption_plan.aux
         && !highlight_overlay_plan.0
         && !highlight_overlay_plan.1
+        && !overlay_plans.buddy.primary
+        && !overlay_plans.buddy.aux
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
@@ -4193,6 +5409,7 @@ async fn start_session_with_timeline(
     let direct_d3d11_consumer_lease = direct_d3d11_recording_source
         .as_ref()
         .map(crate::preview_screen::PreviewScreenD3D11FrameSource::consumer_lease);
+    let direct_d3d11_recording = direct_d3d11_recording_source.is_some();
     if direct_d3d11_recording_source.is_some() {
         let direct_description = if cfg!(target_os = "windows")
             && matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera)
@@ -4216,12 +5433,13 @@ async fn start_session_with_timeline(
     let mut startup_barrier_result: Option<CompositorStartupBarrierResult> = None;
     let mut recording_startup_scene: Option<RecordingStartupSceneLease> = None;
     let mut compositor_capture_lease: Option<CompositorCaptureLeaseGuard> = None;
-    let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store) =
+    let mut restarted_compositor_run_id: Option<String> = None;
+    let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store, source_iso_frame_stores) =
         if direct_d3d11_recording_source.is_some() {
             // The direct path owns the retained WGC source and schedules it on
             // the bridge clock. Starting the CPU compositor here would retain
             // the full-frame BGRA -> I420 cost even though its output is unused.
-            (None, None)
+            (None, None, None)
         } else if use_encoder_bridge && !use_windows_d3d11_media {
             let target_fps = recording_compositor_target_fps(&state, &params.output.video)
                 .await
@@ -4244,28 +5462,37 @@ async fn start_session_with_timeline(
             } else {
                 CompositorFrameConsumer::VideoToolboxEncoder
             };
-            // Instant record (P4.1): a single-output VideoToolbox session arms
-            // the live preview compositor in place — same run id, frame store
-            // and frame history — instead of stopping it and building a new
-            // run. Any refusal falls back to the restart path below, so the
-            // Record button is never a dead click.
-            let armed_in_place = if cfg!(target_os = "macos")
-                && encoder_bridge_stream_output.is_none()
-                && compositor_frame_consumer == CompositorFrameConsumer::VideoToolboxEncoder
+            // Instant record (P4.1): a single-output session arms the live
+            // preview compositor in place — same run id, frame store and frame
+            // history — instead of stopping it and building a new run. Any
+            // refusal falls back to the restart path below, so the Record
+            // button is never a dead click.
+            let armed_in_place = if encoder_bridge_stream_output.is_none()
+                && source_iso_plan.is_none()
+                && compositor_consumer_arms_in_place(compositor_frame_consumer)
                 && !recording_compositor_arm_disabled()
             {
                 match arm_compositor_for_capture(
                     &state,
                     &session_id,
                     CompositorArmParams {
+                        // Plan 212 S1: a benchmark session's lease is marked;
+                        // its scene goes beside the user's (change 2) and
+                        // the Preview holds (change 4).
+                        benchmark: params.purpose.is_performance_check(),
                         target_fps,
                         width: params.output.video.width,
                         height: params.output.video.height,
                         frame_consumer: compositor_frame_consumer,
+                        replay_only,
                         caption_overlay_on_primary: session_caption_plan.primary,
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
+                        buddy_overlay_on_primary: overlay_plans.buddy.primary,
+                        buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        highlight_overlay_on_program: overlay_flags.highlight_on_program,
+                        buddy_overlay_on_program: overlay_flags.buddy_on_program,
                     },
                 )
                 .await
@@ -4310,14 +5537,37 @@ async fn start_session_with_timeline(
                 false
             };
             if !armed_in_place {
-                start_synthetic_compositor(
+                // Plan 200 D2: the Camera file is the live camera's own size,
+                // fitted inside the canvas, fixed here for the whole take. A
+                // cold or layout-retired camera is started first (bounded).
+                let source_iso_camera_format = if source_iso_plan.is_some() {
+                    crate::source_iso::arm_camera_format(&state, &params, &ffmpeg_path).await
+                } else {
+                    None
+                };
+                let started = start_synthetic_compositor(
                     state.clone(),
                     CompositorStartParams {
+                        // Plan 212 S1: the rule holds on the fresh-run path too.
+                        benchmark: params.purpose.is_performance_check(),
                         target_fps,
                         width: params.output.video.width,
                         height: params.output.video.height,
                         frame_consumer: compositor_frame_consumer,
                         stream_output: encoder_bridge_stream_output,
+                        source_iso_output: source_iso_plan.as_ref().map(|_| {
+                            let (camera_width, camera_height) = crate::source_iso::camera_leg_size(
+                                source_iso_camera_format,
+                                (params.output.video.width, params.output.video.height),
+                            );
+                            crate::compositor::CompositorSourceIsoOutput {
+                                width: params.output.video.width,
+                                height: params.output.video.height,
+                                camera_width,
+                                camera_height,
+                                frame_consumer: compositor_frame_consumer,
+                            }
+                        }),
                         // Per-leg overlay plan (R1): primary is the clean source
                         // recording (or the stream when stream-only); aux is the
                         // captioned stream leg for combined sessions.
@@ -4325,11 +5575,34 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
+                        buddy_overlay_on_primary: overlay_plans.buddy.primary,
+                        buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        // Plan 205 S6: the same program verdict the in-place
+                        // arm carries. A buffer-only session lands here on a
+                        // cold launch (the ring starts before the Preview's
+                        // run exists), and its program is idle (D2): a
+                        // stream-only Buddy the ring leaves out is still in
+                        // the Preview.
+                        replay_only,
+                        highlight_overlay_on_program: overlay_flags.highlight_on_program,
+                        buddy_overlay_on_program: overlay_flags.buddy_on_program,
                     },
                 )
                 .await;
+                restarted_compositor_run_id = started.run_id;
+            }
+            if source_iso_plan.is_some() {
+                source_iso_capture_startup.batches =
+                    crate::compositor::compositor_source_iso_frame_stores(&state)
+                        .await
+                        .map(|stores| stores.batches);
+                prepare_source_iso_selected_capture(&state, &params, &ffmpeg_path).await?;
             }
             timeline.mark(RecordingStartPhase::CompositorArm);
+            // Plan 186 S3: banners follow the session's leg plan from its
+            // first frame; the stop and lease-release paths return the
+            // compositor to the idle plan.
+            crate::compositor::set_banner_session_shape(&state, Some(overlay_session_shape)).await;
             let scene = params.scene.clone().unwrap_or_else(|| {
                 scene_from_capture_config(SceneConfigParams {
                     transition_ms: None,
@@ -4341,11 +5614,15 @@ async fn start_session_with_timeline(
                 })
             });
             let startup_source_requirements = recording_startup_source_requirements(&scene);
+            let capture_requirements = source_iso_startup_capture_requirements(
+                startup_source_requirements,
+                source_iso_plan.as_ref().map(|_| &params.sources),
+            );
             if let Err(error) = await_recording_camera_cadence_ready(
                 &state,
                 &session_id,
                 params.output.video.fps,
-                startup_source_requirements,
+                capture_requirements,
                 Some(crate::protocol::PreviewCameraStartParams {
                     sources: params.sources.clone(),
                     layout: params.layout.clone(),
@@ -4373,14 +5650,54 @@ async fn start_session_with_timeline(
                 return Err(error);
             }
             timeline.mark(RecordingStartPhase::CameraCadence);
-            let startup_scene = commit_recording_startup_scene_at_time(
-                &state,
-                &scene,
-                params.layout.clone(),
-                active_screen.clone(),
-                u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
-            )
-            .await;
+            let startup_scene = if params.purpose.is_performance_check() {
+                // Plan 212 S2: a benchmark's startup scene goes beside the
+                // user's scene, which stays what `scene.get`, the status
+                // and the Preview show. The barrier below waits for frames
+                // at the benchmark scene's revision.
+                match commit_benchmark_startup_scene_at_time(
+                    &state,
+                    &scene,
+                    params.layout.clone(),
+                    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+                    &params.sources,
+                )
+                .await
+                {
+                    Some(lease) => lease,
+                    None => {
+                        let error = anyhow::anyhow!(
+                            "the benchmark scene was refused: the compositor run is not the benchmark's"
+                        );
+                        emit_preflight_failure_report(
+                            &state,
+                            &session_id,
+                            "benchmark scene commit",
+                            &error.to_string(),
+                            &params,
+                            &startup_source_requirements,
+                        )
+                        .await;
+                        if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
+                            let _ = crate::fifo::cleanup(fifo_path);
+                        }
+                        if let Some(fifo_path) = encoder_bridge_stream_fifo.as_ref() {
+                            let _ = crate::fifo::cleanup(fifo_path);
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                commit_recording_startup_scene_at_time(
+                    &state,
+                    &scene,
+                    params.layout.clone(),
+                    active_screen.clone(),
+                    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+                    Some(&params.sources),
+                )
+                .await
+            };
             // Dual-orientation: seed the vertical leg's scene from the simulcast
             // params (same sources, its own vertical geometry). Non-dual sessions
             // clear any stale leftover so the aux can never compose a dead scene.
@@ -4491,32 +5808,86 @@ async fn start_session_with_timeline(
             } else {
                 None
             };
-            (recording_store, stream_store)
+            let iso_stores = if source_iso_plan.is_some() {
+                Some(
+                    crate::compositor::compositor_source_iso_frame_stores(&state)
+                        .await
+                        .context("Separate source recording frame stores were not prepared")?,
+                )
+            } else {
+                None
+            };
+            (recording_store, stream_store, iso_stores)
         } else {
             // A live Windows D3D11 pump owns capture, composition, preview
             // surfaces, and both NV12 outputs. Starting the synthetic CPU
             // compositor here would duplicate capture/GPU work even though
             // the bridge writer consumes only D3D11 tickets.
-            (None, None)
+            (None, None, None)
         };
-    let args = if use_encoder_bridge {
+    // Plan 181: the replay ring rides this session's FFmpeg child as one
+    // more output. A buffer-only session must have it; a recording or a
+    // stream goes on without it when it cannot be prepared (S4.4), and the
+    // renderer hears why through `replay.state`.
+    let mut replay_ring = if params.replay.is_some() {
+        match crate::replay_buffer::prepare(
+            &state,
+            crate::replay_buffer::RingRequest {
+                session_id: &session_id,
+                params: &params,
+                replay_only,
+                recordings_dir: &output_dir,
+                ffmpeg_path: &ffmpeg_path,
+            },
+        ) {
+            Ok(ring) => Some(ring),
+            Err(error) if replay_only => {
+                if let Some(fifo_path) = encoder_bridge_fifo.as_ref() {
+                    let _ = crate::fifo::cleanup(fifo_path);
+                }
+                if let Some(fifo_path) = encoder_bridge_stream_fifo.as_ref() {
+                    let _ = crate::fifo::cleanup(fifo_path);
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "replay-buffer-unavailable",
+                    &format!("Clips are off for this session: {error:#}"),
+                );
+                params.replay = None;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let replay_output = replay_ring.as_ref().map(|ring| ReplayOutput {
+        dir: ring.dir.clone(),
+        seconds: ring.seconds,
+    });
+    let mut args = if use_encoder_bridge {
         let fifo_path = encoder_bridge_fifo
             .as_deref()
             .context("Encoder bridge FIFO path was not prepared")?;
-        if params.output.record_enabled && !params.output.stream_enabled {
-            bridge_recording_ffmpeg_args_with_encoder(
+        if params.output.record_enabled && !params.output.stream_enabled && output_path.is_some() {
+            bridge_recording_ffmpeg_args_with_encoder_and_replay(
                 &capture,
                 &params,
                 output_path.as_deref(),
                 fifo_path,
                 encoder_bridge_video_output,
                 &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
+                replay_output.as_ref(),
             )?
         } else if let (Some(stream_output), Some(stream_fifo_path)) = (
             encoder_bridge_stream_output,
             encoder_bridge_stream_fifo.as_deref(),
         ) {
-            bridge_compositor_split_output_ffmpeg_args(
+            bridge_compositor_split_output_ffmpeg_args_with_replay(
                 &capture,
                 &params,
                 output_path.as_deref(),
@@ -4525,9 +5896,10 @@ async fn start_session_with_timeline(
                 stream_fifo_path,
                 encoder_bridge_video_output,
                 stream_output,
+                replay_output.as_ref(),
             )?
         } else {
-            bridge_compositor_ffmpeg_args_with_encoder(
+            bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &capture,
                 &params,
                 output_path.as_deref(),
@@ -4535,18 +5907,31 @@ async fn start_session_with_timeline(
                 fifo_path,
                 encoder_bridge_video_output,
                 &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
+                replay_output.as_ref(),
             )?
         }
     } else {
-        ffmpeg_args_with_encoder(
+        ffmpeg_args_with_encoder_and_replay(
             &capture,
             &params,
             output_path.as_deref(),
             &stream_targets,
             screen_overlay.as_ref(),
             &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
+            replay_output.as_ref(),
         )?
     };
+    if source_iso_plan.is_some() {
+        crate::source_iso::stamp_combined_audio_metadata(&mut args);
+        crate::source_iso::bound_combined_iso_pcm_packets(&mut args);
+        if let Some(output) = output_path.as_deref() {
+            crate::source_iso::configure_iso_local_muxer(
+                &mut args,
+                output,
+                params.output.video.fps,
+            )?;
+        }
+    }
     let ffmpeg_live_audio_filter_count = ffmpeg_live_microphone_filter_count(&args);
     #[cfg(debug_assertions)]
     let source_switch_output_audio_timing = inspect_source_switch_output_audio_timing(
@@ -4599,6 +5984,7 @@ async fn start_session_with_timeline(
             pipeline: Some(pipeline.status()),
             duration_ms: None,
             message: Some(format!("Starting {mode} session.")),
+            replay_only,
         },
         &session_start_publication_permit,
     );
@@ -4606,6 +5992,7 @@ async fn start_session_with_timeline(
         state.clone(),
         &session_id,
         output_path.clone(),
+        replay_only,
         &pipeline,
         session_start_admission
             .take()
@@ -4613,7 +6000,25 @@ async fn start_session_with_timeline(
     );
 
     timeline.mark(RecordingStartPhase::StartingPublished);
+    if let Some((disk_output_dir, disk_video_kbps, disk_separate_files)) = disk_space_check {
+        // Advisory only: `df` and the health-event write stay off the start
+        // path. Retest 154 A5: sent before the Starting status, the event
+        // named a session the renderer did not know yet and never toasted.
+        let disk_state = state.clone();
+        let disk_session_id = session_id.clone();
+        tokio::spawn(async move {
+            let _ = emit_disk_space_health_event(
+                &disk_state,
+                &disk_session_id,
+                &disk_output_dir,
+                disk_video_kbps,
+                disk_separate_files,
+            )
+            .await;
+        });
+    }
     let mut command = ffmpeg_command(&ffmpeg_path);
+    pin_direct_pulse_microphone(&mut command, capture.microphone.as_ref());
     command
         .args(&args)
         .stdin(if retain_ffmpeg_stdin {
@@ -4687,7 +6092,7 @@ async fn start_session_with_timeline(
     // Rust therefore drops the process guard first on cancellation at either
     // await between construction and publication, synchronously signalling
     // FFmpeg before this active value joins its native-audio FIFO writer.
-    let pending_active: ActiveRecording;
+    let mut pending_active: ActiveRecording;
     // Plan 069: on a system-audio platform every bus runs at the system-audio
     // playout delay with the decision 8 offset split, matching the FFmpeg
     // track shift in `ffmpeg_session_params`; elsewhere the defaults.
@@ -4717,6 +6122,14 @@ async fn start_session_with_timeline(
                 )
             })
         });
+    if let (Some(audio), Some(taps)) = (attached_native_audio.as_ref(), source_iso_taps.as_ref()) {
+        audio.set_source_taps(taps.clone());
+    }
+    // Plan 189: the soundboard's voices go into this bus once the session is
+    // published; until then, and without a bus, a press is monitor only.
+    let session_soundboard = attached_native_audio
+        .as_ref()
+        .map(|audio| audio.soundboard());
     // The System audio switch (plan 069 S4). It opens nothing here: an On
     // setting is requested only after the session is published, so capture
     // never delays Record (decision 12).
@@ -4750,6 +6163,7 @@ async fn start_session_with_timeline(
         stderr,
         Some(ffmpeg_output_startup_sender),
         ffmpeg_progress.clone(),
+        crate::metrics_journal::ffmpeg_stderr_tee(&session_id),
     );
     // Legacy capture also writes preview JPEGs to stdout. Drain before waiting
     // for media progress so that a full preview pipe cannot block that proof.
@@ -4789,13 +6203,17 @@ async fn start_session_with_timeline(
             // process creates a fresh monitor/accumulator, while the explicit generation
             // remains testable so future in-place restarts cannot inherit counters.
             let process_generation = 0_u64;
+            let mut stream_legs = StreamLegMonitor::new(stream_url_positions);
+            let mut ffmpeg_repeats = FfmpegRepeatThrottle::default();
+            let mut reconnecting_since = std::collections::HashMap::new();
             let mut stream_health_accumulator =
                 StreamHealthAccumulator::new(&log_session_id, process_generation);
             let mut pending_stream_health = ParsedStreamHealthDelta::default();
             let mut last_stream_health_published_at = Instant::now();
             let stderr_reached_eof = loop {
-                let line = match stderr_events.recv().await {
-                    Some(FfmpegStderrEvent::Line(line)) => line,
+                let (line, informational) = match stderr_events.recv().await {
+                    Some(FfmpegStderrEvent::Line(line)) => (line, false),
+                    Some(FfmpegStderrEvent::Info(line)) => (line, true),
                     Some(FfmpegStderrEvent::Eof) | None => break true,
                     Some(FfmpegStderrEvent::ReadFailed) => {
                         let _ = emit_session_log(
@@ -4811,6 +6229,27 @@ async fn start_session_with_timeline(
                 };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Plan 161: per-leg reconnects and deaths, attributed exactly.
+                if let Some(update) = stream_legs.observe(trimmed) {
+                    publish_stream_leg_update(
+                        &log_state,
+                        &log_session_id,
+                        &stream_targets_snapshot,
+                        &mut reconnecting_since,
+                        update,
+                    )
+                    .await;
+                }
+                if informational {
+                    // The startup dump quotes every output URL (the stream
+                    // key); keep only a URL-free trace.
+                    tracing::debug!(
+                        "{}",
+                        sanitized_ffmpeg_diagnostic_line(trimmed, FFMPEG_STDERR_TAIL_LINE_CHARS)
+                    );
                     continue;
                 }
 
@@ -4879,7 +6318,12 @@ async fn start_session_with_timeline(
                 // Progress/stat spam must not reach the bounded log ring —
                 // it evicted every useful entry within ~60s during the
                 // 2026-07-08 X incident. Stats still feed stream health.
-                if is_ffmpeg_progress_noise(trimmed) {
+                // Plan 161: a leg retrying every two seconds repeats the
+                // same tcp/rtmp/fifo error lines; the first is news, the
+                // same line again within a minute is not.
+                let repeat_admitted = is_ffmpeg_progress_noise(trimmed)
+                    || ffmpeg_repeats.admit(trimmed, Instant::now());
+                if is_ffmpeg_progress_noise(trimmed) || !repeat_admitted {
                     tracing::debug!("{trimmed}");
                 } else {
                     log_state.emit_log("warn", trimmed);
@@ -4905,34 +6349,14 @@ async fn start_session_with_timeline(
                 {
                     last_stream_health_published_at = Instant::now();
                 }
-                if looks_like_ffmpeg_health_event(trimmed) {
+                if repeat_admitted && looks_like_ffmpeg_health_event(trimmed) {
                     publish_ffmpeg_health_event_if_active(&log_state, &log_session_id, trimmed)
                         .await;
                 }
                 // A `tee` slave dropping mid-session (onfail=ignore keeps the rest
                 // running) — attribute it to the specific target and re-emit the
                 // per-target snapshot so the UI can flag exactly which platform fell.
-                // Per-target fifo-muxer legs (plan 023): attribute by URL.
-                if let Some(failure) = parse_fifo_output_failure(trimmed)
-                    && let Some(position) = stream_url_positions
-                        .iter()
-                        .find(|(url, _)| *url == failure.url)
-                        .map(|(_, position)| *position)
-                {
-                    let reason = if failure.reason.is_empty() {
-                        "Stream connection failed".to_string()
-                    } else {
-                        failure.reason.clone()
-                    };
-                    publish_stream_target_failure_if_active(
-                        &log_state,
-                        &log_session_id,
-                        &stream_targets_snapshot,
-                        position,
-                        reason,
-                    )
-                    .await;
-                }
+                // Per-target fifo-muxer legs (plan 023) are `stream_legs` above.
                 if let Some(failure) = parse_tee_slave_failure(trimmed)
                     && let Some(Some(position)) = slave_positions.get(failure.slave_index).copied()
                 {
@@ -4993,6 +6417,94 @@ async fn start_session_with_timeline(
     let windows_d3d11_auxiliary_input = windows_d3d11_media
         .as_ref()
         .and_then(WindowsD3d11SessionPump::auxiliary_encoder_source);
+    let source_iso_track_shift_ms = session_audio_sync(
+        &params.audio,
+        crate::system_audio_session::system_audio_capable(),
+    )
+    .map_or(params.audio.microphone_sync_offset_ms, |split| {
+        split.track_shift_ms
+    });
+    let source_iso_start_barrier = source_iso_plan.as_ref().map(|_| {
+        crate::encoder_bridge::RecordingStartBarrier::new(
+            3 + usize::from(encoder_bridge_stream_profile.is_some()),
+            encoder_bridge_frame_store.clone(),
+            params.output.video.fps,
+            source_iso_track_shift_ms,
+            source_iso_frame_stores.clone(),
+        )
+    });
+    // Construct ISO writers under cancellation ownership before Combined
+    // joins their shared startup barrier. Any known armed-role startup failure
+    // rejects the entire take before ownership transfers to ActiveRecording.
+    let mut source_iso_runtime = match (source_iso_plan.clone(), source_iso_taps.clone()) {
+        (Some(plan), Some(taps)) => {
+            let iso_start: Result<crate::source_iso::SourceIsoStartGuard> = (|| {
+                let frame_stores = source_iso_frame_stores.clone().with_context(|| {
+                    format!(
+                        "{}: Separate source recordings need the compositor encoder bridge; this session's capture path cannot carry them.",
+                        crate::source_iso::HEALTH_UNAVAILABLE
+                    )
+                })?;
+                let combined_mkv_path = output_path
+                    .as_deref()
+                    .context("Separate source recordings need a local recording path")?;
+                crate::source_iso::start_source_iso_writers(
+                    crate::source_iso::SourceIsoStartParams {
+                        state: &state,
+                        session_id: &session_id,
+                        plan,
+                        combined_mkv_path,
+                        ffmpeg_path: &ffmpeg_path,
+                        video: &params.output.video,
+                        video_output: encoder_bridge_video_output,
+                        frame_stores,
+                        video_epoch: video_epoch.clone(),
+                        bitrate_kbps: encoder_bridge_recording_bitrate_kbps,
+                        keep_original_media: params.output.keep_original_mkv,
+                        start_barrier: source_iso_start_barrier.clone(),
+                        track_shift_ms: source_iso_track_shift_ms,
+                    },
+                    taps,
+                )
+            })();
+            match iso_start {
+                Ok(runtime) => {
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Info,
+                        crate::source_iso::HEALTH_STARTED,
+                        "Separate source recordings armed: Screen and Camera files record beside the Combined recording.",
+                    );
+                    // Cleanup-owned until `pending_active` takes it: the
+                    // startup-failure and overlay-failure returns below, and
+                    // cancellation of this future, abort the writers from Drop.
+                    Some(runtime)
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    uncommitted_capture_process
+                        .set_failure(PublishedSessionStartFailureOrigin::EncoderBridge, &message);
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Error,
+                        crate::source_iso::HEALTH_UNAVAILABLE,
+                        &message,
+                    );
+                    uncommitted_capture_process
+                        .terminate_and_reap_before_fifo_writer_join()
+                        .await;
+                    return Err(error);
+                }
+            }
+        }
+        _ => None,
+    };
+    #[cfg(test)]
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.test_pause("writers", pid).await;
+    }
     let (mut encoder_bridge, mut encoder_bridge_stream) = if use_encoder_bridge {
         let bridge_fifo_path = match encoder_bridge_fifo
             .clone()
@@ -5047,6 +6559,7 @@ async fn start_session_with_timeline(
             params.output.stream_enabled && encoder_bridge_stream_profile.is_none(),
             recording_diagnostics_context,
             video_epoch.clone(),
+            source_iso_start_barrier.clone(),
         ) {
             Ok(bridge) => Some(bridge),
             Err(error) => {
@@ -5111,6 +6624,7 @@ async fn start_session_with_timeline(
                         true,
                         stream_diagnostics_context,
                         video_epoch.clone(),
+                        source_iso_start_barrier.clone(),
                     )?)
                 }
                 _ => None,
@@ -5126,6 +6640,7 @@ async fn start_session_with_timeline(
             } else {
                 recording_bridge.wait_until_ready().await?;
             }
+            if let Some(iso) = source_iso_runtime.as_mut() { iso.wait_until_ready().await?; }
             Ok(())
         }
         .await;
@@ -5152,18 +6667,8 @@ async fn start_session_with_timeline(
     } else {
         (None, None)
     };
-    // Instant record (P4): on the VideoToolbox bridge the first frame is already
-    // in the encoder once the bridge is ready, so `Recording` no longer waits
-    // for FFmpeg's first output clock (~700 ms of MPEG-TS probing). That proof
-    // becomes a watchdog which fails the session if FFmpeg never reports
-    // progress. Other bridge outputs (raw YUV, Windows Media Foundation) keep
-    // the synchronous proof.
-    let defer_ffmpeg_output_startup = use_encoder_bridge
-        && matches!(
-            encoder_bridge_video_output,
-            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-                | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
-        );
+    let defer_ffmpeg_output_startup =
+        use_encoder_bridge && defers_ffmpeg_output_startup_proof(encoder_bridge_video_output);
     let mut deferred_ffmpeg_output_startup = None;
     let ffmpeg_output_startup_result: Result<()> = match ffmpeg_output_startup_receiver.take() {
         Some(receiver) if defer_ffmpeg_output_startup => {
@@ -5171,7 +6676,12 @@ async fn start_session_with_timeline(
             Ok(())
         }
         Some(receiver) => {
-            wait_for_ffmpeg_output_startup(receiver, ffmpeg_output_startup_started_at).await
+            wait_for_ffmpeg_output_startup(
+                receiver,
+                ffmpeg_output_startup_started_at,
+                ffmpeg_output_startup_deadline(capture.microphone.as_ref()),
+            )
+            .await
         }
         None => Ok(()),
     };
@@ -5258,12 +6768,35 @@ async fn start_session_with_timeline(
             pump.monitor(),
         )
     });
+    // Plan 186 S4: the banners showing at start, prepared for the output
+    // canvas off this task (decode and Lanczos scale, tens of milliseconds
+    // at 4K). A preparation failure costs the banners, never the session.
+    let legacy_banner_layers = if screen_overlay_fifo.is_some()
+        && !shown_banners_at_start.is_empty()
+    {
+        let shown = crate::banners::banners_with_files(
+            shown_banners_at_start.clone(),
+            &state.database.banner_assets_dir(),
+        );
+        let (width, height) = (params.output.video.width, params.output.video.height);
+        tokio::task::spawn_blocking(move || prepare_legacy_banner_layers(&shown, width, height))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "Legacy banner preparation task stopped; the session starts without banners: {error}"
+                );
+                Vec::new()
+            })
+    } else {
+        Vec::new()
+    };
     let screen_overlay = match screen_overlay_fifo {
         Some(screen_overlay_fifo) => match ScreenOverlaySession::start(
             screen_overlay_fifo,
             params.output.video.width,
             params.output.video.height,
             active_screen.clone().map(|screen| screen.image_path),
+            legacy_banner_layers,
         ) {
             Ok(screen_overlay) => Some(screen_overlay),
             Err(error) => {
@@ -5290,6 +6823,26 @@ async fn start_session_with_timeline(
         },
         None => None,
     };
+    // Plan 186 S4: whether a banner shown from now on reaches this picture.
+    let accepts_banners = session_accepts_banners(
+        use_encoder_bridge,
+        direct_d3d11_recording,
+        screen_overlay.is_some(),
+    );
+    if !accepts_banners {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Info,
+            "recording-banners-fixed-at-start",
+            if direct_d3d11_recording {
+                "Direct D3D11 screen recording draws no banner overlay; a banner shown now is refused until the session ends."
+            } else {
+                "This FFmpeg session has no overlay layer (no takeover, stream or banner at start); a banner shown now is refused until the session ends."
+            },
+            None,
+        );
+    }
     pending_active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -5321,6 +6874,7 @@ async fn start_session_with_timeline(
         screen_overlay,
         encoder_bridge,
         encoder_bridge_stream,
+        source_iso: None,
         #[cfg(target_os = "windows")]
         windows_d3d11_monitor,
         #[cfg(target_os = "windows")]
@@ -5335,15 +6889,19 @@ async fn start_session_with_timeline(
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
         performance_check: params.purpose.is_performance_check(),
+        replay_only,
         comment_highlight_available: comment_highlight_available(
             use_encoder_bridge,
             highlight_overlay_plan,
         ),
         comment_highlight_vertical_canvas,
+        overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
+        accepts_banners,
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
         compositor_capture_lease: compositor_capture_lease.take(),
+        restarted_compositor_run_id: restarted_compositor_run_id.take(),
         ffmpeg_progress: ffmpeg_progress.clone(),
     };
     // The fully-constructed pipeline is now committed to becoming an active
@@ -5371,11 +6929,19 @@ async fn start_session_with_timeline(
     let running_status =
         pending_active.status(running_state, Some(format!("Running {mode} session.")));
 
+    #[cfg(test)]
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.test_pause("precommit", pid).await;
+    }
+
     // Acquire the final owner slot while the uncommitted child guard is still
     // armed. From `commit` through monitor spawn there are no await points, so
     // cancellation can leave neither an orphan FFmpeg child nor an active
     // recording without its reaper.
     let mut recording = state.recording.lock().await;
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.validate_health()?;
+    }
     let mut confirmed_sources = params.sources.clone();
     let live_microphone_id = match capture.microphone.as_ref() {
         Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
@@ -5438,10 +7004,25 @@ async fn start_session_with_timeline(
         } else if cfg!(target_os = "linux")
             && matches!(
                 capture.microphone.as_ref(),
-                Some(MicrophoneInput::LinuxPulse { .. })
+                Some(MicrophoneInput::LinuxPulse { .. } | MicrophoneInput::SessionPcm { .. })
             )
+            && params.sources.microphone_id.is_some()
         {
+            // Release test 147, plan 0001: a Linux microphone on the session
+            // bus still can't be swapped mid-session; nothing has proved it.
             sources.microphone_unavailable("Live microphone replacement is not available on Linux yet. This session keeps its initial microphone input.");
+        }
+        // Linux plan 0024: no Linux adapter swaps a screen or camera mid-
+        // session yet; say so instead of the internal adapter text.
+        if cfg!(target_os = "linux") {
+            sources.kind_unavailable(
+                crate::live_source_switch::SourceKind::Capture,
+                "Changing the screen during a session isn't available on Linux yet. Stop, change it, then start again.",
+            );
+            sources.kind_unavailable(
+                crate::live_source_switch::SourceKind::Camera,
+                "Changing the camera during a session isn't available on Linux yet. Stop, change it, then start again.",
+            );
         }
         sources
             .snapshot(&session_id)
@@ -5459,8 +7040,12 @@ async fn start_session_with_timeline(
     }
     let (child, session_start_admission, ffmpeg_stderr_monitor) =
         uncommitted_capture_process.commit();
+    pending_active.source_iso =
+        source_iso_runtime.map(crate::source_iso::SourceIsoStartGuard::commit);
     let watchdog_pid = pending_active.pid;
     *recording = Some(pending_active);
+    source_iso_capture_startup.state = None;
+    source_iso_capture_startup.batches = None;
     session_start_admission.commit();
     // A delayed idle capture-config reload that was queued before session start
     // may resume only after `recording` is authoritative; the idle-only commit
@@ -5469,12 +7054,27 @@ async fn start_session_with_timeline(
     timeline.mark(RecordingStartPhase::Running);
     state.emit_event("session.sources.changed", sources_snapshot);
     state.emit_event("recording.status", running_status.clone());
+    if !replay_only {
+        // Decision 4 (plan 058) with the ring on by default (plan 181): a
+        // scene editor draft that landed in the handover gap must not outlive
+        // the real session's start, whichever compositor run it took. The
+        // slot above already refuses the next sample; this ends the last one.
+        // Spawned, so the compositor lock is never taken under the slot's.
+        let clear_state = state.clone();
+        tokio::spawn(async move {
+            crate::compositor::clear_editor_draft(&clear_state).await;
+        });
+    }
+    if let Some(ring) = replay_ring.take() {
+        crate::replay_buffer::attach(&state, ring);
+    }
     if let Some(receiver) = deferred_ffmpeg_output_startup.take() {
         spawn_ffmpeg_output_startup_watchdog(
             state.clone(),
             session_id.clone(),
             receiver,
             ffmpeg_output_startup_started_at,
+            ffmpeg_output_startup_deadline(capture.microphone.as_ref()),
             watchdog_pid,
         );
     }
@@ -5554,6 +7154,12 @@ async fn start_session_with_timeline(
             }
         });
     }
+    // Release test 147, plan 0001: a recording or stream whose audio skips
+    // the session bus (a Linux microphone FFmpeg had to open directly) can't
+    // carry sounds; every surface says so instead of claiming it does.
+    if session_soundboard.is_none() && !replay_only {
+        state.soundboard.session_without_bus(&state, &session_id);
+    }
     if has_session_audio {
         tokio::spawn(sample_native_audio_during_recording(
             state.clone(),
@@ -5563,7 +7169,20 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
-        // Orcle's listen intent (plan 068): wanted before this capture, it
+        // A buffer-only Clips session keeps the handle off the player:
+        // idle presses stay monitor-only. The ring is what viewers would
+        // have heard: nothing until Record or Go Live.
+        if !replay_only && let Some(handle) = session_soundboard {
+            let volume_db = state
+                .database
+                .sound_settings()
+                .map(|settings| settings.volume_db)
+                .unwrap_or(0);
+            state
+                .soundboard
+                .session_started(&session_id, handle, volume_db, true);
+        }
+        // Buddy's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
         let listen_state = state.clone();
         tokio::spawn(async move {
@@ -5797,14 +7416,27 @@ struct SessionStartRowGuard {
     database: Database,
     session_id: String,
     armed: bool,
+    /// Set for `session.start`: the row's log waits for the returned error.
+    failure: Option<PendingStartFailure>,
 }
 
 impl SessionStartRowGuard {
+    #[cfg(test)]
     fn new(database: Database, session_id: &str) -> Self {
         Self {
             database,
             session_id: session_id.to_string(),
             armed: true,
+            failure: None,
+        }
+    }
+
+    fn reporting_to(database: Database, session_id: &str, failure: PendingStartFailure) -> Self {
+        Self {
+            database,
+            session_id: session_id.to_string(),
+            armed: true,
+            failure: Some(failure),
         }
     }
 
@@ -5818,6 +7450,8 @@ impl Drop for SessionStartRowGuard {
         if !self.armed {
             return;
         }
+        // The row turns failed here, before the published terminal status
+        // that outlives this guard, so the Library never reloads it running.
         let _ = self.database.finish_session(
             &self.session_id,
             "failed",
@@ -5825,13 +7459,100 @@ impl Drop for SessionStartRowGuard {
             None,
             None,
         );
+        let _ = self
+            .database
+            .fail_uncommitted_source_iso_sessions(&self.session_id);
+        match &self.failure {
+            Some(failure) => {
+                *failure
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(self.session_id.clone());
+            }
+            None => {
+                let _ = self.database.add_session_log(
+                    &self.session_id,
+                    HealthLevel::Error,
+                    SESSION_START_FAILED_CODE,
+                    &session_start_failed_message(None),
+                    None,
+                );
+            }
+        }
+    }
+}
+
+const SESSION_START_FAILED_CODE: &str = "session-start-failed";
+
+fn session_start_failed_message(reason: Option<&str>) -> String {
+    const MESSAGE: &str =
+        "Session start did not reach a running pipeline; the session was marked failed";
+    match reason {
+        Some(reason) => format!("{MESSAGE}: {reason}"),
+        None => format!("{MESSAGE}."),
+    }
+}
+
+/// The failed start's session id, handed from its [`SessionStartRowGuard`] to
+/// [`SessionStartFailureLog`].
+type PendingStartFailure = Arc<StdMutex<Option<String>>>;
+
+/// Writes the `session-start-failed` log for a start whose row guard fired,
+/// with the error `session.start` answered. The support bundle carries the
+/// session logs, not the toast: a log without its reason left five refused
+/// starts on a tester's Iris Xe laptop undiagnosable (2026-10-25). A start
+/// dropped before it returned still gets the bare line.
+struct SessionStartFailureLog {
+    database: Database,
+    pending: PendingStartFailure,
+}
+
+impl SessionStartFailureLog {
+    fn new(database: Database) -> Self {
+        Self {
+            database,
+            pending: Arc::default(),
+        }
+    }
+
+    fn pending(&self) -> PendingStartFailure {
+        self.pending.clone()
+    }
+
+    fn take_session_id(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Logs `error` against the session whose row guard fired, if one did,
+    /// and returns the sanitized reason it logged.
+    fn report(self, error: &anyhow::Error) -> Option<String> {
+        let session_id = self.take_session_id()?;
+        let reason = sanitized_ffmpeg_diagnostic_line(&format!("{error:#}"), 480);
         let _ = self.database.add_session_log(
-            &self.session_id,
+            &session_id,
             HealthLevel::Error,
-            "session-start-failed",
-            "Session start did not reach a running pipeline; the session was marked failed.",
+            SESSION_START_FAILED_CODE,
+            &session_start_failed_message(Some(&reason)),
             None,
         );
+        Some(reason)
+    }
+}
+
+impl Drop for SessionStartFailureLog {
+    fn drop(&mut self) {
+        if let Some(session_id) = self.take_session_id() {
+            let _ = self.database.add_session_log(
+                &session_id,
+                HealthLevel::Error,
+                SESSION_START_FAILED_CODE,
+                &session_start_failed_message(None),
+                None,
+            );
+        }
     }
 }
 
@@ -5953,6 +7674,13 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         return Ok(idle_status());
     };
 
+    let iso_stop_at = active
+        .source_iso
+        .as_ref()
+        .map(|iso| iso.request_stop_at(Instant::now()));
+    if let (Some(boundary), Some(audio)) = (iso_stop_at, active.native_audio.as_ref()) {
+        audio.request_stop_at(boundary);
+    }
     let pid = active.pid;
     let output_path = active.output_path.clone();
     let session_id = active.session_id.clone();
@@ -6008,6 +7736,8 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     if let Some(native_audio) = active.native_audio.as_ref() {
         if active.native_audio_silent_drain {
             native_audio_silent_drain_started = native_audio.request_silent_drain();
+        } else if let Some(boundary) = iso_stop_at {
+            native_audio.request_stop_at(boundary);
         } else {
             native_audio.request_stop();
         }
@@ -6086,7 +7816,11 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         if let Some(encoder_bridge_stream) = &active.encoder_bridge_stream {
             encoder_bridge_stream.stop();
         }
-        encoder_bridge.stop();
+        if let Some(boundary) = iso_stop_at {
+            encoder_bridge.stop_at(boundary);
+        } else {
+            encoder_bridge.stop();
+        }
     } else if let Some(stdin) = active.stdin.take() {
         legacy_ffmpeg_stdin = Some(stdin);
     } else if ffmpeg_live_audio_stop_session.is_none() {
@@ -6107,6 +7841,9 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     let _ =
         crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &wait_session_id)
             .await;
+    // Plan 189: the bus ends every voice as it drains; the player's list
+    // follows now, so a pad never claims "on air" past Stop.
+    state.soundboard.session_ended(&state, &wait_session_id);
     drop(guard);
 
     #[cfg(target_os = "windows")]
@@ -6302,12 +8039,13 @@ impl Mp4FinalizationFault {
 }
 
 pub async fn remux_session(state: AppState, params: RemuxSessionParams) -> Result<String> {
+    let take = load_mp4_export_take(&state, &params.session_id);
     remux_session_with_exporter(
         state,
         params,
         Mp4FinalizationFault::None,
         |ffmpeg_path, input, output| async move {
-            export_mp4_from_mkv(&ffmpeg_path, &input, &output).await
+            export_mp4_from_mkv(&ffmpeg_path, &input, &output, take).await
         },
     )
     .await
@@ -6333,7 +8071,7 @@ where
         bail!("Only MKV session outputs can be remuxed to MP4");
     }
 
-    let preferred_output = input.with_extension("mp4");
+    let preferred_output = crate::source_iso::public_mp4_output_path(&input);
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
     let mut base_finalization = state
         .database
@@ -6341,6 +8079,16 @@ where
     base_finalization.status = "completed".to_string();
     base_finalization.mp4_path = Some(preferred_output.display().to_string());
     let output_ownership = capture_session_file_bound_identity(&input)?;
+    if let Some(expected) = state
+        .database
+        .source_iso_recovery_ownership(&params.session_id)?
+    {
+        anyhow::ensure!(
+            expected.is_some() && output_ownership == expected,
+            "ISO capture ownership could not be verified; refusing to adopt its current path"
+        );
+    }
+    ensure_mp4_export_disk_space(&input)?;
     let mut recovery_path = None;
     let published = export_recording_to_mp4_with_exporter(
         &state,
@@ -6382,6 +8130,7 @@ where
     finalization.mp4_path = Some(published.path.display().to_string());
     persist_finalization_or_recovery_with_fault(&state, &finalization, &mut recovery_path, fault)
         .map_err(anyhow::Error::msg)?;
+    crate::source_iso::remove_empty_capture_directory(&input);
 
     state.emit_log("info", "Created MP4 copy for session.");
     Ok(published.path.display().to_string())
@@ -6403,57 +8152,430 @@ fn parse_mkv_duration_tag(tag: &str) -> Option<f64> {
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
-/// Probe the capture MKV's video/audio stream durations and return the
-/// duration to trim the MP4 export to — `None` when the tails already agree,
-/// when a stream is missing, or when the probe fails (export proceeds
-/// untrimmed; a failed probe must never block finalization).
-async fn mp4_export_trim_seconds(ffprobe_path: &str, input: &Path) -> Option<f64> {
-    let output = Command::new(ffprobe_path)
+/// Plan 200 C1: what the export reads from the capture MKV before FFmpeg
+/// runs. A failed probe leaves every field empty and the export proceeds as a
+/// plain remux; a probe must never block finalization.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Mp4ExportProbe {
+    /// Plan 200 C2: the first video and audio streams' `codec_name`.
+    video_codec: Option<String>,
+    audio_codec: Option<String>,
+    /// The first video stream's `r_frame_rate` as `(numerator, denominator)`.
+    video_frame_rate: Option<(u64, u64)>,
+    video_seconds: Option<f64>,
+    audio_seconds: Option<f64>,
+    format_seconds: Option<f64>,
+}
+
+impl Mp4ExportProbe {
+    fn from_ffprobe_json(probe: &serde_json::Value) -> Self {
+        let mut parsed = Self {
+            format_seconds: probe
+                .get("format")
+                .and_then(|format| format.get("duration"))
+                .and_then(|duration| duration.as_str())
+                .and_then(|duration| duration.parse::<f64>().ok())
+                .filter(|seconds| seconds.is_finite() && *seconds > 0.0),
+            ..Self::default()
+        };
+        let streams = probe
+            .get("streams")
+            .and_then(|streams| streams.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut seen_video = false;
+        let mut seen_audio = false;
+        for stream in streams {
+            let seconds = stream
+                .get("duration")
+                .and_then(|duration| duration.as_str())
+                .and_then(|duration| duration.parse::<f64>().ok())
+                .or_else(|| {
+                    stream
+                        .get("tags")?
+                        .get("DURATION")?
+                        .as_str()
+                        .and_then(parse_mkv_duration_tag)
+                });
+            let codec = stream
+                .get("codec_name")
+                .and_then(|codec| codec.as_str())
+                .map(str::to_string);
+            match stream.get("codec_type").and_then(|kind| kind.as_str()) {
+                Some("video") if !seen_video => {
+                    seen_video = true;
+                    parsed.video_codec = codec;
+                    parsed.video_seconds = seconds;
+                    parsed.video_frame_rate = stream
+                        .get("r_frame_rate")
+                        .and_then(|rate| rate.as_str())
+                        .and_then(parse_ffprobe_rational);
+                }
+                Some("audio") if !seen_audio => {
+                    seen_audio = true;
+                    parsed.audio_codec = codec;
+                    parsed.audio_seconds = seconds;
+                }
+                _ => {}
+            }
+        }
+        parsed
+    }
+
+    /// Plan 200 C2: H.264 gets the BT.709 tags and the VUI rewrite. A failed
+    /// probe keeps today's assumption (Videorc only records H.264);
+    /// `h264_metadata` would reject any other codec.
+    fn video_is_h264(&self) -> bool {
+        self.video_codec
+            .as_deref()
+            .is_none_or(|codec| codec == "h264")
+    }
+
+    /// Plan 200 C2: AAC already (record+stream takes, and record-only takes
+    /// that don't keep the lossless MKV) is copied, never encoded a second
+    /// time.
+    fn audio_is_aac(&self) -> bool {
+        self.audio_codec.as_deref() == Some("aac")
+    }
+
+    /// The duration to trim the MP4 export to: `None` when the tails already
+    /// agree or a stream is missing.
+    fn trim_seconds(&self) -> Option<f64> {
+        let (video_seconds, audio_seconds) = (self.video_seconds?, self.audio_seconds?);
+        if (video_seconds - audio_seconds).abs() <= MP4_EXPORT_TAIL_TRIM_THRESHOLD_SECONDS {
+            return None;
+        }
+        let trim = video_seconds.min(audio_seconds);
+        (trim > 0.0).then_some(trim)
+    }
+
+    /// The length of the exported file, for progress and chapter ends.
+    fn exported_seconds(&self) -> Option<f64> {
+        self.trim_seconds()
+            .or(self.format_seconds)
+            .or_else(|| match (self.video_seconds, self.audio_seconds) {
+                (Some(video), Some(audio)) => Some(video.max(audio)),
+                (video, audio) => video.or(audio),
+            })
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+    }
+}
+
+/// `"30/1"` → `(30, 1)`; `"0/0"` and garbage → `None`.
+fn parse_ffprobe_rational(value: &str) -> Option<(u64, u64)> {
+    let (numerator, denominator) = value.trim().split_once('/')?;
+    let numerator = numerator.parse::<u64>().ok()?;
+    let denominator = denominator.parse::<u64>().ok()?;
+    (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+}
+
+/// Probe the capture MKV's streams. Empty on any failure.
+async fn probe_mp4_export_input(ffprobe_path: &str, input: &Path) -> Mp4ExportProbe {
+    let Ok(output) = Command::new(ffprobe_path)
         .args([
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type,duration:stream_tags=DURATION",
+            "stream=codec_type,codec_name,r_frame_rate,duration:stream_tags=DURATION:format=duration",
             "-of",
             "json",
         ])
         .arg(input)
         .output()
         .await
-        .ok()?;
+    else {
+        return Mp4ExportProbe::default();
+    };
     if !output.status.success() {
-        return None;
+        return Mp4ExportProbe::default();
     }
-    let probe: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let mut video_seconds = None;
-    let mut audio_seconds = None;
-    for stream in probe.get("streams")?.as_array()? {
-        let seconds = stream
-            .get("duration")
-            .and_then(|duration| duration.as_str())
-            .and_then(|duration| duration.parse::<f64>().ok())
-            .or_else(|| {
-                stream
-                    .get("tags")?
-                    .get("DURATION")?
-                    .as_str()
-                    .and_then(parse_mkv_duration_tag)
-            });
-        match stream.get("codec_type").and_then(|kind| kind.as_str()) {
-            Some("video") => video_seconds = video_seconds.or(seconds),
-            Some("audio") => audio_seconds = audio_seconds.or(seconds),
-            _ => {}
-        }
-    }
-    let (video_seconds, audio_seconds) = (video_seconds?, audio_seconds?);
-    if (video_seconds - audio_seconds).abs() <= MP4_EXPORT_TAIL_TRIM_THRESHOLD_SECONDS {
-        return None;
-    }
-    let trim = video_seconds.min(audio_seconds);
-    (trim > 0.0).then_some(trim)
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map(|probe| Mp4ExportProbe::from_ffprobe_json(&probe))
+        .unwrap_or_default()
 }
 
-async fn export_mp4_from_mkv(ffmpeg_path: &str, input: &Path, output: &Path) -> Result<()> {
+/// Plan 200 C1: the take facts an export stamps into the MP4. Present only
+/// for a Videorc capture; imports, duplicates and processed copies get a
+/// plain remux.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Mp4ExportTake {
+    /// The take's configured frame rate.
+    fps: Option<u32>,
+    /// Plan 200 C3: the take's start. All files of one take share it, so
+    /// they carry the same `creation_time` and timecode.
+    started_at: Option<DateTime<Utc>>,
+    /// Plan 200 C3: the take's markers as `(at_seconds, label)`, read from
+    /// the Combined session for every file of the take.
+    markers: Vec<(f64, Option<String>)>,
+}
+
+fn load_mp4_export_take(state: &AppState, session_id: &str) -> Option<Mp4ExportTake> {
+    match state.database.mp4_export_take_row(session_id) {
+        Ok(Some(row)) if row.captured_by_videorc => {
+            let markers = state
+                .database
+                .markers_for_export(&row.marker_session_id)
+                .unwrap_or_else(|error| {
+                    state.emit_log(
+                        "warn",
+                        format!(
+                            "MP4 export for session {session_id} could not read its markers; it has no chapters: {error:#}"
+                        ),
+                    );
+                    Vec::new()
+                });
+            Some(Mp4ExportTake {
+                fps: row.fps,
+                started_at: DateTime::parse_from_rfc3339(&row.started_at)
+                    .ok()
+                    .map(|started_at| started_at.with_timezone(&Utc)),
+                markers,
+            })
+        }
+        Ok(_) => None,
+        Err(error) => {
+            // The take facts improve the MP4; they never block it.
+            state.emit_log(
+                "warn",
+                format!("MP4 export for session {session_id} could not read its take: {error:#}"),
+            );
+            None
+        }
+    }
+}
+
+/// Plan 200 C1: the whole frame rate whose tick every exported frame snaps
+/// to, or `None` (imports, non-H.264, a non-integer rate, an unknown rate).
+fn mp4_export_snap_fps(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Option<u32> {
+    if !probe.video_is_h264() {
+        return None;
+    }
+    mp4_export_take_fps(probe, take)
+}
+
+/// The take's whole frame rate: its configured rate, else the probe's whole
+/// `r_frame_rate`. `None` for imports and non-integer rates.
+fn mp4_export_take_fps(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Option<u32> {
+    let take = take?;
+    let probed = match probe.video_frame_rate {
+        Some((numerator, denominator)) if numerator % denominator != 0 => return None,
+        Some((numerator, denominator)) => u32::try_from(numerator / denominator).ok(),
+        None => None,
+    };
+    take.fps
+        .or(probed)
+        .filter(|fps| (1..=MP4_EXPORT_MAX_SNAP_FPS).contains(fps))
+}
+
+const MP4_EXPORT_MAX_SNAP_FPS: u32 = 240;
+
+/// Plan 200 C1: everything `mp4_export_args` needs beyond the two paths.
+#[derive(Debug, Clone, PartialEq)]
+struct Mp4ExportOptions {
+    /// End the delivered file at the shorter stream.
+    trim_seconds: Option<f64>,
+    /// Plan 200 C2: tag BT.709 and rewrite the H.264 VUI. Off for any other
+    /// video codec (imports: HEVC, VP9, ...).
+    tag_h264_bt709: bool,
+    /// Plan 200 C2: the audio is AAC already; copy it.
+    copy_audio: bool,
+    /// Snap every video packet to its own `1/fps` tick with `setts`.
+    snap_fps: Option<u32>,
+    /// Plan 200 C3: the take start, UTC, RFC 3339, whole seconds (the MP4
+    /// `mvhd` creation time has no finer unit).
+    creation_time: Option<String>,
+    /// Plan 200 C3: `HH:MM:SS:FF`, the local time of day at the take start,
+    /// and the frame rate it counts in.
+    timecode: Option<(String, u32)>,
+    /// Plan 200 C3: an ffmetadata file with the take's markers as chapters,
+    /// in the private staging folder.
+    chapters_path: Option<PathBuf>,
+}
+
+impl Mp4ExportOptions {
+    /// Today's plain remux: no trim, no frame-time snap.
+    #[cfg(test)]
+    fn remux() -> Self {
+        Self {
+            trim_seconds: None,
+            tag_h264_bt709: true,
+            copy_audio: false,
+            snap_fps: None,
+            creation_time: None,
+            timecode: None,
+            chapters_path: None,
+        }
+    }
+
+    fn plan(probe: &Mp4ExportProbe, take: Option<&Mp4ExportTake>) -> Self {
+        Self {
+            trim_seconds: probe.trim_seconds(),
+            tag_h264_bt709: probe.video_is_h264(),
+            copy_audio: probe.audio_is_aac(),
+            snap_fps: mp4_export_snap_fps(probe, take),
+            creation_time: take
+                .and_then(|take| take.started_at)
+                .map(|started_at| started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            timecode: take
+                .and_then(|take| take.started_at)
+                .zip(mp4_export_take_fps(probe, take))
+                .map(|(started_at, fps)| {
+                    (
+                        mp4_export_timecode(started_at.with_timezone(&chrono::Local).time(), fps),
+                        fps,
+                    )
+                }),
+            chapters_path: None,
+        }
+    }
+
+    /// Plan 200 C1: a capture with a real timing glitch (two frames inside one
+    /// tick) makes FFmpeg fail on non-monotonic DTS. The export then runs once
+    /// more without the snap.
+    fn without_frame_time_snap(&self) -> Option<Self> {
+        self.snap_fps.map(|_| Self {
+            snap_fps: None,
+            ..self.clone()
+        })
+    }
+}
+
+/// Plan 200 C3: `HH:MM:SS:FF` for a time of day, the frames counted from the
+/// sub-second at `fps`. Frames never carry into the seconds, so the last
+/// instant before midnight is `23:59:59:<fps-1>`.
+fn mp4_export_timecode(time: chrono::NaiveTime, fps: u32) -> String {
+    use chrono::Timelike;
+    let fps = fps.max(1);
+    // A leap second reports 1_000_000_000.. nanoseconds; clamp it.
+    let nanos = u64::from(time.nanosecond().min(999_999_999));
+    let frame = (nanos * u64::from(fps) / 1_000_000_000).min(u64::from(fps - 1));
+    format!(
+        "{:02}:{:02}:{:02}:{:02}",
+        time.hour(),
+        time.minute(),
+        time.second(),
+        frame
+    )
+}
+
+/// Plan 200 C3: escape an ffmetadata value (`=`, `;`, `#`, `\` and line
+/// breaks are special in that format).
+fn escape_ffmetadata_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '=' | ';' | '#' | '\\' | '\n') {
+            escaped.push('\\');
+        }
+        if character == '\r' {
+            // A bare CR would end the line on some readers; drop it.
+            continue;
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// Plan 200 C3: the take's markers as ffmetadata chapters for a file of
+/// `duration_seconds`. Each chapter starts at a marker and ends at the next
+/// one or at the end of the file; a "Start" chapter covers the time before a
+/// first marker later than 0. `None` when no marker lies inside the file.
+fn mp4_chapters_ffmetadata(
+    markers: &[(f64, Option<String>)],
+    duration_seconds: f64,
+) -> Option<String> {
+    let duration_ms = (duration_seconds * 1000.0).round();
+    if !duration_ms.is_finite() || duration_ms < 1.0 {
+        return None;
+    }
+    let duration_ms = duration_ms as u64;
+    let mut starts: Vec<(u64, String)> = Vec::new();
+    for (index, (at_seconds, label)) in markers.iter().enumerate() {
+        if !at_seconds.is_finite() || *at_seconds < 0.0 {
+            continue;
+        }
+        let start_ms = (at_seconds * 1000.0).round() as u64;
+        if start_ms >= duration_ms {
+            continue;
+        }
+        let title = label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Marker {}", index + 1));
+        starts.push((start_ms, title));
+    }
+    if starts.is_empty() {
+        return None;
+    }
+    starts.sort_by_key(|(start_ms, _)| *start_ms);
+    // Two markers on one millisecond would make an empty chapter; keep the first.
+    starts.dedup_by_key(|(start_ms, _)| *start_ms);
+    if starts[0].0 > 0 {
+        starts.insert(0, (0, "Start".to_string()));
+    }
+    let mut text = String::from(";FFMETADATA1\n");
+    for (index, (start_ms, title)) in starts.iter().enumerate() {
+        let end_ms = starts
+            .get(index + 1)
+            .map(|(next, _)| *next)
+            .unwrap_or(duration_ms);
+        text.push_str(&format!(
+            "[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}\nEND={end_ms}\ntitle={}\n",
+            escape_ffmetadata_value(title)
+        ));
+    }
+    Some(text)
+}
+
+/// Plan 200 C3: write the take's chapters beside the staged MP4, inside the
+/// private staging folder, so they go away with it. `Ok(None)` when there is
+/// nothing to write.
+async fn write_mp4_export_chapters(
+    take: Option<&Mp4ExportTake>,
+    probe: &Mp4ExportProbe,
+    output: &Path,
+) -> Result<Option<PathBuf>> {
+    let Some(take) = take.filter(|take| !take.markers.is_empty()) else {
+        return Ok(None);
+    };
+    let duration_seconds = probe
+        .exported_seconds()
+        .context("the recording's duration is unknown")?;
+    let Some(text) = mp4_chapters_ffmetadata(&take.markers, duration_seconds) else {
+        return Ok(None);
+    };
+    let directory = output
+        .parent()
+        .with_context(|| format!("MP4 output {} has no parent folder", output.display()))?;
+    let path = directory.join("chapters.ffmetadata");
+    fs::write(&path, text)
+        .await
+        .with_context(|| format!("Could not write chapters {}", path.display()))?;
+    Ok(Some(path))
+}
+
+/// Remove a failed attempt's partial MP4 from the private staging folder so
+/// the retry's `-n` can create it again.
+async fn remove_failed_mp4_export_attempt(output: &Path) -> Result<()> {
+    match fs::remove_file(output).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "Could not remove the failed MP4 export attempt {}",
+                output.display()
+            )
+        }),
+    }
+}
+
+async fn export_mp4_from_mkv(
+    ffmpeg_path: &str,
+    input: &Path,
+    output: &Path,
+    take: Option<Mp4ExportTake>,
+) -> Result<()> {
     if output
         .try_exists()
         .with_context(|| format!("Could not inspect MP4 output {}", output.display()))?
@@ -6463,9 +8585,29 @@ async fn export_mp4_from_mkv(ffmpeg_path: &str, input: &Path, output: &Path) -> 
             output.display()
         );
     }
-    let trim_seconds = mp4_export_trim_seconds(&ffprobe_path_for(ffmpeg_path), input).await;
+    let probe = probe_mp4_export_input(&ffprobe_path_for(ffmpeg_path), input).await;
+    let mut options = Mp4ExportOptions::plan(&probe, take.as_ref());
+    match write_mp4_export_chapters(take.as_ref(), &probe, output).await {
+        Ok(chapters_path) => options.chapters_path = chapters_path,
+        Err(error) => tracing::warn!("MP4 export has no chapters: {error:#}"),
+    }
+    let first = run_mp4_export_ffmpeg(ffmpeg_path, mp4_export_args(input, output, &options)).await;
+    let Err(error) = first else {
+        return Ok(());
+    };
+    let Some(retry) = options.without_frame_time_snap() else {
+        return Err(error);
+    };
+    tracing::warn!(
+        "MP4 export with exact frame times failed; retrying without the frame-time snap: {error:#}"
+    );
+    remove_failed_mp4_export_attempt(output).await?;
+    run_mp4_export_ffmpeg(ffmpeg_path, mp4_export_args(input, output, &retry)).await
+}
+
+async fn run_mp4_export_ffmpeg(ffmpeg_path: &str, args: Vec<String>) -> Result<()> {
     let mut command = Command::new(ffmpeg_path);
-    command.args(mp4_export_args(input, output, trim_seconds));
+    command.args(args);
     let status = status_owned_tokio(&mut command)
         .await
         .with_context(|| format!("Could not start {ffmpeg_path} for MP4 export"))?;
@@ -6712,34 +8854,94 @@ async fn publish_staged_media_uniquely(staging: PathBuf, preferred: PathBuf) -> 
     .context("Could not join staged recording publish task")?
 }
 
-fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Vec<String> {
+fn mp4_export_args(input: &Path, output: &Path, options: &Mp4ExportOptions) -> Vec<String> {
     let mut args = vec![
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
         "-i".to_string(),
-        input.display().to_string(),
-        "-map".to_string(),
-        "0".to_string(),
-        "-c:v".to_string(),
-        "copy".to_string(),
-        "-c:a".to_string(),
-        "aac".to_string(),
+        ffmpeg_file_path(input),
+    ];
+    if let Some(chapters) = options.chapters_path.as_deref() {
+        // Plan 200 C3: input 1 holds only chapters. Never `-map_metadata -1`:
+        // it dropped the chapter titles (2026-10-26).
+        args.extend([
+            "-f".to_string(),
+            "ffmetadata".to_string(),
+            "-i".to_string(),
+            ffmpeg_file_path(chapters),
+        ]);
+    }
+    args.extend(["-map".to_string(), "0".to_string()]);
+    if options.chapters_path.is_some() {
+        args.extend(["-map_chapters".to_string(), "1".to_string()]);
+    }
+    args.extend(["-c:v".to_string(), "copy".to_string()]);
+    if options.copy_audio {
+        // Plan 200 C2: record+stream takes already hold AAC; a second encode
+        // only loses quality. Record-only takes hold AAC too unless they keep
+        // the lossless MKV, so finalize is a copy, not a whole-track encode.
+        args.extend(["-c:a".to_string(), "copy".to_string()]);
+    } else {
         // 256k stereo AAC: transparent for voice+music mixes; the capture
         // MKV's PCM is the lossless source when the keep-original setting is
-        // on (recording-quality plan Q4).
-        "-b:a".to_string(),
-        "256k".to_string(),
-        "-movflags".to_string(),
-        "+faststart".to_string(),
-    ];
-    if let Some(trim_seconds) = trim_seconds {
+        // on (recording-quality plan Q4). Its bitrate is the record-only
+        // take's (`RECORD_AAC_BITRATE`).
+        args.extend([
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            RECORD_AAC_BITRATE.to_string(),
+        ]);
+    }
+    args.extend(["-movflags".to_string(), "+faststart".to_string()]);
+    if options.tag_h264_bt709 {
+        // #792 dropped the Media Foundation helper that took a frame rate; MP4
+        // export is a remux of an MKV that already declares its rate, so stamp
+        // BT.709 / video-range with the shared tag + VUI rewrite helpers.
+        args.extend(h264_bt709_color_tag_args());
+        let [bsf_flag, mut bsf_chain] = h264_bt709_vui_rewrite_bsf_args();
+        if let Some(fps) = options.snap_fps {
+            // Plan 200 C1: the MKV time base is 1/1000, so a stream copy leaves
+            // 33/34 ms frame durations that editors read as variable frame
+            // rate. Snap every packet to its own frame tick; real gaps stay
+            // gaps.
+            bsf_chain.push_str(&mp4_export_frame_time_snap_bsf(fps));
+        }
+        args.extend([bsf_flag, bsf_chain]);
+    }
+    if let Some(creation_time) = options.creation_time.as_deref() {
+        // Plan 200 C3: editors sync the files of one take on these.
+        args.extend([
+            "-metadata".to_string(),
+            format!("creation_time={creation_time}"),
+        ]);
+    }
+    if let Some((timecode, fps)) = options.timecode.as_ref() {
+        // The `tmcd` track takes the video stream's frame rate. A stream copy
+        // of a capture MKV with no duration in its header reports a bogus
+        // average rate (30000/1), and the MP4 trailer then fails with "fps
+        // 30000 is too large" (recording-matrix smoke, 2026-10-26). State the
+        // rate; with `-c:v copy` this changes no packet.
+        args.extend([
+            "-r:v".to_string(),
+            fps.to_string(),
+            "-timecode".to_string(),
+            timecode.clone(),
+        ]);
+    }
+    if let Some(trim_seconds) = options.trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
     }
-    args.push(output.display().to_string());
+    args.push(ffmpeg_file_path(output));
     args
+}
+
+/// Appended to the `-bsf:v` chain: retime every packet onto `1/fps`.
+fn mp4_export_frame_time_snap_bsf(fps: u32) -> String {
+    format!(",setts=time_base=1/{fps}:prescale=1:ts=round(PTS)")
 }
 
 pub async fn create_preview_snapshot(
@@ -6760,12 +8962,14 @@ pub async fn create_preview_snapshot(
         scene: None,
         captions: None,
         requested_at_ms: None,
+        replay: None,
         output: crate::protocol::OutputSettings {
             record_enabled: true,
             stream_enabled: false,
             output_directory: None,
             ffmpeg_path: Some(ffmpeg_path.clone()),
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video: default_video_settings(),
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,
@@ -7055,7 +9259,7 @@ fn begin_recording_encoder_bridge_teardown(
     begin_encoder_bridge_shutdown(take_all_encoder_bridge_sessions(recording, stream), grace)
 }
 
-async fn finish_recording_encoder_bridge_teardown(
+pub(crate) async fn finish_recording_encoder_bridge_teardown(
     state: &AppState,
     batch: Option<EncoderBridgeShutdownBatch>,
     origin: &'static str,
@@ -7352,12 +9556,14 @@ fn live_preview_session_params(
         scene: None,
         captions: None,
         requested_at_ms: None,
+        replay: None,
         output: crate::protocol::OutputSettings {
             record_enabled: true,
             stream_enabled: false,
             output_directory: None,
             ffmpeg_path: Some(ffmpeg_path),
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video,
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,
@@ -7902,11 +10108,13 @@ async fn stop_fallback(
     };
     sleep(base_delay).await;
 
-    // A live RTMP leg keeps its own longer, fixed grace. A record-only FFmpeg
-    // that is still advancing its output clock is draining admitted frames
-    // (below-realtime software encode), not hung: TERM here truncates the
-    // file and used to surface as a fake encoder failure.
-    if !streaming && let Some(progress) = progress.as_ref() {
+    // An FFmpeg that is still advancing its output clock is draining admitted
+    // frames (below-realtime software encode), not hung: TERM here truncates
+    // the file and used to surface as a fake encoder failure. That holds with
+    // a live RTMP leg too (Linux plan 0017: ogre's sink kept receiving 25 fps
+    // through the whole 8 s grace before the TERM). A dead ingest stops the
+    // clock, so it still escalates at the next poll.
+    if let Some(progress) = progress.as_ref() {
         let mut waited = base_delay;
         let mut drain_logged = false;
         loop {
@@ -7984,6 +10192,20 @@ async fn stop_kill_fallback(
     );
     mark_ffmpeg_stop_escalated(&state, pid).await;
     let _ = send_process_signal(pid, "KILL").await;
+}
+
+/// Performance check only: ends the active benchmark session's FFmpeg without
+/// waiting for its encoder backlog. Nobody keeps a benchmark file, and a
+/// below-realtime software encoder can need 13 s to flush (UHD 620 field log)
+/// — longer than the user's Record waits for the capture slot. Refuses any
+/// session that is not a benchmark.
+pub(crate) async fn kill_benchmark_ffmpeg(state: &AppState) -> bool {
+    let pid = match state.recording.lock().await.as_ref() {
+        Some(active) if active.performance_check => active.pid,
+        _ => return false,
+    };
+    mark_ffmpeg_stop_escalated(state, pid).await;
+    send_process_signal(pid, "KILL").await.is_ok()
 }
 
 async fn mark_ffmpeg_stop_escalated(state: &AppState, pid: u32) {
@@ -8064,8 +10286,8 @@ async fn wait_for_process_exit(pid: u32, wait: Duration) -> bool {
 /// the session's intended fps and whether an audio source was selected.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PostRecordingGate {
-    intended_fps: Option<f64>,
-    expect_audio: bool,
+    pub(crate) intended_fps: Option<f64>,
+    pub(crate) expect_audio: bool,
 }
 
 struct SessionMonitorContext {
@@ -8124,6 +10346,7 @@ fn audio_levels_event(
         session_id: Some(session_id.to_string()),
         microphone: levels.microphone,
         system_audio: levels.system_audio,
+        sounds: levels.sounds,
         master: levels.master,
         master_clipped_samples: levels.master_clipped_samples,
     })
@@ -8138,6 +10361,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
     let mut microphone_generation = 0;
+    let microphone_reopen_attempts = Arc::new(AtomicU32::new(0));
     loop {
         ticker.tick().await;
         let counters = {
@@ -8213,6 +10437,19 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                 source_loss_after_ms.after_ms,
                 source_loss_after_ms.reason,
             );
+            if microphone_auto_reopen_due(
+                source_loss_after_ms.reason,
+                microphone_reopen_attempts.load(Ordering::Acquire),
+                cfg!(any(target_os = "linux", target_os = "windows")),
+            ) {
+                tokio::spawn(reopen_stopped_microphone(
+                    state.clone(),
+                    session_id.clone(),
+                    source_loss_after_ms.device_name.clone(),
+                    source_loss_after_ms.after_ms,
+                    Arc::clone(&microphone_reopen_attempts),
+                ));
+            }
         }
 
         // Early truthful warning (plan 021 F3): a mic that has produced nothing
@@ -8442,6 +10679,125 @@ fn emit_microphone_input_lost_health_event(
     );
 }
 
+/// Retest 151: a Linux Pulse capture worker stops on its own consistency
+/// checks when the desktop starves it (its timestamp queue overflowed after a
+/// 2 s stall; stamps ran ahead of the capture clock after an overrun) while
+/// the microphone itself is fine. Nothing opened it again, so a 30-minute live
+/// session recorded and streamed 27 minutes of silence. Such a stop now opens
+/// the same microphone again through the path that choosing it again uses, a
+/// bounded number of times per session. A timeline loss keeps its own
+/// re-anchor (plan 076). The Windows capture worker stops the same way: on
+/// the field Intel SST microphone it refused one packet's clock record 32 s
+/// into an idle session while the post-recording quality check ran, and the
+/// session stayed silent. macOS keeps its behaviour.
+const MICROPHONE_AUTO_REOPEN_LIMIT: u32 = 5;
+const MICROPHONE_AUTO_REOPEN_DELAY: Duration = Duration::from_secs(1);
+const MICROPHONE_REOPENED_CODE: &str = "microphone-input-recovered";
+
+fn microphone_auto_reopen_due(
+    reason: crate::session_audio::SourceLossReason,
+    attempts: u32,
+    platform_reopens: bool,
+) -> bool {
+    platform_reopens
+        && reason == crate::session_audio::SourceLossReason::CaptureStopped
+        && attempts < MICROPHONE_AUTO_REOPEN_LIMIT
+}
+
+/// The next reopen attempt's number, or `None` once the session's bounded
+/// attempts are spent. Counted here, not per source-loss event: a reopen
+/// whose worker dies during the switch itself (the field Intel SST
+/// microphone refused its clock record two seconds after it came back)
+/// never went live, so it raises no new loss event; waiting for one left the
+/// session silent after "attempt 1 of 5".
+fn next_microphone_reopen_attempt(attempts: &AtomicU32) -> Option<u32> {
+    let mut taken = attempts.load(Ordering::Acquire);
+    loop {
+        if taken >= MICROPHONE_AUTO_REOPEN_LIMIT {
+            return None;
+        }
+        match attempts.compare_exchange_weak(taken, taken + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return Some(taken + 1),
+            Err(current) => taken = current,
+        }
+    }
+}
+
+/// Opens the session's confirmed microphone again after its capture stopped,
+/// unless it already came back, the user is changing it, or it is gone. A
+/// failed reopen is tried again after the same delay, up to the session's
+/// limit.
+async fn reopen_stopped_microphone(
+    state: AppState,
+    session_id: String,
+    device_name: String,
+    stopped_after_ms: u64,
+    attempts: Arc<AtomicU32>,
+) {
+    while let Some(attempt) = next_microphone_reopen_attempt(&attempts) {
+        tokio::time::sleep(MICROPHONE_AUTO_REOPEN_DELAY).await;
+        let Ok(sources) = crate::live_source_switch::get(&state, &session_id).await else {
+            return;
+        };
+        let Some(device_id) = sources.confirmed.microphone_id.clone() else {
+            return;
+        };
+        let lost = sources.health.iter().any(|health| {
+            health.kind == crate::live_source_switch::SourceKind::Microphone
+                && health.health == crate::live_source_switch::SourceHealth::Unavailable
+        });
+        if !lost || sources.pending.is_some() {
+            return;
+        }
+        let request = crate::live_source_switch::SourceSwitchParams {
+            session_id: session_id.clone(),
+            request_id: format!("microphone-reopen-{attempt}-{}", Uuid::new_v4()),
+            expected_source_revision: sources.source_revision,
+            kind: crate::live_source_switch::SourceKind::Microphone,
+            device_id: Some(device_id),
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let reopened = crate::live_source_switch::reopen_microphone(&state, request)
+            .await
+            .is_ok_and(|after| {
+                after.health.iter().any(|health| {
+                    health.kind == crate::live_source_switch::SourceKind::Microphone
+                        && matches!(
+                            health.health,
+                            crate::live_source_switch::SourceHealth::Ready
+                                | crate::live_source_switch::SourceHealth::Starting
+                        )
+                })
+            });
+        if reopened {
+            let message = microphone_reopened_message(&device_name, stopped_after_ms);
+            state.emit_log("info", &message);
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Info,
+                MICROPHONE_REOPENED_CODE,
+                &message,
+            );
+            return;
+        }
+        state.emit_log(
+            "warn",
+            format!(
+                "Microphone \"{device_name}\" could not be opened again after it stopped (attempt {attempt} of {MICROPHONE_AUTO_REOPEN_LIMIT})."
+            ),
+        );
+    }
+}
+
+fn microphone_reopened_message(device_name: &str, stopped_after_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" stopped after {:.1} seconds and Videorc opened it again. Only the moments in between are silent.",
+        stopped_after_ms as f64 / 1_000.0
+    )
+}
+
 fn microphone_input_lost_message(device_name: &str, source_loss_after_ms: u64) -> String {
     format!(
         "Microphone \"{device_name}\" stopped after {:.1} seconds. Videorc replaced the missing input with silence.",
@@ -8507,6 +10863,10 @@ fn persist_terminal_session_or_recovery(
     duration_ms: Option<i64>,
     diagnostics: &DiagnosticStats,
 ) -> std::result::Result<(), String> {
+    // Plan 181: a buffer-only session has no row to finalize.
+    if crate::replay_buffer::is_rowless_session(state, session_id) {
+        return Ok(());
+    }
     let finalization = SessionFinalization::new(
         session_id,
         status,
@@ -8519,7 +10879,7 @@ fn persist_terminal_session_or_recovery(
     persist_finalization_or_recovery(state, &finalization, &mut None)
 }
 
-fn persist_finalization_or_recovery(
+pub(crate) fn persist_finalization_or_recovery(
     state: &AppState,
     finalization: &SessionFinalization,
     recovery_path: &mut Option<PathBuf>,
@@ -8538,6 +10898,10 @@ fn persist_finalization_or_recovery_with_fault(
     recovery_path: &mut Option<PathBuf>,
     fault: Mp4FinalizationFault,
 ) -> std::result::Result<(), String> {
+    // Plan 181: a buffer-only session has no row and no media to recover.
+    if crate::replay_buffer::is_rowless_session(state, &finalization.session_id) {
+        return Ok(());
+    }
     // A pre-existing record may still own a partial or published MP4 while the
     // live terminal path falls back to the MKV. In that case it remains the
     // single authority: replacing or clearing it with a staging-less fallback
@@ -8793,6 +11157,9 @@ async fn monitor_session(
                 keep_original_media: active.keep_original_media,
                 performance_check: active.performance_check,
                 native_audio_stats,
+                records_file: active.output_path.is_some(),
+                replay_only: active.replay_only,
+                ffmpeg_evidence: active.ffmpeg_progress.evidence.clone(),
             }
         });
     let retired_active = monitored_recording
@@ -8820,6 +11187,19 @@ async fn monitor_session(
     let Some(mut monitored_recording) = monitored_recording else {
         return;
     };
+    // Plan 181: the ring dies with the session's FFmpeg child. A user stop
+    // (or the handover, or shutdown) reads `off`; anything else says why.
+    crate::replay_buffer::retire(
+        &state,
+        &session_id,
+        if monitored_recording.stop_intent_preceded_exit {
+            crate::replay_buffer::RetireOutcome::Stopped
+        } else {
+            crate::replay_buffer::RetireOutcome::Failed(
+                "The session ended before you stopped it, so clips are off.".to_string(),
+            )
+        },
+    );
     // Chat runtime belongs to the exact recording generation, not to the stop
     // RPC or to the much longer media-finalization tail. Retire it as soon as
     // this monitor has successfully removed its own recording slot. The
@@ -8828,38 +11208,84 @@ async fn monitor_session(
     let mut encoder_bridge_lifecycle = EncoderBridgeLifecycleSnapshot::default();
     let mut encoder_bridge_teardown_duration_ms = 0_u64;
     let mut encoder_bridge_detached_writers = 0_usize;
+    // Plan 157: per-role outcomes of the ISO writers, committed as Library
+    // rows below whatever the Combined leg's verdict is (the files are real).
+    let mut source_iso_finished: Option<Vec<crate::source_iso::FinishedSourceIsoRole>> = None;
 
     #[cfg(target_os = "windows")]
     if let Some(mut active) = retired_active {
         let mut final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
-        let bridge_persistence_gate = gate_encoder_bridge_lifecycle_persistence(
-            active
-                .encoder_bridge
-                .iter()
-                .chain(active.encoder_bridge_stream.iter()),
+        // The process may have been terminated after its normal stop grace
+        // expired while a raw fallback writer was still draining a complete
+        // frame. Reap both legs behind one absolute deadline; the old direct
+        // JoinHandle::join here could hold the monitor until the writer's
+        // thirty-second frame timeout (or forever on a wedged pipe), which
+        // prevented MP4 export from ever running.
+        let bridge_teardown = begin_recording_encoder_bridge_teardown(
+            &mut active.encoder_bridge,
+            &mut active.encoder_bridge_stream,
+            ENCODER_BRIDGE_TEARDOWN_GRACE,
         );
-        if let Some(stream_bridge) = active.encoder_bridge_stream.as_ref() {
-            stream_bridge.stop();
+        if let Some(report) = finish_recording_encoder_bridge_teardown(
+            &state,
+            bridge_teardown,
+            "recording-process-exit",
+        )
+        .await
+        {
+            encoder_bridge_teardown_duration_ms = report.teardown_duration_ms;
+            for bridge in &report.reports {
+                if let Some(failure) = bridge.terminal_failure.clone() {
+                    match bridge.role {
+                        Some(EncoderBridgeOutputRole::Stream) => {
+                            monitored_recording.stream_bridge_terminal_failure = Some(failure);
+                        }
+                        Some(
+                            EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared,
+                        )
+                        | None => {
+                            monitored_recording.recording_bridge_terminal_failure = Some(failure);
+                        }
+                    }
+                }
+            }
+            encoder_bridge_lifecycle = report.lifecycle;
+            if encoder_bridge_lifecycle.live_resources > 0 {
+                let message = format!(
+                    "Encoder bridge teardown left {} capture-relevant resource(s) live (outer={}, FIFO={}, detached={}); restart Videorc before recording again.",
+                    encoder_bridge_lifecycle.live_resources,
+                    encoder_bridge_lifecycle.live_outer_writers,
+                    encoder_bridge_lifecycle.live_fifo_writers,
+                    encoder_bridge_lifecycle.detached_writers,
+                );
+                state.emit_log("warn", message.clone());
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "encoder-bridge-writer-leaked",
+                    &message,
+                );
+            }
+            let _ = emit_session_log(
+                &state,
+                &session_id,
+                HealthLevel::Info,
+                "encoder-bridge-writer-lifecycle",
+                &format!(
+                    "state=teardown-complete durationMs={} liveOuter={} liveFifo={} liveResources={} detached={}",
+                    encoder_bridge_teardown_duration_ms,
+                    encoder_bridge_lifecycle.live_outer_writers,
+                    encoder_bridge_lifecycle.live_fifo_writers,
+                    encoder_bridge_lifecycle.live_resources,
+                    encoder_bridge_lifecycle.detached_writers,
+                ),
+                None,
+            );
         }
-        if let Some(recording_bridge) = active.encoder_bridge.as_ref() {
-            recording_bridge.stop();
-        }
-        if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
-            stream_bridge.stop_and_join_writer();
-        }
-        if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
-            recording_bridge.stop_and_join_writer();
-        }
-        drop(bridge_persistence_gate);
         final_snapshot_phase
             .writers_joined()
             .expect("Windows D3D11 writers join exactly once before final diagnostics");
-        // Terminal bridge failures may be published only as the writer exits;
-        // refresh them after the bounded MF drain/flush has completed.
-        monitored_recording.recording_bridge_terminal_failure =
-            active.recording_bridge_terminal_failure();
-        monitored_recording.stream_bridge_terminal_failure =
-            active.stream_bridge_terminal_failure();
         let mut retained_snapshot = None;
         if let Some(mut monitor) = active.windows_d3d11_monitor.take() {
             monitor.request_stop();
@@ -8891,6 +11317,9 @@ async fn monitor_session(
         if let Some(pump) = active.windows_d3d11_media.as_ref() {
             let _ = pump.destroy_preview();
         }
+        if let Some(source_iso) = active.source_iso.take() {
+            source_iso_finished = Some(source_iso.finish(&state).await);
+        }
         teardown_current_windows_d3d11_presenter(&state, "windows-d3d11-recording-process-exited")
             .await;
         // The pump must release the D3D generation before the suspended CPU
@@ -8920,6 +11349,8 @@ async fn monitor_session(
             ENCODER_BRIDGE_TEARDOWN_GRACE,
         );
         let compositor_capture_lease = active.compositor_capture_lease.take();
+        let restarted_compositor_run_id = active.restarted_compositor_run_id.take();
+        let source_iso = active.source_iso.take();
         drop(active);
         let teardown_report = finish_recording_encoder_bridge_teardown(
             &state,
@@ -8927,10 +11358,19 @@ async fn monitor_session(
             "recording-process-exit",
         )
         .await;
+        if let Some(source_iso) = source_iso {
+            source_iso_finished = Some(source_iso.finish(&state).await);
+        }
         // The bridge writer no longer reads the frame store: hand the armed
         // preview compositor back (or stop it when no surface is live).
         if let Some(lease) = compositor_capture_lease {
             lease.release().await;
+        } else if let Some(run_id) = restarted_compositor_run_id {
+            // The restart path has no lease to hand back: stop this session's
+            // own run (a newer run, e.g. the next Clips ring, is never hit)
+            // and let a live preview surface start its own run again.
+            let _ = crate::compositor::stop_compositor_if_run_id(&state, &run_id).await;
+            crate::preview_surface::reconcile_preview_after_capture_release(&state).await;
         }
         if let Some(report) = teardown_report {
             encoder_bridge_teardown_duration_ms = report.teardown_duration_ms;
@@ -8954,7 +11394,15 @@ async fn monitor_session(
                     }
                 }
             }
-            encoder_bridge_lifecycle = report.lifecycle;
+            // Plan 198: the batch snapshot is taken when the Combined bridge
+            // reaps, while each ISO bridge is still reaping under its own
+            // supervisor. `finish` above has joined them; count again so an
+            // ISO take is not reported as leaking a writer it just released.
+            encoder_bridge_lifecycle = if source_iso_finished.is_some() {
+                crate::encoder_bridge::encoder_bridge_lifecycle_snapshot()
+            } else {
+                report.lifecycle
+            };
             if encoder_bridge_lifecycle.live_resources > 0 {
                 let message = format!(
                     "Encoder bridge teardown left {} capture-relevant resource(s) live (outer={}, FIFO={}, detached={}); restart Videorc before recording again.",
@@ -9008,8 +11456,9 @@ async fn monitor_session(
     // session's card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &session_id)
         .await;
+    state.soundboard.session_ended(&state, &session_id);
 
-    if let Some(native_audio_stats) = monitored_recording.native_audio_stats {
+    if let Some(native_audio_stats) = monitored_recording.native_audio_stats.as_ref() {
         let diagnostic_stats = {
             let mut diagnostics = state.diagnostics.lock().await;
             let next = apply_audio_stats(
@@ -9158,12 +11607,36 @@ async fn monitor_session(
     // rest of finalization to a background job that is spawned only after the
     // terminal status is published.
     let mut pending_finalization_job: Option<PendingRecordingFinalizationJob> = None;
+    // A take whose capture died mid-recording: once the failed row is
+    // committed and published, its MKV is recovered as an MP4.
+    let mut recover_failed_take: Option<String> = None;
     let performance_check_session = monitored_recording.performance_check;
+    // Plan 157: ISO rows + their finalization jobs are registered BEFORE the
+    // terminal status so the quit/updater gates never see an idle gap.
+    if let Some(finished) = source_iso_finished.take()
+        && !performance_check_session
+    {
+        // Plan 200 C4: the separate files queue first, but Combined exports
+        // first. Withdrawn below when this take gets no Combined job.
+        state
+            .recording_finalization
+            .expect_primary_export(&session_id);
+        crate::source_iso::commit_finished_source_iso_roles(
+            &state,
+            &session_id,
+            finished,
+            &monitored_recording.ffmpeg_path,
+            &ended_at,
+            duration_ms,
+            monitored_recording.keep_original_media,
+        );
+    }
     let terminal_status = match status {
         Ok(exit_status)
             if should_finalize_recording_session(
                 exit_status.success(),
                 monitored_recording.stop_intent_preceded_exit,
+                monitored_recording.stop_escalated,
                 recording_bridge_terminal_failure.as_deref(),
                 stream_bridge_terminal_failure.as_deref(),
             ) =>
@@ -9264,6 +11737,7 @@ async fn monitor_session(
                             pipeline: Some(monitored_recording.pipeline.status()),
                             duration_ms,
                             message: Some(message),
+                            replay_only: monitored_recording.replay_only,
                         }
                     }
                     Ok(()) => {
@@ -9323,6 +11797,7 @@ async fn monitor_session(
                             message: Some(
                                 "Recording saved; exporting the MP4 in the background.".to_string(),
                             ),
+                            replay_only: monitored_recording.replay_only,
                         }
                     }
                 }
@@ -9529,6 +12004,7 @@ async fn monitor_session(
                         persistence_error
                             .unwrap_or_else(|| "Capture session finalized.".to_string()),
                     ),
+                    replay_only: monitored_recording.replay_only,
                 };
                 // Slice 8: check (and, if needed, repair in place) the finalized file off
                 // the hot path. The recording is already marked complete; the gate only ever
@@ -9569,17 +12045,25 @@ async fn monitor_session(
             // Only the RECORDING bridge condemns the session here — a stream
             // failure was already reported above and, with a clean exit,
             // finalizes in the arm before this one.
-            let (failed_stage, health_code, mut message) = classify_failed_ffmpeg_exit(
-                monitored_recording.stop_intent_preceded_exit,
-                monitored_recording.stop_escalated,
-                recording_bridge_terminal_failure.as_deref(),
+            let (failed_stage, health_code, mut message) = ffmpeg_disk_full_failure(
+                monitored_recording.ffmpeg_fatal_category(),
                 &exit_status.to_string(),
-            );
+                monitored_recording.records_file,
+            )
+            .unwrap_or_else(|| {
+                classify_failed_ffmpeg_exit(
+                    monitored_recording.stop_intent_preceded_exit,
+                    monitored_recording.stop_escalated,
+                    recording_bridge_terminal_failure.as_deref(),
+                    &exit_status.to_string(),
+                    monitored_recording.records_file,
+                )
+            });
             monitored_recording
                 .pipeline
                 .mark_failed(failed_stage, &message);
             state.emit_log("error", &message);
-            if let Err(persistence_error) = persist_terminal_session_or_recovery(
+            match persist_terminal_session_or_recovery(
                 &state,
                 &session_id,
                 "failed",
@@ -9588,7 +12072,13 @@ async fn monitor_session(
                 duration_ms,
                 &final_diagnostics,
             ) {
-                message = format!("{message}. {persistence_error}");
+                Ok(()) if monitored_recording.records_file && !performance_check_session => {
+                    recover_failed_take = Some(session_id.clone());
+                }
+                Ok(()) => {}
+                Err(persistence_error) => {
+                    message = format!("{message}. {persistence_error}");
+                }
             }
             let _ = emit_health_event(
                 &state,
@@ -9607,6 +12097,7 @@ async fn monitor_session(
                 pipeline: Some(monitored_recording.pipeline.status()),
                 duration_ms,
                 message: Some(message),
+                replay_only: monitored_recording.replay_only,
             };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
@@ -9651,6 +12142,7 @@ async fn monitor_session(
                 pipeline: Some(monitored_recording.pipeline.status()),
                 duration_ms,
                 message: Some(message),
+                replay_only: monitored_recording.replay_only,
             };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
@@ -9672,6 +12164,11 @@ async fn monitor_session(
         RecordingState::Failed => "failed",
         _ => "non-terminal",
     };
+    if pending_finalization_job.is_none() {
+        state
+            .recording_finalization
+            .withdraw_primary_export(&stop_timeline_session_id);
+    }
     state.capture_interruption.capture_finished();
     state.emit_event("recording.status", terminal_status);
     publish_stop_timeline(&state, &stop_timeline_session_id, terminal_outcome).await;
@@ -9684,6 +12181,9 @@ async fn monitor_session(
         } else {
             tokio::spawn(run_recording_finalization_job(state.clone(), job));
         }
+    }
+    if let Some(failed_session_id) = recover_failed_take {
+        recover_interrupted_takes(&state, Some(&failed_session_id));
     }
     drop(finalizing_permit);
 
@@ -9743,7 +12243,9 @@ pub(crate) async fn run_recording_finalization_job(
     let session_id = request.session_id.clone();
     let output_path = request.input_mkv.display().to_string();
     match finalize_recording_media(&state, request, &control).await {
-        Ok(detail) => {
+        Ok(mut detail) => {
+            detail.interruption_recovery =
+                settle_interrupted_take(&state, &session_id, detail.mp4_path.is_some(), &detail);
             emit_finalization_event(
                 &state,
                 &session_id,
@@ -9772,20 +12274,82 @@ pub(crate) async fn run_recording_finalization_job(
                     "MP4 export failed; keeping MKV recovery file at {output_path}. {message}"
                 ),
             );
+            let detail = FinalizationEventDetail {
+                output_path: Some(output_path),
+                error: Some(message),
+                ..FinalizationEventDetail::default()
+            };
+            let interruption_recovery =
+                settle_interrupted_take(&state, &session_id, false, &detail);
             emit_finalization_event(
                 &state,
                 &session_id,
                 crate::protocol::RecordingFinalizationState::Failed,
                 FinalizationEventDetail {
-                    output_path: Some(output_path),
-                    error: Some(message),
-                    ..FinalizationEventDetail::default()
+                    interruption_recovery,
+                    ..detail
                 },
             );
         }
     }
     state.recording_finalization.finish(&session_id);
     drop(export_permit);
+}
+
+/// Closes the recovery of an interrupted take (no-op for an ordinary
+/// finalization) and says what happened in the take's log and Health.
+fn settle_interrupted_take(
+    state: &AppState,
+    session_id: &str,
+    recovered: bool,
+    detail: &FinalizationEventDetail,
+) -> Option<String> {
+    let settled = match state
+        .database
+        .settle_interruption_recovery(session_id, recovered)
+    {
+        Ok(settled) => settled?,
+        Err(error) => {
+            state.emit_log(
+                "warn",
+                format!("Could not record the interrupted recording's recovery: {error:#}"),
+            );
+            return None;
+        }
+    };
+    let message = interrupted_take_recovery_message(recovered, detail.duration_ms);
+    let level = if recovered {
+        HealthLevel::Info
+    } else {
+        HealthLevel::Warn
+    };
+    let code = if recovered {
+        "interrupted-take-recovered"
+    } else {
+        "interrupted-take-recovery-failed"
+    };
+    let _ = emit_health_event(state, Some(session_id), level, code, &message);
+    state.emit_log(if recovered { "info" } else { "warn" }, &message);
+    Some(settled.to_string())
+}
+
+/// Health copy for a settled interrupted-take recovery.
+fn interrupted_take_recovery_message(recovered: bool, duration_ms: Option<i64>) -> String {
+    if !recovered {
+        return "Videorc stopped during this recording and could not make an MP4 from it. \
+                The MKV is kept in the recordings folder."
+            .to_string();
+    }
+    match duration_ms.filter(|duration| *duration > 0) {
+        Some(duration_ms) => format!(
+            "Recovered after Videorc stopped: {:.1} s saved as MP4, up to where the recording \
+             was interrupted. The original MKV is kept.",
+            duration_ms as f64 / 1000.0
+        ),
+        None => "Recovered after Videorc stopped: saved as MP4 up to where the recording was \
+                 interrupted. The original MKV is kept."
+            .to_string(),
+    }
 }
 
 /// The post-MKV finalization sequence, verbatim from the former inline stop
@@ -9816,7 +12380,7 @@ async fn finalize_recording_media(
     let mut finalization_recovery_path = None;
     let export_result = {
         let queued = Instant::now();
-        let _export_slot = state.recording_finalization.export_slot().await;
+        let _export_slot = state.recording_finalization.export_slot(&session_id).await;
         state.emit_log(
             "info",
             format!(
@@ -9824,22 +12388,27 @@ async fn finalize_recording_media(
                 queued.elapsed().as_millis()
             ),
         );
-        export_completed_recording_to_mp4_tracked(
-            state,
-            &session_id,
-            &ffmpeg_path,
-            &input_mkv,
-            Mp4ExportFinalizationContext {
-                ended_at: &ended_at,
-                duration_ms: wall_duration_ms,
-                diagnostics: &final_diagnostics,
-                output_ownership: output_ownership.clone(),
-                keep_original_media,
-            },
-            &mut finalization_recovery_path,
-            control,
-        )
-        .await
+        match ensure_mp4_export_disk_space(&input_mkv) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                export_completed_recording_to_mp4_tracked(
+                    state,
+                    &session_id,
+                    &ffmpeg_path,
+                    &input_mkv,
+                    Mp4ExportFinalizationContext {
+                        ended_at: &ended_at,
+                        duration_ms: wall_duration_ms,
+                        diagnostics: &final_diagnostics,
+                        output_ownership: output_ownership.clone(),
+                        keep_original_media,
+                    },
+                    &mut finalization_recovery_path,
+                    control,
+                )
+                .await
+            }
+        }
     };
     mark_stop_timeline(state, RecordingStopPhase::Mp4Export);
     let (published_mp4, export_error) = match export_result {
@@ -9954,6 +12523,11 @@ async fn finalize_recording_media(
             anyhow::anyhow!(message)
         })?;
     mark_stop_timeline(state, RecordingStopPhase::DbCommit);
+    // Plan 200 C6: an export that consumed the MKV of a separate file still
+    // in its private capture folder leaves that folder empty.
+    if published_mp4.is_some() {
+        crate::source_iso::remove_empty_capture_directory(&input_mkv);
+    }
     state.emit_log(
         "info",
         format!(
@@ -10010,11 +12584,73 @@ async fn finalize_recording_media(
         duration_ms,
         file_size_bytes,
         error: None,
+        interruption_recovery: None,
     })
+}
+
+/// Plan 200 C5: an export needs room for a second copy of the MKV. Without
+/// it the job fails before FFmpeg starts and the MKV stays the recording.
+fn ensure_mp4_export_disk_space(input_mkv: &Path) -> Result<()> {
+    let Some(output_dir) = input_mkv.parent() else {
+        return Ok(());
+    };
+    crate::disk_space::ensure_export_space(input_mkv, output_dir)
 }
 
 /// Rows left in `finalizing` by a backend exit mid-export: re-run the job.
 pub fn resume_pending_recording_finalizations(state: &AppState) {
+    resume_pending_recording_finalizations_where(state, |_| true);
+}
+
+/// Recovers interrupted takes: a recording Videorc stopped in the middle of
+/// (a crash, a killed backend, a power loss, a capture that died mid-take)
+/// keeps a failed row and a capture MKV. Each one started within
+/// [`INTERRUPTED_TAKE_RECOVERY_WINDOW`] runs the ordinary background
+/// finalization (MP4 export, duration probe, poster), keeps its MKV, and is
+/// marked `recovered` on the row. `only_session` recovers just the take that
+/// failed a moment ago; `None` scans at startup.
+pub fn recover_interrupted_takes(state: &AppState, only_session: Option<&str>) {
+    let since = (Utc::now() - crate::storage::INTERRUPTED_TAKE_RECOVERY_WINDOW).to_rfc3339();
+    let claimed = match state.database.claim_interrupted_takes(&since, only_session) {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            state.emit_log(
+                "warn",
+                format!("Could not look for interrupted recordings to recover: {error:#}"),
+            );
+            return;
+        }
+    };
+    if claimed.is_empty() {
+        return;
+    }
+    state.emit_log(
+        "info",
+        format!(
+            "Recovering {} interrupted recording(s) as MP4: {}",
+            claimed.len(),
+            claimed.join(", ")
+        ),
+    );
+    for session_id in &claimed {
+        // The row now reads `finalizing`: the Library shows "Saving MP4…".
+        emit_finalization_event(
+            state,
+            session_id,
+            crate::protocol::RecordingFinalizationState::Finalizing,
+            FinalizationEventDetail {
+                progress_percent: Some(0),
+                ..FinalizationEventDetail::default()
+            },
+        );
+    }
+    resume_pending_recording_finalizations_where(state, |row| claimed.contains(&row.session_id));
+}
+
+fn resume_pending_recording_finalizations_where(
+    state: &AppState,
+    include: impl Fn(&crate::storage::PendingRecordingFinalization) -> bool,
+) {
     let pending = match state.database.sessions_pending_finalization() {
         Ok(pending) => pending,
         Err(error) => {
@@ -10026,7 +12662,19 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
         }
     };
     for row in pending {
+        if !include(&row) {
+            continue;
+        }
         let session_id = row.session_id.clone();
+        // A job already running for this row (a stop's own finalization)
+        // owns it; never start a second export of the same file.
+        if state
+            .recording_finalization
+            .active_for_session(&session_id)
+            .is_some()
+        {
+            continue;
+        }
         let input_mkv = row.output_path.as_deref().map(PathBuf::from);
         let Some(input_mkv) = input_mkv.filter(|path| path.exists()) else {
             let _ = state.database.set_session_finalization_state(
@@ -10034,6 +12682,11 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
                 FINALIZATION_STATE_FAILED,
                 Some("The capture file was missing when the interrupted MP4 export resumed."),
             );
+            if row.interrupted_take {
+                let _ = state
+                    .database
+                    .settle_interruption_recovery(&session_id, false);
+            }
             continue;
         };
         let final_diagnostics: DiagnosticStats = serde_json::from_str(&row.diagnostics_json)
@@ -10041,6 +12694,34 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
         let output_ownership = capture_session_file_bound_identity(&input_mkv)
             .ok()
             .flatten();
+        let iso_ownership = state.database.source_iso_recovery_ownership(&session_id);
+        if let Ok(Some(expected)) = &iso_ownership {
+            let matches = expected
+                .as_ref()
+                .zip(output_ownership.as_ref())
+                .is_some_and(|(expected, actual)| expected == actual);
+            if !matches {
+                let _ = state.database.set_session_finalization_state(&session_id, FINALIZATION_STATE_FAILED,
+                    Some("Interrupted separate recording ownership could not be verified; the current file was not adopted."));
+                continue;
+            }
+        } else if iso_ownership.is_err() {
+            continue;
+        }
+        let iso_gate = if matches!(iso_ownership, Ok(Some(_))) {
+            let Ok((intended_fps, expect_audio)) = state
+                .database
+                .source_iso_recording_expectations(&session_id)
+            else {
+                continue;
+            };
+            Some(PostRecordingGate {
+                intended_fps,
+                expect_audio,
+            })
+        } else {
+            None
+        };
         state.emit_log(
             "info",
             format!("Resuming the interrupted MP4 export for session {session_id}."),
@@ -10055,13 +12736,15 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
                     ffmpeg_path: resolve_ffmpeg_path(None),
                     input_mkv,
                     output_ownership,
-                    keep_original_media: row.keep_original_mkv,
+                    // A recovered take keeps its MKV: it is the only copy of
+                    // the media until someone has watched the MP4.
+                    keep_original_media: row.keep_original_mkv || row.interrupted_take,
                     ended_at: row.ended_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
                     wall_duration_ms: row.duration_ms,
                     final_diagnostics,
                     finalized_caption_artifact: None,
                     captioned_copy_requested: false,
-                    post_recording_gate: None,
+                    post_recording_gate: iso_gate,
                     pipeline_reported_freezes: false,
                 },
                 control,
@@ -10173,14 +12856,17 @@ async fn export_mp4_from_mkv_tracked(
         );
     }
     let probe_started = Instant::now();
-    let trim_seconds = mp4_export_trim_seconds(&ffprobe_path_for(ffmpeg_path), input).await;
-    let total_seconds = match trim_seconds {
-        Some(trim) => Some(trim),
-        None => crate::session_ops::probe_duration_ms(ffmpeg_path, input)
-            .await
-            .map(|ms| ms as f64 / 1000.0),
+    let take = load_mp4_export_take(state, session_id);
+    let probe = probe_mp4_export_input(&ffprobe_path_for(ffmpeg_path), input).await;
+    let mut options = Mp4ExportOptions::plan(&probe, take.as_ref());
+    match write_mp4_export_chapters(take.as_ref(), &probe, output).await {
+        Ok(chapters_path) => options.chapters_path = chapters_path,
+        Err(error) => state.emit_log(
+            "warn",
+            format!("MP4 export for session {session_id} has no chapters: {error:#}"),
+        ),
     }
-    .filter(|seconds| *seconds > 0.0);
+    let total_seconds = probe.exported_seconds();
     state.emit_log(
         "info",
         format!(
@@ -10188,71 +12874,118 @@ async fn export_mp4_from_mkv_tracked(
             probe_started.elapsed().as_millis()
         ),
     );
-    let export_started = Instant::now();
-    let mut command = Command::new(ffmpeg_path);
-    command
-        .args(["-nostats", "-progress", "pipe:1"])
-        .args(mp4_export_args(input, output, trim_seconds))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = spawn_owned_tokio(&mut command)
-        .with_context(|| format!("Could not start {ffmpeg_path} for MP4 export"))?;
-    if let Some(pid) = child.id() {
-        control.set_child_pid(pid);
-    }
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|stderr| tokio::spawn(read_mp4_stderr_tail(stderr)));
-    if let Some(stdout) = child.stdout.take() {
-        let mut lines = BufReader::new(stdout).lines();
-        let mut last_reported = 0_u8;
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Some(total_seconds) = total_seconds else {
-                continue;
-            };
-            if let Some(percent) = crate::noise_cleanup::parse_progress_line(&line, total_seconds)
-                && percent >= last_reported.saturating_add(FINALIZATION_PROGRESS_STEP_PERCENT)
-            {
-                last_reported = percent;
-                control.set_progress_percent(percent);
-                emit_finalization_event(
-                    state,
-                    session_id,
-                    crate::protocol::RecordingFinalizationState::Finalizing,
-                    FinalizationEventDetail {
-                        progress_percent: Some(percent),
-                        ..FinalizationEventDetail::default()
-                    },
-                );
-            }
-        }
-    }
-    let status = child
-        .wait()
-        .await
-        .with_context(|| format!("Could not wait for {ffmpeg_path} MP4 export"))?;
-    control.set_child_pid(0);
-    let stderr = match stderr_reader {
-        Some(reader) => reader.await.unwrap_or_default(),
-        None => String::new(),
+    let tracked = TrackedMp4Export {
+        state,
+        session_id,
+        ffmpeg_path,
+        control,
+        total_seconds,
     };
+    let first = tracked.run(mp4_export_args(input, output, &options)).await;
+    let Err(error) = first else {
+        return Ok(());
+    };
+    let Some(retry) = options.without_frame_time_snap() else {
+        return Err(error);
+    };
+    if control.is_cancelled() {
+        return Err(error);
+    }
     state.emit_log(
-        "info",
+        "warn",
         format!(
-            "MP4 finalization session={session_id} stage=ffmpeg elapsed_ms={} success={}",
-            export_started.elapsed().as_millis(),
-            status.success()
+            "MP4 export for session {session_id} with exact frame times failed; retrying once without the frame-time snap: {error:#}"
         ),
     );
-    if control.is_cancelled() {
-        bail!("MP4 export was cancelled");
+    remove_failed_mp4_export_attempt(output).await?;
+    tracked.run(mp4_export_args(input, output, &retry)).await
+}
+
+/// One FFmpeg MP4 export run whose child is tracked on the job control.
+struct TrackedMp4Export<'a> {
+    state: &'a AppState,
+    session_id: &'a str,
+    ffmpeg_path: &'a str,
+    control: &'a FinalizationJobControl,
+    total_seconds: Option<f64>,
+}
+
+impl TrackedMp4Export<'_> {
+    async fn run(&self, args: Vec<String>) -> Result<()> {
+        let Self {
+            state,
+            session_id,
+            ffmpeg_path,
+            control,
+            total_seconds,
+        } = *self;
+        let export_started = Instant::now();
+        let mut command = Command::new(ffmpeg_path);
+        command
+            .args(["-nostats", "-progress", "pipe:1"])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = spawn_owned_tokio(&mut command)
+            .with_context(|| format!("Could not start {ffmpeg_path} for MP4 export"))?;
+        if let Some(pid) = child.id() {
+            control.set_child_pid(pid);
+        }
+        let stderr_reader = child
+            .stderr
+            .take()
+            .map(|stderr| tokio::spawn(read_mp4_stderr_tail(stderr)));
+        if let Some(stdout) = child.stdout.take() {
+            let mut lines = BufReader::new(stdout).lines();
+            let mut last_reported = 0_u8;
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Some(total_seconds) = total_seconds else {
+                    continue;
+                };
+                if let Some(percent) =
+                    crate::noise_cleanup::parse_progress_line(&line, total_seconds)
+                    && percent >= last_reported.saturating_add(FINALIZATION_PROGRESS_STEP_PERCENT)
+                {
+                    last_reported = percent;
+                    control.set_progress_percent(percent);
+                    emit_finalization_event(
+                        state,
+                        session_id,
+                        crate::protocol::RecordingFinalizationState::Finalizing,
+                        FinalizationEventDetail {
+                            progress_percent: Some(percent),
+                            ..FinalizationEventDetail::default()
+                        },
+                    );
+                }
+            }
+        }
+        let status = child
+            .wait()
+            .await
+            .with_context(|| format!("Could not wait for {ffmpeg_path} MP4 export"))?;
+        control.set_child_pid(0);
+        let stderr = match stderr_reader {
+            Some(reader) => reader.await.unwrap_or_default(),
+            None => String::new(),
+        };
+        state.emit_log(
+            "info",
+            format!(
+                "MP4 finalization session={session_id} stage=ffmpeg elapsed_ms={} success={}",
+                export_started.elapsed().as_millis(),
+                status.success()
+            ),
+        );
+        if control.is_cancelled() {
+            bail!("MP4 export was cancelled");
+        }
+        if !status.success() {
+            bail!("FFmpeg MP4 export failed with {status}: {stderr}");
+        }
+        Ok(())
     }
-    if !status.success() {
-        bail!("FFmpeg MP4 export failed with {status}: {stderr}");
-    }
-    Ok(())
 }
 
 fn enqueue_post_recording_gate(
@@ -10346,24 +13079,20 @@ fn enqueue_post_recording_gate(
         .and_then(|result| result);
 
         let should_attempt_repair = match fast_assessment {
-            Ok(status @ GateStatus::Ready { .. }) | Ok(status @ GateStatus::Failed { .. }) => {
-                job.complete_with_gate(&status, Utc::now().to_rfc3339());
-                let _ = state.database.upsert_repair_job(&job);
-                emit_gate_health(&state, Some(&session_id), &status);
-                return;
-            }
-            Ok(status @ GateStatus::NotHundredPercent { .. }) => {
-                record_running_quality_snapshot(&mut job, &status, Utc::now().to_rfc3339());
-                let _ = state.database.upsert_repair_job(&job);
-                emit_gate_health(&state, Some(&session_id), &status);
-                true
-            }
-            Ok(status @ GateStatus::Repaired { .. }) => {
-                job.complete_with_gate(&status, Utc::now().to_rfc3339());
-                let _ = state.database.upsert_repair_job(&job);
-                emit_gate_health(&state, Some(&session_id), &status);
-                return;
-            }
+            Ok(status) => match post_recording_gate_step(&status) {
+                PostRecordingGateStep::Complete => {
+                    job.complete_with_gate(&status, Utc::now().to_rfc3339());
+                    let _ = state.database.upsert_repair_job(&job);
+                    emit_gate_health(&state, Some(&session_id), &status);
+                    return;
+                }
+                PostRecordingGateStep::AttemptRepair => {
+                    record_running_quality_snapshot(&mut job, &status, Utc::now().to_rfc3339());
+                    let _ = state.database.upsert_repair_job(&job);
+                    emit_gate_health(&state, Some(&session_id), &status);
+                    true
+                }
+            },
             Err(error) if error.contains(MAINTENANCE_CANCELLED) => {
                 job.defer(
                     "quality check deferred because capture started".to_string(),
@@ -10454,11 +13183,18 @@ async fn run_quality_assessment(
     expectations: QualityExpectations,
     cancel_token: MaintenanceCancelToken,
 ) -> std::result::Result<GateStatus, String> {
-    tokio::task::spawn_blocking(move || {
+    // Plan 200 C6: a timeout that drops this future cancels the job (FFmpeg
+    // is killed), and the thread stays counted until it has exited.
+    let cancel_on_drop = cancel_token.cancel_on_drop();
+    let worker = cancel_token.worker();
+    let result = tokio::task::spawn_blocking(move || {
+        let _worker = worker;
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let path = file_path.clone();
         let is_cancelled = || cancel_token.is_cancelled();
-        let status = match analyze_recording_cancellable(
+        // Plan 200 C8: a recording over 20 minutes gets the sampled quick
+        // check instead of a full decode.
+        let status = match assess_recording_after_capture_cancellable(
             &ffmpeg_path,
             &ffprobe_path,
             &file_path,
@@ -10466,13 +13202,15 @@ async fn run_quality_assessment(
             &expectations,
             &is_cancelled,
         ) {
-            Ok((_, report)) if report.verdict == QualityVerdict::Clean => {
-                GateStatus::Ready { path }
-            }
+            Ok((_, report)) if report.verdict == QualityVerdict::Clean => GateStatus::Ready {
+                path,
+                sampled: report.sampled,
+            },
             Ok((_, report)) => GateStatus::NotHundredPercent {
                 path,
                 reasons: issue_reasons(&report.issues),
                 needs_attention: has_user_impacting_issue(&report.issues),
+                sampled: report.sampled,
             },
             Err(reason) if reason.contains(MAINTENANCE_CANCELLED) => {
                 return Err(MAINTENANCE_CANCELLED.to_string());
@@ -10485,8 +13223,33 @@ async fn run_quality_assessment(
             Ok(status)
         }
     })
-    .await
-    .map_err(|error| format!("quality assessment task failed: {error}"))?
+    .await;
+    cancel_on_drop.disarm();
+    result.map_err(|error| format!("quality assessment task failed: {error}"))?
+}
+
+/// What the post-recording gate does after its fast assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostRecordingGateStep {
+    /// Store the verdict and stop.
+    Complete,
+    /// Store a running snapshot and attempt the backup-safe repair.
+    AttemptRepair,
+}
+
+/// Only a full check that found issues tries an automatic repair. Plan 200
+/// C8: the quick check of a long recording never auto-repairs; its report is
+/// shown instead.
+fn post_recording_gate_step(status: &GateStatus) -> PostRecordingGateStep {
+    match status {
+        GateStatus::NotHundredPercent { sampled: false, .. } => {
+            PostRecordingGateStep::AttemptRepair
+        }
+        GateStatus::Ready { .. }
+        | GateStatus::Repaired { .. }
+        | GateStatus::NotHundredPercent { sampled: true, .. }
+        | GateStatus::Failed { .. } => PostRecordingGateStep::Complete,
+    }
 }
 
 fn record_running_quality_snapshot(job: &mut RepairJob, status: &GateStatus, now: String) {
@@ -10503,7 +13266,12 @@ async fn run_quality_gate(
     expectations: QualityExpectations,
     cancel_token: MaintenanceCancelToken,
 ) -> std::result::Result<GateStatus, String> {
-    tokio::task::spawn_blocking(move || {
+    // Plan 200 C6: a repair timeout kills the repair's FFmpeg; quit waits
+    // for the thread (and its temp cleanup) to finish.
+    let cancel_on_drop = cancel_token.cancel_on_drop();
+    let worker = cancel_token.worker();
+    let result = tokio::task::spawn_blocking(move || {
+        let _worker = worker;
         let ffprobe_path = ffprobe_path_for(&ffmpeg_path);
         let is_cancelled = || cancel_token.is_cancelled();
         let status = gate_recording_cancellable(
@@ -10522,8 +13290,9 @@ async fn run_quality_gate(
             Ok(status)
         }
     })
-    .await
-    .map_err(|error| format!("quality check task failed: {error}"))?
+    .await;
+    cancel_on_drop.disarm();
+    result.map_err(|error| format!("quality check task failed: {error}"))?
 }
 
 /// Emits the health event that matches a gate verdict (passed / repaired / not 100% /
@@ -10535,13 +13304,19 @@ async fn run_quality_gate(
 /// records for the Library row, session log, and Diagnostics.
 fn emit_gate_health(state: &AppState, session_id: Option<&str>, status: &GateStatus) {
     match status {
-        GateStatus::Ready { .. } => {
+        GateStatus::Ready { sampled, .. } => {
+            let message = if *sampled {
+                // Plan 200 C8.
+                "Quick check (long recording): the sampled parts passed the automated quality check."
+            } else {
+                "Recording passed the automated quality check."
+            };
             let _ = emit_health_event(
                 state,
                 session_id,
                 HealthLevel::Info,
                 "recording-quality-passed",
-                "Recording passed the automated quality check.",
+                message,
             );
         }
         GateStatus::Repaired { interpolated, .. } => {
@@ -10561,12 +13336,21 @@ fn emit_gate_health(state: &AppState, session_id: Option<&str>, status: &GateSta
         GateStatus::NotHundredPercent {
             reasons,
             needs_attention,
+            sampled,
             ..
         } => {
-            let message = format!(
-                "Recording could not be brought to 100%: {}",
-                reasons.join("; ")
-            );
+            let message = if *sampled {
+                // Plan 200 C8: reported, never repaired automatically.
+                format!(
+                    "Quick check (long recording) found issues in the sampled parts: {}. It wasn't repaired automatically; choose Check quality in the Library for the details.",
+                    reasons.join("; ")
+                )
+            } else {
+                format!(
+                    "Recording could not be brought to 100%: {}",
+                    reasons.join("; ")
+                )
+            };
             let level = if *needs_attention {
                 HealthLevel::Warn
             } else {
@@ -10702,24 +13486,20 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
             .and_then(|result| result);
 
             let should_attempt_repair = match fast_assessment {
-                Ok(status @ GateStatus::Ready { .. }) | Ok(status @ GateStatus::Failed { .. }) => {
-                    job.complete_with_gate(&status, Utc::now().to_rfc3339());
-                    let _ = state.database.upsert_repair_job(&job);
-                    emit_gate_health(&state, None, &status);
-                    return;
-                }
-                Ok(status @ GateStatus::NotHundredPercent { .. }) => {
-                    record_running_quality_snapshot(&mut job, &status, Utc::now().to_rfc3339());
-                    let _ = state.database.upsert_repair_job(&job);
-                    emit_gate_health(&state, None, &status);
-                    true
-                }
-                Ok(status @ GateStatus::Repaired { .. }) => {
-                    job.complete_with_gate(&status, Utc::now().to_rfc3339());
-                    let _ = state.database.upsert_repair_job(&job);
-                    emit_gate_health(&state, None, &status);
-                    return;
-                }
+                Ok(status) => match post_recording_gate_step(&status) {
+                    PostRecordingGateStep::Complete => {
+                        job.complete_with_gate(&status, Utc::now().to_rfc3339());
+                        let _ = state.database.upsert_repair_job(&job);
+                        emit_gate_health(&state, None, &status);
+                        return;
+                    }
+                    PostRecordingGateStep::AttemptRepair => {
+                        record_running_quality_snapshot(&mut job, &status, Utc::now().to_rfc3339());
+                        let _ = state.database.upsert_repair_job(&job);
+                        emit_gate_health(&state, None, &status);
+                        true
+                    }
+                },
                 Err(error) if error.contains(MAINTENANCE_CANCELLED) => {
                     job.defer(
                         "repair job deferred because capture started".to_string(),
@@ -10859,6 +13639,7 @@ async fn export_completed_recording_to_mp4(
         diagnostics,
     )?;
     let ffmpeg_path = ffmpeg_path.to_string();
+    let take = load_mp4_export_take(state, session_id);
     export_recording_to_mp4_with_exporter(
         state,
         Mp4ExportRequest {
@@ -10873,7 +13654,7 @@ async fn export_completed_recording_to_mp4(
         },
         recovery_path,
         move |input, output| async move {
-            export_mp4_from_mkv(&ffmpeg_path, &input, &output).await
+            export_mp4_from_mkv(&ffmpeg_path, &input, &output, take).await
         },
     )
     .await
@@ -10913,7 +13694,9 @@ where
         return Ok(None);
     }
 
-    let preferred_output = input.with_extension("mp4");
+    // Plan 200 C6: a stopped-early separate file publishes beside Combined,
+    // never into its private capture folder.
+    let preferred_output = crate::source_iso::public_mp4_output_path(input);
     let staging_plan = plan_mp4_export_staging(&preferred_output)?;
     let mut initial_intent = base_finalization.clone();
     initial_intent.mp4_path = Some(preferred_output.display().to_string());
@@ -11190,11 +13973,29 @@ struct MonitoredRecording {
     keep_original_media: bool,
     performance_check: bool,
     native_audio_stats: Option<NativeAudioStats>,
+    /// False for a stream-only session: there is no file to keep.
+    records_file: bool,
+    /// Plan 181: a buffer-only session; its terminal status keeps the mark.
+    replay_only: bool,
+    /// FFmpeg's stderr evidence, read at terminal time for the first fatal
+    /// category (retest 154 A5: a full disk said only "exit status: 228").
+    ffmpeg_evidence: Arc<StdMutex<FfmpegEvidenceSnapshot>>,
+}
+
+impl MonitoredRecording {
+    fn ffmpeg_fatal_category(&self) -> Option<&'static str> {
+        self.ffmpeg_evidence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tail
+            .first_fatal_category
+    }
 }
 
 fn should_finalize_recording_session(
     ffmpeg_exit_success: bool,
     stop_intent_preceded_exit: bool,
+    stop_escalated: bool,
     recording_bridge_terminal_failure: Option<&str>,
     stream_bridge_terminal_failure: Option<&str>,
 ) -> bool {
@@ -11202,13 +14003,25 @@ fn should_finalize_recording_session(
     // before the user asks to stop is still an early termination (for example,
     // a source/pipe that silently ended) and must never publish a shortened
     // artifact as successful.
-    // Stop intent must win the monitor's exit-ready race, but that alone is not
-    // proof that muxer flush completed. A forced
-    // TERM/KILL or any non-zero FFmpeg exit keeps the artifact as recovery
-    // media and marks the session failed unless a future explicit verifier can
-    // prove the container is complete.
-    if recording_bridge_terminal_failure.is_some() || !ffmpeg_exit_success {
+    // Stop intent must win the monitor's exit-ready race. Windows FFmpeg can
+    // report a non-zero status while closing a stopped graph even though the
+    // local MKV is still exportable; let the MP4 exporter validate that output
+    // instead of unconditionally marooning it as recovery media. That only
+    // holds when FFmpeg exited on its own: once Videorc escalated to TERM/KILL
+    // the muxer never flushed, so the MKV stays recovery media and the exit is
+    // reported as `recording-stop-forced`.
+    // macOS VideoToolbox and Linux keep main's contract: any non-zero FFmpeg
+    // exit stays recovery media. A recording bridge failure remains terminal
+    // because it means the video producer did not finish its contract.
+    if recording_bridge_terminal_failure.is_some() {
         return false;
+    }
+    if !ffmpeg_exit_success {
+        let windows_nonzero_after_own_stop =
+            cfg!(target_os = "windows") && stop_intent_preceded_exit && !stop_escalated;
+        if !windows_nonzero_after_own_stop {
+            return false;
+        }
     }
     // A dead STREAM output ends FFmpeg without a user stop, but the RECORDING
     // data is intact and the muxer flushed cleanly (exit 0) — finalize it.
@@ -11230,13 +14043,20 @@ fn classify_failed_ffmpeg_exit(
     stop_escalated: bool,
     recording_bridge_terminal_failure: Option<&str>,
     exit_status: &str,
+    records_file: bool,
 ) -> (RecordingPipelineStage, &'static str, String) {
     if stop_intent_preceded_exit && stop_escalated {
+        // A stream-only session has no file to keep (Linux plan 0017).
+        let outcome = if records_file {
+            "The file was kept as recovery media and may be cut short."
+        } else {
+            "The stream server may not have seen a clean end of the stream."
+        };
         return (
             RecordingPipelineStage::Muxer,
             "recording-stop-forced",
             format!(
-                "FFmpeg did not finish after Stop, so Videorc forced it to stop. The file was kept as recovery media and may be cut short. (FFmpeg exit: {exit_status})"
+                "FFmpeg did not finish after Stop, so Videorc forced it to stop. {outcome} (FFmpeg exit: {exit_status})"
             ),
         );
     }
@@ -11254,6 +14074,27 @@ fn classify_failed_ffmpeg_exit(
         "ffmpeg-exit",
         format!("FFmpeg exited with {exit_status}"),
     )
+}
+
+/// Retest 154 A5: a full recordings folder ends FFmpeg with "No space left on
+/// device" (Windows: "There is not enough space on the disk"). That cause
+/// outranks a forced stop or a broken bridge pipe, which are its consequences.
+/// The raw stderr stays in the persisted `ffmpeg-stderr-tail` log.
+fn ffmpeg_disk_full_failure(
+    fatal_category: Option<&str>,
+    exit_status: &str,
+    records_file: bool,
+) -> Option<(RecordingPipelineStage, &'static str, String)> {
+    if !records_file || fatal_category != Some(FFMPEG_DISK_FULL_CATEGORY) {
+        return None;
+    }
+    Some((
+        RecordingPipelineStage::Muxer,
+        "recording-disk-full",
+        format!(
+            "The recordings folder ran out of space, so recording stopped. The recording up to that point is kept. Free some space before you record again. (FFmpeg exit: {exit_status})"
+        ),
+    ))
 }
 
 fn should_begin_captioned_copy_render(requested: bool, caption_chunk_count: usize) -> bool {
@@ -11313,6 +14154,21 @@ struct PreparedNativeAudioSource {
 }
 
 async fn resolve_capture_inputs(ffmpeg_path: &str, params: &StartSessionParams) -> CaptureInputs {
+    #[cfg(test)]
+    if matches!(
+        params
+            .sources
+            .screen_id
+            .as_deref()
+            .or(params.sources.window_id.as_deref()),
+        Some("screen:screencapturekit:4294967294" | "window:screencapturekit:4294967293")
+    ) {
+        return CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: resolve_microphone_input(params.sources.microphone_id.as_deref()),
+        };
+    }
     let microphone = resolve_microphone_input(params.sources.microphone_id.as_deref());
 
     // Camera-only makes the camera the primary input. No screen is enumerated or
@@ -12738,6 +15594,7 @@ pub fn stream_output_topology_probe_log_line(
                 result
                     .fallback_reason
                     .as_deref()
+                    .or(result.encoder_selection_reason.as_deref())
                     .map(|reason| format!(" reason={reason}"))
                     .unwrap_or_default(),
             )
@@ -13680,6 +16537,111 @@ async fn emit_preflight_failure_report(
     );
 }
 
+fn source_iso_startup_capture_requirements(
+    mut visible: CompositorStartupSourceRequirements,
+    selected: Option<&crate::protocol::SourceSelection>,
+) -> CompositorStartupSourceRequirements {
+    if let Some(selected) = selected {
+        visible.require_camera_source |= selected.camera_id.is_some();
+        visible.require_screen_source |=
+            selected.screen_id.is_some() || selected.window_id.is_some();
+        visible.require_real_source |=
+            visible.require_camera_source || visible.require_screen_source;
+    }
+    visible
+}
+
+/// ISO eligibility is independent of the current layout. Idle layout retirement
+/// may already have released an omitted source, so cross native admission for
+/// both selected roles. Healthy generations are reused by the existing owners;
+/// first-frame/cadence and completed-batch barriers still prove readiness.
+async fn prepare_source_iso_selected_capture(
+    state: &AppState,
+    params: &StartSessionParams,
+    ffmpeg_path: &str,
+) -> Result<()> {
+    let (camera, screen) = tokio::join!(
+        async {
+            let status = crate::preview_camera::preview_camera_status(state).await;
+            let current = crate::preview_camera::preview_camera_frame_source(state).await;
+            if status.state == crate::protocol::PreviewCameraState::Live
+                && current
+                    .as_ref()
+                    .and_then(|source| source.source_key())
+                    .is_some_and(|key| params.sources.camera_id.as_ref() == Some(&key.id))
+            {
+                status
+            } else {
+                crate::preview_camera::start_preview_camera(
+                    state.clone(),
+                    crate::protocol::PreviewCameraStartParams {
+                        sources: params.sources.clone(),
+                        layout: params.layout.clone(),
+                        video: params.output.video.clone(),
+                        ffmpeg_path: Some(ffmpeg_path.to_owned()),
+                    },
+                )
+                .await
+            }
+        },
+        ensure_selected_preview_screen_live(state, params, ffmpeg_path)
+    );
+    anyhow::ensure!(
+        matches!(camera.state, crate::protocol::PreviewCameraState::Live),
+        "Selected Camera could not be prepared for separate recording ({:?}): {}",
+        camera.state,
+        camera
+            .message
+            .as_deref()
+            .unwrap_or("capture did not become live")
+    );
+    anyhow::ensure!(
+        matches!(screen.state, crate::protocol::PreviewScreenState::Live),
+        "Selected Screen/Window could not be prepared for separate recording ({:?}): {}",
+        screen.state,
+        screen
+            .message
+            .as_deref()
+            .unwrap_or("capture did not become live")
+    );
+    Ok(())
+}
+
+/// Starts the selected Screen/Window preview unless it is already live on that
+/// source; a healthy generation is reused by its existing owner.
+async fn ensure_selected_preview_screen_live(
+    state: &AppState,
+    params: &StartSessionParams,
+    ffmpeg_path: &str,
+) -> crate::protocol::PreviewScreenStatus {
+    let status = crate::preview_screen::preview_screen_status(state).await;
+    let current = crate::preview_screen::preview_screen_frame_source(state).await;
+    let selected = params
+        .sources
+        .window_id
+        .as_ref()
+        .or(params.sources.screen_id.as_ref());
+    if status.state == crate::protocol::PreviewScreenState::Live
+        && current
+            .as_ref()
+            .and_then(|source| source.source_key())
+            .is_some_and(|key| selected == Some(&key.id))
+    {
+        return status;
+    }
+    crate::preview_screen::start_preview_screen(
+        state.clone(),
+        crate::protocol::PreviewScreenStartParams {
+            sources: params.sources.clone(),
+            video: params.output.video.clone(),
+            protected_overlay_window_ids:
+                crate::preview_screen::source_iso_protected_overlay_window_ids(state).await,
+            ffmpeg_path: Some(ffmpeg_path.to_owned()),
+        },
+    )
+    .await
+}
+
 fn recording_startup_source_requirements(scene: &Scene) -> CompositorStartupSourceRequirements {
     let mut require_camera_source = false;
     let mut require_screen_source = false;
@@ -13791,6 +16753,21 @@ async fn prepare_native_audio_source(
         Ok(source) => {
             let device_name = source.device_name();
             *fifo_path = Some(path.clone());
+            // Plan 200 A3: a device running at another rate than 48 kHz.
+            if let Some(warning) = source
+                .stats_handle()
+                .device_sample_rate()
+                .and_then(|rate| crate::audio::microphone_sample_rate_warning(&device_name, rate))
+            {
+                state.emit_log("warn", &warning);
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    crate::audio::MICROPHONE_SAMPLE_RATE_CODE,
+                    &warning,
+                );
+            }
             state.emit_log(
                 "info",
                 if taken_warm {
@@ -13844,9 +16821,10 @@ async fn prepare_native_audio_source(
 /// back-pressure the shared encoder and stall the other platforms (or the local
 /// recording) — the classic cause of "one platform makes them all lag." On sustained
 /// overflow the lagging slave drops packets instead of blocking everyone; the queue
-/// is large enough that the disk-backed recording leg never drops in practice. We do
-/// not enable fifo auto-recovery, so a leg that fails to open still surfaces the
-/// `Slave muxer #N failed` line that drives the per-target failure status (M5).
+/// is large enough that the disk-backed recording leg never drops in practice. These
+/// tee-wide options carry no auto-recovery, so the recording leg that fails still
+/// surfaces the `Slave muxer #N failed` line (M5); RTMP legs override them with their
+/// own recovering `fifo_options` (`rtmp_tee_leg`).
 fn tee_output_args(spec: String) -> Vec<String> {
     vec![
         "-f".to_string(),
@@ -13945,40 +16923,66 @@ fn windows_d3d11_screen_preflight_candidate(
         && windows_d3d11_display_camera_layout(&params.layout.layout_preset).is_some()
 }
 
-async fn should_use_compositor_encoder_bridge(
-    state: &AppState,
+/// The source preflight skips the screen preview when the D3D11 path will
+/// capture the display itself. A bridge session that then falls back from that
+/// path composites the screen preview instead, so it must start it first.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_fallback_needs_screen_preview(
     params: &StartSessionParams,
-    active_screen: Option<&crate::protocol::StreamScreen>,
-) -> Result<bool> {
+    mode: WindowsD3d11MediaMode,
+    use_encoder_bridge: bool,
+    requested_video_output: EncoderBridgeVideoOutput,
+) -> bool {
+    use_encoder_bridge
+        && windows_d3d11_screen_preflight_candidate(params, mode, requested_video_output)
+}
+
+/// The legacy-path choices `should_use_compositor_encoder_bridge` makes from
+/// the request alone, before it waits on any source. Past them the session
+/// either takes the bridge or refuses to start, never the legacy path.
+fn compositor_encoder_bridge_ruled_out(params: &StartSessionParams) -> bool {
     if !params.output.record_enabled && !params.output.stream_enabled {
-        return Ok(false);
+        return true;
     }
     if compositor_encoder_bridge_disabled(
         params.output.record_enabled,
         params.output.stream_enabled,
     ) {
         // Explicit developer env override — the only sanctioned legacy escape hatch.
-        return Ok(false);
+        return true;
     }
-    let requested_fps = requested_compositor_bridge_fps(params);
-    if requested_fps > 30
+    // The bridge cap: record-only runs to 1440p60; livestreaming runs to
+    // 1080p60 across every encoded role. Profiles outside those measured
+    // envelopes retain the legacy path, and the session log says so.
+    requested_compositor_bridge_fps(params) > 30
         && !(record_only_bridge_60fps_eligible(params) || streaming_bridge_60fps_eligible(params))
-    {
-        // The bridge cap: record-only runs to 1440p60; livestreaming runs to
-        // 1080p60 across every encoded role. Profiles outside those measured
-        // envelopes retain the legacy path, and the session log says so.
+}
+
+/// The video output the encoder bridge is asked for, or the raw legacy
+/// path's when the request alone rules the bridge out.
+fn requested_session_video_output(
+    params: &StartSessionParams,
+    use_encoder_bridge: bool,
+) -> EncoderBridgeVideoOutput {
+    if use_encoder_bridge {
+        recording_encoder_bridge_video_output(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        )
+    } else {
+        EncoderBridgeVideoOutput::RawYuv420p
+    }
+}
+
+async fn should_use_compositor_encoder_bridge(
+    state: &AppState,
+    params: &StartSessionParams,
+    active_screen: Option<&crate::protocol::StreamScreen>,
+) -> Result<bool> {
+    if compositor_encoder_bridge_ruled_out(params) {
         return Ok(false);
     }
-    let scene = params.scene.clone().unwrap_or_else(|| {
-        scene_from_capture_config(SceneConfigParams {
-            transition_ms: None,
-            sources: params.sources.clone(),
-            layout: params.layout.clone(),
-            video: Some(params.output.video.clone()),
-            background: None,
-            protected_overlay_window_ids: Vec::new(),
-        })
-    });
+    let scene = requested_session_scene(params);
     let screen_image_usable = stream_screen_image_usable(active_screen);
     #[cfg(target_os = "windows")]
     let d3d11_screen_source_authoritative = windows_d3d11_screen_preflight_candidate(
@@ -14032,13 +17036,7 @@ async fn should_use_compositor_encoder_bridge(
         missing.push("camera");
     }
     let detail = if screen_preview_is_failed(&screen_status) {
-        format!(
-            " Screen preview reported: {}.",
-            screen_status
-                .message
-                .as_deref()
-                .unwrap_or("failed without a message")
-        )
+        screen_preview_failure_detail(screen_status.message.as_deref())
     } else {
         String::new()
     };
@@ -14058,6 +17056,16 @@ async fn should_use_compositor_encoder_bridge(
 /// dangling row as a usable screen let sessions start with nothing to composite.
 fn stream_screen_image_usable(active_screen: Option<&crate::protocol::StreamScreen>) -> bool {
     active_screen.is_some_and(|screen| std::path::Path::new(&screen.image_path).is_file())
+}
+
+/// " Screen preview reported: …." once, whatever the message ends with (ogre:
+/// "…while starting screen capture.. Re-select the source").
+fn screen_preview_failure_detail(message: Option<&str>) -> String {
+    let message = message
+        .map(|message| message.trim().trim_end_matches('.'))
+        .filter(|message| !message.is_empty())
+        .unwrap_or("failed without a message");
+    format!(" Screen preview reported: {message}.")
 }
 
 fn screen_preview_is_failed(status: &crate::protocol::PreviewScreenStatus) -> bool {
@@ -14400,13 +17408,10 @@ pub(crate) fn graphics_adapter_driver_identity() -> String {
 #[cfg(target_os = "windows")]
 fn query_windows_graphics_adapter_driver_identity() -> Result<String, String> {
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIFactory1,
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIDevice,
+        IDXGIFactory1,
     };
-
-    // IID_ID3D11Device from d3d11.h. CheckInterfaceSupport only needs this
-    // GUID, so Plan 039 does not widen the windows crate feature set.
-    const IID_ID3D11_DEVICE: windows::core::GUID =
-        windows::core::GUID::from_u128(0xdb6f6ddb_ac77_4e88_8253_819df9bbf140);
+    use windows::core::Interface;
 
     let windows_error_code =
         |error: windows::core::Error| format!("hresult-{:08x}", error.code().0 as u32);
@@ -14425,7 +17430,11 @@ fn query_windows_graphics_adapter_driver_identity() -> Result<String, String> {
         if description.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
             continue;
         }
-        let driver_version = unsafe { adapter.CheckInterfaceSupport(&IID_ID3D11_DEVICE) }
+        // DXGI answers CheckInterfaceSupport only for IDXGIDevice and D3D10
+        // GUIDs; ID3D11Device always returns DXGI_ERROR_UNSUPPORTED, which made
+        // every identity a fresh non-cacheable UUID. Since WDDM 2.3 all UMDs in
+        // a driver package share this one version.
+        let driver_version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }
             .map_err(windows_error_code)?;
         identities.push(WindowsGraphicsAdapterDriverIdentity {
             adapter_luid: (u64::from(description.AdapterLuid.HighPart as u32) << 32)
@@ -14866,6 +17875,40 @@ const WINDOWS_SOFTWARE_SHORT_EDGE_CAP: u32 = 1080;
 const WINDOWS_SOFTWARE_SMALL_CPU_SHORT_EDGE_CAP: u32 = 720;
 #[cfg(any(test, target_os = "windows"))]
 const WINDOWS_SOFTWARE_SMALL_CPU_MAX_LOGICAL_CORES: usize = 4;
+// The performance check's floor (plan 090): a stored verdict never caps the
+// software encoder below it.
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_SOFTWARE_FLOOR_SHORT_EDGE: u32 = 540;
+
+/// Plan 195 S5: the software cap this machine's own performance check
+/// implies, as a short edge and the bitrate of that rung. The highest rung
+/// that passed; the floor when nothing did; `None` when there is no check or
+/// it was measured on another GPU, driver or app version (stale), so the
+/// CPU-class cap stays in charge. Applies only after every hardware probe
+/// rejected the request (`select_windows_recordable_video`).
+#[cfg(any(test, target_os = "windows"))]
+fn performance_check_software_cap(
+    check: &crate::protocol::PerformanceCheckState,
+) -> Option<(u32, u32)> {
+    let result = check.result.as_ref()?;
+    if check.stale {
+        return None;
+    }
+    let passed = result
+        .rungs
+        .iter()
+        .filter(|rung| rung.verdict == crate::protocol::PerformanceCheckRungVerdict::Passed)
+        .map(|rung| &rung.video)
+        .max_by_key(|video| video.width.min(video.height));
+    let video = passed.or_else(|| result.below_floor.then_some(&result.recommended))?;
+    Some((
+        video
+            .width
+            .min(video.height)
+            .max(WINDOWS_SOFTWARE_FLOOR_SHORT_EDGE),
+        video.bitrate_kbps,
+    ))
+}
 
 /// Same aspect and orientation, short edge scaled to `short_edge`, even dims.
 #[cfg(any(test, target_os = "windows"))]
@@ -14907,11 +17950,16 @@ fn windows_recordable_video_rungs(video: &VideoSettings) -> Vec<VideoSettings> {
 /// Picks the canvas a Windows record-only session can actually sustain.
 /// `hardware_accepts` is the real Media Foundation topology probe in
 /// production and a fake in tests. The requested size is tried first, so a
-/// healthy GPU pays exactly one probe and nothing changes.
+/// healthy GPU pays exactly one probe and nothing changes. With no hardware
+/// encoder, the software cap is the CPU-class envelope, tightened to this
+/// machine's own measured verdict when one exists (`verdict_cap`, plan 195
+/// S5: the tester's laptop passed only 540p30 yet recorded 1080p30 at 0.98×
+/// with 5 s freezes).
 #[cfg(any(test, target_os = "windows"))]
 fn select_windows_recordable_video(
     requested: &VideoSettings,
     logical_cores: usize,
+    verdict_cap: Option<(u32, u32)>,
     mut hardware_accepts: impl FnMut(&VideoSettings) -> bool,
 ) -> WindowsRecordableVideo {
     if hardware_accepts(requested) {
@@ -14928,10 +17976,16 @@ fn select_windows_recordable_video(
             };
         }
     }
-    let cap = if logical_cores <= WINDOWS_SOFTWARE_SMALL_CPU_MAX_LOGICAL_CORES {
+    let cpu_cap = if logical_cores <= WINDOWS_SOFTWARE_SMALL_CPU_MAX_LOGICAL_CORES {
         WINDOWS_SOFTWARE_SMALL_CPU_SHORT_EDGE_CAP
     } else {
         WINDOWS_SOFTWARE_SHORT_EDGE_CAP
+    };
+    let (cap, verdict_bitrate_kbps) = match verdict_cap {
+        Some((short_edge, bitrate_kbps)) if short_edge < cpu_cap => {
+            (short_edge, Some(bitrate_kbps))
+        }
+        _ => (cpu_cap, None),
     };
     if requested.width.min(requested.height) <= cap {
         return WindowsRecordableVideo {
@@ -14939,10 +17993,12 @@ fn select_windows_recordable_video(
             reason: None,
         };
     }
-    let bitrate_kbps = WINDOWS_RECORDABLE_SHORT_EDGE_RUNGS
-        .iter()
-        .find(|(rung, _)| *rung == cap)
-        .map_or(requested.bitrate_kbps, |(_, bitrate_kbps)| *bitrate_kbps);
+    let bitrate_kbps = verdict_bitrate_kbps.unwrap_or_else(|| {
+        WINDOWS_RECORDABLE_SHORT_EDGE_RUNGS
+            .iter()
+            .find(|(rung, _)| *rung == cap)
+            .map_or(requested.bitrate_kbps, |(_, bitrate_kbps)| *bitrate_kbps)
+    });
     WindowsRecordableVideo {
         video: scale_video_to_short_edge(requested, cap, bitrate_kbps),
         reason: Some(WindowsRecordableVideoReason::SoftwareCap),
@@ -14982,25 +18038,42 @@ static WINDOWS_RECORDABLE_VIDEO_CACHE: std::sync::OnceLock<
 /// still start. Streaming sessions keep their provider-planned profile.
 #[cfg(target_os = "windows")]
 async fn resolve_windows_recordable_video(
+    state: &AppState,
     ffmpeg_path: &str,
     params: &StartSessionParams,
 ) -> Option<WindowsRecordableVideo> {
     if !params.output.record_enabled || params.output.stream_enabled {
         return None;
     }
+    resolve_windows_record_only_video(state, ffmpeg_path, &params.output.video).await
+}
+
+/// The record-only canvas for `requested`, cached per profile. A record-only
+/// session's encoder topology is the one shared profile, so the probe needs
+/// nothing else from the request (the startup prewarm calls this directly).
+#[cfg(target_os = "windows")]
+async fn resolve_windows_record_only_video(
+    state: &AppState,
+    ffmpeg_path: &str,
+    requested: &VideoSettings,
+) -> Option<WindowsRecordableVideo> {
     if !matches!(
         recording_encoder_bridge_video_output(true, false),
         EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
         return None;
     }
-    let requested = params.output.video.clone();
+    let requested = requested.clone();
     let identity = graphics_adapter_driver_identity();
+    // Plan 195 S5: this machine's own measured verdict, when it has one.
+    let verdict_cap =
+        performance_check_software_cap(&crate::performance_check::current_state(state).await);
     let key = (
         // A verdict measured under one encoder preference must not answer
         // for another: Quick Sync changes what "no usable GPU encoder" means.
+        // A new performance check changes the software cap.
         format!(
-            "{identity}|h264={}",
+            "{identity}|h264={}|cap={verdict_cap:?}",
             windows_h264_encoder_preference_label(windows_h264_encoder_preference().0)
         ),
         ffmpeg_path.to_string(),
@@ -15037,26 +18110,23 @@ async fn resolve_windows_recordable_video(
     let mut candidates = vec![requested.clone()];
     candidates.extend(windows_recordable_video_rungs(&requested));
     for candidate in candidates {
-        let mut candidate_params = params.clone();
-        candidate_params.output.video = candidate.clone();
-        let accepted = match encoder_output_topology_plan_from_session(&candidate_params) {
-            Ok(plan) => matches!(
-                probe_windows_media_foundation_topology(ffmpeg_path, &plan, &identity).await,
-                MediaFoundationTopologyProbe::Passed { .. }
-            ),
-            Err(_) => false,
-        };
+        let plan = EncoderOutputTopologyPlan::shared(candidate.clone());
+        let accepted = matches!(
+            probe_windows_media_foundation_topology(ffmpeg_path, &plan, &identity).await,
+            MediaFoundationTopologyProbe::Passed { .. }
+        );
         verdicts.push((candidate, accepted));
         if accepted {
             break;
         }
     }
     let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    let selected = select_windows_recordable_video(&requested, logical_cores, |candidate| {
-        verdicts
-            .iter()
-            .any(|(probed, accepted)| *accepted && probed == candidate)
-    });
+    let selected =
+        select_windows_recordable_video(&requested, logical_cores, verdict_cap, |candidate| {
+            verdicts
+                .iter()
+                .any(|(probed, accepted)| *accepted && probed == candidate)
+        });
     if let Ok(mut cache) = cache.lock() {
         cache.insert(key, selected.clone());
     }
@@ -15196,11 +18266,38 @@ pub async fn probe_stream_output_topology(
         effective_bridge_output: stream_output_bridge(decision.effective),
         effective_encode_backend: decision.effective_encode_backend,
         probe_state: decision.probe_state,
-        fallback_reason: combined_output_fallback_reason(
+        fallback_reason: topology_result_fallback_reason(
+            decision.probe_state,
+            decision.requested != decision.effective,
             decision.fallback_reason,
-            decision.encoder_selection_fallback_reason,
+            decision.encoder_selection_fallback_reason.clone(),
         ),
+        encoder_selection_reason: decision
+            .encoder_selection_fallback_reason
+            .as_deref()
+            .map(bounded_stream_output_topology_fallback_reason),
     })
+}
+
+/// The wire `fallbackReason` is a topology verdict (plan 0015): a passed or
+/// not-required probe on its requested bridge carries none, even when the raw
+/// path's encoder was itself a fallback (Linux OpenH264, VAAPI rejected).
+/// That encoder note travels as `encoderSelectionReason` instead; the shared
+/// contract rejects a `fallbackReason` on a healthy topology.
+fn topology_result_fallback_reason(
+    probe_state: StreamOutputTopologyProbeState,
+    bridge_changed: bool,
+    bridge: Option<String>,
+    encoder_selection: Option<String>,
+) -> Option<String> {
+    let fallback_verdict = matches!(
+        probe_state,
+        StreamOutputTopologyProbeState::Rejected | StreamOutputTopologyProbeState::Unsupported
+    );
+    if !fallback_verdict && !bridge_changed {
+        return None;
+    }
+    combined_output_fallback_reason(bridge, encoder_selection)
 }
 
 /// Why the session is not on its requested path. When the bridge was rejected
@@ -15376,13 +18473,223 @@ where
 static WINDOWS_MF_PROBE_REJECTIONS: std::sync::OnceLock<StdMutex<MediaFoundationProbeRejections>> =
     std::sync::OnceLock::new();
 
+/// Plan 195 S5: Media Foundation rejections remembered across app runs
+/// (`windows_mf_rejections`), so a PC whose MFT rejects everything stops
+/// paying seconds of probes on the first start of every run. Loaded once at
+/// backend start; written through on every real rejection. A probe that
+/// timed out or was refused behind a wedged driver is NOT stored: a reboot
+/// may clear that, and the process-lifetime cache above already covers it.
+#[cfg(target_os = "windows")]
+struct WindowsMfRejectionStore {
+    database: Database,
+    store: StdMutex<crate::windows_mf_rejections::StoredRejections>,
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_MF_PERSISTED_REJECTIONS: std::sync::OnceLock<WindowsMfRejectionStore> =
+    std::sync::OnceLock::new();
+
+/// The profile the launch replay ring most likely asks for: the remembered
+/// capture's (Record and Go Live save it), else the renderer's default 1080p30.
+#[cfg(any(test, target_os = "windows"))]
+fn replay_ring_prewarm_video(remembered: Option<&StartSessionParams>) -> VideoSettings {
+    remembered.map_or_else(
+        || video_preset_defaults(VideoPreset::Tutorial1080p30),
+        |params| params.output.video.clone(),
+    )
+}
+
+/// The replay ring starts on its own at launch (plan 181), and its first
+/// start paid the cold Windows encoder probes while it held the ordered
+/// command lane: the recordable-video probe and the first in-process Media
+/// Foundation encoder open (3.3 s against 1.55 s warm on a GTX 1650, right
+/// behind the camera start). Warm both in the background at startup, through
+/// the same caches the start reads: the record-only canvas, then the ring's
+/// encoded-bridge decision for it. Best effort: a start that lands first
+/// probes for itself, and another profile simply misses the cache.
+#[cfg(target_os = "windows")]
+pub(crate) fn spawn_windows_replay_ring_prewarm(state: &AppState) {
+    let remembered = state
+        .database
+        .load_setting::<StartSessionParams>("last_capture_session")
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                "Could not load the remembered capture for the encoder prewarm: {error}"
+            );
+            None
+        });
+    let requested = replay_ring_prewarm_video(remembered.as_ref());
+    let state = state.clone();
+    tokio::spawn(async move {
+        let started = Instant::now();
+        let ffmpeg_path = resolve_ffmpeg_path(None);
+        let Some(selected) =
+            resolve_windows_record_only_video(&state, &ffmpeg_path, &requested).await
+        else {
+            return;
+        };
+        let decision = resolve_windows_encoded_bridge_decision(
+            &ffmpeg_path,
+            &EncoderOutputTopologyPlan::shared(selected.video.clone()),
+            recording_encoder_bridge_video_output(true, false),
+        )
+        .await;
+        tracing::info!(
+            "[encoder-prewarm] replay ring profile {}x{}@{} warmed in {}ms ({})",
+            selected.video.width,
+            selected.video.height,
+            selected.video.fps,
+            started.elapsed().as_millis(),
+            match &decision {
+                Ok(decision) => format!("{:?}", decision.effective_encode_backend),
+                Err(error) => format!("decision failed: {error}"),
+            }
+        );
+    });
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn load_windows_mf_rejection_store(database: &Database) {
+    use crate::windows_mf_rejections::{SETTING_KEY, StoredRejections};
+    let stored = match database.load_setting::<StoredRejections>(SETTING_KEY) {
+        Ok(stored) => stored,
+        Err(error) => {
+            tracing::warn!("Could not load the remembered Media Foundation rejections: {error:#}");
+            None
+        }
+    };
+    let adopted = StoredRejections::adopt(
+        stored,
+        &graphics_adapter_driver_identity(),
+        &crate::performance_check::desktop_app_version(),
+        Utc::now(),
+    );
+    tracing::info!(
+        remembered = adopted.entries.len(),
+        "Media Foundation rejection store loaded"
+    );
+    if WINDOWS_MF_PERSISTED_REJECTIONS
+        .set(WindowsMfRejectionStore {
+            database: database.clone(),
+            store: StdMutex::new(adopted),
+        })
+        .is_err()
+    {
+        tracing::warn!("The Media Foundation rejection store was already loaded");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn remembered_mf_rejection(
+    key: &crate::windows_mf_rejections::RejectionKey,
+    graphics_adapter_driver_identity: &str,
+) -> Option<String> {
+    let handle = WINDOWS_MF_PERSISTED_REJECTIONS.get()?;
+    let store = handle.store.lock().ok()?;
+    if store.driver_identity != graphics_adapter_driver_identity {
+        return None;
+    }
+    store.lookup(key, Utc::now()).map(str::to_string)
+}
+
+#[cfg(target_os = "windows")]
+fn remember_mf_rejection(
+    key: crate::windows_mf_rejections::RejectionKey,
+    graphics_adapter_driver_identity: &str,
+    reason: &str,
+) {
+    let Some(handle) = WINDOWS_MF_PERSISTED_REJECTIONS.get() else {
+        return;
+    };
+    let snapshot = {
+        let Ok(mut store) = handle.store.lock() else {
+            return;
+        };
+        if store.driver_identity != graphics_adapter_driver_identity {
+            return;
+        }
+        store.remember(key, reason, Utc::now());
+        store.clone()
+    };
+    if let Err(error) = handle
+        .database
+        .save_setting(crate::windows_mf_rejections::SETTING_KEY, &snapshot)
+    {
+        tracing::warn!("Could not save the remembered Media Foundation rejections: {error:#}");
+    }
+}
+
 #[cfg(target_os = "windows")]
 static WINDOWS_NATIVE_ENCODED_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<std::collections::HashMap<WindowsNativeEncodedProbeKey, Option<String>>>,
 > = std::sync::OnceLock::new();
 
+/// Successful hardware probes, kept for the process lifetime.
+///
+/// Each probe builds a throwaway hardware MFT, encodes a few frames, and
+/// destroys it. Re-probing on every recording start churned the NVIDIA async
+/// H.264 MFT (18 nvEncodeAPI64.dll load/unload cycles in 13 minutes), and its
+/// teardown races the MFT's own RTWorkQ work item: three minidumps on
+/// 2026-10-23 (0.9.147) crash on `nvEncMFTH264x.dll` -> `RTWorkQ.dll` ->
+/// `mfplat.dll` (null+0x24 write) 0.3-0.8 s after a record-start probe, with
+/// `probe_hardware_encoder`'s encoder drop in flight in the first one. The
+/// race is inside the driver, so the fix is to stop re-creating and destroying
+/// the MFT when nothing it depends on has changed. The key carries the GPU
+/// driver identity, so a driver update re-probes; failures keep using the
+/// existing TTL'd rejection cache.
+#[cfg(target_os = "windows")]
+type WindowsNativeEncodedProbeSuccessKey = (String, String, &'static str, u32, u32, u32, u32);
+
+#[cfg(target_os = "windows")]
+static WINDOWS_NATIVE_ENCODED_PROBE_SUCCESSES: std::sync::OnceLock<
+    StdMutex<
+        std::collections::HashMap<
+            WindowsNativeEncodedProbeSuccessKey,
+            crate::windows_media_foundation_encoder::MediaFoundationProbe,
+        >,
+    >,
+> = std::sync::OnceLock::new();
+
 #[cfg(target_os = "windows")]
 async fn probe_windows_native_encoded_bridge(
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+    topology: &'static str,
+    graphics_adapter_driver_identity: &str,
+) -> Result<crate::windows_media_foundation_encoder::MediaFoundationProbe> {
+    let success_key: WindowsNativeEncodedProbeSuccessKey = (
+        graphics_adapter_driver_identity.to_string(),
+        ffmpeg_path.to_string(),
+        topology,
+        video.width,
+        video.height,
+        video.fps,
+        video.bitrate_kbps,
+    );
+    let successes = WINDOWS_NATIVE_ENCODED_PROBE_SUCCESSES
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
+    if let Some(probe) = successes
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&success_key).cloned())
+    {
+        return Ok(probe);
+    }
+    let probe = probe_windows_native_encoded_bridge_uncached(
+        ffmpeg_path,
+        video,
+        topology,
+        graphics_adapter_driver_identity,
+    )
+    .await?;
+    if let Ok(mut cache) = successes.lock() {
+        cache.insert(success_key, probe.clone());
+    }
+    Ok(probe)
+}
+
+#[cfg(target_os = "windows")]
+async fn probe_windows_native_encoded_bridge_uncached(
     ffmpeg_path: &str,
     video: &VideoSettings,
     topology: &'static str,
@@ -15413,6 +18720,22 @@ async fn probe_windows_native_encoded_bridge(
     {
         bail!("{reason} (remembered from an earlier probe)");
     }
+    // Plan 195 S5: a rejection remembered from an earlier app run.
+    let remembered_key = crate::windows_mf_rejections::RejectionKey {
+        encoder_preference: windows_h264_encoder_preference_label(
+            windows_h264_encoder_preference().0,
+        )
+        .to_string(),
+        topology: topology.to_string(),
+        width: video.width,
+        height: video.height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+    };
+    if let Some(reason) = remembered_mf_rejection(&remembered_key, graphics_adapter_driver_identity)
+    {
+        bail!("{reason} (remembered from an earlier app run)");
+    }
     let probe = match blocking_probe_with_deadline(
         &WINDOWS_MF_WEDGED_PROBES,
         WINDOWS_MF_HARDWARE_PROBE_DEADLINE,
@@ -15422,8 +18745,14 @@ async fn probe_windows_native_encoded_bridge(
     {
         BlockingProbeOutcome::Finished(Ok(probe)) => probe,
         BlockingProbeOutcome::Finished(Err(error)) => {
-            if let Ok(mut cache) = rejections.lock() {
-                cache.insert(rejection_key, format!("{error:#}"), Instant::now());
+            let reason = format!("{error:#}");
+            // A GPU with every encoder session taken can encode this profile
+            // once one frees up; remembering it would downgrade it for a week.
+            if !crate::windows_mf_rejections::is_encoder_session_exhaustion(&reason) {
+                if let Ok(mut cache) = rejections.lock() {
+                    cache.insert(rejection_key, reason.clone(), Instant::now());
+                }
+                remember_mf_rejection(remembered_key, graphics_adapter_driver_identity, &reason);
             }
             return Err(error);
         }
@@ -16417,6 +19746,7 @@ async fn run_windows_d3d11_session_monitor(
     > = None;
     let mut last_presenter = None;
     let mut last_placement_error = None;
+    let mut last_configure_error: Option<String> = None;
     let mut consecutive_snapshot_errors = 0_u8;
     'monitor: while !stop.load(Ordering::Acquire) {
         if !windows_d3d11_monitor_identity_is_current(&state, &stop, &session_id, generation).await
@@ -16592,6 +19922,17 @@ async fn run_windows_d3d11_session_monitor(
                             configured_placement = None;
                             last_presenter = None;
                             let reason = format!("windows-d3d11-preview-configure-failed: {error}");
+                            // The monitor retries every tick, so name each new
+                            // reason once instead of failing over silently.
+                            if last_configure_error.as_deref() != Some(reason.as_str()) {
+                                state.emit_log(
+                                    "warn",
+                                    format!(
+                                        "Windows D3D11 presenter for session {session_id} could not be configured; the Electron proof preview stays active: {reason}"
+                                    ),
+                                );
+                                last_configure_error = Some(reason.clone());
+                            }
                             if let Some(previous) = previous_placement {
                                 let _ = crate::preview_surface::teardown_windows_d3d11_presenter_status(
                                     &state,
@@ -17010,6 +20351,220 @@ fn bridge_recording_ffmpeg_args(
     )
 }
 
+/// Plan 181: the replay ring output a session's FFmpeg child adds beside
+/// its file and stream outputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplayOutput {
+    dir: PathBuf,
+    seconds: u32,
+}
+
+/// How the ring gets its video: a stream copy of the encoded bridge, or its
+/// own encode from the filter graph on the raw and legacy paths.
+enum ReplayVideoCodec {
+    Copy {
+        video_output: EncoderBridgeVideoOutput,
+        /// The copied FIFO's encoder rate.
+        fps: u32,
+    },
+    Encode {
+        /// `[v_main]` when the ring is the only output, `[v_replay]` when
+        /// it rides a `split` beside a primary output.
+        label: &'static str,
+        encoder_args: Vec<String>,
+    },
+}
+
+/// Appends the ring as one more output: the same audio mix the file gets,
+/// encoded to AAC, and a `-f segment` MPEG-TS ring (plan 181 S2).
+fn append_replay_segment_output(
+    args: &mut Vec<String>,
+    input_layout: &InputLayout,
+    audio: &AudioSettings,
+    video: ReplayVideoCodec,
+    replay: &ReplayOutput,
+) {
+    match video {
+        ReplayVideoCodec::Copy { video_output, fps } => {
+            args.extend([
+                "-map".to_string(),
+                format!("{}:v", input_layout.video_input_index),
+            ]);
+            append_audio_output_args(args, input_layout);
+            args.extend(["-c:v".to_string(), "copy".to_string()]);
+            if matches!(
+                video_output,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+            ) {
+                append_media_foundation_h264_copy_metadata_args(args, fps);
+            }
+        }
+        ReplayVideoCodec::Encode {
+            label,
+            encoder_args,
+        } => {
+            args.extend(["-map".to_string(), label.to_string()]);
+            append_audio_output_args(args, input_layout);
+            args.extend(encoder_args);
+        }
+    }
+    let filter =
+        (!input_layout.audio_inputs.is_empty()).then(|| capture_audio_filter(input_layout, audio));
+    args.extend(crate::replay_buffer::replay_audio_encoding_args(
+        filter.as_deref(),
+        audio_output_channels(input_layout),
+    ));
+    // The ring ends with the video, like every bridge output.
+    args.push("-shortest".to_string());
+    args.extend(crate::replay_buffer::segment_muxer_args(
+        &replay.dir,
+        replay.seconds,
+    ));
+}
+
+/// Plan 181 S7: a buffer-only session yields to a real one. Stop it through
+/// the ordinary path (bounded, no finalization: it has no file), then wait
+/// for the pieces the admission checks below need, so the Record that
+/// follows is not refused for a microphone still closing.
+/// A buffer-only session runs, or one is starting, so this start would hand
+/// over from it.
+async fn replay_hand_over_pending(state: &AppState) -> bool {
+    state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active| active.replay_only)
+        || crate::replay_buffer::start_in_flight(state)
+}
+
+/// The refusals `start_session` makes from the request alone, on a copy of it.
+fn refuse_invalid_request(state: &AppState, params: &StartSessionParams) -> Result<()> {
+    let mut params = params.clone();
+    hydrate_stream_key_secret_refs(state, &mut params)?;
+    normalize_stream_only_output_video(&mut params)?;
+    validate_session_entitlements(&params, &entitlements::current_entitlements())?;
+    validate_outputs(&params)?;
+    if let Some(scene) = params.scene.as_ref()
+        && let Err(message) = validate_scene_background(scene)
+    {
+        bail!(message);
+    }
+    Ok(())
+}
+
+async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
+    // The ring re-arms right after every Stop (redesign R2), so the next
+    // press can land while that buffer-only start is still between admission
+    // and its running session. Wait for it (bounded) and hand over from the
+    // running session instead of meeting "A capture session is starting".
+    //
+    // A session that already left `state.recording` keeps the capture
+    // admission until its terminal status is published. When Clips is
+    // switched off (or the ring stops for any reason) a Record landing in
+    // that window met "A capture session is active or finalizing"
+    // (retest 151); wait for the terminal edge instead, on the same bound.
+    let wait_deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
+    let session_id = loop {
+        let (replay_only_session, slot_empty) = {
+            let recording = state.recording.lock().await;
+            (
+                recording
+                    .as_ref()
+                    .filter(|active| active.replay_only)
+                    .map(|active| active.session_id.clone()),
+                recording.is_none(),
+            )
+        };
+        if let Some(session_id) = replay_only_session {
+            break session_id;
+        }
+        let finishing = slot_empty && state.capture_interruption.capture_is_finalizing();
+        if !finishing && !crate::replay_buffer::start_in_flight(state) {
+            return Ok(());
+        }
+        if Instant::now() >= wait_deadline {
+            if finishing {
+                bail!("The last session is still finishing. Try again in a moment.");
+            }
+            bail!("Clips are still starting. Try again in a moment.");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    tracing::info!("Replay buffer session {session_id} hands over to a new session.");
+    let status = stop_recording_with_intent(state.clone(), SessionStopParams::default())
+        .await
+        .context("Could not stop the replay buffer before starting the session")?;
+    if !matches!(status.state, RecordingState::Idle | RecordingState::Failed) {
+        bail!("The clip buffer is still stopping. Try again in a moment.");
+    }
+    let deadline = Instant::now() + REPLAY_HANDOVER_CLEANUP_TIMEOUT;
+    loop {
+        let slot_free = state.recording.lock().await.is_none();
+        let audio_settled =
+            !crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count());
+        if slot_free && audio_settled {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("The clip buffer is still releasing the microphone. Try again in a moment.");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Plan 181: a buffer-only session writes nothing permanent, so it blocks no
+/// update install or permission restart (main already reads it as idle). The
+/// interruption hands over from it the way Record and Go Live do, then takes
+/// the lease at once, before the renderer re-arms the ring. A re-arm that
+/// still lands first is handed over again, a bounded number of times.
+pub(crate) async fn admit_interruption_over_replay_buffer(
+    state: &AppState,
+    owner_id: &str,
+    action: &str,
+) -> std::result::Result<crate::capture_interruption::InterruptionLeaseGrant, String> {
+    let mut attempt = 1;
+    loop {
+        hand_over_replay_only_session(state)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        match state
+            .capture_interruption
+            .try_acquire_interruption(owner_id, action)
+        {
+            Ok(grant) => return Ok(grant),
+            Err(_)
+                if attempt < INTERRUPTION_HANDOVER_ATTEMPTS
+                    && replay_only_session_pending(state).await =>
+            {
+                attempt += 1;
+            }
+            Err(blocker) => return Err(blocker.to_string()),
+        }
+    }
+}
+
+async fn replay_only_session_pending(state: &AppState) -> bool {
+    crate::replay_buffer::start_in_flight(state)
+        || state
+            .recording
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|active| active.replay_only)
+}
+
+const INTERRUPTION_HANDOVER_ATTEMPTS: u32 = 3;
+
+/// How long the handover waits for the buffer session's microphone and slot
+/// to release before the real session is admitted.
+const REPLAY_HANDOVER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long an admitted start waits for the previous session's microphone
+/// cleanup (and the standby microphone's re-open) before refusing.
+const MICROPHONE_CLEANUP_GRACE: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
 fn bridge_recording_ffmpeg_args_with_encoder(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -17018,9 +20573,29 @@ fn bridge_recording_ffmpeg_args_with_encoder(
     video_output: EncoderBridgeVideoOutput,
     encoder: &ResolvedFfmpegH264Encoder,
 ) -> Result<Vec<String>> {
+    bridge_recording_ffmpeg_args_with_encoder_and_replay(
+        capture,
+        params,
+        output_path,
+        fifo_path,
+        video_output,
+        encoder,
+        None,
+    )
+}
+
+fn bridge_recording_ffmpeg_args_with_encoder_and_replay(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    fifo_path: &Path,
+    video_output: EncoderBridgeVideoOutput,
+    encoder: &ResolvedFfmpegH264Encoder,
+    replay: Option<&ReplayOutput>,
+) -> Result<Vec<String>> {
     let output_path =
         output_path.context("Encoder bridge recording requires a local output path")?;
-    bridge_compositor_ffmpeg_args_with_encoder(
+    bridge_compositor_ffmpeg_args_with_encoder_and_replay(
         capture,
         params,
         Some(output_path),
@@ -17028,6 +20603,7 @@ fn bridge_recording_ffmpeg_args_with_encoder(
         fifo_path,
         video_output,
         encoder,
+        replay,
     )
 }
 
@@ -17052,6 +20628,7 @@ fn bridge_compositor_ffmpeg_args(
     )
 }
 
+#[cfg(test)]
 fn bridge_compositor_ffmpeg_args_with_encoder(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -17061,8 +20638,35 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
     video_output: EncoderBridgeVideoOutput,
     encoder: &ResolvedFfmpegH264Encoder,
 ) -> Result<Vec<String>> {
+    bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+        capture,
+        params,
+        output_path,
+        stream_targets,
+        fifo_path,
+        video_output,
+        encoder,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    stream_targets: &[StreamTarget],
+    fifo_path: &Path,
+    video_output: EncoderBridgeVideoOutput,
+    encoder: &ResolvedFfmpegH264Encoder,
+    replay: Option<&ReplayOutput>,
+) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
     let performance_check = params.purpose.is_performance_check();
+    // Plan 181: a buffer-only session has no primary output; the ring maps
+    // the video itself. With a primary output the ring copies the encoded
+    // stream, or rides a `split` of the raw graph.
+    let primary_output = output_path.is_some() || !stream_targets.is_empty();
     let session_params = ffmpeg_session_params(
         capture,
         params,
@@ -17097,26 +20701,36 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
     if !copy_stream_fanout {
         match video_output {
             EncoderBridgeVideoOutput::RawYuv420p => {
-                args.extend([
-                    "-filter_complex".to_string(),
-                    bridge_recording_video_filter_for_encoder(
-                        input_layout.video_input_index,
-                        &params.output.video,
-                        encoder,
-                    ),
-                    "-map".to_string(),
-                    "[v_main]".to_string(),
-                ]);
+                let filter = bridge_recording_video_filter_for_encoder(
+                    input_layout.video_input_index,
+                    &params.output.video,
+                    encoder,
+                );
+                let filter = match replay {
+                    Some(_) if primary_output => {
+                        crate::replay_buffer::split_video_filter_for_replay(&filter)
+                            .unwrap_or(filter)
+                    }
+                    _ => filter,
+                };
+                args.extend(["-filter_complex".to_string(), filter]);
+                if primary_output {
+                    args.extend(["-map".to_string(), "[v_main]".to_string()]);
+                }
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
             | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-                args.extend([
-                    "-map".to_string(),
-                    format!("{}:v", input_layout.video_input_index),
-                ]);
+                if primary_output {
+                    args.extend([
+                        "-map".to_string(),
+                        format!("{}:v", input_layout.video_input_index),
+                    ]);
+                }
             }
         }
+    }
+    if primary_output && !copy_stream_fanout {
         append_audio_output_args(&mut args, &input_layout);
         match video_output {
             EncoderBridgeVideoOutput::RawYuv420p => {
@@ -17137,7 +20751,10 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                     video_output,
                     EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
                 ) {
-                    append_media_foundation_h264_color_metadata_args(&mut args);
+                    append_media_foundation_h264_copy_metadata_args(
+                        &mut args,
+                        params.output.video.fps,
+                    );
                 }
             }
         }
@@ -17145,7 +20762,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
             &mut args,
             &input_layout,
             &params.audio,
-            !stream_targets.is_empty(),
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
             true,
         );
     }
@@ -17162,8 +20779,9 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                 &mut args,
                 &input_layout,
                 &params.audio,
-                true,
+                OutputAudioCodec::StreamAac,
                 video_output,
+                params.output.video.fps,
                 path,
             );
             for target in stream_targets {
@@ -17174,6 +20792,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                     target,
                     false,
                     video_output,
+                    params.output.video.fps,
                 );
             }
         }
@@ -17194,6 +20813,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                     target,
                     false,
                     video_output,
+                    params.output.video.fps,
                 );
             }
         }
@@ -17209,13 +20829,49 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
         (None, targets) if !targets.is_empty() => {
             args.extend(tee_output_args(stream_legs.join("|")));
         }
+        // Plan 181: the replay ring is this session's only output.
+        (None, []) if replay.is_some() => {}
         (None, _) => bail!("At least one output target is required"),
+    }
+
+    if let Some(replay) = replay {
+        let video = match video_output {
+            EncoderBridgeVideoOutput::RawYuv420p => {
+                let mut encoder_args = Vec::new();
+                append_h264_encoding_args_for_platform_preserving_input_timestamps(
+                    &mut encoder_args,
+                    &params.output.video,
+                    encoder.platform,
+                    !stream_targets.is_empty(),
+                    encoder.vaapi_arg_profile,
+                    performance_check,
+                );
+                ReplayVideoCodec::Encode {
+                    label: if primary_output {
+                        "[v_replay]"
+                    } else {
+                        "[v_main]"
+                    },
+                    encoder_args,
+                }
+            }
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
+                ReplayVideoCodec::Copy {
+                    video_output,
+                    fps: params.output.video.fps,
+                }
+            }
+        };
+        append_replay_segment_output(&mut args, &input_layout, &params.audio, video, replay);
     }
 
     Ok(args)
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn bridge_compositor_split_output_ffmpeg_args(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -17225,6 +20881,31 @@ fn bridge_compositor_split_output_ffmpeg_args(
     stream_fifo_path: &Path,
     recording_video_output: EncoderBridgeVideoOutput,
     stream_output: CompositorAuxiliaryOutput,
+) -> Result<Vec<String>> {
+    bridge_compositor_split_output_ffmpeg_args_with_replay(
+        capture,
+        params,
+        output_path,
+        stream_targets,
+        recording_fifo_path,
+        stream_fifo_path,
+        recording_video_output,
+        stream_output,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bridge_compositor_split_output_ffmpeg_args_with_replay(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    stream_targets: &[StreamTarget],
+    recording_fifo_path: &Path,
+    stream_fifo_path: &Path,
+    recording_video_output: EncoderBridgeVideoOutput,
+    stream_output: CompositorAuxiliaryOutput,
+    replay: Option<&ReplayOutput>,
 ) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
     let session_params = ffmpeg_session_params(
@@ -17308,10 +20989,30 @@ fn bridge_compositor_split_output_ffmpeg_args(
             recording_video_output,
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
         ) {
-            append_media_foundation_h264_color_metadata_args(&mut args);
+            append_media_foundation_h264_copy_metadata_args(&mut args, params.output.video.fps);
         }
-        append_audio_encoding_with_video_clock(&mut args, &input_layout, &params.audio, true, true);
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            OutputAudioCodec::StreamAac,
+            true,
+        );
         args.push(ffmpeg_file_path(output_path));
+    }
+    // Plan 181: the ring copies the recording leg's encode (the clean
+    // program, before any stream-only overlay).
+    if let Some(replay) = replay {
+        append_replay_segment_output(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            ReplayVideoCodec::Copy {
+                video_output: recording_video_output,
+                fps: params.output.video.fps,
+            },
+            replay,
+        );
     }
 
     let stream_input_layout = InputLayout {
@@ -17330,15 +21031,15 @@ fn bridge_compositor_split_output_ffmpeg_args(
         // vertical destinations consume the simulcast encode, horizontal ones
         // the primary. Profile equality is a trap here (a 1080×1920 recording
         // and an identical vertical stream profile would tie).
-        let video_input_index = if simulcast_mode {
+        let (video_input_index, video_fps) = if simulcast_mode {
             match target.output_orientation {
                 crate::streaming::StreamOutputOrientation::Vertical => {
                     uses_companion_stream_input = true;
-                    stream_video_input_index
+                    (stream_video_input_index, stream_video.fps)
                 }
                 crate::streaming::StreamOutputOrientation::Horizontal => {
                     uses_recording_stream_input = true;
-                    recording_video_input_index
+                    (recording_video_input_index, params.output.video.fps)
                 }
             }
         } else {
@@ -17348,10 +21049,10 @@ fn bridge_compositor_split_output_ffmpeg_args(
             // first would silently send the clean recording pixels to RTMP.
             if same_video_profile(target_video, &stream_video) {
                 uses_companion_stream_input = true;
-                stream_video_input_index
+                (stream_video_input_index, stream_video.fps)
             } else if same_video_profile(target_video, &params.output.video) {
                 uses_recording_stream_input = true;
-                recording_video_input_index
+                (recording_video_input_index, params.output.video.fps)
             } else {
                 bail!(
                     "Target {} resolves to unsupported mixed stream profile {}x{}@{} {}kbps",
@@ -17363,12 +21064,12 @@ fn bridge_compositor_split_output_ffmpeg_args(
                 );
             }
         };
-        stream_routes.push((target, video_input_index));
+        stream_routes.push((target, video_input_index, video_fps));
     }
     let mixed_stream_inputs = uses_recording_stream_input && uses_companion_stream_input;
 
     if mixed_stream_inputs {
-        for (target, video_input_index) in stream_routes {
+        for (target, video_input_index, video_fps) in stream_routes {
             let stream_input_layout = InputLayout {
                 video_input_index,
                 camera_input_index: None,
@@ -17384,6 +21085,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
                 target,
                 true,
                 recording_video_output,
+                video_fps,
             );
         }
         return Ok(args);
@@ -17401,18 +21103,23 @@ fn bridge_compositor_split_output_ffmpeg_args(
             target,
             true,
             recording_video_output,
+            stream_video.fps,
         );
     }
 
     Ok(args)
 }
 
-fn bridge_ffmpeg_base_args() -> Vec<String> {
+pub(crate) fn bridge_ffmpeg_base_args() -> Vec<String> {
     vec![
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
-        "warning".to_string(),
+        // `level+info` (plan 161): fifo legs log their reconnects ("Recovery
+        // failed", "Recovery successful") and the startup dump maps output
+        // indexes to destinations, all at INFO. Every line carries its level,
+        // and `relay_ffmpeg_stderr` keeps INFO out of the warning-level paths.
+        BRIDGE_FFMPEG_LOGLEVEL.to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
         FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
@@ -17500,9 +21207,18 @@ fn append_bridge_recording_input_args(
             // its output muxer; the 2026-08-29 failure delivered 61 valid access
             // units and still left a zero-byte MKV. Record-only therefore uses
             // the proven 4 KiB split-FIFO bound, while shared streaming preserves
-            // its established 64 KiB posture. Do not add `-fflags nobuffer`: on
+            // its established 64 KiB posture when ISO is off. An ISO-on shared
+            // graph must open promptly too: waiting for 64 KiB of easy content
+            // stalls the common audio bus and both sibling muxers for seconds.
+            // Do not add `-fflags nobuffer`: on
             // a non-seekable FIFO it discards the first keyframe during probing.
-            let probe_bytes = if params.output.stream_enabled {
+            let probe_bytes = if params.output.stream_enabled
+                && !params
+                    .output
+                    .separate_source_recordings
+                    .as_ref()
+                    .is_some_and(|iso| iso.enabled)
+            {
                 SHARED_STREAM_ENCODED_MPEGTS_INPUT_PROBE_BYTES
             } else {
                 MINIMAL_ENCODED_MPEGTS_INPUT_PROBE_BYTES
@@ -17542,7 +21258,7 @@ fn append_bridge_recording_input_args(
     }
 }
 
-fn append_bridge_encoded_video_input_args(
+pub(crate) fn append_bridge_encoded_video_input_args(
     args: &mut Vec<String>,
     next_input_index: &mut usize,
     fifo_path: &Path,
@@ -17597,11 +21313,12 @@ fn append_bridge_copy_file_output(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming_audio: bool,
+    audio_codec: OutputAudioCodec,
     video_output: EncoderBridgeVideoOutput,
+    fps: u32,
     path: &Path,
 ) {
-    append_bridge_copy_output_args(args, input_layout, audio, streaming_audio, video_output);
+    append_bridge_copy_output_args(args, input_layout, audio, audio_codec, video_output, fps);
     args.push(ffmpeg_file_path(path));
 }
 
@@ -17612,6 +21329,7 @@ fn append_bridge_copy_flv_output(
     target: &StreamTarget,
     advance_audio: bool,
     video_output: EncoderBridgeVideoOutput,
+    fps: u32,
 ) {
     let stream_audio;
     let audio = if advance_audio {
@@ -17620,7 +21338,14 @@ fn append_bridge_copy_flv_output(
     } else {
         audio
     };
-    append_bridge_copy_output_args(args, input_layout, audio, true, video_output);
+    append_bridge_copy_output_args(
+        args,
+        input_layout,
+        audio,
+        OutputAudioCodec::StreamAac,
+        video_output,
+        fps,
+    );
     // FLV's H264 codec tag, explicitly: the mpegts input carries tag [27]
     // (stream_type) through -c:v copy, wrapper muxers clone it verbatim into
     // the inner flv muxer, and "-tag:v 0" is a no-op for copy (0 = keep).
@@ -17631,29 +21356,49 @@ fn append_bridge_copy_flv_output(
     // carry mpegts inputs to flv slaves — it forwards the mpegts codec tag
     // [27], which the FLV muxer rejects; standalone outputs negotiate tags
     // correctly — plan 023 L1).
+    //
+    // Reconnect after ANY error, on a keyframe (plan 161). An ingest that
+    // closes the connection mid-stream surfaces as AVERROR_EOF, which the fifo
+    // refuses to retry by default (`is_recoverable` in libavformat/fifo.c): the
+    // leg then closed for good while FFmpeg finished that one output quietly
+    // and the session stayed "On air" (YouTube, 2026-10-07). Retries are
+    // unlimited (FFmpeg's `max_recovery_attempts` default of 0) and every
+    // failed attempt logs `[fifo @ …] Error opening <url>`, which attributes
+    // the leg; `restart_with_keyframe` (honoured only with
+    // `drop_pkts_on_overflow`) resumes on a clean picture.
     args.extend([
         "-f".to_string(),
         "fifo".to_string(),
         "-fifo_format".to_string(),
         "flv".to_string(),
-        "-queue_size".to_string(),
-        "512".to_string(),
-        "-drop_pkts_on_overflow".to_string(),
-        "1".to_string(),
-        "-attempt_recovery".to_string(),
-        "1".to_string(),
-        "-recovery_wait_time".to_string(),
-        "2".to_string(),
-        target.url.clone(),
     ]);
+    for (key, value) in RTMP_LEG_FIFO_RECOVERY_OPTIONS {
+        args.extend([format!("-{key}"), value.to_string()]);
+    }
+    args.push(target.url.clone());
 }
 
+/// The fifo-muxer options every RTMP leg runs with, whether it is its own
+/// output (bridge copy) or a tee slave (`rtmp_tee_leg`): drop on overflow,
+/// and reconnect after ANY error on a keyframe, every two seconds, without a
+/// retry limit (plan 161).
+const RTMP_LEG_FIFO_RECOVERY_OPTIONS: [(&str, &str); 6] = [
+    ("queue_size", "512"),
+    ("drop_pkts_on_overflow", "1"),
+    ("attempt_recovery", "1"),
+    ("recover_any_error", "1"),
+    ("restart_with_keyframe", "1"),
+    ("recovery_wait_time", "2"),
+];
+
+/// `fps` is the encoder rate of the FIFO that `input_layout` maps.
 fn append_bridge_copy_output_args(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming_audio: bool,
+    audio_codec: OutputAudioCodec,
     video_output: EncoderBridgeVideoOutput,
+    fps: u32,
 ) {
     args.extend([
         "-map".to_string(),
@@ -17665,12 +21410,21 @@ fn append_bridge_copy_output_args(
         video_output,
         EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
-        append_media_foundation_h264_color_metadata_args(args);
+        append_media_foundation_h264_copy_metadata_args(args, fps);
     }
-    append_audio_encoding_with_video_clock(args, input_layout, audio, streaming_audio, true);
+    append_audio_encoding_with_video_clock(args, input_layout, audio, audio_codec, true);
 }
 
-fn append_media_foundation_h264_color_metadata_args(args: &mut Vec<String>) {
+/// Output metadata for a stream copy of the Media Foundation MPEG-TS FIFO.
+///
+/// The FIFO is opened with minimal probing, too little for FFmpeg to estimate
+/// a frame rate, so it falls back to H.264's field-rate `tbr`: twice the SPS
+/// rate. Copied as-is, that guess becomes the container's declared rate
+/// (Matroska `DefaultDuration`, FLV `framerate`) and a 30fps take reads back
+/// as 60p. `-r` on a stream copy only declares the rate; packet timestamps
+/// pass through untouched, so frame skips stay real gaps.
+fn append_media_foundation_h264_copy_metadata_args(args: &mut Vec<String>, fps: u32) {
+    args.extend(["-r".to_string(), fps.max(1).to_string()]);
     args.extend(h264_bt709_color_tag_args());
     args.extend(h264_bt709_vui_rewrite_bsf_args());
 }
@@ -17719,9 +21473,22 @@ fn append_bridge_audio_input_args(
 /// Twitch endpoint used to wedge the whole stop path until Force stop
 /// (owner report, 2026-08-19). Steady-state overflow is already handled by
 /// the fifo wrapper's drop_pkts_on_overflow; this bounds the CLOSE.
+///
+/// The leg's own `fifo_options` replace the tee-wide ones with the plan 161
+/// recovery set: an ingest that drops (Broken pipe) or restarts used to
+/// close the slave for the rest of the session; now the fifo reconnects it
+/// and logs `[fifo @ …] Error opening <url>` / `Recovery successful`, which
+/// `StreamLegMonitor` attributes by URL (retest 154 B2). The option string
+/// is unescaped twice (tee slave split, then slave option parse) before the
+/// fifo parses it, so each `:` separator is written `\\\:`.
 fn rtmp_tee_leg(url: &str) -> String {
+    let fifo_options = RTMP_LEG_FIFO_RECOVERY_OPTIONS
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\\\\\\:");
     format!(
-        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}]{}",
+        "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout={RTMP_LEG_RW_TIMEOUT_US}:fifo_options={fifo_options}]{}",
         escape_tee_target(url)
     )
 }
@@ -17774,6 +21541,7 @@ fn ffmpeg_args(
     )
 }
 
+#[cfg(test)]
 fn ffmpeg_args_with_encoder(
     capture: &CaptureInputs,
     params: &StartSessionParams,
@@ -17782,7 +21550,29 @@ fn ffmpeg_args_with_encoder(
     screen_overlay: Option<&ScreenOverlayInput>,
     encoder: &ResolvedFfmpegH264Encoder,
 ) -> Result<Vec<String>> {
+    ffmpeg_args_with_encoder_and_replay(
+        capture,
+        params,
+        output_path,
+        stream_targets,
+        screen_overlay,
+        encoder,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ffmpeg_args_with_encoder_and_replay(
+    capture: &CaptureInputs,
+    params: &StartSessionParams,
+    output_path: Option<&Path>,
+    stream_targets: &[StreamTarget],
+    screen_overlay: Option<&ScreenOverlayInput>,
+    encoder: &ResolvedFfmpegH264Encoder,
+    replay: Option<&ReplayOutput>,
+) -> Result<Vec<String>> {
     validate_stream_targets_for_ffmpeg(stream_targets)?;
+    let primary_output = output_path.is_some() || !stream_targets.is_empty();
     let session_params = ffmpeg_session_params(
         capture,
         params,
@@ -17809,29 +21599,35 @@ fn ffmpeg_args_with_encoder(
         screen_overlay,
     );
     let filter = recording_video_filter_for_encoder(capture, &input_layout, params, true, encoder);
+    // Plan 181: with a primary output the ring rides a `split` of the graph;
+    // buffer-only maps `[v_main]` itself.
+    let filter = match replay {
+        Some(_) if primary_output => {
+            crate::replay_buffer::split_video_filter_for_replay(&filter).unwrap_or(filter)
+        }
+        _ => filter,
+    };
 
-    args.extend([
-        "-filter_complex".to_string(),
-        filter,
-        "-map".to_string(),
-        "[v_main]".to_string(),
-    ]);
-    append_audio_output_args(&mut args, &input_layout);
-    append_h264_encoding_args_for_platform(
-        &mut args,
-        &params.output.video,
-        encoder.platform,
-        !stream_targets.is_empty(),
-        encoder.vaapi_arg_profile,
-        params.purpose.is_performance_check(),
-    );
-    append_audio_encoding_with_video_clock(
-        &mut args,
-        &input_layout,
-        &params.audio,
-        !stream_targets.is_empty(),
-        false,
-    );
+    args.extend(["-filter_complex".to_string(), filter]);
+    if primary_output {
+        args.extend(["-map".to_string(), "[v_main]".to_string()]);
+        append_audio_output_args(&mut args, &input_layout);
+        append_h264_encoding_args_for_platform(
+            &mut args,
+            &params.output.video,
+            encoder.platform,
+            !stream_targets.is_empty(),
+            encoder.vaapi_arg_profile,
+            params.purpose.is_performance_check(),
+        );
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
+            false,
+        );
+    }
 
     let stream_legs = stream_targets
         .iter()
@@ -17866,7 +21662,35 @@ fn ffmpeg_args_with_encoder(
         (None, targets) if !targets.is_empty() => {
             args.extend(tee_output_args(stream_legs.join("|")));
         }
+        // Plan 181: the replay ring is this session's only output.
+        (None, []) if replay.is_some() => {}
         (None, _) => bail!("At least one output target is required"),
+    }
+
+    if let Some(replay) = replay {
+        let mut encoder_args = Vec::new();
+        append_h264_encoding_args_for_platform(
+            &mut encoder_args,
+            &params.output.video,
+            encoder.platform,
+            !stream_targets.is_empty(),
+            encoder.vaapi_arg_profile,
+            params.purpose.is_performance_check(),
+        );
+        append_replay_segment_output(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            ReplayVideoCodec::Encode {
+                label: if primary_output {
+                    "[v_replay]"
+                } else {
+                    "[v_main]"
+                },
+                encoder_args,
+            },
+            replay,
+        );
     }
 
     args.extend(["-map".to_string(), "[preview]".to_string()]);
@@ -18295,11 +22119,59 @@ fn append_audio_output_args(args: &mut Vec<String>, input_layout: &InputLayout) 
     }
 }
 
+/// The audio codec of a session's primary output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputAudioCodec {
+    /// A stream, and the MKV a record+stream take tees from it: AAC 160k.
+    StreamAac,
+    /// A record-only take: AAC at the bitrate the MP4 export used to encode,
+    /// so the export copies it. Encoding the whole PCM track at Stop took
+    /// 11 min 53 s for a 75-minute take on a slow laptop (retest 152).
+    RecordAac,
+    /// A record-only take that keeps its capture MKV ("Keep original
+    /// recording": lossless audio, as promised) or arms separate source
+    /// recordings (their PCM legs align with the Combined file's PCM).
+    /// Encoded to AAC at export.
+    RecordPcm,
+}
+
+/// Record-only AAC bitrate: what the MP4 export encodes PCM at.
+const RECORD_AAC_BITRATE: &str = "256k";
+
+impl OutputAudioCodec {
+    fn for_session(params: &StartSessionParams, streaming: bool) -> Self {
+        let separate_sources = params
+            .output
+            .separate_source_recordings
+            .as_ref()
+            .is_some_and(|iso| iso.enabled);
+        if streaming {
+            Self::StreamAac
+        } else if params.output.keep_original_mkv || separate_sources {
+            Self::RecordPcm
+        } else {
+            Self::RecordAac
+        }
+    }
+
+    fn is_streaming(self) -> bool {
+        self == Self::StreamAac
+    }
+
+    fn encoder_args(self) -> &'static [&'static str] {
+        match self {
+            Self::StreamAac => &["-c:a", "aac", "-b:a", "160k"],
+            Self::RecordAac => &["-c:a", "aac", "-b:a", RECORD_AAC_BITRATE],
+            Self::RecordPcm => &["-c:a", "pcm_s16le"],
+        }
+    }
+}
+
 fn append_audio_encoding_args(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming: bool,
+    codec: OutputAudioCodec,
 ) {
     if input_layout.audio_inputs.is_empty() {
         return;
@@ -18313,13 +22185,8 @@ fn append_audio_encoding_args(
         "48000".to_string(),
         "-ac".to_string(),
         audio_output_channels(input_layout).to_string(),
-        "-c:a".to_string(),
-        if streaming { "aac" } else { "pcm_s16le" }.to_string(),
     ]);
-
-    if streaming {
-        args.extend(["-b:a".to_string(), "160k".to_string()]);
-    }
+    args.extend(codec.encoder_args().iter().map(|arg| arg.to_string()));
 }
 
 /// Applies audio encoding and its duration contract as one inseparable output
@@ -18333,17 +22200,17 @@ fn append_audio_encoding_with_video_clock(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
-    streaming: bool,
+    codec: OutputAudioCodec,
     preserve_bridge_shortest: bool,
 ) {
-    append_audio_encoding_args(args, input_layout, audio, streaming);
+    append_audio_encoding_args(args, input_layout, audio, codec);
     let microphone_is_padded = input_layout
         .audio_inputs
         .iter()
         .any(|input| input.track.source == AudioTrackSource::Microphone);
     if preserve_bridge_shortest || microphone_is_padded {
         args.push("-shortest".to_string());
-        if !streaming
+        if !codec.is_streaming()
             && (input_layout.microphone_is_linux_pulse
                 || (microphone_is_padded && !preserve_bridge_shortest))
         {
@@ -18353,7 +22220,8 @@ fn append_audio_encoding_with_video_clock(
             // window can retain an entire short recording. Bound these dense
             // live A/V queues to 250 ms so the overflow heartbeat advances the
             // lagging stream, retaining PCM, apad and video-owned EOF. Encoded
-            // bridges and AAC outputs keep their existing synchronization.
+            // bridges and stream outputs keep their existing synchronization;
+            // a record-only take keeps the bound whether it writes PCM or AAC.
             args.extend(["-shortest_buf_duration".to_string(), "0.25".to_string()]);
         }
     }
@@ -18552,6 +22420,8 @@ fn source_switch_output_options_are_known(options: &[String]) -> bool {
             "-queue_size",
             "-drop_pkts_on_overflow",
             "-attempt_recovery",
+            "-recover_any_error",
+            "-restart_with_keyframe",
             "-recovery_wait_time",
             "-flvflags",
             "-colorspace",
@@ -18559,6 +22429,8 @@ fn source_switch_output_options_are_known(options: &[String]) -> bool {
             "-color_trc",
             "-color_range",
             "-bsf:v",
+            // Media Foundation copies declare their video rate; audio is untouched.
+            "-r",
         ]
         .contains(&option.as_str())
             || option.starts_with("-metadata:s:a:")
@@ -18586,6 +22458,9 @@ fn unique_arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 #[cfg(debug_assertions)]
 fn source_switch_filter_shift_ms(filter: &str) -> Option<i32> {
+    let filter = filter
+        .strip_suffix(",asetnsamples=n=480:p=0")
+        .unwrap_or(filter);
     let prefix = filter.strip_suffix("aresample=async=1:first_pts=0,apad")?;
     if prefix.is_empty() {
         return Some(0);
@@ -18647,7 +22522,24 @@ fn session_audio_options(
             system_gain_db: audio.system_audio_gain_db,
             echo_guard: audio.system_audio_echo_guard,
         },
-        None => crate::session_audio::SessionAudioOptions::default(),
+        None => crate::session_audio::SessionAudioOptions {
+            playout_delay: default_session_playout_delay(),
+            ..crate::session_audio::SessionAudioOptions::default()
+        },
+    }
+}
+
+/// The bus's write deadline where no system audio is mixed. Linux's Pulse
+/// worker delivers PCM tens of ms late under load; at 50 ms the bus wrote
+/// silence for those samples and then discarded them as overlap (retest 150:
+/// 37 s of mic lost in a 12-minute 1080p take, 2 s in a 10-minute 720p one).
+/// The delay changes when bytes are written, never which bytes
+/// (`playout_delay_150ms_writes_the_same_bytes_as_50ms`).
+fn default_session_playout_delay() -> std::time::Duration {
+    if cfg!(target_os = "linux") {
+        crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
+    } else {
+        crate::session_audio::PLAYOUT_DELAY
     }
 }
 
@@ -18867,6 +22759,8 @@ fn parse_ffmpeg_progress_media_seconds(line: &str) -> Option<f64> {
         .then(|| seconds.clamp(0.0, MAX_CAPTURE_MEDIA_CLOCK_SECONDS))
 }
 
+const FFMPEG_DISK_FULL_CATEGORY: &str = "disk-full";
+
 fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
     let line = line.to_ascii_lowercase();
     if line.contains("could not find audio only device")
@@ -18886,8 +22780,12 @@ fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
         || line.contains("could not open encoder")
     {
         Some("encoder-open-failed")
-    } else if line.contains("no space left on device") {
-        Some("disk-full")
+    } else if line.contains("no space left on device")
+        // Windows ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL.
+        || line.contains("not enough space on the disk")
+        || line.contains("disk is full")
+    {
+        Some(FFMPEG_DISK_FULL_CATEGORY)
     } else if line.contains("could not write header") {
         Some("output-open-failed")
     } else if line.contains("conversion failed") {
@@ -19866,7 +23764,7 @@ fn ready_stream_destination_counts_by_orientation(
 }
 
 fn validate_outputs(params: &StartSessionParams) -> Result<()> {
-    if !params.output.record_enabled && !params.output.stream_enabled {
+    if !params.output.record_enabled && !params.output.stream_enabled && params.replay.is_none() {
         bail!("Enable local recording, RTMP streaming, or both");
     }
 
@@ -19893,6 +23791,7 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     validate_simulcast_targets(params)?;
     validate_caption_output_policy(params)?;
     validate_video_profile_policy(params)?;
+    crate::source_iso::validate_separate_source_recordings(params)?;
 
     Ok(())
 }
@@ -20200,6 +24099,120 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
     )
 }
 
+/// Plan 164 (S-B3.4): a layout saved mid-session re-plans the highlight and
+/// Buddy legs for the running session and swaps the compositor flags in
+/// place. Captions keep their start-time plan (their burn target is a session
+/// parameter, pre-armed with its leg); the Windows D3D11 pump keeps its
+/// start-time overlay input, which is said in the log rather than hidden.
+/// With no session, the idle preview run follows the layout instead
+/// (plan 205, `apply_overlay_layout_to_idle_preview`).
+pub async fn apply_overlay_layout_to_active_session(
+    state: &AppState,
+    layout: &crate::overlay_layout::OverlayLayout,
+) {
+    let session = {
+        let mut recording = state.recording.lock().await;
+        match recording.as_mut() {
+            None => None,
+            Some(active) => {
+                // A session without a compositor shape (the legacy FFmpeg
+                // graph) applies its switches at the next start.
+                let Some(shape) = active.overlay_session_shape else {
+                    return;
+                };
+                let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
+                active.comment_highlight_available = plans.highlight.burns_anywhere();
+                #[cfg(target_os = "windows")]
+                let d3d11 = active.windows_d3d11_media.is_some();
+                #[cfg(not(target_os = "windows"))]
+                let d3d11 = false;
+                // Plan 205 S6: the program's verdict too, idle for a
+                // buffer-only session (D2), so the Preview's own picture
+                // re-plans with the legs.
+                let flags = crate::compositor::OverlayLegFlags::for_session(
+                    shape,
+                    active.replay_only,
+                    layout,
+                );
+                Some((active.session_id.clone(), plans, flags, d3d11))
+            }
+        }
+    };
+    let Some((session_id, plans, flags, d3d11)) = session else {
+        apply_overlay_layout_to_idle_preview(state, layout).await;
+        return;
+    };
+    let swapped = crate::compositor::update_overlay_flags(state, flags).await;
+    // Plan 168 S-B1, mid-session: the pet's atlases for a leg it just joined
+    // start building now, as they do at session start. The first frames
+    // after the swap draw it as soon as the atlas exists (`leg_frame` asks
+    // too, so this only shortens the wait). Plan 205: the program's Buddy
+    // (the Preview's own picture) prepares the Primary atlas the same way.
+    let buddy_canvases =
+        if swapped && (plans.buddy.primary || plans.buddy.aux || flags.buddy_on_program) {
+            let canvases = crate::compositor::banner_prepare_canvases(state).await;
+            match canvases.first() {
+                Some(primary) => {
+                    let legs = buddy_sprite_legs(
+                        plans.buddy,
+                        flags.buddy_on_program,
+                        *primary,
+                        canvases.get(1).copied(),
+                    );
+                    state.buddy_sprite.prepare(&legs);
+                    legs.len()
+                }
+                None => 0,
+            }
+        } else {
+            0
+        };
+    tracing::info!(
+        session = %session_id,
+        highlight_primary = plans.highlight.primary,
+        highlight_aux = plans.highlight.aux,
+        buddy_primary = plans.buddy.primary,
+        buddy_aux = plans.buddy.aux,
+        highlight_program = flags.highlight_on_program,
+        buddy_program = flags.buddy_on_program,
+        buddy_legs_prepared = buddy_canvases,
+        swapped,
+        "overlay layout changed mid-session"
+    );
+    if d3d11 {
+        state.emit_log(
+            "warn",
+            "Overlay layout changed mid-session; the Windows D3D11 media path applies output switches at the next session start.",
+        );
+    }
+}
+
+/// Plan 205 (S1): a layout saved while nothing runs swaps the idle preview
+/// run's flags to the program (`OverlayLegFlags::idle`): a Buddy turned on
+/// for an output joins the picture at once, and one turned off for both
+/// leaves it. A run a capture holds is refused by
+/// `update_idle_overlay_flags` and keeps the session's plan (the session
+/// lands in `state.recording` after its lease is armed).
+async fn apply_overlay_layout_to_idle_preview(
+    state: &AppState,
+    layout: &crate::overlay_layout::OverlayLayout,
+) {
+    let flags = crate::compositor::OverlayLegFlags::idle(layout);
+    let swapped = crate::compositor::update_idle_overlay_flags(state, flags).await;
+    if swapped {
+        let canvases = crate::compositor::banner_prepare_canvases(state).await;
+        if let Some(primary) = canvases.first() {
+            crate::compositor::prepare_idle_buddy(state, flags, *primary);
+        }
+    }
+    tracing::info!(
+        highlight_primary = flags.highlight_on_primary,
+        buddy_primary = flags.buddy_on_primary,
+        swapped,
+        "overlay layout changed while nothing runs"
+    );
+}
+
 /// A session can put a comment card on stream only when the compositor bridge
 /// renders it AND the leg plan burns it on at least one leg. Deriving this
 /// from the same plan the compositor receives keeps "On stream" honest: the
@@ -20208,15 +24221,40 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
     use_encoder_bridge && (leg_plan.0 || leg_plan.1)
 }
 
+/// The legs (and their canvases) the Buddy's pet draws on in a session
+/// (plan 168 S-B1), for `BuddySpriteSlot::prepare`.
+/// The Buddy atlases a session wants (plan 168 S-B1): the Primary atlas at
+/// the primary canvas when the primary leg burns the pet, or (plan 205 S6)
+/// when the program carries it and the Preview's own picture draws it at
+/// that same canvas; the Auxiliary atlas at the aux canvas when that leg
+/// burns it.
+fn buddy_sprite_legs(
+    plan: crate::overlay_layout::OverlayLegPlan,
+    program: bool,
+    primary: (u32, u32),
+    auxiliary: Option<(u32, u32)>,
+) -> Vec<(crate::buddy_sprite::BuddySpriteLeg, (u32, u32))> {
+    let mut legs = Vec::with_capacity(2);
+    if plan.primary || program {
+        legs.push((crate::buddy_sprite::BuddySpriteLeg::Primary, primary));
+    }
+    if plan.aux
+        && let Some(auxiliary) = auxiliary
+    {
+        legs.push((crate::buddy_sprite::BuddySpriteLeg::Auxiliary, auxiliary));
+    }
+    legs
+}
+
 fn highlight_aux_leg(
     stream_output: Option<&CompositorAuxiliaryOutput>,
-) -> crate::captions::HighlightAuxLeg {
+) -> crate::overlay_layout::OverlayAuxLeg {
     match stream_output {
-        None => crate::captions::HighlightAuxLeg::None,
+        None => crate::overlay_layout::OverlayAuxLeg::None,
         Some(output) if output.composes_simulcast_scene => {
-            crate::captions::HighlightAuxLeg::VerticalSimulcast
+            crate::overlay_layout::OverlayAuxLeg::VerticalSimulcast
         }
-        Some(_) => crate::captions::HighlightAuxLeg::Stream,
+        Some(_) => crate::overlay_layout::OverlayAuxLeg::Stream,
     }
 }
 
@@ -20269,6 +24307,14 @@ fn recording_compositor_stream_output_with_plan(
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
             | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
     ) {
+        // The raw path has no auxiliary encoder. Dropping the vertical leg
+        // silently sent the landscape program to every vertical destination
+        // (Linux, ogre 2026-10-12: a 720x1280 destination received 1280x720).
+        if params.simulcast.is_some() && params.output.stream_enabled {
+            bail!(
+                "This computer can't encode a separate vertical stream yet, so vertical destinations would receive the landscape video. Turn off the vertical destinations to go live."
+            );
+        }
         return Ok(None);
     }
     // Dual-orientation simulcast claims the auxiliary output: the vertical
@@ -20618,10 +24664,35 @@ fn resolve_provider_stream_output_plan_with_separate_roles(
             }
         })
         .collect::<Vec<_>>();
+    let destinations_shared = strictest_shared_stream_profile(&shared_candidates)?;
     if params.output.record_enabled {
         shared_candidates.push(provider_safe_shared_profile(&params.output.video));
     }
     let shared = strictest_shared_stream_profile(&shared_candidates)?;
+    // One encode serves both: a recording below the destinations' profile
+    // would silently send the livestream at the recording's quality (Linux
+    // raw path, plan 0016: a 1080p stream arrived at 640x360). Refuse instead;
+    // the renderer re-plans the recording to follow the stream. Simulcast is
+    // left as it was: its horizontal leg is the session's primary encode. A
+    // recording that differs from the shared encode is already refused by
+    // the profile policy ("share one encoder"); this is the case it misses.
+    if params.simulcast.is_none()
+        && params.output.record_enabled
+        && same_video_profile(&params.output.video, &shared)
+        && !same_video_profile(&shared, &destinations_shared)
+    {
+        bail!(
+            "This computer runs one encode for the recording and the livestream, so recording at {}x{}@{}fps, {} kbps would send the livestream at that quality too. Record at the stream's {}x{}@{}fps, {} kbps or turn recording off.",
+            params.output.video.width,
+            params.output.video.height,
+            params.output.video.fps,
+            params.output.video.bitrate_kbps,
+            destinations_shared.width,
+            destinations_shared.height,
+            destinations_shared.fps,
+            destinations_shared.bitrate_kbps
+        );
+    }
     for target in &mut targets {
         target.video = shared.clone();
     }
@@ -20904,7 +24975,7 @@ fn encoder_bridge_output_profile(video: &VideoSettings) -> EncoderBridgeOutputPr
     }
 }
 
-fn encoder_bridge_diagnostics_context(
+pub(crate) fn encoder_bridge_diagnostics_context(
     role: EncoderBridgeOutputRole,
     recording_output: Option<&VideoSettings>,
     stream_output: Option<&VideoSettings>,
@@ -21254,7 +25325,7 @@ fn redact_stream_url(url: &str) -> String {
 /// Windows file APIs use the `\\?\` namespace for long-path safety, but FFmpeg's
 /// tee muxer treats that prefix as an invalid slave filename. Keep verbatim paths
 /// internally and remove the namespace only at the subprocess boundary.
-fn ffmpeg_file_path(path: &Path) -> String {
+pub(crate) fn ffmpeg_file_path(path: &Path) -> String {
     let path = path.display().to_string();
     #[cfg(target_os = "windows")]
     {
@@ -21584,7 +25655,321 @@ async fn publish_stream_target_failure_if_active(
             "stream-target-failed",
             &format!("Streaming to {label} stopped: {reason}"),
         );
+        note_buddy_destination_failed(state);
         state.emit_event("stream.targets", snapshot);
+    }
+}
+
+/// Moves one destination to `next` (plan 161). Returns its label, the state it
+/// left and the replacement snapshot only when the STATE changed. A new reason
+/// for the same state is stored silently: a leg retrying every two seconds
+/// must not flood the renderer or the health log. Skipped destinations never
+/// change.
+fn transition_stream_target(
+    shared: &SharedStreamTargetsSnapshot,
+    position: usize,
+    next: StreamTargetState,
+    message: Option<String>,
+) -> Option<(String, StreamTargetState, StreamTargetsSnapshot)> {
+    let mut snapshot = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = snapshot.targets.get_mut(position)?;
+    if entry.state == StreamTargetState::NotConfigured {
+        return None;
+    }
+    if entry.state == next {
+        entry.message = message;
+        return None;
+    }
+    let previous = entry.state;
+    entry.state = next;
+    entry.message = message;
+    let label = entry.label.clone();
+    Some((label, previous, snapshot.clone()))
+}
+
+/// How long the stderr consumer waits for the recording slot before it gives
+/// up on one broadcast. The stop path holds that slot while it joins this
+/// consumer with a bounded abort, so the wait must stay short and bounded.
+const STREAM_TARGET_PUBLISH_ATTEMPTS: u32 = 10;
+const STREAM_TARGET_PUBLISH_RETRY: Duration = Duration::from_millis(50);
+
+/// Runs `publish` while this exact session owns the recording slot. A retired
+/// consumer can never publish into a replacement session. Unlike a single
+/// `try_lock`, a briefly busy slot does not lose a reconnect notice.
+async fn with_active_session<F>(state: &AppState, session_id: &str, publish: F)
+where
+    F: FnOnce(),
+{
+    for attempt in 0..STREAM_TARGET_PUBLISH_ATTEMPTS {
+        if let Ok(recording) = state.recording.try_lock() {
+            if recording
+                .as_ref()
+                .is_some_and(|active| active.session_id == session_id)
+            {
+                publish();
+            }
+            return;
+        }
+        if attempt + 1 < STREAM_TARGET_PUBLISH_ATTEMPTS {
+            sleep(STREAM_TARGET_PUBLISH_RETRY).await;
+        }
+    }
+}
+
+/// Health event and snapshot broadcast for one FFmpeg-reported leg change
+/// (plan 161). `reconnecting_since` remembers when each leg went down so the
+/// resume notice can say for how long.
+async fn publish_stream_leg_update(
+    state: &AppState,
+    session_id: &str,
+    targets: &SharedStreamTargetsSnapshot,
+    reconnecting_since: &mut std::collections::HashMap<usize, Instant>,
+    update: StreamLegUpdate,
+) {
+    // A failed destination is terminal: a dead tee slave, a finished output,
+    // or a broadcast the platform ended. FFmpeg reconnecting the socket
+    // underneath cannot bring the broadcast back, so it never revives one.
+    if let StreamLegUpdate::Reconnecting { position, .. } | StreamLegUpdate::Resumed { position } =
+        &update
+        && stream_targets_snapshot_value(targets)
+            .targets
+            .get(*position)
+            .is_some_and(|target| target.state == StreamTargetState::Failed)
+    {
+        return;
+    }
+    match update {
+        StreamLegUpdate::Reconnecting { position, reason } => {
+            let transition = transition_stream_target(
+                targets,
+                position,
+                StreamTargetState::Reconnecting,
+                Some(format!("Reconnecting: {reason}")),
+            );
+            let Some((label, _, snapshot)) = transition else {
+                return;
+            };
+            reconnecting_since
+                .entry(position)
+                .or_insert_with(Instant::now);
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    STREAM_TARGET_RECONNECTING_CODE,
+                    &format!(
+                        "Streaming to {label} is reconnecting: {reason}. Until it is back, viewers there see nothing; the other destinations keep streaming."
+                    ),
+                );
+                state.emit_event("stream.targets", snapshot);
+            })
+            .await;
+        }
+        StreamLegUpdate::Resumed { position } => {
+            let down_for = reconnecting_since
+                .remove(&position)
+                .map(|since| since.elapsed());
+            let transition =
+                transition_stream_target(targets, position, StreamTargetState::Live, None);
+            let Some((label, _, snapshot)) = transition else {
+                return;
+            };
+            let message = match down_for {
+                Some(down_for) => format!(
+                    "Streaming to {label} resumed after {} of reconnecting.",
+                    format_stream_leg_outage(down_for)
+                ),
+                None => format!("Streaming to {label} resumed."),
+            };
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Info,
+                    STREAM_TARGET_RESUMED_CODE,
+                    &message,
+                );
+                state.emit_event("stream.targets", snapshot);
+            })
+            .await;
+        }
+        StreamLegUpdate::Failed { position, reason } => {
+            reconnecting_since.remove(&position);
+            publish_stream_target_failure_if_active(state, session_id, targets, position, reason)
+                .await;
+        }
+        StreamLegUpdate::UnattributedReconnecting { reason } => {
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    STREAM_TARGET_RECONNECTING_CODE,
+                    &format!(
+                        "A live destination is reconnecting: {reason}. The other destinations keep streaming."
+                    ),
+                );
+            })
+            .await;
+        }
+        StreamLegUpdate::UnattributedResumed => {
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Info,
+                    STREAM_TARGET_RECONNECTED_CODE,
+                    "A live destination dropped its connection and reconnected by itself. Viewers there saw a short interruption.",
+                );
+            })
+            .await;
+        }
+    }
+}
+
+/// What a platform's own API says about the stream it should be receiving
+/// (plan 161, S4; `platform_stream_watch`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlatformStreamObservation {
+    Receiving,
+    /// The platform says it is not receiving the stream, in its own words.
+    NotReceiving {
+        detail: String,
+    },
+    /// The platform ended the broadcast; reconnecting cannot bring it back.
+    Ended {
+        detail: String,
+    },
+}
+
+/// The destination state a platform observation leads to, if any. FFmpeg's
+/// view wins while it is reconnecting a leg: the platform can only demote a
+/// destination FFmpeg believes is live, and it only clears the warning it
+/// raised itself (nothing else sets `Warning` on a live destination).
+fn platform_observation_transition(
+    current: StreamTargetState,
+    observation: &PlatformStreamObservation,
+) -> Option<(StreamTargetState, Option<String>)> {
+    match (observation, current) {
+        (PlatformStreamObservation::Receiving, StreamTargetState::Warning) => {
+            Some((StreamTargetState::Live, None))
+        }
+        (PlatformStreamObservation::NotReceiving { detail }, StreamTargetState::Live) => Some((
+            StreamTargetState::Warning,
+            Some(format!("Not receiving: {detail}")),
+        )),
+        (
+            PlatformStreamObservation::Ended { detail },
+            StreamTargetState::Live
+            | StreamTargetState::Warning
+            | StreamTargetState::Reconnecting
+            | StreamTargetState::Connecting,
+        ) => Some((StreamTargetState::Failed, Some(detail.clone()))),
+        _ => None,
+    }
+}
+
+/// Applies a platform observation to this session's destinations on that
+/// platform. `target_id` narrows it when the poller knows its destination;
+/// when it matches nothing, every destination on the platform is meant.
+pub(crate) async fn observe_platform_stream(
+    state: &AppState,
+    session_id: &str,
+    platform: crate::streaming::StreamPlatform,
+    target_id: Option<&str>,
+    observation: PlatformStreamObservation,
+) {
+    let recording = state.recording.lock().await;
+    let Some(active) = recording
+        .as_ref()
+        .filter(|active| active.session_id == session_id)
+    else {
+        return;
+    };
+    let shared = &active.stream_targets_snapshot;
+    let candidates: Vec<(usize, StreamTargetState)> = {
+        let snapshot = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let on_platform = || {
+            snapshot
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| target.platform == platform)
+        };
+        let exact: Vec<_> = on_platform()
+            .filter(|(_, target)| target_id.is_some_and(|id| target.target_id == id))
+            .map(|(position, target)| (position, target.state))
+            .collect();
+        if exact.is_empty() {
+            on_platform()
+                .map(|(position, target)| (position, target.state))
+                .collect()
+        } else {
+            exact
+        }
+    };
+    for (position, current) in candidates {
+        let Some((next, message)) = platform_observation_transition(current, &observation) else {
+            continue;
+        };
+        let Some((label, _, snapshot)) = transition_stream_target(shared, position, next, message)
+        else {
+            continue;
+        };
+        let (level, code, text) = match &observation {
+            PlatformStreamObservation::Receiving => (
+                HealthLevel::Info,
+                STREAM_TARGET_RESUMED_CODE,
+                format!("{label} is receiving the stream again."),
+            ),
+            PlatformStreamObservation::NotReceiving { detail } => (
+                HealthLevel::Warn,
+                STREAM_TARGET_NOT_RECEIVING_CODE,
+                format!(
+                    "{label} isn't receiving the stream ({detail}), although Videorc is still sending it. Viewers there may see nothing."
+                ),
+            ),
+            PlatformStreamObservation::Ended { detail } => (
+                HealthLevel::Warn,
+                "stream-target-failed",
+                format!("Streaming to {label} stopped: {detail}."),
+            ),
+        };
+        let _ = emit_health_event(state, Some(session_id), level, code, &text);
+        if next == StreamTargetState::Failed {
+            note_buddy_destination_failed(state);
+        }
+        state.emit_event("stream.targets", snapshot);
+    }
+}
+
+/// Plan 168 D14: a destination failed; the Buddy reacts only when the persona
+/// chose a reaction for it (owner default: none).
+fn note_buddy_destination_failed(state: &AppState) {
+    state
+        .buddy_sprite
+        .notify(crate::buddy_animator::BuddyAnimatorEvent::Trigger {
+            trigger: crate::buddy_pet::BuddyTrigger::DestinationFailed,
+            reaction: None,
+        });
+}
+
+pub(crate) const STREAM_TARGET_NOT_RECEIVING_CODE: &str = "stream-target-not-receiving";
+pub(crate) const STREAM_TARGET_RECONNECTING_CODE: &str = "stream-target-reconnecting";
+pub(crate) const STREAM_TARGET_RESUMED_CODE: &str = "stream-target-resumed";
+pub(crate) const STREAM_TARGET_RECONNECTED_CODE: &str = "stream-target-reconnected";
+
+fn format_stream_leg_outage(duration: Duration) -> String {
+    let seconds = duration.as_secs().max(1);
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min {} s", seconds / 60, seconds % 60)
     }
 }
 
@@ -21761,28 +26146,248 @@ fn parse_tee_slave_failure(line: &str) -> Option<TeeSlaveFailure> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FifoOutputFailure {
+    /// The fifo muxer's log context (`fifo @ 0x…`). It is stable for the
+    /// leg's whole life, so it attributes the later recovery lines, which
+    /// never name the URL (plan 161).
+    context: String,
     url: String,
     reason: String,
+}
+
+/// Splits a `[fifo @ 0x…] message` line into the fifo's log context and its
+/// message. The fifo line can follow a `\r`-terminated stats segment, so it is
+/// found anywhere in the line.
+fn fifo_log_message(line: &str) -> Option<(&str, &str)> {
+    let start = line.find("[fifo @ ")?;
+    let rest = &line[start + 1..];
+    let close = rest.find("] ")?;
+    Some((&rest[..close], rest[close + 2..].trim_end()))
 }
 
 /// Parses an FFmpeg `fifo` muxer failure line, e.g.
 /// `[fifo @ 0x..] Error opening rtmp://host/app/key: Connection refused`.
 /// Stream targets ride per-target fifo-muxer outputs (plan 023 L1), so a
-/// failing leg is attributed by URL instead of a tee slave index.
+/// failing leg is attributed by URL instead of a tee slave index. With
+/// recovery on, the fifo prints this line on EVERY failed reconnect attempt.
 fn parse_fifo_output_failure(line: &str) -> Option<FifoOutputFailure> {
-    let tag = line.find("[fifo @")?;
-    let rest = &line[tag..];
-    let marker = "Error opening ";
-    let start = rest.find(marker)? + marker.len();
-    let (url, reason) = rest[start..].rsplit_once(": ")?;
+    let (context, message) = fifo_log_message(line)?;
+    let rest = message.strip_prefix("Error opening ")?;
+    let (url, reason) = rest.rsplit_once(": ")?;
     let url = url.trim();
     if url.is_empty() {
         return None;
     }
     Some(FifoOutputFailure {
+        context: context.to_string(),
         url: url.to_string(),
         reason: reason.trim().trim_end_matches('.').to_string(),
     })
+}
+
+/// Parses FFmpeg's startup dump header for one output,
+/// `Output #1, fifo, to 'rtmp://host/app/key':`, into the output index and
+/// its URL. Printed at INFO, so it arrives as an `Info` stderr event.
+fn parse_ffmpeg_output_header(line: &str) -> Option<(usize, &str)> {
+    let rest = line.trim().strip_prefix("Output #")?;
+    let (index, rest) = rest.split_once(", ")?;
+    let index = index.parse::<usize>().ok()?;
+    let start = rest.find(" to '")? + " to '".len();
+    let url = rest[start..].strip_suffix("':")?;
+    (!url.is_empty()).then_some((index, url))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputMuxFailure {
+    output_index: usize,
+    reason: String,
+}
+
+/// Parses FFmpeg's per-output mux failure, which names the output by index
+/// and never by URL:
+/// `[aost#1:1/aac @ 0x…] Error submitting a packet to the muxer: End of file`
+/// (the 2026-10-07 YouTube leg) or `[out#1/fifo @ 0x…] Error muxing a packet`.
+/// FFmpeg finishes only that output, so the process, the other legs and the
+/// progress clock carry on: nothing else ever reports it (plan 161).
+fn parse_ffmpeg_output_mux_failure(line: &str) -> Option<OutputMuxFailure> {
+    const SUBMIT: &str = "Error submitting a packet to the muxer";
+    const MUXING: &str = "Error muxing a packet";
+    let (message_start, reason) = if let Some(start) = line.find(SUBMIT) {
+        let reason = line[start + SUBMIT.len()..]
+            .trim_start_matches(':')
+            .trim()
+            .trim_end_matches('.')
+            .to_string();
+        (start, reason)
+    } else {
+        (line.find(MUXING)?, String::new())
+    };
+    let prefix = line[..message_start].trim_end();
+    let context_start = prefix.rfind('[')?;
+    let context = prefix[context_start + 1..].strip_suffix(']')?;
+    let context = context.split(" @ ").next()?;
+    let digits = if let Some(rest) = context.strip_prefix("out#") {
+        rest.split('/').next()?
+    } else {
+        let (_, rest) = context.split_once("ost#")?;
+        rest.split(':').next()?
+    };
+    Some(OutputMuxFailure {
+        output_index: digits.parse().ok()?,
+        reason,
+    })
+}
+
+/// What happened to one stream leg, from FFmpeg's own words (plan 161).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamLegUpdate {
+    /// The leg's connection is down and the fifo is retrying it.
+    Reconnecting { position: usize, reason: String },
+    /// The fifo reconnected the leg.
+    Resumed { position: usize },
+    /// The leg will not come back by itself.
+    Failed { position: usize, reason: String },
+    /// A fifo we cannot attribute is retrying (it reconnected before it ever
+    /// printed its URL). Reported once per leg until it recovers.
+    UnattributedReconnecting { reason: String },
+    /// A fifo we cannot attribute dropped and reconnected immediately.
+    UnattributedResumed,
+}
+
+/// One session's stream legs as FFmpeg reports them. Pure: stripped stderr
+/// lines in, per-destination updates out (plan 161).
+///
+/// Attribution is exact, never guessed: a fifo prints its URL only on
+/// `Error opening <url>`, which teaches the monitor that fifo's context; its
+/// later `Recovery failed` / `Recovery successful` lines carry the context
+/// alone. The startup dump (`Output #N, fifo, to '<url>'`) maps FFmpeg's
+/// output index for the per-output mux failure.
+#[derive(Debug, Default)]
+struct StreamLegMonitor {
+    url_positions: Vec<(String, usize)>,
+    fifo_contexts: std::collections::HashMap<String, usize>,
+    output_positions: std::collections::HashMap<usize, usize>,
+    unattributed_reconnecting: std::collections::HashSet<String>,
+}
+
+impl StreamLegMonitor {
+    fn new(url_positions: Vec<(String, usize)>) -> Self {
+        Self {
+            url_positions,
+            ..Self::default()
+        }
+    }
+
+    fn position_for_url(&self, url: &str) -> Option<usize> {
+        self.url_positions
+            .iter()
+            .find(|(candidate, _)| candidate == url)
+            .map(|(_, position)| *position)
+    }
+
+    fn observe(&mut self, line: &str) -> Option<StreamLegUpdate> {
+        if let Some((output_index, url)) = parse_ffmpeg_output_header(line) {
+            if let Some(position) = self.position_for_url(url) {
+                self.output_positions.insert(output_index, position);
+            }
+            return None;
+        }
+        if let Some(failure) = parse_fifo_output_failure(line) {
+            let position = self.position_for_url(&failure.url)?;
+            self.fifo_contexts.insert(failure.context, position);
+            return Some(StreamLegUpdate::Reconnecting {
+                position,
+                reason: stream_leg_reason(failure.reason),
+            });
+        }
+        if let Some((context, message)) = fifo_log_message(line) {
+            let position = self.fifo_contexts.get(context).copied();
+            if let Some(reason) = message.strip_prefix("Recovery failed:") {
+                let reason = stream_leg_reason(reason.trim().trim_end_matches('.').to_string());
+                return match position {
+                    Some(position) => Some(StreamLegUpdate::Reconnecting { position, reason }),
+                    None => self
+                        .unattributed_reconnecting
+                        .insert(context.to_string())
+                        .then_some(StreamLegUpdate::UnattributedReconnecting { reason }),
+                };
+            }
+            if message == "Recovery successful" {
+                return Some(match position {
+                    Some(position) => StreamLegUpdate::Resumed { position },
+                    None => {
+                        self.unattributed_reconnecting.remove(context);
+                        StreamLegUpdate::UnattributedResumed
+                    }
+                });
+            }
+            if message.starts_with("Maximal number of") {
+                return Some(StreamLegUpdate::Failed {
+                    position: position?,
+                    reason: "Videorc stopped reconnecting".to_string(),
+                });
+            }
+            return None;
+        }
+        let failure = parse_ffmpeg_output_mux_failure(line)?;
+        let position = *self.output_positions.get(&failure.output_index)?;
+        Some(StreamLegUpdate::Failed {
+            position,
+            reason: if failure.reason.is_empty() {
+                "The connection closed".to_string()
+            } else {
+                format!("The connection closed ({})", failure.reason)
+            },
+        })
+    }
+}
+
+/// Keeps a line FFmpeg repeats in a loop out of the log ring and the persisted
+/// health log (plan 161). A fifo leg retrying every two seconds prints the
+/// same tcp, rtmp and fifo errors each time; the first is news, the same line
+/// within [`FFMPEG_REPEAT_WINDOW`] is not. Log-context pointers are ignored so
+/// a fresh `[rtmp @ 0x…]` per attempt still counts as the same line.
+#[derive(Debug, Default)]
+struct FfmpegRepeatThrottle {
+    last_admitted: std::collections::HashMap<String, Instant>,
+}
+
+const FFMPEG_REPEAT_WINDOW: Duration = Duration::from_secs(60);
+const FFMPEG_REPEAT_KEYS: usize = 512;
+
+impl FfmpegRepeatThrottle {
+    fn admit(&mut self, line: &str, now: Instant) -> bool {
+        let key = ffmpeg_repeat_key(line);
+        if let Some(at) = self.last_admitted.get(&key)
+            && now.saturating_duration_since(*at) < FFMPEG_REPEAT_WINDOW
+        {
+            return false;
+        }
+        if self.last_admitted.len() >= FFMPEG_REPEAT_KEYS {
+            self.last_admitted.clear();
+        }
+        self.last_admitted.insert(key, now);
+        true
+    }
+}
+
+/// The line with every `0x…` pointer reduced to `0x`.
+fn ffmpeg_repeat_key(line: &str) -> String {
+    let mut key = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("0x") {
+        key.push_str(&rest[..start + 2]);
+        rest = rest[start + 2..].trim_start_matches(|c: char| c.is_ascii_hexdigit());
+    }
+    key.push_str(rest);
+    key
+}
+
+fn stream_leg_reason(reason: String) -> String {
+    if reason.is_empty() {
+        "Stream connection failed".to_string()
+    } else {
+        reason
+    }
 }
 
 fn output_mode(record_enabled: bool, stream_enabled: bool) -> &'static str {
@@ -21970,38 +26575,24 @@ async fn emit_disk_space_health_event(
     state: &AppState,
     session_id: &str,
     output_dir: &Path,
+    video_kbps: u32,
+    separate_files: usize,
 ) -> Result<()> {
-    let output = Command::new("df")
-        .args(["-Pk", &output_dir.display().to_string()])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-
-    let Ok(output) = output else {
+    let directory = output_dir.to_path_buf();
+    let Ok(Some(available)) =
+        tokio::task::spawn_blocking(move || crate::disk_space::available_bytes(&directory)).await
+    else {
         return Ok(());
     };
-
-    if !output.status.success() {
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let Some(line) = stdout.lines().nth(1) else {
-        return Ok(());
-    };
-    let columns = line.split_whitespace().collect::<Vec<_>>();
-    let Some(available_kb) = columns.get(3).and_then(|value| value.parse::<u64>().ok()) else {
-        return Ok(());
-    };
-
-    if available_kb < 1_048_576 {
+    if let Some(message) =
+        crate::disk_space::record_space_notice(available, video_kbps, separate_files)
+    {
         emit_health_event(
             state,
             Some(session_id),
             HealthLevel::Warn,
             "disk-space-low",
-            "Less than 1 GB is available in the selected recording location.",
+            &message,
         )?;
     }
 
@@ -22019,6 +26610,9 @@ pub fn emit_health_event(
     // `ffmpeg-warning` code carries raw FFmpeg lines that can quote an RTMP
     // URL, whose path is the stream key.
     let message = &crate::state::redact_stream_urls(message);
+    // Plan 181: a buffer-only session has no `sessions` row, so its events
+    // are stored without the session id instead of failing the foreign key.
+    let session_id = session_id.filter(|id| !crate::replay_buffer::is_rowless_session(state, id));
     let event = state
         .database
         .add_health_event(session_id, level, code, message)?;
@@ -22113,11 +26707,105 @@ fn emit_session_log(
     message: &str,
     source_id: Option<&str>,
 ) -> Result<()> {
+    if crate::replay_buffer::is_rowless_session(state, session_id) {
+        // Plan 181: no row to attach the line to; the backend log keeps it.
+        tracing::info!(
+            target: "videorc_backend::replay_buffer",
+            session_id,
+            code,
+            "{message}"
+        );
+        return Ok(());
+    }
     let entry = state
         .database
         .add_session_log(session_id, level, code, message, source_id)?;
     state.emit_event("session.log", entry);
     Ok(())
+}
+
+/// The bridge FFmpeg's log level: every `av_log` line tagged with its level.
+const BRIDGE_FFMPEG_LOGLEVEL: &str = "level+info";
+
+/// An `av_log` level as printed by `-loglevel level+…` (`get_level_str` in
+/// libavutil/log.c), least to most severe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FfmpegLogLevel {
+    Trace,
+    Debug,
+    Verbose,
+    Info,
+    Warning,
+    Error,
+    Fatal,
+    Panic,
+}
+
+impl FfmpegLogLevel {
+    fn from_tag(tag: &str) -> Option<Self> {
+        Some(match tag {
+            "trace" => Self::Trace,
+            "debug" => Self::Debug,
+            "verbose" => Self::Verbose,
+            "info" => Self::Info,
+            "warning" => Self::Warning,
+            "error" => Self::Error,
+            "fatal" => Self::Fatal,
+            "panic" => Self::Panic,
+            _ => return None,
+        })
+    }
+
+    fn is_informational(self) -> bool {
+        self <= Self::Info
+    }
+}
+
+/// Removes `-loglevel level+…` tags from one stderr line and returns the most
+/// severe level it carried (`None` for an untagged line: `-progress` output,
+/// command replies and prompts are plain `fprintf`/avio writes).
+///
+/// FFmpeg prints the tag AFTER the context prefixes
+/// (`[fifo @ 0x1] [info] Recovery successful`, `[info] frame= …`), and the
+/// stats line ends in `\r`, so one `\n` line can hold several tagged
+/// segments (`[info] frame= …\r[flv @ 0x2] [warning] Failed to update …`).
+/// Each `\r` segment is stripped on its own and the separators are kept.
+fn strip_ffmpeg_log_levels(line: &str) -> (String, Option<FfmpegLogLevel>) {
+    if !line.contains("] ") {
+        return (line.to_string(), None);
+    }
+    let mut level: Option<FfmpegLogLevel> = None;
+    let stripped = line
+        .split('\r')
+        .map(|segment| {
+            let mut cursor = 0;
+            // At most a parent context, a context and the level tag.
+            for _ in 0..3 {
+                let rest = &segment[cursor..];
+                if !rest.starts_with('[') {
+                    break;
+                }
+                let Some(close) = rest.find("] ") else {
+                    break;
+                };
+                let inner = &rest[1..close];
+                if let Some(tagged) = FfmpegLogLevel::from_tag(inner) {
+                    level = Some(level.map_or(tagged, |current| current.max(tagged)));
+                    let mut owned = String::with_capacity(segment.len());
+                    owned.push_str(&segment[..cursor]);
+                    owned.push_str(&rest[close + 2..]);
+                    return owned;
+                }
+                if !inner.contains(" @ ") {
+                    break;
+                }
+                cursor += close + 2;
+            }
+            segment.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\r");
+    (stripped, level)
 }
 
 /// FFmpeg `-progress`/stats output: either the combined `frame= ... speed=`
@@ -22156,6 +26844,10 @@ fn looks_like_ffmpeg_health_event(line: &str) -> bool {
         || normalized.contains("permission")
         || normalized.contains("failed")
         || normalized.contains("connection")
+        // Plan 161: the only words FFmpeg says when one output dies.
+        || normalized.contains("end of file")
+        || normalized.contains("error submitting")
+        || normalized.contains("error muxing")
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -22380,6 +27072,7 @@ mod tests {
             crate::session_audio::BusLevels {
                 microphone: Some(reading),
                 system_audio: None,
+                sounds: None,
                 master: Some(reading),
                 master_clipped_samples: 3,
             },
@@ -22618,6 +27311,43 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_linux_microphone_is_reopened_a_bounded_number_of_times() {
+        use crate::session_audio::SourceLossReason::{CaptureStopped, TimelineRejected};
+        // Retest 151: a starved Pulse worker stopped and the session stayed
+        // silent for 27 minutes. A stop is reopened, up to the limit.
+        for attempts in 0..MICROPHONE_AUTO_REOPEN_LIMIT {
+            assert!(microphone_auto_reopen_due(CaptureStopped, attempts, true));
+        }
+        assert!(!microphone_auto_reopen_due(
+            CaptureStopped,
+            MICROPHONE_AUTO_REOPEN_LIMIT,
+            true
+        ));
+        // A timeline loss keeps its own re-anchor; macOS is unchanged.
+        assert!(!microphone_auto_reopen_due(TimelineRejected, 0, true));
+        assert!(!microphone_auto_reopen_due(CaptureStopped, 0, false));
+        // The reopen task counts its own attempts, so a worker that dies
+        // during the switch (no new loss event) is still tried again, and
+        // the session's limit holds across loss events.
+        let attempts = AtomicU32::new(0);
+        let taken: Vec<u32> = std::iter::from_fn(|| next_microphone_reopen_attempt(&attempts))
+            .take(10)
+            .collect();
+        assert_eq!(taken, vec![1, 2, 3, 4, 5]);
+        assert!(!microphone_auto_reopen_due(
+            CaptureStopped,
+            attempts.load(Ordering::Acquire),
+            true
+        ));
+        // The `-recovered` code clears the renderer's "stopped" notice.
+        assert!(MICROPHONE_REOPENED_CODE.ends_with("-recovered"));
+        assert_eq!(
+            microphone_reopened_message("Desk Mic", 166_000),
+            "Microphone \"Desk Mic\" stopped after 166.0 seconds and Videorc opened it again. Only the moments in between are silent."
+        );
+    }
+
+    #[test]
     fn audio_placement_losses_never_claim_the_device_stopped() {
         let microphone = microphone_timeline_lost_message("MacBook Pro Microphone", 2_100);
         assert!(microphone.contains("kept delivering audio"), "{microphone}");
@@ -22648,6 +27378,7 @@ mod tests {
             pipeline: None,
             duration_ms: None,
             message: Some("Starting stream session.".to_string()),
+            replay_only: false,
         }
     }
 
@@ -22809,6 +27540,7 @@ mod tests {
             state.clone(),
             &session_id,
             Some(output_path.clone()),
+            false,
             &pipeline,
             session_start_admission,
         );
@@ -23108,6 +27840,7 @@ mod tests {
             width: 2,
             height: 2,
             frame: vec![7; 16],
+            revision: 1,
         };
         let mut replacement = test_active_recording_stub("reused-session-id");
         replacement.screen_overlay = Some(ScreenOverlaySession::test_stub(2, 2, blocker));
@@ -23126,6 +27859,383 @@ mod tests {
                 .all(|byte| *byte == 0),
             "a prepared frame must not enter a successor overlay generation"
         );
+    }
+
+    fn legacy_banner(
+        x: usize,
+        y: usize,
+        width: u32,
+        height: u32,
+        bgra: &[u8],
+    ) -> LegacyBannerLayer {
+        assert_eq!(bgra.len(), (width * height * 4) as usize);
+        LegacyBannerLayer {
+            x,
+            y,
+            bitmap: Arc::new(crate::banner_prepare::BannerBitmap {
+                width,
+                height,
+                bgra: Arc::new(bgra.to_vec()),
+                revision: 1,
+            }),
+        }
+    }
+
+    fn rgba_at(frame: &[u8], width: u32, x: usize, y: usize) -> [u8; 4] {
+        let start = (y * width as usize + x) * 4;
+        frame[start..start + 4].try_into().unwrap()
+    }
+
+    /// Plan 186 S4: the legacy overlay frame is the takeover first, then the
+    /// banners source-over at their rects; transparent where nothing draws.
+    #[test]
+    fn legacy_overlay_frame_composes_the_takeover_then_the_banners() {
+        const WIDTH: u32 = 4;
+        const HEIGHT: u32 = 4;
+        let blue = [0_u8, 0, 255, 255];
+        let takeover = blue.repeat((WIDTH * HEIGHT) as usize);
+        // A 2x1 banner at (1, 2): an opaque red pixel and a half-alpha green
+        // one (BGRA, opacity already baked by the prepare).
+        let banner = legacy_banner(1, 2, 2, 1, &[0, 0, 255, 255, 0, 255, 0, 128]);
+
+        let frame = legacy_overlay_frame(
+            Some(&takeover[..]),
+            std::slice::from_ref(&banner),
+            WIDTH,
+            HEIGHT,
+        );
+        assert_eq!(frame.len(), (WIDTH * HEIGHT * 4) as usize);
+        assert_eq!(
+            rgba_at(&frame, WIDTH, 1, 2),
+            [255, 0, 0, 255],
+            "red over blue"
+        );
+        assert_eq!(
+            rgba_at(&frame, WIDTH, 2, 2),
+            [0, 128, 127, 255],
+            "half green over opaque blue"
+        );
+        for (x, y) in [(0, 0), (3, 3), (0, 2), (3, 2), (1, 1), (1, 3)] {
+            assert_eq!(
+                rgba_at(&frame, WIDTH, x, y),
+                blue,
+                "({x}, {y}) is the takeover"
+            );
+        }
+
+        // No takeover: transparent except the banner's own pixels, straight alpha kept.
+        let frame = legacy_overlay_frame(None, std::slice::from_ref(&banner), WIDTH, HEIGHT);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 2, 2), [0, 255, 0, 128]);
+        assert_eq!(rgba_at(&frame, WIDTH, 0, 0), [0, 0, 0, 0]);
+
+        // Banners stack bottom to top: a later opaque banner wins its pixel,
+        // and a banner hanging off the canvas is cut, never wrapped.
+        let top = legacy_banner(2, 2, 3, 3, &[255, 255, 255, 255].repeat(9));
+        let frame = legacy_overlay_frame(Some(&takeover[..]), &[banner, top], WIDTH, HEIGHT);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 2, 2), [255, 255, 255, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 3, 3), [255, 255, 255, 255]);
+        assert_eq!(rgba_at(&frame, WIDTH, 0, 3), blue);
+        assert_eq!(rgba_at(&frame, WIDTH, 1, 3), blue);
+
+        // A takeover of the wrong size is not a frame: transparent instead.
+        let frame = legacy_overlay_frame(Some(&takeover[..8]), &[], WIDTH, HEIGHT);
+        assert!(frame.iter().all(|byte| *byte == 0));
+    }
+
+    /// Plan 186 S4: a legacy session recomposes its FIFO frame whenever the
+    /// takeover or the banner set changes, each prepared off the recording
+    /// lock; the takeover stays under the banners and an older composition
+    /// never undoes a newer one.
+    #[test]
+    fn legacy_overlay_session_recomposes_when_the_takeover_or_the_banners_change() {
+        let dir = std::env::temp_dir().join(format!("videorc-legacy-banners-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let banner_path = dir.join("banner.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(&banner_path)
+            .unwrap();
+        let takeover_path = dir.join("takeover.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]))
+            .save(&takeover_path)
+            .unwrap();
+        let banner = crate::protocol::Banner {
+            id: "b1".to_string(),
+            name: "b1".to_string(),
+            image_file: "banner.png".to_string(),
+            thumbnail_file: "banner.thumb.png".to_string(),
+            width: 2,
+            height: 2,
+            has_alpha: false,
+            sort_order: 0,
+            shown: true,
+            // Half the canvas, bottom right: a 2x2 image contained at (2, 2).
+            horizontal: crate::overlay_layout::OverlayRect::new(0.5, 0.5, 0.5, 0.5),
+            vertical: crate::overlay_layout::OverlayRect::new(0.5, 0.5, 0.5, 0.5),
+            show_on_stream: true,
+            show_in_recording: true,
+            opacity: 1.0,
+            hide_after_sec: None,
+            repeat_every_min: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let shown = || {
+            vec![(
+                banner.clone(),
+                Arc::<Path>::from(banner_path.as_path()),
+                crate::banner_prepare::banner_file_revision(&banner_path),
+            )]
+        };
+        let blocker = ScreenOverlayPreparationBlocker::new();
+        blocker.release();
+        let mut active = test_active_recording_stub("legacy-banners");
+        active.screen_overlay = Some(ScreenOverlaySession::test_stub(4, 4, blocker));
+        let frame =
+            |active: &ActiveRecording| active.screen_overlay.as_ref().unwrap().test_current_frame();
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+
+        // Show: the banner lands at its contained rect over nothing.
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket.prepare_banners(shown()).unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        let shown_frame = frame(&active);
+        assert_eq!(rgba_at(&shown_frame, 4, 2, 2), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&shown_frame, 4, 3, 3), [255, 0, 0, 255]);
+        assert_eq!(rgba_at(&shown_frame, 4, 0, 0), [0, 0, 0, 0]);
+        assert_eq!(rgba_at(&shown_frame, 4, 1, 2), [0, 0, 0, 0]);
+
+        // A takeover activated later goes under the banner.
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket
+            .prepare(Some(takeover_path.display().to_string()))
+            .unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        let both = frame(&active);
+        assert_eq!(rgba_at(&both, 4, 0, 0), [0, 0, 255, 255]);
+        assert_eq!(rgba_at(&both, 4, 2, 2), [255, 0, 0, 255]);
+
+        // Two prepares in flight: the one that read the inputs last carries
+        // both changes; the older one, committed after it, changes nothing.
+        let hide_ticket = active.active_screen_overlay_preparation().unwrap();
+        let clear_ticket = active.active_screen_overlay_preparation().unwrap();
+        let hidden = hide_ticket.prepare_banners(Vec::new()).unwrap();
+        let cleared = clear_ticket.prepare(None).unwrap();
+        assert!(cleared.revision > hidden.revision);
+        assert_eq!(
+            active.commit_prepared_active_screen(cleared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+        assert_eq!(
+            active.commit_prepared_active_screen(hidden),
+            PreparedScreenOverlayCommit::Applied,
+            "its change is on the picture already"
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+
+        // A banner whose file is gone is skipped; the frame still composes.
+        std::fs::remove_file(&banner_path).unwrap();
+        let ticket = active.active_screen_overlay_preparation().unwrap();
+        let prepared = ticket.prepare_banners(shown()).unwrap();
+        assert_eq!(
+            active.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Applied
+        );
+        assert!(frame(&active).iter().all(|byte| *byte == 0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Plan 210 S7.5: only the legacy FFmpeg graph reads the display outside
+    /// the gated frame store.
+    #[tokio::test]
+    async fn hide_screen_refuses_only_the_legacy_ffmpeg_session() {
+        let state = test_state();
+        assert_eq!(active_session_reads_display_directly(&state).await, None);
+        let legacy = test_active_recording_stub("legacy-session");
+        assert!(legacy.encoder_bridge.is_none() && legacy.encoder_bridge_stream.is_none());
+        assert!(session_reads_display_directly(&legacy));
+        *state.recording.lock().await = Some(legacy);
+        assert_eq!(
+            active_session_reads_display_directly(&state)
+                .await
+                .as_deref(),
+            Some("legacy-session")
+        );
+        *state.recording.lock().await = None;
+        assert_eq!(active_session_reads_display_directly(&state).await, None);
+    }
+
+    /// Plan 210 D8: while hidden the store never advances (held frames are
+    /// never published), so a Record, Go Live or Clips start after a hide
+    /// meets the frosted still as the screen's only frame, however long the
+    /// hide. The start barrier asks for a frame, not a fresh one: the start
+    /// takes the bridge, which records the gated store's still, instead of
+    /// refusing with "produced no frames" or waiting out the barrier.
+    #[tokio::test]
+    async fn a_start_while_hidden_takes_the_bridge_on_the_frosted_still() {
+        let state = test_state();
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 64,
+            height: 36,
+            fps: 30,
+            bitrate_kbps: 2000,
+        };
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            "screen:fixture",
+            1,
+            11,
+            &video,
+        )
+        .await;
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(crate::preview_screen::hold_screen_now(&state).await);
+        let still = preview_screen_latest_frame_info(&state)
+            .await
+            .expect("the still is in the store");
+        // A long hide: the capture keeps delivering, nothing publishes.
+        for sequence in 20..23 {
+            let _ = crate::preview_screen::test_publish_screen_pixels(
+                &state,
+                sequence,
+                [255, 255, 255, 255],
+                Instant::now(),
+            )
+            .await;
+        }
+        assert_eq!(
+            crate::preview_screen::test_privacy_held_frames(&state).await,
+            3
+        );
+        assert_eq!(
+            preview_screen_latest_frame_info(&state)
+                .await
+                .unwrap()
+                .sequence,
+            still.sequence,
+            "the store never advances while hidden"
+        );
+
+        let mut params = base_params(true, false);
+        params.sources.camera_id = None;
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.output.video = video;
+        let started = Instant::now();
+        let use_bridge = should_use_compositor_encoder_bridge(&state, &params, None)
+            .await
+            .expect("a hidden screen is a screen with a frame");
+        assert!(
+            use_bridge,
+            "the start takes the bridge, which records the gated store's still"
+        );
+        assert!(
+            started.elapsed() < RECORDING_ENCODER_BRIDGE_SOURCE_READY_TIMEOUT / 2,
+            "the barrier answered at once, no stall: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Plan 210 S7.5 at start: the check the start path runs once the bridge
+    /// decision is made. Only the legacy FFmpeg path while hidden is refused,
+    /// with the exact copy first; the bridge (which records the still) and a
+    /// visible screen start as always. A 4K60 recording is the shipping
+    /// profile that rules the bridge out, so that start meets the refusal.
+    #[test]
+    fn a_legacy_start_while_hidden_is_refused_with_the_exact_copy() {
+        let error = refuse_legacy_start_while_hidden(false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY),
+            "{error}"
+        );
+        assert!(error.ends_with(SCREEN_HIDE_LEGACY_START_DETAIL), "{error}");
+        assert!(
+            refuse_legacy_start_while_hidden(true, true).is_ok(),
+            "the bridge records the still"
+        );
+        assert!(refuse_legacy_start_while_hidden(false, false).is_ok());
+        assert!(refuse_legacy_start_while_hidden(true, false).is_ok());
+
+        let mut four_k_sixty = base_params(true, false);
+        four_k_sixty.output.video = VideoSettings {
+            preset: VideoPreset::Record4k60Experimental,
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        assert!(
+            compositor_encoder_bridge_ruled_out(&four_k_sixty),
+            "4K60 records through the legacy path, so a hidden start there is refused"
+        );
+    }
+
+    /// The same refusal through the real start path: a 4K60 recording
+    /// (legacy FFmpeg) requested while hidden fails with the exact copy and
+    /// leaves no session, before any capture or encoder process spawns.
+    #[tokio::test]
+    async fn a_legacy_session_start_while_hidden_is_refused_through_the_start_path() {
+        let state = test_state();
+        let output_dir = std::env::temp_dir().join(format!(
+            "videorc-hidden-legacy-start-{}",
+            uuid::Uuid::new_v4()
+        ));
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        let mut params = base_params(true, false);
+        params.sources.camera_id = None;
+        params.sources.microphone_id = None;
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.output.output_directory = Some(output_dir.to_string_lossy().into_owned());
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k60Experimental,
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            start_session(state.clone(), params),
+        )
+        .await
+        .expect("the refusal is immediate");
+        let error = format!(
+            "{:#}",
+            result.expect_err("a hidden legacy start is refused")
+        );
+        assert!(
+            error.contains(crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY),
+            "{error}"
+        );
+        assert!(error.contains(SCREEN_HIDE_LEGACY_START_DETAIL), "{error}");
+        assert!(state.recording.lock().await.is_none());
+        let _ = std::fs::remove_dir_all(&output_dir);
+    }
+
+    /// Plan 186 S4: which sessions take a banner shown after their start.
+    #[test]
+    fn session_accepts_banners_follows_the_render_path() {
+        // The compositor bridge (Metal, CPU, the Windows D3D11 media session).
+        assert!(session_accepts_banners(true, false, false));
+        // The direct D3D11 recording draws nothing over the screen.
+        assert!(!session_accepts_banners(true, true, false));
+        // The legacy FFmpeg graph: only with its overlay FIFO.
+        assert!(session_accepts_banners(false, false, true));
+        assert!(!session_accepts_banners(false, false, false));
     }
 
     #[derive(Debug)]
@@ -24372,6 +29482,7 @@ mod tests {
             effective_encode_backend: EncodeBackend::HardwareQsv,
             probe_state: StreamOutputTopologyProbeState::Rejected,
             fallback_reason: Some("stage=process-output HRESULT=0x8000FFFF".to_string()),
+            encoder_selection_reason: None,
         };
         let line = stream_output_topology_probe_log_line(
             std::time::Duration::from_millis(18_250),
@@ -24428,6 +29539,64 @@ mod tests {
             Some(encoder)
         );
         assert_eq!(combined_output_fallback_reason(None, None), None);
+    }
+
+    #[test]
+    fn a_healthy_topology_never_carries_the_encoder_note_as_its_fallback_reason() {
+        // Plan 0015: Linux OpenH264 is not-required on the raw path it asked
+        // for; its "selected explicitly" note made the renderer reject the
+        // whole check and block Go Live.
+        let encoder = "OpenH264 software encoding was selected explicitly for this session.";
+        for state in [
+            StreamOutputTopologyProbeState::NotRequired,
+            StreamOutputTopologyProbeState::Passed,
+        ] {
+            assert_eq!(
+                topology_result_fallback_reason(state, false, None, Some(encoder.to_string())),
+                None
+            );
+        }
+        assert_eq!(
+            topology_result_fallback_reason(
+                StreamOutputTopologyProbeState::NotRequired,
+                true,
+                Some("bridge changed".to_string()),
+                None
+            )
+            .as_deref(),
+            Some("bridge changed")
+        );
+        let rejected = topology_result_fallback_reason(
+            StreamOutputTopologyProbeState::Rejected,
+            true,
+            Some("Media Foundation rejected".to_string()),
+            Some(encoder.to_string()),
+        )
+        .unwrap();
+        assert!(rejected.starts_with("OpenH264 software"), "{rejected}");
+
+        let video = qsv_test_video();
+        let result = StreamOutputTopologyProbeResult {
+            capability_key: "stream-output-topology-v1:test".to_string(),
+            stream_profile: video.clone(),
+            recording_profile: None,
+            output_roles: vec![StreamOutputTopologyRole::Shared],
+            requested_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_encode_backend: EncodeBackend::SoftwareOpenH264,
+            probe_state: StreamOutputTopologyProbeState::NotRequired,
+            fallback_reason: None,
+            encoder_selection_reason: Some(encoder.to_string()),
+        };
+        let wire = serde_json::to_value(&result).unwrap();
+        assert!(wire.get("fallbackReason").is_none(), "{wire}");
+        assert_eq!(wire["encoderSelectionReason"], encoder);
+        let line =
+            stream_output_topology_probe_log_line(std::time::Duration::from_millis(0), Ok(&result));
+        assert!(
+            line.contains("probe=not-required reason=OpenH264"),
+            "{line}"
+        );
     }
 
     #[test]
@@ -24850,6 +30019,35 @@ mod tests {
             windows_graphics_adapter_driver_identity_material(Vec::new()),
             None
         );
+    }
+
+    /// UHD 620 field log: CheckInterfaceSupport(ID3D11Device) always returned
+    /// DXGI_ERROR_UNSUPPORTED, so every call minted a fresh UUID identity and
+    /// no MF rejection, perf-check verdict or Quick Sync detection ever held.
+    /// CI runners without a hardware adapter may still fail with
+    /// `no-hardware-dxgi-adapter`; any other error leaves the identity
+    /// uncacheable and is a bug.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_graphics_adapter_driver_identity_query_is_supported_and_stable() {
+        match query_windows_graphics_adapter_driver_identity() {
+            Ok(identity) => {
+                assert_eq!(
+                    graphics_adapter_driver_identity(),
+                    identity,
+                    "a queryable adapter identity must be stable across calls"
+                );
+                assert_eq!(
+                    crate::screen_capture::graphics_adapter_driver_identity(),
+                    identity,
+                    "screen capture and recording must key verdicts on the same identity"
+                );
+            }
+            Err(reason) => assert_eq!(
+                reason, "no-hardware-dxgi-adapter",
+                "only an adapter-free host may fail the driver identity query"
+            ),
+        }
     }
 
     #[test]
@@ -25590,6 +30788,7 @@ mod tests {
             layout.clone(),
             None,
             1_000,
+            None,
         )
         .await;
         assert_eq!(startup.scene_revision, 1_000);
@@ -25662,9 +30861,39 @@ mod tests {
         assert!(!record_only_bridge_60fps_eligible(&streaming));
     }
 
+    #[tokio::test]
+    async fn a_refused_request_is_refused_before_the_clip_buffer_hands_over() {
+        // Retest 152: separate files refused on Linux, but only after Record
+        // had stopped the clip buffer, so the re-armed ring started empty.
+        // A ring start in flight makes the hand-over wait up to its 5 s
+        // timeout and fail with "Clips are still starting"; the request's
+        // own refusal must come first.
+        let state = test_state();
+        let _ring_starting = crate::replay_buffer::begin_start_in_flight(&state);
+        let mut params = base_params(true, false);
+        params.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: false,
+            });
+        let started = Instant::now();
+        let error = format!(
+            "{:#}",
+            start_session(state.clone(), params).await.unwrap_err()
+        );
+        assert!(error.contains("separate-source-recordings-"), "{error}");
+        assert!(
+            started.elapsed() < REPLAY_HANDOVER_CLEANUP_TIMEOUT / 5,
+            "refused after {:?}",
+            started.elapsed()
+        );
+        assert!(state.recording.lock().await.is_none());
+    }
+
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
         StartSessionParams {
             requested_at_ms: None,
+            replay: None,
             captions: None,
             sources: SourceSelection {
                 screen_id: Some("screen:avfoundation:3".to_string()),
@@ -25703,6 +30932,7 @@ mod tests {
             scene: None,
             output: OutputSettings {
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 record_enabled,
                 stream_enabled,
                 output_directory: None,
@@ -25738,6 +30968,699 @@ mod tests {
         )
     }
 
+    struct SourceIsoFixtureTick {
+        sequence: u64,
+        audio_start_sample: u64,
+        video_sequence: u64,
+        video_captured_at: Instant,
+    }
+
+    impl SourceIsoFixtureTick {
+        fn at(origin: Instant, sample_end: Instant, video_latency: Duration) -> Self {
+            let elapsed = sample_end.duration_since(origin);
+            let sequence = (elapsed.as_millis() / 10) as u64;
+            assert!(sequence > 0);
+            assert_eq!(elapsed, Duration::from_millis(sequence * 10));
+            let video_captured_at = sample_end - video_latency;
+            Self {
+                sequence,
+                audio_start_sample: (sequence - 1) * 480,
+                video_sequence: (video_captured_at
+                    .saturating_duration_since(origin)
+                    .as_millis()
+                    / 10) as u64,
+                video_captured_at,
+            }
+        }
+    }
+
+    #[test]
+    fn source_iso_fixture_clock_keeps_scheduled_sample_end_through_delayed_delivery() {
+        let origin = Instant::now();
+        for sequence in [1, 50, 80, 190, 370] {
+            let scheduled = origin + Duration::from_millis(sequence * 10);
+            // Delivery may bunch after a delayed callback; it cannot relabel
+            // already-captured samples or the source content with a new time.
+            for delivery_lag_ms in [0, 2, 47] {
+                let delivered = scheduled + Duration::from_millis(delivery_lag_ms);
+                let tick = SourceIsoFixtureTick::at(origin, scheduled, Duration::from_millis(72));
+                assert_eq!(tick.sequence, sequence);
+                assert_eq!(tick.audio_start_sample + 480, sequence * 480);
+                assert_eq!(
+                    tick.video_captured_at + Duration::from_millis(72),
+                    scheduled
+                );
+                assert_eq!(tick.video_sequence, (sequence * 10).saturating_sub(72) / 10);
+                assert!(delivered >= scheduled);
+            }
+        }
+    }
+
+    /// Real session coordinator, compositor, native encoders, muxers and Stop.
+    /// Only device producers are replaced by controlled frame stores.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "maintained runtime smoke; produces real encoded artifacts"]
+    async fn source_iso_runtime_artifacts() {
+        let directory = std::path::PathBuf::from(
+            std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_DIR").expect("runtime evidence directory"),
+        );
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_RECOVER").is_some() {
+            let reconciled = state.database.reconcile_orphaned_sessions().unwrap();
+            assert_eq!(
+                reconciled, 3,
+                "every durable member recovered after process interruption"
+            );
+            assert_eq!(state.database.reconcile_orphaned_sessions().unwrap(), 0);
+            let rows = state.database.list_session_items_page(None, 20).unwrap();
+            assert_eq!(rows.items.len(), 3);
+            for row in &rows.items {
+                if row.recording_role.as_deref() != Some("combined") {
+                    assert_eq!(
+                        row.finalization_state,
+                        Some(crate::protocol::RecordingFinalizationState::Failed)
+                    );
+                    let path = state
+                        .database
+                        .session_recording_path(&row.id)
+                        .unwrap()
+                        .unwrap();
+                    state
+                        .database
+                        .verify_source_iso_capture_ownership(&row.id, Path::new(&path))
+                        .unwrap();
+                    remux_session(
+                        state.clone(),
+                        RemuxSessionParams {
+                            session_id: row.id.clone(),
+                            ffmpeg_path: Some("ffmpeg".into()),
+                        },
+                    )
+                    .await
+                    .expect("owned interrupted role media remains recoverable");
+                }
+            }
+            std::fs::write(directory.join("recovery.json"), serde_json::to_vec_pretty(&serde_json::json!({"reconciled": reconciled, "secondReconcile": 0, "roles": rows.items})).unwrap()).unwrap();
+            return;
+        }
+        let stream_port = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_STREAM_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok());
+        let mut params = if stream_port.is_some() {
+            simulcast_split_params(true).0
+        } else {
+            base_params(true, false)
+        };
+        let shared_stream = test_force_shared_encoder_output_from_env();
+        if shared_stream {
+            assert!(stream_port.is_some());
+            params.streaming.as_mut().unwrap().targets.truncate(1);
+            params.simulcast = None;
+        }
+        if let Some(port) = stream_port {
+            for (index, target) in params
+                .streaming
+                .as_mut()
+                .unwrap()
+                .targets
+                .iter_mut()
+                .enumerate()
+            {
+                target.server_url = format!("rtmp://127.0.0.1:{}/live", port + index as u16);
+                target.stream_key = format!("iso-{index}");
+                target.platform = crate::streaming::StreamPlatform::Custom;
+            }
+        }
+
+        let screen_fixture_id = if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_WINDOW").is_some() {
+            "window:screencapturekit:4294967293"
+        } else {
+            "screen:screencapturekit:4294967294"
+        };
+        if screen_fixture_id.starts_with("window:") {
+            params.sources.screen_id = None;
+            params.sources.window_id = Some(screen_fixture_id.into());
+        } else {
+            params.sources.screen_id = Some(screen_fixture_id.into());
+            params.sources.window_id = None;
+        }
+        params.sources.camera_id = Some("camera:iso-runtime".into());
+        params.sources.microphone_id = Some("microphone:coreaudio:42".into());
+        let cancellation = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_CANCEL").ok();
+        let startup_failure =
+            std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_START_FAILURE").is_some();
+        let audio_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_AUDIO").unwrap_or_default();
+        if cancellation.is_some() || startup_failure || audio_case == "no-microphone" {
+            params.sources.microphone_id = None;
+        }
+        params.audio.microphone_muted = audio_case == "muted";
+        if audio_case == "gains" {
+            params.audio.microphone_gain_db = -6.0;
+            params.audio.system_audio_gain_db = 3.0;
+        }
+        let system_enabled = audio_case != "system-off";
+        let (microphone, microphone_tx, microphone_stats) =
+            crate::audio::test_controlled_native_audio_source();
+        state.warm_microphone.install(
+            42,
+            crate::session_audio::InitialAudioSource::warm(microphone),
+        );
+        params.output.ffmpeg_path =
+            Some(std::env::var("VIDEORC_SMOKE_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into()));
+        params.output.output_directory = Some(directory.display().to_string());
+        params.output.keep_original_mkv = true;
+        params.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            });
+        params.output.video.width = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_WIDTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1920);
+        params.output.video.height = params.output.video.width * 9 / 16;
+        params.output.video.fps = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        if params.output.video.fps == 60
+            && let Some(streaming) = params.streaming.as_mut()
+        {
+            streaming.default_output_preset = VideoPreset::StreamSafe1080p60;
+            for target in &mut streaming.targets {
+                if target.output_orientation
+                    != Some(crate::streaming::StreamOutputOrientation::Vertical)
+                {
+                    target.output_preset = Some(VideoPreset::StreamSafe1080p60);
+                }
+            }
+        }
+        params.audio.microphone_sync_offset_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_OFFSET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if shared_stream {
+            let plan = resolve_provider_stream_output_plan(&params).unwrap();
+            assert!(
+                !plan.separate_encoded_output_role,
+                "forced shared topology must be exercised"
+            );
+            assert!(
+                recording_compositor_stream_output_with_plan(
+                    &params,
+                    EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                    Some(&plan)
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        let idle_hidden_role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_START_HIDDEN").ok();
+        if let Some(role) = idle_hidden_role.as_deref() {
+            params.layout.layout_preset = if role == "camera" {
+                LayoutPreset::ScreenOnly
+            } else {
+                LayoutPreset::CameraOnly
+            };
+        }
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:iso-runtime",
+            &params.layout,
+            &params.output.video,
+        )
+        .await;
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            screen_fixture_id,
+            1,
+            1,
+            &params.output.video,
+        )
+        .await;
+        if let Some(role) = idle_hidden_role.as_deref() {
+            if role == "camera" {
+                crate::preview_camera::stop_preview_camera(&state).await;
+                assert!(
+                    crate::preview_camera::preview_camera_frame_source(&state)
+                        .await
+                        .is_none()
+                );
+            } else {
+                crate::preview_screen::stop_preview_screen(&state).await;
+                assert!(
+                    crate::preview_screen::preview_screen_frame_source(&state)
+                        .await
+                        .is_none()
+                );
+            }
+        }
+        let (system_tx, system_rx) = std::sync::mpsc::sync_channel(512);
+        let system_stats = Arc::new(crate::audio::AudioCaptureStats::default());
+        let producer_system_stats = system_stats.clone();
+        let system_sender = Arc::new(std::sync::Mutex::new(system_tx));
+        let producer_system_sender = system_sender.clone();
+        let capture_latency_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_CAPTURE_LATENCY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let producer_state = state.clone();
+        let (producer_stop, mut producer_stopping) = tokio::sync::oneshot::channel();
+        let stereo_right_gain = if audio_case == "stereo" { 0.5_f32 } else { 1.0 };
+        let live_controls = audio_case == "live-controls";
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ProducerTiming {
+            sequence: u64,
+            video_sequence: u64,
+            captured_ms: f64,
+            delivered_ms: f64,
+            video_captured_ms: f64,
+            camera_published_ms: f64,
+            screen_published_ms: f64,
+            camera_publish_stage_us: [u64; 4],
+            screen_publish_stage_us: [u64; 4],
+        }
+        crate::encoder_bridge::test_source_iso_trace_ms(Instant::now());
+        let producer = tokio::spawn(async move {
+            let mut timing_trace = Vec::with_capacity(512);
+            let source_origin = Instant::now();
+            let mut tick = tokio::time::interval_at(
+                tokio::time::Instant::from_std(source_origin + Duration::from_millis(10)),
+                Duration::from_millis(10),
+            );
+            loop {
+                // AudioFrame.captured_at is the last sample's clock boundary,
+                // not when an asynchronously scheduled callback delivered it.
+                let captured_at = tokio::select! {
+                    _ = &mut producer_stopping => break,
+                    at = tick.tick() => at.into_std(),
+                };
+                let delivered_at = Instant::now();
+                let source_tick = SourceIsoFixtureTick::at(
+                    source_origin,
+                    captured_at,
+                    Duration::from_millis(capture_latency_ms),
+                );
+                let sequence = source_tick.sequence;
+                let pulse_at = |sequence: u64| {
+                    if matches!(sequence % 290, 0..=49 | 80..=119 | 190..=209 | 250..=289) {
+                        255
+                    } else {
+                        100
+                    }
+                };
+                let pulse = if live_controls {
+                    255
+                } else {
+                    pulse_at(sequence - 1)
+                };
+                let samples = (0..480)
+                    .flat_map(|index| {
+                        let time = (source_tick.audio_start_sample + index) as f64 / 48_000.0;
+                        let value = if pulse == 255 {
+                            (time * 997.0 * std::f64::consts::TAU).sin() as f32 * 0.25
+                        } else {
+                            0.0
+                        };
+                        [value, value * stereo_right_gain]
+                    })
+                    .collect();
+                let system_samples = (0..480)
+                    .flat_map(|index| {
+                        let time = (source_tick.audio_start_sample + index) as f64 / 48_000.0;
+                        let value = if pulse == 255 {
+                            (time * 317.0 * std::f64::consts::TAU).sin() as f32 * 0.2
+                        } else {
+                            0.0
+                        };
+                        [value, value * stereo_right_gain]
+                    })
+                    .collect();
+                if producer_system_sender
+                    .lock()
+                    .unwrap()
+                    .try_send(crate::audio::AudioFrame {
+                        timestamp_micros: (sequence - 1) * 10_000,
+                        captured_at,
+                        sample_rate: 48_000,
+                        channels: 2,
+                        samples: system_samples,
+                    })
+                    .is_ok()
+                {
+                    producer_system_stats.record_captured_frames(480);
+                }
+                let frame = crate::audio::AudioFrame {
+                    timestamp_micros: (sequence - 1) * 10_000,
+                    captured_at,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    samples,
+                };
+                if microphone_tx.try_send(frame).is_ok() {
+                    microphone_stats.record_captured_frames(480);
+                }
+
+                let video_sequence = source_tick.video_sequence;
+                let video_pulse = pulse_at(video_sequence);
+                let video_captured_at = source_tick.video_captured_at;
+                let camera_publish_stage_us = crate::preview_camera::test_publish_camera_pixels(
+                    &producer_state,
+                    sequence,
+                    [(video_sequence % 32 * 6) as u8, 0, video_pulse, 255],
+                    video_captured_at,
+                )
+                .await;
+                let camera_published_at = Instant::now();
+                let screen_publish_stage_us = crate::preview_screen::test_publish_screen_pixels(
+                    &producer_state,
+                    sequence,
+                    [(video_sequence % 32 * 6) as u8, video_pulse, 0, 255],
+                    video_captured_at,
+                )
+                .await;
+                if timing_trace.len() < 4096 {
+                    timing_trace.push(ProducerTiming {
+                        sequence,
+                        video_sequence,
+                        camera_publish_stage_us,
+                        screen_publish_stage_us,
+                        captured_ms: crate::encoder_bridge::test_source_iso_trace_ms(captured_at),
+                        delivered_ms: crate::encoder_bridge::test_source_iso_trace_ms(delivered_at),
+                        video_captured_ms: crate::encoder_bridge::test_source_iso_trace_ms(
+                            video_captured_at,
+                        ),
+                        camera_published_ms: crate::encoder_bridge::test_source_iso_trace_ms(
+                            camera_published_at,
+                        ),
+                        screen_published_ms: crate::encoder_bridge::test_source_iso_trace_ms(
+                            Instant::now(),
+                        ),
+                    });
+                }
+            }
+            timing_trace
+        });
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(async {
+        if let Some(point) = if startup_failure { Some("precommit-failure") } else { cancellation.as_deref() } {
+            let receipt = crate::source_iso::test_pause_next_source_iso_start(point);
+            let start_state = state.clone();
+            let start_params = params.clone();
+            let start = tokio::spawn(async move { start_session(start_state, start_params).await });
+            let receipt = tokio::time::timeout(Duration::from_secs(15), receipt).await;
+            if startup_failure {
+                let failed = tokio::time::timeout(Duration::from_secs(8), start).await.unwrap().unwrap();
+                assert!(failed.is_err(), "known ISO failure must reject whole startup");
+            } else {
+                start.abort();
+                let _ = start.await;
+            }
+            let receipt = receipt.expect("production startup reaches cancellation boundary").unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(8), receipt.reaped).await.unwrap().unwrap(), "ISO children reaped");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if receipt.pids.iter().all(|pid| unsafe { libc::kill(*pid as i32, 0) } != 0) { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("all owned Combined and ISO muxers reaped");
+            assert!(receipt.fifos.iter().all(|path| !path.exists()), "every ISO FIFO retired");
+            let page = state.database.list_session_items_page(None, 20).unwrap();
+            assert_eq!(page.items.len(), 3);
+            for item in page.items.iter().filter(|item| item.recording_role.as_deref() != Some("combined")) {
+                assert_eq!(item.finalization_state, Some(crate::protocol::RecordingFinalizationState::Failed));
+            }
+            std::fs::write(directory.join("cancellation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                "point": point, "ownedPids": receipt.pids, "fifos": receipt.fifos, "reaped": true
+            })).unwrap()).unwrap();
+            // The same capture producers must admit a subsequent real Start.
+        }
+        state.live_source_switch.lock().unwrap().observe_devices(&[
+            crate::protocol::Device { app: None, window_title: None, id: "camera:iso-runtime".into(), name: "Controlled camera".into(), kind: crate::protocol::DeviceKind::Camera, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+            crate::protocol::Device { app: None, window_title: None, id: screen_fixture_id.into(), name: "Controlled capture".into(), kind: if screen_fixture_id.starts_with("window:") { crate::protocol::DeviceKind::Window } else { crate::protocol::DeviceKind::Screen }, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+        ]);
+        let failure_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FAILURE").ok();
+        // Plan 198 (owner's 0.11.0 take): a screen latch from an incident long
+        // before Record is still set when the take arms. All three files save.
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_STALE_LATCH").is_some() {
+            state.capture_recovery.lock().await.test_screen_recovery_failed(screen_fixture_id, true);
+        }
+        let camera_fails = failure_case.is_some();
+        let start_click = Instant::now();
+        let start = start_session(state.clone(), params.clone()).await;
+        let start_ms = start_click.elapsed().as_secs_f64() * 1000.0;
+        if let Err(error) = &start { panic!("production ISO startup: {error:#}"); }
+        let status = start.unwrap();
+        let session_id = status.session_id.as_deref().unwrap();
+        eprintln!("ISO_RUNTIME_STAGE started pid={} session={session_id}", std::process::id());
+        let system = state.recording.lock().await.as_ref().unwrap().native_audio.as_ref().unwrap().system_audio();
+        system.set_echo_guard(false);
+        if system_enabled {
+        let system_stats = system_stats.clone();
+        let source = system.prepare(move || Ok(crate::session_audio::ProducerSource::system(
+            "system:iso-runtime".into(), "Controlled system audio".into(), system_rx,
+            system_stats, Arc::new(std::sync::Mutex::new(None)), Box::new(()),
+        )), Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap();
+        system.attach(source).await.expect("real system audio slot accepts controlled capture");
+        }
+
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_CRASH").is_some() {
+            let recording = state.recording.lock().await;
+            let active = recording.as_ref().unwrap();
+            let mut pids = vec![active.pid];
+            pids.extend_from_slice(active.source_iso.as_ref().unwrap().test_owned_pids());
+            let paths: Vec<String> = [session_id.to_owned(), format!("{session_id}-screen"), format!("{session_id}-camera")]
+                .iter().map(|id| state.database.session_recording_path(id).unwrap().unwrap()).collect();
+            // This receipt establishes owned process identity only. The parent
+            // waits for decoded live clusters before deliberately interrupting.
+            println!("ISO_CRASH_READY {}", serde_json::json!({"sessionId": session_id, "pids": pids, "paths": paths}));
+            use std::io::Write;
+            std::io::stdout().flush().unwrap();
+            drop(recording);
+            std::future::pending::<()>().await;
+        }
+        let mut control_intervals = Vec::new();
+        if live_controls {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            system.detach().await.expect("live system Off acknowledged");
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: -6.0, microphone_muted: false,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+            let off_at = active_capture_elapsed_seconds(&state).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            control_intervals.push(serde_json::json!({"start": off_at + 0.2, "duration": 0.4, "microphone": 0.25 * 10_f64.powf(-6.0 / 20.0), "system": 0.0}));
+            let (sender, receiver) = std::sync::mpsc::sync_channel(512);
+            *system_sender.lock().unwrap() = sender;
+            let source = system.prepare(move || Ok(crate::session_audio::ProducerSource::system(
+                "system:iso-runtime-readded".into(), "Controlled system audio".into(), receiver,
+                system_stats, Arc::new(std::sync::Mutex::new(None)), Box::new(()),
+            )), Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap();
+            system.attach(source).await.expect("live system On acknowledged");
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: true,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+            let mute_at = active_capture_elapsed_seconds(&state).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            control_intervals.push(serde_json::json!({"start": mute_at + 0.2, "duration": 0.4, "microphone": 0.0, "system": 0.2 * 10_f64.powf(f64::from(params.audio.system_audio_gain_db) / 20.0)}));
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: false,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+        }
+        if failure_case.as_deref() == Some("capture-recovery") {
+            state.capture_recovery.lock().await.test_camera_recovery_failed("camera:iso-runtime", false);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(state.database.session_finalization_snapshot(&format!("{session_id}-camera")).unwrap().status, "running", "retryable capture failure must not end ISO");
+            state.capture_recovery.lock().await.test_camera_recovery_failed("camera:iso-runtime", true);
+        }
+        let remove_role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_REMOVE").ok();
+        let hidden_role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_HIDE").ok();
+        let hidden = hidden_role.is_some();
+        if remove_role.as_deref() == Some("screen") || hidden {
+            let mut layout = params.layout.clone();
+            layout.layout_preset = if hidden_role.as_deref() == Some("camera") {
+                crate::protocol::LayoutPreset::ScreenOnly
+            } else { crate::protocol::LayoutPreset::CameraOnly };
+            let applied = crate::live_layout::apply_layout_live(&state, crate::protocol::SceneLayoutApplyParams {
+                intent_id: None, simulcast_leg: false,
+                config: crate::protocol::SceneConfigParams { sources: params.sources.clone(), layout,
+                    video: Some(params.output.video.clone()), background: None,
+                    protected_overlay_window_ids: vec![], transition_ms: Some(100),
+                },
+            }).await.expect("real layout hides selected screen");
+            assert!(applied.applied);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if hidden {
+            let role = if hidden_role.as_deref() == Some("camera") { "camera" } else { "screen" };
+            assert_eq!(state.database.session_finalization_snapshot(&format!("{session_id}-{role}")).unwrap().status, "running", "hidden selected source keeps its ISO");
+        }
+        if let Some(role) = remove_role.as_deref() {
+            eprintln!("ISO_RUNTIME_STAGE source-off-begin role={role}");
+            let sources = crate::live_source_switch::get(&state, session_id).await.unwrap();
+            crate::live_source_switch::switch(&state, crate::live_source_switch::SourceSwitchParams {
+                session_id: session_id.into(), request_id: format!("runtime-{role}-off"),
+                expected_source_revision: sources.source_revision,
+                kind: if role == "camera" { crate::live_source_switch::SourceKind::Camera } else { crate::live_source_switch::SourceKind::Capture }, device_id: None,
+                protected_overlay_window_ids: vec![],
+            }).await.expect("authoritative source Off commits");
+            eprintln!("ISO_RUNTIME_STAGE source-off-committed role={role}");
+            if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_READD").is_some() {
+                if role == "camera" {
+                    crate::preview_camera::test_install_live_camera_for_layout(&state, "camera:iso-runtime", &params.layout, &params.output.video).await;
+                } else {
+                    crate::preview_screen::test_install_live_screen_generation(&state, screen_fixture_id, 2, 1, &params.output.video).await;
+                }
+                let sources = crate::live_source_switch::get(&state, session_id).await.unwrap();
+                crate::live_source_switch::switch(&state, crate::live_source_switch::SourceSwitchParams {
+                    session_id: session_id.into(), request_id: format!("runtime-{role}-readd"), expected_source_revision: sources.source_revision,
+                    kind: if role == "camera" { crate::live_source_switch::SourceKind::Camera } else { crate::live_source_switch::SourceKind::Capture },
+                    device_id: Some(if role == "camera" { "camera:iso-runtime" } else { screen_fixture_id }.into()), protected_overlay_window_ids: vec![],
+                }).await.expect("source re-add commits without restarting ended ISO");
+            }
+        }
+        let runtime_duration_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_DURATION_MS")
+            .ok().map(|value| value.parse::<u64>().expect("integer runtime duration")).unwrap_or(4000);
+        assert!((3000..=10000).contains(&runtime_duration_ms), "runtime duration outside 3-10s");
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_STOP_AFTER_REMOVE").is_none() {
+            tokio::time::sleep(Duration::from_millis(runtime_duration_ms - 2000)).await;
+        }
+        let mut terminal_events = state.events.subscribe();
+        let stop_boundary_seconds = active_capture_elapsed_seconds(&state).await.unwrap();
+        let stop_click = Instant::now();
+        eprintln!("ISO_RUNTIME_STAGE stop-begin");
+        let stop = stop_recording(state.clone()).await;
+        stop.expect("real Stop");
+        eprintln!("ISO_RUNTIME_STAGE stop-returned");
+        let terminal = wait_for_final_recording_status(&mut terminal_events, session_id)
+            .await.expect("Stop publishes its terminal authority after ISO teardown");
+        assert!(matches!(terminal.state, RecordingState::Idle), "{terminal:?}");
+        eprintln!("ISO_RUNTIME_STAGE terminal-idle");
+        if let Some(role) = hidden_role.as_deref().or(idle_hidden_role.as_deref()) {
+            if role == "camera" {
+                assert!(crate::preview_camera::preview_camera_frame_source(&state).await.is_none(), "Stop retires hidden Camera after its ISO ends");
+            } else {
+                assert!(crate::preview_screen::preview_screen_frame_source(&state).await.is_none(), "Stop retires hidden Screen after its ISO ends");
+            }
+        }
+        let idle_at = Instant::now();
+        let stop_ms = stop_click.elapsed().as_secs_f64() * 1000.0;
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let page = state.database.list_session_items_page(None, 20).unwrap();
+                let take = page
+                    .items
+                    .iter()
+                    .filter(|item| item.take_id.as_deref() == Some(session_id))
+                    .collect::<Vec<_>>();
+                if take.len() == 3
+                    && take.iter().all(|item| {
+                        item.finalization_state == Some(if camera_fails && item.recording_role.as_deref() == Some("camera") {
+                            crate::protocol::RecordingFinalizationState::Failed
+                        } else { crate::protocol::RecordingFinalizationState::Finalized })
+                    })
+                {
+                    break;
+                }
+                if take.iter().any(|item| {
+                    !(camera_fails && item.recording_role.as_deref() == Some("camera")) && item.finalization_state
+                        == Some(crate::protocol::RecordingFinalizationState::Failed)
+                }) {
+                    panic!("runtime take failed: {take:?}");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("all three exports finish");
+        // Plan 198: one role-failed event per failed role per take, none when
+        // only a pre-take latch was set.
+        // The leak check counts after the ISO bridges reap: no false
+        // "restart Videorc before recording again".
+        let take_events = state.database.list_health_events(session_id).unwrap();
+        let role_failed_events = take_events.iter()
+            .filter(|event| event.code == crate::source_iso::HEALTH_ROLE_FAILED).count();
+        assert_eq!(role_failed_events, usize::from(camera_fails), "role-failed events for {failure_case:?}");
+        assert!(!take_events.iter().any(|event| event.code == "encoder-bridge-writer-leaked"),
+            "ISO teardown reported a leak: {take_events:?}");
+        let camera_final = state.database.session_finalization_snapshot(&format!("{session_id}-camera")).unwrap();
+        let camera_diagnostics: serde_json::Value = serde_json::from_str(&camera_final.diagnostics_json).unwrap();
+        if failure_case.as_deref() == Some("bridge") {
+            assert_eq!(camera_diagnostics["sourceIsoMuxerExitCode"], 0, "a failed encoder with clean muxer EOF stays failed");
+        }
+        let mut intervals = if let Some(role) = remove_role.as_deref() {
+            let row = state.database.session_finalization_snapshot(&format!("{session_id}-{role}")).unwrap();
+            let diagnostics: serde_json::Value = serde_json::from_str(&row.diagnostics_json).unwrap();
+            assert_eq!(diagnostics["sourceIsoOutcome"], "source-removed");
+            serde_json::json!({role: {"outcome": "source-removed", "startSeconds": 0,
+                "endSeconds": diagnostics["sourceIsoEndOffsetMs"].as_f64().unwrap() / 1000.0}})
+        } else { serde_json::json!({}) };
+        // Plan 200 D1: a file shed so Combined keeps up (a slow 4K take) ends
+        // early by design; the take gate judges it on its explicit end.
+        for role in ["screen", "camera"] {
+            let Ok(row) = state.database.session_finalization_snapshot(&format!("{session_id}-{role}")) else {
+                continue;
+            };
+            let diagnostics: serde_json::Value =
+                serde_json::from_str(&row.diagnostics_json).unwrap_or_default();
+            if diagnostics["sourceIsoOutcome"] == "shed" {
+                intervals[role] = serde_json::json!({"outcome": "shed", "startSeconds": 0,
+                    "endSeconds": diagnostics["sourceIsoEndOffsetMs"].as_f64().unwrap_or(0.0) / 1000.0});
+            }
+        }
+        std::fs::write(directory.join("runtime-take.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "combinedPath": status.output_path, "sessionId": session_id,
+            "video": params.output.video, "layout": params.layout, "audio": params.audio, "offsetMs": params.audio.microphone_sync_offset_ms,
+            "intervals": intervals, "failureCase": failure_case, "systemAudio": system_enabled,
+            "microphoneSelected": params.sources.microphone_id.is_some(), "audioCase": audio_case, "stereoRightGain": stereo_right_gain, "controlIntervals": control_intervals,
+            "latency": {"cold": cancellation.is_none(), "clickToRecordingMs": start_ms,
+                "stopClickToIdleMs": stop_ms, "idleToFinalizedMs": idle_at.elapsed().as_secs_f64() * 1000.0,
+                "surface": "backend-session-coordinator"},
+
+            "orchestration": "start_session/stop_recording", "deviceAdapters": "controlled-frame-stores",
+            "stopBoundarySeconds": stop_boundary_seconds,
+            "runtimeDurationMs": runtime_duration_ms,
+            "sharedStream": shared_stream,
+        })).unwrap()).unwrap();
+        }).catch_unwind().await;
+        let _ = producer_stop.send(());
+        let producer_result = producer.await;
+        shutdown_capture_processes(state.clone()).await;
+        assert!(
+            crate::compositor::shutdown_compositor(&state).await,
+            "runtime compositor retires"
+        );
+        std::fs::write(
+            directory.join("compositor-timing.json"),
+            serde_json::to_vec_pretty(&crate::compositor::test_take_source_iso_composition_trace())
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("iso-teardown-timing.json"),
+            serde_json::to_vec_pretty(&crate::source_iso::test_take_source_iso_teardown_trace())
+                .unwrap(),
+        )
+        .unwrap();
+        let producer_timing = producer_result.expect("controlled producers retired");
+        std::fs::write(
+            directory.join("producer-timing.json"),
+            serde_json::to_vec_pretty(&producer_timing).unwrap(),
+        )
+        .unwrap();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     fn test_state() -> AppState {
         let (events, _) = broadcast::channel(16);
         AppState::new(
@@ -25746,6 +31669,67 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    /// Plan 181: only the Clips buffer yields to an update install; a real
+    /// session still refuses it and keeps running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interruption_admission_still_refuses_a_real_session() {
+        let state = test_state();
+        state
+            .capture_interruption
+            .try_begin_session_start()
+            .unwrap()
+            .commit();
+        *state.recording.lock().await = Some(test_active_recording_stub("real-session"));
+
+        let admission =
+            admit_interruption_over_replay_buffer(&state, "main/update", "update-install").await;
+
+        assert!(admission.is_err());
+        assert!(
+            state.recording.lock().await.is_some(),
+            "an update never stops a recording or a stream"
+        );
+        state.recording.lock().await.take();
+    }
+
+    /// The ring re-arms right after every Stop, so an update click can land
+    /// while a buffer-only start is still between admission and its running
+    /// session: admission waits it out instead of refusing the install.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interruption_admission_waits_out_a_clips_start_in_flight() {
+        let state = test_state();
+        let start_admission = state
+            .capture_interruption
+            .try_begin_session_start()
+            .unwrap();
+        let start_in_flight = crate::replay_buffer::begin_start_in_flight(&state);
+        let admit_state = state.clone();
+        let admit = tokio::spawn(async move {
+            admit_interruption_over_replay_buffer(&admit_state, "main/update", "update-install")
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!admit.is_finished(), "admission waits for the Clips start");
+
+        // The start ends without a running session (a refused start).
+        drop(start_in_flight);
+        drop(start_admission);
+
+        let grant = timeout(Duration::from_secs(2), admit)
+            .await
+            .expect("admission resolves once the Clips start ends")
+            .unwrap()
+            .expect("the update install is admitted");
+        assert!(!grant.consumed);
+        assert!(
+            state
+                .capture_interruption
+                .try_begin_session_start()
+                .is_err(),
+            "the lease now holds off the next Clips start"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -26399,6 +32383,7 @@ mod tests {
             session_id: snapshot.session_id.clone(),
             pid: 0,
             stdin: None,
+            replay_only: false,
             output_path: None,
             stream_url: None,
             ffmpeg_path: "test-ffmpeg".to_string(),
@@ -26418,6 +32403,7 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            source_iso: None,
             #[cfg(target_os = "windows")]
             windows_d3d11_monitor: None,
             #[cfg(target_os = "windows")]
@@ -26434,10 +32420,13 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            overlay_session_shape: None,
+            accepts_banners: true,
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
             compositor_capture_lease: None,
+            restarted_compositor_run_id: None,
             ffmpeg_progress: FfmpegProgressBeacon::default(),
         }
     }
@@ -26548,6 +32537,202 @@ mod tests {
         );
     }
 
+    /// A failed row whose capture MKV is on disk, as a crash leaves it.
+    fn create_interrupted_take(state: &AppState, session_id: &str, mkv: &Path) {
+        let params = base_params(true, false);
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.to_string(),
+                title: "Interrupted take".to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                mode: "record".to_string(),
+                output_path: Some(mkv.display().to_string()),
+                container: Some("mkv".to_string()),
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .expect("create session row");
+        // The boot reconcile turns the orphaned `running` row failed.
+        state
+            .database
+            .reconcile_orphaned_sessions()
+            .expect("reconcile");
+    }
+
+    async fn wait_for_finalization_idle(state: &AppState) {
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            state.recording_finalization.wait_idle(),
+        )
+        .await
+        .expect("the recovery job finishes");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_interrupted_take_without_decodable_media_is_marked_failed_and_keeps_its_mkv() {
+        let state = test_state();
+        let session_id = format!("interrupted-garbage-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(&session_id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mkv = directory.join("take.mkv");
+        std::fs::write(
+            &mkv,
+            vec![0x5au8; crate::storage::INTERRUPTED_TAKE_MIN_BYTES as usize],
+        )
+        .unwrap();
+        create_interrupted_take(&state, &session_id, &mkv);
+        let mut events = state.events.subscribe();
+
+        recover_interrupted_takes(&state, None);
+        wait_for_finalization_idle(&state).await;
+
+        let page = state.database.list_session_items_page(None, 10).unwrap();
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.id == session_id)
+            .expect("session row");
+        assert_eq!(item.interruption_recovery.as_deref(), Some("failed"));
+        assert_eq!(item.status, "failed", "{item:?}");
+        assert!(item.mp4_path.is_none(), "{item:?}");
+        assert_eq!(
+            item.finalization_state,
+            Some(crate::protocol::RecordingFinalizationState::Failed),
+            "{item:?}"
+        );
+        assert!(
+            mkv.exists(),
+            "the MKV is never removed by a failed recovery"
+        );
+        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| event.event == "recording.finalization"
+                    && event.payload["sessionId"] == session_id.as_str()
+                    && event.payload["interruptionRecovery"] == "failed"),
+            "{emitted:?}"
+        );
+        // The next launch leaves the settled row alone.
+        recover_interrupted_takes(&state, None);
+        assert!(!state.recording_finalization.has_active_jobs());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn interrupted_take_recovery_copy_states_the_saved_length() {
+        assert_eq!(
+            interrupted_take_recovery_message(true, Some(41_666)),
+            "Recovered after Videorc stopped: 41.7 s saved as MP4, up to where the recording was interrupted. The original MKV is kept."
+        );
+        assert!(interrupted_take_recovery_message(true, None).starts_with("Recovered after"));
+        assert!(interrupted_take_recovery_message(false, Some(1)).contains("MKV is kept"));
+    }
+
+    /// A power-loss capture: a live (headerless-size) Matroska file cut
+    /// mid-cluster, with no cues and no duration, becomes a recovered MP4.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "spawns ffmpeg/ffprobe and writes media; run with --ignored"]
+    async fn an_unindexed_interrupted_take_is_recovered_as_a_playable_mp4() {
+        if !plan200_ffmpeg_available("an_unindexed_interrupted_take_is_recovered_as_a_playable_mp4")
+        {
+            return;
+        }
+        let state = test_state();
+        let session_id = format!("interrupted-real-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(&session_id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mkv = directory.join("take.mkv");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("testsrc2=size=320x180:rate=30")
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "6",
+                "-c:v",
+                "libx264",
+                "-bf",
+                "0",
+                "-g",
+                "30",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "pcm_s16le",
+                "-ac",
+                "2",
+                "-live",
+                "1",
+            ])
+            .arg(&mkv)
+            .status()
+            .expect("ffmpeg runs");
+        assert!(status.success());
+        // Cut the last fifth off: no cues, no duration, a torn cluster.
+        let bytes = std::fs::read(&mkv).unwrap();
+        std::fs::write(&mkv, &bytes[..bytes.len() * 4 / 5]).unwrap();
+        assert!(
+            plan200_ffprobe(
+                &mkv,
+                &["-show_entries", "format=duration", "-of", "csv=p=0"]
+            )
+            .contains("N/A")
+        );
+        create_interrupted_take(&state, &session_id, &mkv);
+
+        recover_interrupted_takes(&state, None);
+        wait_for_finalization_idle(&state).await;
+
+        let page = state.database.list_session_items_page(None, 10).unwrap();
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.id == session_id)
+            .expect("session row");
+        assert_eq!(
+            item.interruption_recovery.as_deref(),
+            Some("recovered"),
+            "{item:?}"
+        );
+        assert_eq!(item.status, "completed");
+        assert_eq!(
+            item.finalization_state,
+            Some(crate::protocol::RecordingFinalizationState::Finalized)
+        );
+        let mp4 = PathBuf::from(item.mp4_path.as_deref().expect("an MP4"));
+        assert!(mp4.exists());
+        let duration_ms = item.duration_ms.expect("the probed duration");
+        assert!(
+            (3_000..6_000).contains(&duration_ms),
+            "the MP4 holds the media up to the cut: {duration_ms} ms"
+        );
+        let streams = plan200_ffprobe(
+            &mp4,
+            &["-show_entries", "stream=codec_name", "-of", "csv=p=0"],
+        );
+        assert!(
+            streams.contains("h264") && streams.contains("aac"),
+            "{streams}"
+        );
+        assert!(mkv.exists(), "the recovered take keeps its MKV");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn resume_pending_recording_finalizations_marks_missing_capture_failed() {
         let state = test_state();
@@ -26610,6 +32795,39 @@ mod tests {
                 .is_some_and(|error| error.contains("missing")),
             "{item:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_waits_for_a_finishing_session_instead_of_refusing() {
+        // Retest 151: a capture that already left `state.recording` holds the
+        // admission until its terminal status. A Record in that window used to
+        // meet "A capture session is active or finalizing".
+        let state = test_state();
+        state
+            .capture_interruption
+            .try_begin_session_start()
+            .expect("idle admission")
+            .commit();
+        assert!(state.recording.lock().await.is_none());
+        let finisher = state.clone();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            finisher.capture_interruption.capture_finished();
+        });
+        let waited_from = Instant::now();
+        hand_over_replay_only_session(&state)
+            .await
+            .expect("the hand-over waits for the terminal edge");
+        assert!(waited_from.elapsed() >= Duration::from_millis(150));
+        assert!(state.capture_interruption.capture_admission_is_idle());
+        release.await.expect("finisher");
+
+        // Nothing finishing and nothing starting: no wait at all.
+        let waited_from = Instant::now();
+        hand_over_replay_only_session(&state)
+            .await
+            .expect("idle hand-over");
+        assert!(waited_from.elapsed() < Duration::from_millis(100));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -26880,6 +33098,53 @@ mod tests {
             !mkv.exists(),
             "auto-finalization removes MKV only after recovery commit"
         );
+        drop(state);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stopped_early_separate_file_exports_beside_combined() {
+        let session_id = format!("take-stopped-early-{}-screen", Uuid::new_v4());
+        let directory =
+            std::env::temp_dir().join(format!("videorc-p200-iso-export-{}", Uuid::new_v4()));
+        let hidden = directory.join(format!(".videorc-iso-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&hidden).unwrap();
+        let state = test_state_with_file_database(&directory);
+        let mkv = hidden.join("take-screen.mkv");
+        std::fs::write(&mkv, b"stopped-early partial").unwrap();
+        create_test_recording_row(&state, &session_id, &mkv);
+
+        let published = remux_session_with_exporter(
+            state.clone(),
+            RemuxSessionParams {
+                session_id: session_id.clone(),
+                ffmpeg_path: None,
+            },
+            Mp4FinalizationFault::None,
+            |_ffmpeg_path, _input, output| async move {
+                std::fs::write(output, b"exported partial mp4")?;
+                Ok(())
+            },
+        )
+        .await
+        .expect("the stopped-early file exports");
+
+        let expected = directory.join("take-screen.mp4");
+        assert_eq!(published, expected.display().to_string());
+        assert_eq!(std::fs::read(&expected).unwrap(), b"exported partial mp4");
+        assert!(
+            !hidden.join("take-screen.mp4").exists(),
+            "nothing is published into the private folder"
+        );
+        // Export MP4 keeps the MKV, so its folder stays until the row goes.
+        assert!(mkv.exists());
+        assert!(directory.read_dir().unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".videorc-export-")
+        }));
         drop(state);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -27482,6 +33747,49 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_encode_never_sends_the_stream_at_a_smaller_recordings_quality() {
+        // Plan 0016: Linux's raw path has no separate stream role. Recording
+        // 640x360 with a 1080p destination used to collapse the stream to the
+        // recording's profile and stream it silently at 640x360.
+        let mut params = base_params(true, true);
+        params.output.video = video_preset_defaults(VideoPreset::Tutorial720p30);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6000;
+        params.streaming = Some(streaming);
+
+        let refused = resolve_provider_stream_output_plan_with_separate_roles(&params, false)
+            .expect_err("a smaller recording must not cap the livestream");
+        assert!(
+            refused
+                .to_string()
+                .contains("send the livestream at that quality"),
+            "{refused}"
+        );
+
+        // A lower recording bitrate at the same size is the same downgrade.
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            bitrate_kbps: 4000,
+            ..video_preset_defaults(VideoPreset::StreamSafe1080p30)
+        };
+        assert!(resolve_provider_stream_output_plan_with_separate_roles(&params, false).is_err());
+
+        // The recording following the stream (the renderer's re-plan) shares.
+        params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
+        let plan = resolve_provider_stream_output_plan_with_separate_roles(&params, false).unwrap();
+        assert_eq!(
+            plan.stream_video,
+            video_preset_defaults(VideoPreset::StreamSafe1080p30)
+        );
+        assert!(!plan.separate_encoded_output_role);
+    }
+
+    #[test]
     fn mixed_providers_keep_youtube_rate_only_with_proven_separate_role() {
         let mut params = base_params(true, true);
         params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
@@ -28055,6 +34363,446 @@ mod tests {
         assert!(parse_fifo_output_failure("[fifo @ 0x1] something else").is_none());
     }
 
+    // Plan 161: lines captured from the bundled FFmpeg 8.1.1 publishing to a
+    // local RTMP listener that was killed mid-stream and then restarted.
+    const YOUTUBE_URL: &str = "rtmp://a.rtmp.youtube.com/live2/abcd-efgh";
+    const TWITCH_URL: &str = "rtmp://live.twitch.tv/app/live_123";
+
+    fn two_leg_monitor() -> StreamLegMonitor {
+        StreamLegMonitor::new(vec![
+            (YOUTUBE_URL.to_string(), 0),
+            (TWITCH_URL.to_string(), 1),
+        ])
+    }
+
+    #[test]
+    fn ffmpeg_level_tags_are_stripped_after_the_context() {
+        assert_eq!(
+            strip_ffmpeg_log_levels(
+                "[fifo @ 0xac4c1c500] [info] Recovery failed: Connection refused"
+            ),
+            (
+                "[fifo @ 0xac4c1c500] Recovery failed: Connection refused".to_string(),
+                Some(FfmpegLogLevel::Info)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels(
+                "[aost#1:1/aac @ 0x703488900] [error] Error submitting a packet to the muxer: End of file"
+            ),
+            (
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+                    .to_string(),
+                Some(FfmpegLogLevel::Error)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels("[a @ 0x1] [b @ 0x2] [warning] nested"),
+            (
+                "[a @ 0x1] [b @ 0x2] nested".to_string(),
+                Some(FfmpegLogLevel::Warning)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels("[info] Press [q] to stop, [?] for help"),
+            (
+                "Press [q] to stop, [?] for help".to_string(),
+                Some(FfmpegLogLevel::Info)
+            )
+        );
+    }
+
+    #[test]
+    fn untagged_ffmpeg_lines_pass_through_unchanged() {
+        for line in [
+            "out_time_us=1500000",
+            "progress=continue",
+            "Command reply for stream 0: ret:0 res:",
+            "Enter command: <target>|all <time>|-1 <command>[ <argument>]",
+            "[fifo @ 0x7ef042a80] Error opening rtmp://127.0.0.1:11937/live/x: Connection refused",
+            "[tee @ 0x10] Slave muxer #2 failed: Connection refused, continuing with 2/3 slaves.",
+        ] {
+            assert_eq!(strip_ffmpeg_log_levels(line), (line.to_string(), None));
+        }
+    }
+
+    #[test]
+    fn a_stats_line_keeps_its_carriage_returns_and_most_severe_level() {
+        let (line, level) = strip_ffmpeg_log_levels(
+            "[info] frame=  360 fps=30 q=2.0 size=N/A time=00:00:12.00 bitrate=N/A speed=1.01x    \rframe=361",
+        );
+        assert_eq!(
+            line,
+            "frame=  360 fps=30 q=2.0 size=N/A time=00:00:12.00 bitrate=N/A speed=1.01x    \rframe=361"
+        );
+        assert_eq!(level, Some(FfmpegLogLevel::Info));
+        assert!(
+            is_ffmpeg_progress_noise(&line),
+            "stats stay progress noise after the tag is gone"
+        );
+        let stats = parse_ffmpeg_stream_health(&line).expect("stats still parse");
+        assert_eq!(stats.fps, Some(30.0));
+        assert_eq!(stats.speed, Some(1.01));
+
+        let (line, level) = strip_ffmpeg_log_levels(
+            "[info] frame=  1 fps=30 speed=1x    \r[flv @ 0xac4c1f200] [warning] Failed to update header with correct duration.",
+        );
+        assert_eq!(
+            line,
+            "frame=  1 fps=30 speed=1x    \r[flv @ 0xac4c1f200] Failed to update header with correct duration."
+        );
+        assert_eq!(level, Some(FfmpegLogLevel::Warning));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stderr_relay_routes_info_away_from_warning_readers() {
+        let (event_sender, mut events) = mpsc::channel(256);
+        let input = format!(
+            "[info] Output #1, fifo, to '{YOUTUBE_URL}':\n\
+             [fifo @ 0x1] [error] Error opening {YOUTUBE_URL}: Connection refused\n\
+             [fifo @ 0x1] [info] Recovery failed: Connection refused\n\
+             [info] frame=  1 fps=30 speed=1x    \rframe=2\n\
+             Command reply for stream 0: ret:0 res:\n"
+        );
+        let progress = FfmpegProgressBeacon::default();
+        relay_ffmpeg_stderr(
+            BufReader::new(input.as_bytes()),
+            event_sender,
+            None,
+            progress.clone(),
+        )
+        .await;
+
+        let mut received = Vec::new();
+        while let Some(event) = events.recv().await {
+            received.push(match event {
+                FfmpegStderrEvent::Line(line) => format!("line:{line}"),
+                FfmpegStderrEvent::Info(line) => format!("info:{line}"),
+                FfmpegStderrEvent::Eof => "eof".to_string(),
+                FfmpegStderrEvent::ReadFailed => "read-failed".to_string(),
+            });
+        }
+        assert_eq!(
+            received,
+            vec![
+                format!("info:Output #1, fifo, to '{YOUTUBE_URL}':"),
+                format!("line:[fifo @ 0x1] Error opening {YOUTUBE_URL}: Connection refused"),
+                "info:[fifo @ 0x1] Recovery failed: Connection refused".to_string(),
+                "line:frame=  1 fps=30 speed=1x    \rframe=2".to_string(),
+                "line:Command reply for stream 0: ret:0 res:".to_string(),
+                "eof".to_string(),
+            ]
+        );
+        let evidence = progress
+            .evidence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tail = evidence.tail.summary().unwrap_or_default();
+        assert!(
+            !tail.contains("Output #1") && !tail.contains("Recovery failed"),
+            "INFO lines must never reach the persisted stderr tail: {tail}"
+        );
+    }
+
+    #[test]
+    fn bridge_ffmpeg_tags_every_log_line_with_its_level() {
+        let args = bridge_ffmpeg_base_args();
+        assert_eq!(arg_value(&args, "-loglevel"), Some("level+info"));
+    }
+
+    #[test]
+    fn output_headers_map_ffmpeg_output_indexes_to_urls() {
+        assert_eq!(
+            parse_ffmpeg_output_header(&format!("Output #1, fifo, to '{YOUTUBE_URL}':")),
+            Some((1, YOUTUBE_URL))
+        );
+        assert_eq!(
+            parse_ffmpeg_output_header("Output #0, matroska, to '/tmp/session.mkv':"),
+            Some((0, "/tmp/session.mkv"))
+        );
+        assert!(parse_ffmpeg_output_header("Input #0, lavfi, from 'testsrc':").is_none());
+        assert!(parse_ffmpeg_output_header("  Stream #0:0 -> #1:0 (copy)").is_none());
+    }
+
+    #[test]
+    fn output_mux_failures_name_the_output_index() {
+        // The 2026-10-07 incident line (output #1 was YouTube).
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure(
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+            ),
+            Some(OutputMuxFailure {
+                output_index: 1,
+                reason: "End of file".to_string()
+            })
+        );
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure(
+                "[vost#3:0/copy @ 0x1] Error submitting a packet to the muxer: Broken pipe"
+            ),
+            Some(OutputMuxFailure {
+                output_index: 3,
+                reason: "Broken pipe".to_string()
+            })
+        );
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure("[out#2/fifo @ 0x1] Error muxing a packet"),
+            Some(OutputMuxFailure {
+                output_index: 2,
+                reason: String::new()
+            })
+        );
+        assert!(parse_ffmpeg_output_mux_failure("[flv @ 0x1] Failed to update header").is_none());
+        assert!(parse_ffmpeg_output_mux_failure("Error muxing a packet").is_none());
+    }
+
+    #[test]
+    fn a_dropped_leg_reconnects_and_resumes_on_its_own_target() {
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe(&format!("Output #1, fifo, to '{YOUTUBE_URL}':")),
+            None
+        );
+        for noise in [
+            "[flv @ 0xac4c1f200] Failed to update header with correct duration.",
+            "[tcp @ 0xac4c446e0] Connection to tcp://a.rtmp.youtube.com:1935?tcp_nodelay=0 failed: Connection refused",
+            "[rtmp @ 0xac4c20700] Cannot open connection tcp://a.rtmp.youtube.com:1935?tcp_nodelay=0",
+        ] {
+            assert_eq!(monitor.observe(noise), None, "{noise}");
+        }
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0xac4c1c500] Error opening {YOUTUBE_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xac4c1c500] Recovery failed: Connection refused"),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        // The success line can trail a `\r` stats segment.
+        assert_eq!(
+            monitor
+                .observe("frame=  1 fps=30 speed=1x    \r[fifo @ 0xac4c1c500] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 0 })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xac4c1c500] Maximal number of 3 recovery attempts reached."),
+            Some(StreamLegUpdate::Failed {
+                position: 0,
+                reason: "Videorc stopped reconnecting".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_fifo_is_reported_without_guessing_a_destination() {
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            Some(StreamLegUpdate::UnattributedReconnecting {
+                reason: "Broken pipe".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            None,
+            "one notice per outage"
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery successful"),
+            Some(StreamLegUpdate::UnattributedResumed)
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            Some(StreamLegUpdate::UnattributedReconnecting {
+                reason: "Broken pipe".to_string()
+            }),
+            "a later outage is a new notice"
+        );
+        // An immediate reconnect (the ingest dropped, the first retry worked).
+        assert_eq!(
+            monitor.observe("[fifo @ 0xddd] Recovery successful"),
+            Some(StreamLegUpdate::UnattributedResumed)
+        );
+        assert_eq!(
+            monitor.observe(
+                "[fifo @ 0xeee] Error opening rtmp://elsewhere/app/key: Connection refused"
+            ),
+            None,
+            "a URL that is not a destination of this session"
+        );
+    }
+
+    #[test]
+    fn a_mux_failure_fails_only_the_mapped_destination() {
+        let mut monitor = two_leg_monitor();
+        monitor.observe("Output #0, matroska, to '/tmp/session.mkv':");
+        monitor.observe(&format!("Output #1, fifo, to '{YOUTUBE_URL}':"));
+        monitor.observe(&format!("Output #2, fifo, to '{TWITCH_URL}':"));
+        assert_eq!(
+            monitor.observe(
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+            ),
+            Some(StreamLegUpdate::Failed {
+                position: 0,
+                reason: "The connection closed (End of file)".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[out#2/fifo @ 0x1] Error muxing a packet"),
+            Some(StreamLegUpdate::Failed {
+                position: 1,
+                reason: "The connection closed".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe(
+                "[aost#0:1/aac @ 0x1] Error submitting a packet to the muxer: End of file"
+            ),
+            None,
+            "output #0 is the local recording, not a destination"
+        );
+    }
+
+    #[test]
+    fn a_platform_only_demotes_a_live_leg_and_clears_its_own_warning() {
+        let not_receiving = PlatformStreamObservation::NotReceiving {
+            detail: "YouTube reports no data".to_string(),
+        };
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Live, &not_receiving),
+            Some((
+                StreamTargetState::Warning,
+                Some("Not receiving: YouTube reports no data".to_string())
+            ))
+        );
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Reconnecting, &not_receiving),
+            None,
+            "FFmpeg already says this leg is down"
+        );
+        assert_eq!(
+            platform_observation_transition(
+                StreamTargetState::Warning,
+                &PlatformStreamObservation::Receiving
+            ),
+            Some((StreamTargetState::Live, None))
+        );
+        assert_eq!(
+            platform_observation_transition(
+                StreamTargetState::Reconnecting,
+                &PlatformStreamObservation::Receiving
+            ),
+            None,
+            "only FFmpeg's own recovery clears a reconnect"
+        );
+        let ended = PlatformStreamObservation::Ended {
+            detail: "YouTube ended this broadcast".to_string(),
+        };
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Reconnecting, &ended),
+            Some((
+                StreamTargetState::Failed,
+                Some("YouTube ended this broadcast".to_string())
+            ))
+        );
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::NotConfigured, &ended),
+            None
+        );
+    }
+
+    #[test]
+    fn a_retry_loop_is_news_once_a_minute() {
+        let mut throttle = FfmpegRepeatThrottle::default();
+        let start = Instant::now();
+        let first =
+            "[rtmp @ 0xac4c20700] Cannot open connection tcp://127.0.0.1:19361?tcp_nodelay=0";
+        let again =
+            "[rtmp @ 0xac4c20980] Cannot open connection tcp://127.0.0.1:19361?tcp_nodelay=0";
+        assert!(throttle.admit(first, start));
+        assert!(
+            !throttle.admit(again, start + Duration::from_secs(2)),
+            "a fresh context pointer is the same line"
+        );
+        assert!(throttle.admit(
+            "[fifo @ 0x1] Error opening rtmp://127.0.0.1:19361/live/k: Connection refused",
+            start + Duration::from_secs(2)
+        ));
+        assert!(throttle.admit(again, start + FFMPEG_REPEAT_WINDOW));
+        assert_eq!(
+            ffmpeg_repeat_key("[tcp @ 0xac4c446e0] x 0x12 y"),
+            "[tcp @ 0x] x 0x y"
+        );
+    }
+
+    #[test]
+    fn stream_target_transitions_broadcast_state_changes_only() {
+        let shared = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: "s".to_string(),
+            targets: vec![
+                StreamTargetRuntime {
+                    target_id: "youtube".to_string(),
+                    platform: StreamPlatform::Youtube,
+                    label: "YouTube".to_string(),
+                    state: StreamTargetState::Live,
+                    message: None,
+                    redacted_url: None,
+                },
+                StreamTargetRuntime {
+                    target_id: "kick".to_string(),
+                    platform: StreamPlatform::Kick,
+                    label: "Kick".to_string(),
+                    state: StreamTargetState::NotConfigured,
+                    message: Some("No key".to_string()),
+                    redacted_url: None,
+                },
+            ],
+        }));
+        let (label, previous, snapshot) = transition_stream_target(
+            &shared,
+            0,
+            StreamTargetState::Reconnecting,
+            Some("Reconnecting: Connection refused".to_string()),
+        )
+        .expect("live to reconnecting is a change");
+        assert_eq!(label, "YouTube");
+        assert_eq!(previous, StreamTargetState::Live);
+        assert_eq!(snapshot.targets[0].state, StreamTargetState::Reconnecting);
+        assert!(
+            transition_stream_target(
+                &shared,
+                0,
+                StreamTargetState::Reconnecting,
+                Some("Reconnecting: Broken pipe".to_string()),
+            )
+            .is_none(),
+            "a retry with a new reason is not a broadcast"
+        );
+        assert_eq!(
+            stream_targets_snapshot_value(&shared).targets[0]
+                .message
+                .as_deref(),
+            Some("Reconnecting: Broken pipe"),
+            "but the authoritative snapshot keeps the latest reason"
+        );
+        assert!(
+            transition_stream_target(&shared, 1, StreamTargetState::Live, None).is_none(),
+            "a skipped destination never goes live"
+        );
+        let (_, previous, snapshot) =
+            transition_stream_target(&shared, 0, StreamTargetState::Live, None).unwrap();
+        assert_eq!(previous, StreamTargetState::Reconnecting);
+        assert_eq!(snapshot.targets[0].message, None);
+    }
+
     #[test]
     fn build_stream_runtime_maps_slaves_after_recording_leg() {
         let streaming = streaming_for(&[
@@ -28272,8 +35020,12 @@ mod tests {
 
         assert!(args.contains(&"tee".to_string()));
         let tee = args.iter().find(|arg| arg.contains("[f=matroska")).unwrap();
-        assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-test.mkv"));
+        assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-test.mkv|"));
         assert!(tee.contains("onfail=ignore"));
+        // Every RTMP leg reconnects on its own; the recording leg keeps the
+        // tee-wide options (no recovery, onfail=abort).
+        assert_eq!(tee.matches(":fifo_options=").count(), 3, "{tee}");
+        assert_eq!(tee.matches("attempt_recovery=1").count(), 3, "{tee}");
         assert_eq!(
             tee.matches("[f=flv").count(),
             3,
@@ -28577,6 +35329,106 @@ mod tests {
         );
         let message = worker_microphone_fallback_message("probe timed out");
         assert!(message.contains("microphone is live") && message.contains("probe timed out"));
+        // Release test 147, plan 0001: a Linux worker failure keeps the direct
+        // Pulse input and says the soundboard is out...
+        let pulse = MicrophoneInput::LinuxPulse {
+            source_name: "videorc_test_tone".to_string(),
+        };
+        for error in [&probe_timeout, &open_budget] {
+            assert_eq!(
+                worker_microphone_fallback(Some(&pulse), error),
+                WorkerMicrophoneFallback::DirectPulse,
+                "{error}"
+            );
+        }
+        // ...unless the source is unplugged (retest 154, C4): the session
+        // records silence, never the default (built-in) microphone.
+        let unplugged = anyhow::Error::from(WorkerStartError::for_test(
+            WorkerStartFailureKind::DeviceNotInInventory,
+            &crate::linux_pulse_audio::pulse_source_not_connected_message("usb_mic"),
+        ))
+        .context("Microphone opening failed");
+        for error in [&missing, &unplugged] {
+            assert_eq!(
+                worker_microphone_fallback(Some(&pulse), error),
+                WorkerMicrophoneFallback::Silence,
+                "{error}"
+            );
+        }
+        let linux = linux_direct_microphone_message("pulse refused");
+        assert!(linux.contains("soundboard") && linux.contains("pulse refused"));
+    }
+
+    #[test]
+    fn a_direct_pulse_microphone_is_pinned_to_its_source() {
+        let pulse_prop = |microphone: Option<&MicrophoneInput>| {
+            let mut command = ffmpeg_command("ffmpeg");
+            pin_direct_pulse_microphone(&mut command, microphone);
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "PULSE_PROP")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            pulse_prop(Some(&MicrophoneInput::LinuxPulse {
+                source_name: "usb_mic".to_string(),
+            }))
+            .as_deref(),
+            Some(crate::linux_pulse_audio::PULSE_PINNED_SOURCE_PROPS)
+        );
+        assert_eq!(
+            pulse_prop(Some(&MicrophoneInput::WindowsDshow {
+                device_name: "Mic".to_string(),
+            })),
+            None
+        );
+        assert_eq!(pulse_prop(None), None);
+    }
+
+    #[test]
+    fn a_linux_pulse_microphone_goes_through_the_session_bus_worker() {
+        // Release test 147, plan 0001: FFmpeg's direct Pulse input bypassed
+        // the session audio bus, so no soundboard press reached the output.
+        let pulse = MicrophoneInput::LinuxPulse {
+            source_name: "videorc_test_tone".to_string(),
+        };
+        let id = crate::linux_pulse_audio::linux_pulse_microphone_id("videorc_test_tone");
+        assert_eq!(
+            linux_pulse_worker_device(Some(&pulse), Some(&id), true, false),
+            Some(id.clone())
+        );
+        // The opt-out keeps the old direct input; other platforms never take
+        // this arm; a foreign or missing id is not guessed at.
+        assert_eq!(
+            linux_pulse_worker_device(Some(&pulse), Some(&id), true, true),
+            None
+        );
+        assert_eq!(
+            linux_pulse_worker_device(Some(&pulse), Some(&id), false, false),
+            None
+        );
+        assert_eq!(
+            linux_pulse_worker_device(
+                Some(&pulse),
+                Some(&"microphone:coreaudio:42".to_string()),
+                true,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            linux_pulse_worker_device(Some(&pulse), None, true, false),
+            None
+        );
+        let dshow = MicrophoneInput::WindowsDshow {
+            device_name: "Microphone Array".to_string(),
+        };
+        assert_eq!(
+            linux_pulse_worker_device(Some(&dshow), Some(&id), true, false),
+            None
+        );
     }
 
     #[tokio::test]
@@ -28653,7 +35505,7 @@ mod tests {
                     &mut args,
                     &layout,
                     &params.audio,
-                    streaming,
+                    OutputAudioCodec::for_session(&params, streaming),
                     true,
                 );
 
@@ -28664,7 +35516,7 @@ mod tests {
                         .parse()
                         .unwrap();
                     assert!(seconds > 0.0 && seconds < FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_secs_f64());
-                    assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+                    assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
                     assert!(arg_value(&args, "-af").unwrap().ends_with(",apad"));
                     let bound_index = args
                         .iter()
@@ -28684,26 +35536,116 @@ mod tests {
     }
 
     #[test]
+    fn record_only_takes_encode_aac_unless_the_lossless_mkv_is_kept() {
+        let record = base_params(true, false);
+        assert_eq!(
+            OutputAudioCodec::for_session(&record, false),
+            OutputAudioCodec::RecordAac
+        );
+        let mut keep = base_params(true, false);
+        keep.output.keep_original_mkv = true;
+        assert_eq!(
+            OutputAudioCodec::for_session(&keep, false),
+            OutputAudioCodec::RecordPcm
+        );
+        let mut iso = base_params(true, false);
+        iso.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            });
+        assert_eq!(
+            OutputAudioCodec::for_session(&iso, false),
+            OutputAudioCodec::RecordPcm
+        );
+        iso.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: false,
+                keep_combined: true,
+            });
+        assert_eq!(
+            OutputAudioCodec::for_session(&iso, false),
+            OutputAudioCodec::RecordAac
+        );
+        for params in [&record, &keep] {
+            assert_eq!(
+                OutputAudioCodec::for_session(params, true),
+                OutputAudioCodec::StreamAac
+            );
+        }
+    }
+
+    #[test]
+    fn record_only_aac_is_what_the_mp4_export_copies() {
+        let layout = microphone_input_layout(false);
+        let mut args = Vec::new();
+        append_audio_encoding_args(
+            &mut args,
+            &layout,
+            &AudioSettings::default(),
+            OutputAudioCodec::RecordAac,
+        );
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
+        // The bitrate the export used to encode the PCM track at.
+        assert_eq!(arg_value(&args, "-b:a"), Some(RECORD_AAC_BITRATE));
+        assert_eq!(arg_value(&args, "-ar"), Some("48000"));
+        // ...so the export is a copy, and its chapters/faststart are unchanged.
+        let probe = Mp4ExportProbe {
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            ..Mp4ExportProbe::default()
+        };
+        let export = mp4_export_args(
+            Path::new("/tmp/take.mkv"),
+            Path::new("/tmp/take.mp4"),
+            &Mp4ExportOptions::plan(&probe, None),
+        );
+        assert_eq!(arg_value(&export, "-c:a"), Some("copy"));
+        assert_eq!(export.iter().filter(|arg| *arg == "-c:a").count(), 1);
+        assert_eq!(arg_value(&export, "-b:a"), None);
+        assert_eq!(arg_value(&export, "-movflags"), Some("+faststart"));
+
+        let mut pcm = Vec::new();
+        append_audio_encoding_args(
+            &mut pcm,
+            &layout,
+            &AudioSettings::default(),
+            OutputAudioCodec::RecordPcm,
+        );
+        assert_eq!(arg_value(&pcm, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&pcm, "-b:a"), None);
+    }
+
+    #[test]
     fn legacy_pcm_sync_bound_preserves_aac_and_bridge_policies() {
         let layout = microphone_input_layout(false);
-        for streaming in [false, true] {
+        for codec in [
+            OutputAudioCodec::RecordPcm,
+            OutputAudioCodec::RecordAac,
+            OutputAudioCodec::StreamAac,
+        ] {
+            let streaming = codec.is_streaming();
             for bridge in [false, true] {
                 let mut args = Vec::new();
                 append_audio_encoding_with_video_clock(
                     &mut args,
                     &layout,
                     &AudioSettings::default(),
-                    streaming,
+                    codec,
                     bridge,
                 );
                 assert_eq!(
                     arg_value(&args, "-shortest_buf_duration"),
                     (!streaming && !bridge).then_some("0.25"),
-                    "streaming={streaming}, bridge={bridge}: {args:?}"
+                    "codec={codec:?}, bridge={bridge}: {args:?}"
                 );
                 assert_eq!(
                     arg_value(&args, "-c:a"),
-                    Some(if streaming { "aac" } else { "pcm_s16le" })
+                    Some(if codec == OutputAudioCodec::RecordPcm {
+                        "pcm_s16le"
+                    } else {
+                        "aac"
+                    })
                 );
                 assert!(arg_value(&args, "-af").unwrap().ends_with(",apad"));
                 assert!(args.iter().any(|arg| arg == "-shortest"));
@@ -28982,6 +35924,485 @@ mod tests {
             .collect()
     }
 
+    /// Plan 198: Clips' buffer-only session arms no Separate source files
+    /// (0.11.0 refused it 62 times in 40 s: "need a local recording path"),
+    /// while Record with the same Output settings still arms them.
+    #[test]
+    fn buffer_only_session_never_arms_separate_source_recordings() {
+        let separate = Some(crate::protocol::SeparateSourceRecordingsSettings {
+            enabled: true,
+            keep_combined: true,
+        });
+        let mut buffer = base_params(false, false);
+        buffer.output.separate_source_recordings = separate;
+        buffer.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: false,
+        });
+        assert!(normalize_replay_only_params(&mut buffer));
+        assert!(buffer.output.record_enabled);
+        assert!(crate::source_iso::armed_plan(&buffer.output).is_none());
+        crate::source_iso::validate_separate_source_recordings(&buffer)
+            .expect("a buffer-only start carries no ISO request");
+
+        let mut record = base_params(true, false);
+        record.output.separate_source_recordings = separate;
+        record.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: false,
+        });
+        assert!(!normalize_replay_only_params(&mut record));
+        assert_eq!(record.output.separate_source_recordings, separate);
+        assert!(crate::source_iso::armed_plan(&record.output).is_some());
+    }
+
+    /// Plan 205 D2 (owner): a buffer-only (Clips) session keeps planning
+    /// every item by "Show in recording", exactly as a recording does. Its
+    /// shape is record-only, so a stream-only Buddy and a stream-only banner
+    /// burn on neither leg of the ring, and a record-only session drops them
+    /// the same way. The program (what the Preview shows) still has both:
+    /// Phase 2 gives the Preview its own picture while the ring runs.
+    #[test]
+    fn a_buffer_only_session_burns_neither_a_stream_only_buddy_nor_banner() {
+        use crate::banners::{BannerLeg, banner_leg_carries};
+        use crate::overlay_layout::{OverlayAuxLeg, OverlaySessionShape, program_shows};
+
+        let mut layout = crate::overlay_layout::OverlayLayout::default();
+        layout.buddy.show_on_stream = true;
+        layout.buddy.show_in_recording = false;
+        let mut banner = crate::banners::tests::sample_banner("stream-only", 0);
+        banner.show_on_stream = true;
+        banner.show_in_recording = false;
+
+        let mut buffer = base_params(false, false);
+        buffer.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: false,
+        });
+        assert!(normalize_replay_only_params(&mut buffer));
+        // The shape `start_session` builds for it: a recording with no stream
+        // and no auxiliary leg.
+        let shape = OverlaySessionShape {
+            record_enabled: buffer.output.record_enabled,
+            stream_enabled: buffer.output.stream_enabled,
+            aux_leg: highlight_aux_leg(None),
+        };
+        assert_eq!(
+            shape,
+            OverlaySessionShape {
+                record_enabled: true,
+                stream_enabled: false,
+                aux_leg: OverlayAuxLeg::None,
+            }
+        );
+        let plans = crate::overlay_layout::overlay_session_plans(shape, &layout);
+        assert!(!plans.buddy.primary && !plans.buddy.aux);
+        assert!(!banner_leg_carries(
+            Some(shape),
+            BannerLeg::Primary,
+            &banner
+        ));
+        assert!(!banner_leg_carries(
+            Some(shape),
+            BannerLeg::Auxiliary,
+            &banner
+        ));
+        assert!(!program_shows(Some(shape), true, false));
+
+        // A real recording plans the same.
+        let mut record = base_params(true, false);
+        assert!(!normalize_replay_only_params(&mut record));
+        let record_shape = OverlaySessionShape {
+            record_enabled: record.output.record_enabled,
+            stream_enabled: record.output.stream_enabled,
+            aux_leg: highlight_aux_leg(None),
+        };
+        assert_eq!(record_shape, shape);
+        assert!(
+            !crate::overlay_layout::overlay_session_plans(record_shape, &layout)
+                .buddy
+                .primary
+        );
+
+        // The program while nothing runs has both (the Preview's half; on
+        // macOS it needs Phase 2's program leg while the ring runs).
+        assert!(program_shows(None, true, false));
+        assert!(banner_leg_carries(None, BannerLeg::Primary, &banner));
+        assert!(crate::compositor::OverlayLegFlags::idle(&layout).buddy_on_primary);
+    }
+
+    /// Plan 181: the replay ring output on every FFmpeg arg builder.
+    mod replay_ring_args {
+        use super::*;
+        use crate::protocol::ReplayParams;
+
+        fn capture() -> CaptureInputs {
+            CaptureInputs {
+                video: VideoInput::TestPattern,
+                camera_index: None,
+                microphone: Some(MicrophoneInput::SessionPcm {
+                    fifo_path: PathBuf::from("/tmp/videorc-replay-test-audio.f32le"),
+                }),
+            }
+        }
+
+        fn ring() -> ReplayOutput {
+            ReplayOutput {
+                dir: PathBuf::from("/tmp/videorc-ring"),
+                seconds: 30,
+            }
+        }
+
+        fn encoder() -> ResolvedFfmpegH264Encoder {
+            ResolvedFfmpegH264Encoder::for_platform(current_ffmpeg_h264_platform().unwrap())
+        }
+
+        /// A buffer-only request after `start_session` raised `record_enabled`
+        /// for the pipeline decisions: the builder still gets no output path.
+        fn buffer_only_params() -> StartSessionParams {
+            let mut params = base_params(false, false);
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
+            assert!(params.replay_only());
+            params.output.record_enabled = true;
+            params
+        }
+
+        fn count(args: &[String], value: &str) -> usize {
+            args.iter().filter(|arg| *arg == value).count()
+        }
+
+        fn all_values<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {
+            args.windows(2)
+                .filter_map(|pair| (pair[0] == name).then_some(pair[1].as_str()))
+                .collect()
+        }
+
+        fn position(args: &[String], value: &str) -> usize {
+            args.iter()
+                .position(|arg| arg == value)
+                .unwrap_or_else(|| panic!("{value} is in the args: {args:?}"))
+        }
+
+        /// The ring tail every builder must end its replay output with.
+        fn assert_ring_output(args: &[String]) {
+            let segment = position(args, "segment");
+            assert_eq!(args[segment - 1], "-f");
+            // The ring ends with its file pattern; a preview or stream output
+            // may follow it on the legacy and split builders.
+            // The ring builds its paths with `join`, so Windows reads backslashes.
+            let ring_dir = ring().dir;
+            let pattern_arg = ring_dir.join("seg-%06d.ts").display().to_string();
+            let list_arg = ring_dir.join("segments.csv").display().to_string();
+            let pattern = position(args, &pattern_arg);
+            assert!(pattern > segment, "{args:?}");
+            let tail = &args[segment..=pattern];
+            assert_eq!(arg_value(tail, "-segment_format"), Some("mpegts"));
+            assert_eq!(arg_value(tail, "-segment_time"), Some("2"));
+            assert_eq!(arg_value(tail, "-segment_list"), Some(list_arg.as_str()));
+            assert_eq!(arg_value(tail, "-segment_list_type"), Some("csv"));
+            assert_eq!(arg_value(tail, "-segment_list_size"), Some("17"));
+            assert_eq!(arg_value(tail, "-segment_list_flags"), Some("+live"));
+            // The ring's audio is AAC 192k with the session's mix.
+            let ring_start = args[..segment]
+                .iter()
+                .rposition(|arg| arg == "-map")
+                .unwrap();
+            let ring = &args[ring_start..segment];
+            assert!(
+                ring.contains(&"aac".to_string()),
+                "ring audio is AAC: {ring:?}"
+            );
+            assert_eq!(arg_value(ring, "-b:a"), Some("192k"));
+            assert_eq!(arg_value(ring, "-ar"), Some("48000"));
+            assert!(ring.contains(&"-shortest".to_string()));
+        }
+
+        #[test]
+        fn buffer_only_bridge_copy_is_the_only_output() {
+            let params = buffer_only_params();
+            let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &[],
+                Path::new("/tmp/videorc-ring-bridge.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            assert_eq!(all_values(&args, "-c:v"), vec!["copy"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac"]);
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == "pcm_s16le" || arg.ends_with(".mkv"))
+            );
+            assert_eq!(
+                count(&args, "-map"),
+                2,
+                "one video map, one audio map: {args:?}"
+            );
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn buffer_only_without_a_ring_is_still_refused() {
+            let mut params = buffer_only_params();
+            params.replay = None;
+            let error = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &[],
+                Path::new("/tmp/videorc-ring-bridge.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                &encoder(),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("At least one output target is required")
+            );
+        }
+
+        #[test]
+        fn record_only_bridge_keeps_its_audio_and_adds_the_ring() {
+            let mut params = base_params(true, false);
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
+            let args = bridge_recording_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-record.mkv")),
+                Path::new("/tmp/videorc-ring-bridge.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            // The file output is untouched: its own AAC, then the MKV path.
+            assert_eq!(all_values(&args, "-c:v"), vec!["copy", "copy"]);
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
+            let mkv = position(&args, "/tmp/videorc-replay-record.mkv");
+            assert!(
+                position(&args, "segment") > mkv,
+                "the ring comes after the file"
+            );
+            assert_ring_output(&args);
+            // Without a ring the args are byte-for-byte the pre-181 shape.
+            let without = bridge_recording_ffmpeg_args_with_encoder(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-record.mkv")),
+                Path::new("/tmp/videorc-ring-bridge.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                &encoder(),
+            )
+            .unwrap();
+            assert_eq!(&args[..mkv + 1], &without[..]);
+        }
+
+        #[test]
+        fn raw_bridge_buffer_only_maps_the_graph_into_the_ring() {
+            let params = buffer_only_params();
+            let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &[],
+                Path::new("/tmp/videorc-ring-raw.yuv"),
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(
+                filter.ends_with("[v_main]"),
+                "no split without a primary output: {filter}"
+            );
+            assert_eq!(
+                all_values(&args, "-map")
+                    .iter()
+                    .filter(|map| **map == "[v_main]")
+                    .count(),
+                1
+            );
+            assert_eq!(all_values(&args, "-c:v").len(), 1, "one encode: {args:?}");
+            assert_ne!(arg_value(&args, "-c:v"), Some("copy"));
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn raw_bridge_ride_along_splits_the_graph_and_encodes_twice() {
+            let mut params = base_params(true, false);
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
+            let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-raw.mkv")),
+                &[],
+                Path::new("/tmp/videorc-ring-raw.yuv"),
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(
+                filter.ends_with(";[v_replay_src]split=2[v_main][v_replay]"),
+                "{filter}"
+            );
+            let maps = all_values(&args, "-map");
+            assert!(
+                maps.contains(&"[v_main]") && maps.contains(&"[v_replay]"),
+                "{maps:?}"
+            );
+            assert_eq!(all_values(&args, "-c:v").len(), 2, "two encodes: {args:?}");
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn split_output_bridge_copies_the_recording_leg_into_the_ring() {
+            let mut params = base_params(true, true);
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
+            params.output.video = VideoSettings {
+                preset: VideoPreset::Record4k30,
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 30_000,
+            };
+            let mut streaming =
+                streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw")]);
+            streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+            streaming.default_bitrate_kbps = 6_000;
+            params.streaming = Some(streaming.clone());
+            let targets = stream_targets_from_streaming(&streaming).unwrap();
+            let stream_output = recording_compositor_stream_output(
+                &params,
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            )
+            .unwrap()
+            .expect("1080p companion stream output");
+            let args = bridge_compositor_split_output_ffmpeg_args_with_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-split.mkv")),
+                &targets,
+                Path::new("/tmp/videorc-ring-rec.h264"),
+                Path::new("/tmp/videorc-ring-stream.h264"),
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+                stream_output,
+                Some(&ring()),
+            )
+            .unwrap();
+            let recording_input = all_values(&args, "-i")
+                .iter()
+                .position(|input| *input == "/tmp/videorc-ring-rec.h264")
+                .unwrap();
+            let video_maps = all_values(&args, "-map")
+                .into_iter()
+                .filter(|map| map.ends_with(":v"))
+                .collect::<Vec<_>>();
+            // File, ring and the stream leg all map a video input; the ring
+            // maps the RECORDING leg, never the stream encode.
+            assert!(video_maps.len() >= 3, "{video_maps:?}");
+            let segment = position(&args, "segment");
+            let ring_video = args[..segment]
+                .windows(2)
+                .filter(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
+                .last()
+                .unwrap()[1]
+                .clone();
+            assert_eq!(ring_video, format!("{recording_input}:v"));
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn legacy_buffer_only_and_ride_along() {
+            let params = buffer_only_params();
+            let args = ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &[],
+                None,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(!filter.contains("[v_replay]"), "{filter}");
+            assert_eq!(
+                all_values(&args, "-c:v").len(),
+                2,
+                "the ring encode and the preview mjpeg: {args:?}"
+            );
+            assert_eq!(
+                all_values(&args, "-map")
+                    .iter()
+                    .filter(|map| **map == "[v_main]")
+                    .count(),
+                1
+            );
+            assert!(position(&args, "segment") < position(&args, "[preview]"));
+            assert_ring_output(&args);
+
+            let mut params = base_params(true, false);
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
+            let args = ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-legacy.mkv")),
+                &[],
+                None,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(filter.contains("split=2[v_main][v_replay]"), "{filter}");
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
+            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn validate_outputs_accepts_a_buffer_only_request() {
+            let mut params = base_params(false, false);
+            assert!(validate_outputs(&params).is_err());
+            params.replay = Some(ReplayParams {
+                seconds: 30,
+                auto: false,
+            });
+            validate_outputs(&params).unwrap();
+            assert!(params.replay_only());
+            params.output.record_enabled = true;
+            assert!(
+                !params.replay_only(),
+                "a recording with a ring is not buffer-only"
+            );
+        }
+    }
+
     fn arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         args.windows(2)
             .find_map(|pair| (pair[0] == name).then_some(pair[1].as_str()))
@@ -29227,7 +36648,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "[preview]"));
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_current_h264_encoder_args(&args, false);
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
 
         let filter = arg_value(&args, "-filter_complex").unwrap();
@@ -29338,7 +36759,7 @@ mod tests {
             "-video_size"
         ));
         assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
@@ -29409,7 +36830,7 @@ mod tests {
             "-pix_fmt"
         ));
         assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-map" && pair[1] == "1:v")
@@ -29482,6 +36903,143 @@ mod tests {
             Some(
                 "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
             )
+        );
+    }
+
+    /// `(mapped video, declared -r)` for every output that declares a rate.
+    fn declared_rates_by_video_map(args: &[String]) -> Vec<(&str, &str)> {
+        let mut video_map = None;
+        let mut rates = Vec::new();
+        for pair in args.windows(2) {
+            match pair[0].as_str() {
+                "-map" if pair[1].ends_with(":v") || pair[1].ends_with(":v:0") => {
+                    video_map = Some(pair[1].as_str());
+                }
+                "-r" => rates.push((video_map.expect("-r follows a video map"), pair[1].as_str())),
+                _ => {}
+            }
+        }
+        rates
+    }
+
+    /// Minimal MPEG-TS probing cannot estimate a rate, so FFmpeg's guess is
+    /// H.264's field-rate tbr (2x the SPS rate) and a stream copy wrote it as
+    /// the Matroska DefaultDuration: every 30fps D3D11 take read back as 60p
+    /// and 60fps as 120p. Each Media Foundation copy output must declare the
+    /// encoder rate of the FIFO it maps instead.
+    #[test]
+    fn media_foundation_copy_outputs_declare_the_encoder_rate_not_the_probe_guess() {
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let fifo_path = Path::new("/tmp/videorc-bridge-input.ts");
+        for fps in [30, 60] {
+            let mut params = base_params(true, false);
+            params.output.video.fps = fps;
+            let fps_arg = fps.to_string();
+            let args = bridge_recording_ffmpeg_args(
+                &capture,
+                &params,
+                Some(Path::new("/tmp/videorc-bridge-rate.mkv")),
+                fifo_path,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            )
+            .unwrap();
+            // The test tone opens before the video FIFO, so the video is input 1.
+            assert_eq!(
+                declared_rates_by_video_map(&args),
+                vec![("1:v", fps_arg.as_str())],
+                "record-only {fps}fps: {args:?}"
+            );
+            assert_eq!(
+                input_arg_value(&args, &fifo_path.display().to_string(), "-r"),
+                None,
+                "an input -r would replace the encoder PTS with a synthetic CFR clock"
+            );
+
+            let video_toolbox_args = bridge_recording_ffmpeg_args(
+                &capture,
+                &params,
+                Some(Path::new("/tmp/videorc-bridge-rate.mkv")),
+                fifo_path,
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            )
+            .unwrap();
+            assert_eq!(arg_value(&video_toolbox_args, "-r"), None);
+        }
+
+        // Record + stream fan-out: the file and every FLV leg copy one FIFO.
+        let mut params = base_params(true, true);
+        params.output.video.fps = 60;
+        let streaming = streaming_for(&[
+            (
+                StreamPlatform::Youtube,
+                "rtmp://a.rtmp.youtube.com/live2",
+                "yt",
+            ),
+            (StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw"),
+        ]);
+        params.streaming = Some(streaming.clone());
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+            &capture,
+            &params,
+            Some(Path::new("/tmp/videorc-bridge-rate-fanout.mkv")),
+            &targets,
+            fifo_path,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            &ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::WindowsHardware),
+            Some(&ReplayOutput {
+                dir: PathBuf::from("/tmp/videorc-ring"),
+                seconds: 30,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            declared_rates_by_video_map(&args),
+            vec![("1:v", "60"); 4],
+            "file, two FLV legs and the replay ring: {args:?}"
+        );
+
+        // Split output: the recording leg and the companion stream leg are
+        // separate FIFOs at their own rates.
+        let mut params = base_params(true, true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 12_000,
+        };
+        let mut streaming =
+            streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw")]);
+        streaming.default_output_preset = VideoPreset::StreamSafe1080p30;
+        streaming.default_bitrate_kbps = 6_000;
+        params.streaming = Some(streaming.clone());
+        let targets = stream_targets_from_streaming(&streaming).unwrap();
+        let stream_output = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+        )
+        .unwrap()
+        .expect("1080p30 companion stream output");
+        let args = bridge_compositor_split_output_ffmpeg_args(
+            &capture,
+            &params,
+            Some(Path::new("/tmp/videorc-bridge-rate-split.mkv")),
+            &targets,
+            Path::new("/tmp/videorc-bridge-rate-recording.ts"),
+            Path::new("/tmp/videorc-bridge-rate-stream.ts"),
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            stream_output,
+        )
+        .unwrap();
+        assert_eq!(
+            declared_rates_by_video_map(&args),
+            vec![("1:v", "60"), ("2:v", "30")],
+            "{args:?}"
         );
     }
 
@@ -29731,6 +37289,13 @@ mod tests {
                 "single RTMP target must be fifo-muxer wrapped: {args:?}"
             );
             assert_eq!(arg_value(&args, "-fifo_format"), Some("flv"));
+            // Plan 161: an ingest that closes the connection (EOF) reconnects
+            // on a keyframe instead of closing the leg for good.
+            assert_eq!(arg_value(&args, "-attempt_recovery"), Some("1"));
+            assert_eq!(arg_value(&args, "-recover_any_error"), Some("1"));
+            assert_eq!(arg_value(&args, "-restart_with_keyframe"), Some("1"));
+            assert_eq!(arg_value(&args, "-drop_pkts_on_overflow"), Some("1"));
+            assert_eq!(arg_value(&args, "-max_recovery_attempts"), None);
             assert_eq!(
                 input_arg_value(&args, &fifo_path.display().to_string(), "-f"),
                 Some("mpegts")
@@ -29932,8 +37497,12 @@ mod tests {
         {
             assert!(args.contains(&"tee".to_string()));
             let tee = args.iter().find(|arg| arg.contains("[f=matroska")).unwrap();
-            assert!(tee.contains("[f=matroska:onfail=abort]/tmp/videorc-bridge-record-stream.mkv"));
+            assert!(
+                tee.contains("[f=matroska:onfail=abort]/tmp/videorc-bridge-record-stream.mkv|")
+            );
             assert_eq!(tee.matches("[f=flv").count(), 2);
+            // Retest 154 B2: each Linux RTMP leg reconnects on its own.
+            assert_eq!(tee.matches("attempt_recovery=1").count(), 2, "{tee}");
         }
         assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
         assert!(args.iter().any(|arg| arg == "-shortest"));
@@ -29978,6 +37547,80 @@ mod tests {
             assert_eq!(
                 input_arg_value(&args, &fifo_path.display().to_string(), "-pix_fmt"),
                 Some("yuv420p")
+            );
+        }
+    }
+
+    #[test]
+    fn source_iso_nominal_rate_changes_only_the_local_copy_output_in_every_graph() {
+        let (mut params, _) = simulcast_split_params(true);
+        params.output.video.fps = 60;
+        let streaming = params.streaming.as_mut().unwrap();
+        streaming.targets[0].output_preset = Some(VideoPreset::StreamSafe1080p60);
+        let targets = stream_targets_from_streaming(streaming).unwrap();
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let output = Path::new("/tmp/nominal-rate.mkv");
+        let fifo = Path::new("/tmp/nominal-rate.ts");
+        let video = EncoderBridgeVideoOutput::VideoToolboxH264MpegTs;
+        let split = recording_compositor_stream_output(&params, video)
+            .unwrap()
+            .unwrap();
+        let graphs = [
+            bridge_compositor_ffmpeg_args(&capture, &params, Some(output), &[], fifo, video)
+                .unwrap(),
+            bridge_compositor_ffmpeg_args(&capture, &params, Some(output), &targets, fifo, video)
+                .unwrap(),
+            bridge_compositor_split_output_ffmpeg_args(
+                &capture,
+                &params,
+                Some(output),
+                &targets,
+                fifo,
+                Path::new("/tmp/nominal-stream.ts"),
+                video,
+                split,
+            )
+            .unwrap(),
+        ];
+        for original in graphs {
+            assert!(
+                !original.iter().any(|arg| arg == "-r:v"),
+                "ISO-off graph remains unchanged"
+            );
+            assert!(
+                !original.iter().any(|arg| arg == "tee"),
+                "native copy outputs have separate destination scopes"
+            );
+            let output_index = original
+                .iter()
+                .position(|arg| arg == &ffmpeg_file_path(output))
+                .unwrap();
+            let mut declared = original.clone();
+            crate::source_iso::configure_iso_local_muxer(&mut declared, output, 60).unwrap();
+            assert_eq!(
+                &declared[..output_index],
+                &original[..output_index],
+                "inputs, maps and codecs unchanged"
+            );
+            assert_eq!(
+                &declared[output_index..output_index + 6],
+                &[
+                    "-r:v",
+                    "60",
+                    "-flush_packets",
+                    "1",
+                    "-cluster_time_limit",
+                    "500"
+                ]
+            );
+            assert_eq!(
+                &declared[output_index + 6..],
+                &original[output_index..],
+                "all later stream outputs unchanged"
             );
         }
     }
@@ -30457,6 +38100,42 @@ mod tests {
     }
 
     #[test]
+    fn windows_d3d11_fallback_prepares_the_screen_the_preflight_skipped() {
+        // Field UHD 620 laptop: the preflight trusted D3D11 for the screen,
+        // D3D11 startup failed, and the legacy compositor had no screen frames.
+        let mut params = base_params(false, true);
+        params.sources.screen_id = Some("screen:dxgi:00000000000003f1:2".to_string());
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        let media_foundation = EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs;
+        assert!(windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            true,
+            media_foundation,
+        ));
+        // The preflight already waited for the screen preview here.
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Disabled,
+            true,
+            media_foundation,
+        ));
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            true,
+            EncoderBridgeVideoOutput::RawYuv420p,
+        ));
+        // The FFmpeg legacy path captures the screen itself.
+        assert!(!windows_d3d11_fallback_needs_screen_preview(
+            &params,
+            WindowsD3d11MediaMode::Automatic,
+            false,
+            media_foundation,
+        ));
+    }
+
+    #[test]
     fn windows_d3d11_fallback_diagnostics_name_the_legacy_path() {
         let diagnostics = windows_d3d11_fallback_diagnostics(
             WindowsD3d11MediaMode::Automatic,
@@ -30795,8 +38474,106 @@ mod tests {
         // forever and the stop path hangs until Force stop.
         let leg = rtmp_tee_leg("rtmp://live.twitch.tv/app/streamkey");
         assert!(leg.starts_with("[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout="));
-        assert!(leg.contains(":rw_timeout=8000000]"));
+        assert!(leg.contains(":rw_timeout=8000000:"));
         assert!(leg.ends_with("rtmp://live.twitch.tv/app/streamkey"));
+    }
+
+    /// One `av_get_token` pass: split on unescaped `delim`, dropping one
+    /// level of backslash escaping (what tee and its slave-option parser do).
+    fn av_tokens(input: &str, delim: char) -> Vec<String> {
+        let mut tokens = vec![String::new()];
+        let mut chars = input.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => tokens.last_mut().unwrap().extend(chars.next()),
+                c if c == delim => tokens.push(String::new()),
+                c => tokens.last_mut().unwrap().push(c),
+            }
+        }
+        tokens
+    }
+
+    #[test]
+    fn rtmp_tee_legs_reconnect_through_their_own_fifo() {
+        // Retest 154 B2: with only the tee-wide fifo options a dropped ingest
+        // closed the slave for good ("Streaming to X stopped · Broken pipe").
+        let leg = rtmp_tee_leg("rtmp://live.twitch.tv/app/streamkey");
+        assert_eq!(
+            leg,
+            "[f=flv:onfail=ignore:flvflags=no_duration_filesize:rw_timeout=8000000:\
+             fifo_options=queue_size=512\\\\\\:drop_pkts_on_overflow=1\\\\\\:attempt_recovery=1\\\\\\:\
+             recover_any_error=1\\\\\\:restart_with_keyframe=1\\\\\\:recovery_wait_time=2]\
+             rtmp://live.twitch.tv/app/streamkey"
+        );
+        // Tee splits slaves (one unescape), then parses the slave options
+        // (a second one): the fifo must receive the plan 161 recovery set
+        // intact, and the flv options must stay the leg's own.
+        let slave = av_tokens(&leg, '|');
+        assert_eq!(slave.len(), 1);
+        let (options, url) = slave[0]
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once(']'))
+            .unwrap();
+        assert_eq!(url, "rtmp://live.twitch.tv/app/streamkey");
+        let options = av_tokens(options, ':');
+        assert_eq!(
+            options,
+            [
+                "f=flv",
+                "onfail=ignore",
+                "flvflags=no_duration_filesize",
+                "rw_timeout=8000000",
+                "fifo_options=queue_size=512:drop_pkts_on_overflow=1:attempt_recovery=1:\
+                 recover_any_error=1:restart_with_keyframe=1:recovery_wait_time=2",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dropped_tee_leg_reconnects_and_resumes_on_its_own_target() {
+        // The bundled n8.1 FFmpeg's own lines for a record+stream tee whose
+        // ingest restarted (retest 154 B2): the tee's fifo legs name their URL
+        // on `Error opening`, so plan 161 attribution works unchanged.
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe(&format!(
+                "Output #0, tee, to '[f=matroska:onfail=abort]/tmp/a.mkv|[f=flv]{YOUTUBE_URL}|[f=flv]{TWITCH_URL}':"
+            )),
+            None
+        );
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0x7f4fe03c8680] Error opening {TWITCH_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 1,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0x7f4fe03b72c0] Error opening {YOUTUBE_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03b72c0] Recovery failed: Connection refused"),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03b72c0] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 0 })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0x7f4fe03c8680] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 1 })
+        );
     }
 
     #[test]
@@ -30886,6 +38663,7 @@ mod tests {
                     layout: crate::protocol::default_layout_settings(),
                     output: OutputSettings {
                         keep_original_mkv: false,
+                        separate_source_recordings: None,
                         record_enabled: true,
                         stream_enabled: false,
                         output_directory: None,
@@ -31053,6 +38831,275 @@ mod tests {
         assert!(camera_cadence_mismatch_warning(None, 30).is_none());
         assert!(camera_cadence_mismatch_warning(Some(0.0), 30).is_none());
         assert!(camera_cadence_mismatch_warning(Some(f64::NAN), 30).is_none());
+    }
+
+    #[tokio::test]
+    async fn source_iso_failed_start_cleanup_waits_only_admitted_native_transitions() {
+        for replacement_take in [false, true] {
+            let state = test_state();
+            let native_start = state.source_transition_fence.begin();
+            let stores = crate::compositor::test_install_source_iso_frame_stores(&state).await;
+            let (cleanup_done, cleanup_complete) = tokio::sync::oneshot::channel();
+            let guard = SourceIsoCaptureStartupGuard {
+                state: Some(state.clone()),
+                batches: Some(stores.batches.clone()),
+                cleanup_done: Some(cleanup_done),
+            };
+            drop(guard);
+            assert!(
+                stores
+                    .batches
+                    .membership()
+                    .active
+                    .iter()
+                    .all(|active| !active)
+            );
+            // A later source transition cannot extend the captured cleanup wait.
+            let newer_transition = state.source_transition_fence.begin();
+            let mut params = base_params(true, false);
+            params.output.video.width = 64;
+            params.output.video.height = 36;
+            params.sources.camera_id = Some("camera:iso-runtime".into());
+            params.sources.screen_id = Some("screen:screencapturekit:4294967294".into());
+            params.layout.layout_preset = LayoutPreset::ScreenOnly;
+            let scene = scene_from_capture_config(SceneConfigParams {
+                sources: params.sources.clone(),
+                layout: params.layout.clone(),
+                video: Some(params.output.video.clone()),
+                background: None,
+                protected_overlay_window_ids: vec![],
+                transition_ms: None,
+            });
+            crate::compositor::update_compositor_scene_with_selected_sources(
+                &state,
+                CompositorSceneUpdateParams {
+                    revision: 1,
+                    scene: Some(scene),
+                    layout: params.layout.clone(),
+                    active_screen: None,
+                    transition_ms: None,
+                },
+                &params.sources,
+            )
+            .await;
+            let newer_stores = if replacement_take {
+                Some(crate::compositor::test_install_source_iso_frame_stores(&state).await)
+            } else {
+                None
+            };
+            // Late publication from the already-admitted start must be seen by
+            // rollback. The cleanup task cannot run past its fence before this.
+            crate::preview_camera::test_install_live_camera_for_layout(
+                &state,
+                "camera:iso-runtime",
+                &params.layout,
+                &params.output.video,
+            )
+            .await;
+            let camera = crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .unwrap();
+            drop(native_start);
+            let cleaned = tokio::time::timeout(Duration::from_secs(2), cleanup_complete).await;
+            drop(newer_transition);
+            cleaned
+                .expect("cleanup waits only the captured native transition")
+                .expect("cleanup completed");
+            if replacement_take {
+                assert_eq!(
+                    crate::preview_camera::preview_camera_frame_source(&state)
+                        .await
+                        .unwrap()
+                        .generation(),
+                    camera.generation(),
+                    "new take owns the live source"
+                );
+            } else {
+                assert!(
+                    crate::preview_camera::preview_camera_frame_source(&state)
+                        .await
+                        .is_none(),
+                    "late hidden native completion is retired"
+                );
+            }
+            if let Some(stores) = newer_stores {
+                for role in 0..3 {
+                    stores.batches.retire(role, None);
+                }
+            }
+            crate::preview_camera::stop_preview_camera(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn source_iso_startup_reacquires_idle_hidden_source_and_reuses_visible_generation() {
+        for hidden_camera in [false, true] {
+            let state = test_state();
+            let mut params = base_params(true, false);
+            params.output.video.width = 64;
+            params.output.video.height = 36;
+            params.sources.camera_id = Some("camera:iso-runtime".into());
+            params.sources.screen_id = Some("screen:screencapturekit:4294967294".into());
+            params.layout.layout_preset = if hidden_camera {
+                LayoutPreset::ScreenOnly
+            } else {
+                LayoutPreset::CameraOnly
+            };
+            crate::preview_camera::test_install_live_camera_for_layout(
+                &state,
+                "camera:iso-runtime",
+                &params.layout,
+                &params.output.video,
+            )
+            .await;
+            crate::preview_screen::test_install_live_screen_generation(
+                &state,
+                params.sources.screen_id.as_deref().unwrap(),
+                1,
+                1,
+                &params.output.video,
+            )
+            .await;
+            let camera_generation = crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .unwrap()
+                .generation();
+            let screen_generation = crate::preview_screen::preview_screen_frame_source(&state)
+                .await
+                .unwrap()
+                .generation();
+            if hidden_camera {
+                crate::preview_camera::stop_preview_camera(&state).await;
+            } else {
+                crate::preview_screen::stop_preview_screen(&state).await;
+            }
+            let prepared = prepare_source_iso_selected_capture(&state, &params, "ffmpeg").await;
+            let camera = crate::preview_camera::preview_camera_frame_source(&state).await;
+            let screen = crate::preview_screen::preview_screen_frame_source(&state).await;
+            crate::preview_camera::stop_preview_camera(&state).await;
+            crate::preview_screen::stop_preview_screen(&state).await;
+            prepared.unwrap();
+            let camera = camera.expect("selected Camera reacquired");
+            let screen = screen.expect("selected Screen reacquired");
+            assert_eq!(camera.generation() == camera_generation, !hidden_camera);
+            assert_eq!(screen.generation() == screen_generation, hidden_camera);
+            let scene = scene_from_capture_config(SceneConfigParams {
+                sources: params.sources.clone(),
+                layout: params.layout.clone(),
+                video: Some(params.output.video.clone()),
+                background: None,
+                protected_overlay_window_ids: vec![],
+                transition_ms: None,
+            });
+            let visible = recording_startup_source_requirements(&scene);
+            assert_eq!(
+                source_iso_startup_capture_requirements(visible, None),
+                visible,
+                "ISO-off retains visible source requirements"
+            );
+            let iso = source_iso_startup_capture_requirements(visible, Some(&params.sources));
+            assert!(iso.require_camera_source && iso.require_screen_source);
+            assert_ne!(
+                visible, iso,
+                "omitted source readiness belongs to ISO barrier, not Combined scene proof"
+            );
+        }
+    }
+
+    /// Plan 212 S2: a benchmark session's startup scene never reaches
+    /// `state.scene` (what `scene.get` answers) nor the compositor's scene;
+    /// it is refused outright when the run is not the benchmark's, and
+    /// committed beside the user's scene when it is, at the revision the
+    /// startup barrier then waits for.
+    #[tokio::test]
+    async fn a_benchmark_startup_scene_never_replaces_the_users_scene() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let user_scene = state.scene.lock().await.clone();
+        let params = benchmark_like_params();
+        let scene = scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: params.sources.clone(),
+            layout: params.layout.clone(),
+            video: Some(params.output.video.clone()),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        assert!(
+            commit_benchmark_startup_scene_at_time(
+                &state,
+                &scene,
+                params.layout.clone(),
+                1_000,
+                &params.sources,
+            )
+            .await
+            .is_none(),
+            "no run, or a run that is not the benchmark's: refused"
+        );
+        crate::compositor::start_synthetic_compositor(
+            state.clone(),
+            crate::compositor::CompositorStartParams {
+                benchmark: true,
+                target_fps: 30,
+                width: 64,
+                height: 36,
+                frame_consumer: crate::compositor::CompositorFrameConsumer::RawYuvEncoder,
+                stream_output: None,
+                source_iso_output: None,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
+            },
+        )
+        .await;
+        let lease = commit_benchmark_startup_scene_at_time(
+            &state,
+            &scene,
+            params.layout.clone(),
+            1_000,
+            &params.sources,
+        )
+        .await
+        .expect("a benchmark run takes the benchmark scene");
+        assert_eq!(
+            crate::compositor::compositor_benchmark_scene_revision(&state).await,
+            Some(lease.scene_revision)
+        );
+        assert_eq!(
+            *state.scene.lock().await,
+            user_scene,
+            "scene.get keeps the user's scene"
+        );
+        let status = crate::compositor::compositor_status(&state).await;
+        assert_ne!(status.scene_revision, Some(lease.scene_revision));
+        assert!(status.scene_sources.is_empty());
+        drop(lease);
+        crate::compositor::stop_compositor(&state).await;
+    }
+
+    fn benchmark_like_params() -> StartSessionParams {
+        let mut params = base_params(true, false);
+        params.sources = SourceSelection {
+            screen_id: None,
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: true,
+        };
+        params.purpose = crate::protocol::SessionPurpose::PerformanceCheck;
+        params
     }
 
     #[test]
@@ -31432,6 +39479,7 @@ mod tests {
                 state.clone(),
                 session_id,
                 None,
+                false,
                 &RecordingPipeline::new(true, false, &[]),
                 state
                     .capture_interruption
@@ -31621,6 +39669,222 @@ mod tests {
         );
     }
 
+    fn session_start_failed_logs(database: &Database, session_id: &str) -> Vec<String> {
+        database
+            .list_session_logs_page(session_id, None, 120)
+            .unwrap()
+            .entries
+            .into_iter()
+            .filter(|entry| entry.code == SESSION_START_FAILED_CODE)
+            .map(|entry| entry.message)
+            .collect()
+    }
+
+    #[test]
+    fn refused_start_logs_the_error_session_start_returned() {
+        let database = Database::open_in_memory_for_tests();
+        let session_id = "refused-start";
+        database.ensure_fake_live_chat_session(session_id).unwrap();
+        let failure_log = SessionStartFailureLog::new(database.clone());
+        drop(SessionStartRowGuard::reporting_to(
+            database.clone(),
+            session_id,
+            failure_log.pending(),
+        ));
+        assert_eq!(
+            database
+                .session_finalization_snapshot(session_id)
+                .unwrap()
+                .status,
+            "failed",
+            "the row turns failed when the guard fires, before the report"
+        );
+        assert!(session_start_failed_logs(&database, session_id).is_empty());
+
+        let error = anyhow::anyhow!(
+            "Cannot start: the screen preview source(s) produced no frames via rtmp://private.example/live/secret-key"
+        )
+        .context("session.start");
+        let reason = failure_log.report(&error).expect("the guard fired");
+
+        assert!(reason.contains("produced no frames"), "{reason}");
+        assert!(!reason.contains("private.example"), "{reason}");
+        assert_eq!(
+            session_start_failed_logs(&database, session_id),
+            vec![session_start_failed_message(Some(&reason))]
+        );
+    }
+
+    #[test]
+    fn start_dropped_before_it_returned_keeps_the_bare_failure_line() {
+        let database = Database::open_in_memory_for_tests();
+        let session_id = "dropped-start";
+        database.ensure_fake_live_chat_session(session_id).unwrap();
+        let failure_log = SessionStartFailureLog::new(database.clone());
+        drop(SessionStartRowGuard::reporting_to(
+            database.clone(),
+            session_id,
+            failure_log.pending(),
+        ));
+        drop(failure_log);
+
+        assert_eq!(
+            session_start_failed_logs(&database, session_id),
+            vec![session_start_failed_message(None)]
+        );
+    }
+
+    #[test]
+    fn disarmed_start_guard_leaves_nothing_to_report() {
+        let database = Database::open_in_memory_for_tests();
+        let session_id = "committed-start";
+        database.ensure_fake_live_chat_session(session_id).unwrap();
+        let failure_log = SessionStartFailureLog::new(database.clone());
+        let mut guard =
+            SessionStartRowGuard::reporting_to(database.clone(), session_id, failure_log.pending());
+        guard.disarm();
+        drop(guard);
+
+        // A later failure (the published terminal path) logs its own stage.
+        assert!(
+            failure_log
+                .report(&anyhow::anyhow!("muxer failed"))
+                .is_none()
+        );
+        assert!(session_start_failed_logs(&database, session_id).is_empty());
+    }
+
+    #[test]
+    fn the_ring_prewarm_uses_the_remembered_profile_else_the_default_1080p30() {
+        let default = replay_ring_prewarm_video(None);
+        assert_eq!(
+            (
+                default.width,
+                default.height,
+                default.fps,
+                default.bitrate_kbps
+            ),
+            (1920, 1080, 30, 6000),
+            "the renderer's default profile (tutorial-1080p30)"
+        );
+        let mut remembered = base_params(true, false);
+        remembered.output.video = video_preset_defaults(VideoPreset::Tutorial1440p30);
+        assert_eq!(
+            replay_ring_prewarm_video(Some(&remembered)),
+            remembered.output.video
+        );
+    }
+
+    #[test]
+    fn a_record_only_session_probes_the_one_shared_profile() {
+        // The startup prewarm builds this plan from the profile alone; it must
+        // be the plan a record-only start builds from the full request.
+        let params = base_params(true, false);
+        assert_eq!(
+            encoder_output_topology_plan_from_session(&params).unwrap(),
+            EncoderOutputTopologyPlan::shared(params.output.video.clone())
+        );
+    }
+
+    #[test]
+    fn only_an_automatic_bridge_ring_waits_for_a_visible_cameras_first_frame() {
+        let mut params = base_params(true, false);
+        let camera_scene = requested_session_scene(&params);
+        assert!(automatic_ring_waits_for_camera(
+            true,
+            false,
+            &camera_scene,
+            false
+        ));
+        assert!(
+            !automatic_ring_waits_for_camera(true, false, &camera_scene, true),
+            "a camera with a frame starts the ring"
+        );
+        assert!(
+            !automatic_ring_waits_for_camera(false, false, &camera_scene, false),
+            "Record and a ring the user turned on keep the bridge's own source wait"
+        );
+        assert!(
+            !automatic_ring_waits_for_camera(true, true, &camera_scene, false),
+            "the legacy path captures the camera itself"
+        );
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        assert!(
+            !automatic_ring_waits_for_camera(true, false, &requested_session_scene(&params), false),
+            "a scene without a visible camera never waits for one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_automatic_ring_without_camera_frames_is_refused_before_admission() {
+        let state = test_state();
+        let mut params = base_params(true, false);
+        params.output.record_enabled = false;
+        params.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: true,
+        });
+        let error = start_session(state.clone(), params)
+            .await
+            .expect_err("the camera has no frame");
+        assert!(
+            error
+                .downcast_ref::<crate::replay_buffer::AutoStartSourcesNotReady>()
+                .is_some(),
+            "typed so the renderer waits instead of counting a failed start: {error:#}"
+        );
+        assert!(state.recording.lock().await.is_none());
+        assert!(
+            state
+                .database
+                .list_session_items_page(None, 20)
+                .unwrap()
+                .items
+                .is_empty(),
+            "no Library row for a start that never ran"
+        );
+    }
+
+    #[test]
+    fn only_an_automatic_buffer_only_start_meets_the_replay_guard() {
+        let mut params = base_params(true, false);
+        assert!(!replay_auto_start_requested(false, &params));
+        params.replay = Some(crate::protocol::ReplayParams {
+            seconds: 30,
+            auto: true,
+        });
+        assert!(replay_auto_start_requested(true, &params));
+        assert!(
+            !replay_auto_start_requested(false, &params),
+            "Record carrying its own ring is not an automatic start"
+        );
+        params.replay.as_mut().unwrap().auto = false;
+        assert!(
+            !replay_auto_start_requested(true, &params),
+            "a ring the user turned on runs anywhere"
+        );
+    }
+
+    #[test]
+    fn early_replay_guard_asks_for_the_raw_path_when_the_request_rules_the_bridge_out() {
+        let record_30 = base_params(true, false);
+        assert!(!compositor_encoder_bridge_ruled_out(&record_30));
+        assert_eq!(
+            requested_session_video_output(&record_30, true),
+            recording_encoder_bridge_video_output(true, false)
+        );
+
+        let no_output = base_params(false, false);
+        assert!(compositor_encoder_bridge_ruled_out(&no_output));
+        assert_eq!(
+            requested_session_video_output(
+                &no_output,
+                !compositor_encoder_bridge_ruled_out(&no_output)
+            ),
+            EncoderBridgeVideoOutput::RawYuv420p
+        );
+    }
+
     #[tokio::test]
     async fn published_cancelled_start_drains_evidence_before_persist_and_replacement() {
         let directory =
@@ -31639,6 +39903,7 @@ mod tests {
             state.clone(),
             session_id,
             None,
+            false,
             &RecordingPipeline::new(true, true, &[]),
             state
                 .capture_interruption
@@ -31807,15 +40072,133 @@ mod tests {
 
         let (ready_sender, ready) = oneshot::channel();
         ready_sender.send(Ok(())).unwrap();
-        wait_for_ffmpeg_output_startup(ready, expired_start)
+        wait_for_ffmpeg_output_startup(ready, expired_start, FFMPEG_OUTPUT_STARTUP_TIMEOUT)
             .await
             .unwrap();
 
         let (_pending_sender, pending) = oneshot::channel();
-        let error = wait_for_ffmpeg_output_startup(pending, expired_start)
+        let error =
+            wait_for_ffmpeg_output_startup(pending, expired_start, FFMPEG_OUTPUT_STARTUP_TIMEOUT)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "within {}ms of process spawn",
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_millis()
+        )));
+
+        // Plan 195 S3: the error prints the deadline the graph actually got.
+        let dshow_deadline = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
+            device_name: "Digital Microphone".to_string(),
+        }));
+        let expired_start = Instant::now()
+            .checked_sub(dshow_deadline + Duration::from_millis(1))
+            .unwrap();
+        let (_pending_sender, pending) = oneshot::channel();
+        let error = wait_for_ffmpeg_output_startup(pending, expired_start, dshow_deadline)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("within 8000ms of process spawn"));
+        assert!(
+            error.to_string().contains(&format!(
+                "within {}ms of process spawn",
+                dshow_deadline.as_millis()
+            )),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn only_platform_encoder_consumers_arm_the_preview_compositor_in_place() {
+        assert_eq!(
+            compositor_consumer_arms_in_place(CompositorFrameConsumer::VideoToolboxEncoder),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(
+            compositor_consumer_arms_in_place(CompositorFrameConsumer::RawYuvEncoder),
+            cfg!(target_os = "linux")
+        );
+        assert!(!compositor_consumer_arms_in_place(
+            CompositorFrameConsumer::MediaFoundationEncoder
+        ));
+        assert!(!compositor_consumer_arms_in_place(
+            CompositorFrameConsumer::NativePreview
+        ));
+    }
+
+    #[test]
+    fn ffmpeg_output_progress_proof_is_a_watchdog_where_the_bridge_already_fed_a_frame() {
+        // VideoToolbox (P4a) and the Linux raw-YUV bridge publish `Recording`
+        // once the first frame is in FFmpeg; Windows keeps the synchronous
+        // proof for its software first frame (retest 151).
+        assert!(defers_ffmpeg_output_startup_proof(
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        ));
+        assert!(defers_ffmpeg_output_startup_proof(
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        ));
+        assert!(!defers_ffmpeg_output_startup_proof(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        ));
+        assert_eq!(
+            defers_ffmpeg_output_startup_proof(EncoderBridgeVideoOutput::RawYuv420p),
+            cfg!(target_os = "linux")
+        );
+    }
+
+    #[test]
+    fn ffmpeg_output_startup_deadline_follows_the_input_topology() {
+        // Plan 195 S3 + #769: FIFO-only graphs keep the platform base
+        // (8 s macOS/Linux, 20 s Windows). A direct live device input gets
+        // the DirectShow readiness budget on top of the 8 s FIFO deadline;
+        // Windows' 20 s window already covers that 18 s need.
+        let base = FFMPEG_OUTPUT_STARTUP_TIMEOUT;
+        #[cfg(target_os = "windows")]
+        assert_eq!(base, Duration::from_secs(20));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(base, Duration::from_secs(8));
+        assert_eq!(ffmpeg_output_startup_deadline(None), base);
+        assert_eq!(
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::SessionPcm {
+                fifo_path: PathBuf::from("/tmp/mic.fifo"),
+            })),
+            base
+        );
+        assert_eq!(
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::CoreAudio {
+                device_id: 42,
+                fifo_path: None,
+            })),
+            base
+        );
+        assert_eq!(
+            ffmpeg_output_startup_deadline(Some(&MicrophoneInput::AvFoundationUid {
+                uid_hex: "6465736b".to_string(),
+            })),
+            base
+        );
+        let live_device = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::WindowsDshow {
+            device_name: "Digital Microphone".to_string(),
+        }));
+        let pulse = ffmpeg_output_startup_deadline(Some(&MicrophoneInput::LinuxPulse {
+            source_name: "alsa_input.pci-0000_02_00.3.HiFi__Mic__source".to_string(),
+        }));
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(live_device, Duration::from_secs(18));
+            assert_eq!(pulse, Duration::from_secs(18));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(live_device, Duration::from_secs(20));
+            assert_eq!(pulse, Duration::from_secs(20));
+        }
+        assert!(
+            live_device < Duration::from_secs(30),
+            "stays under the renderer's RPC deadline"
+        );
+        assert!(
+            pulse < Duration::from_secs(30),
+            "stays under the renderer's RPC deadline"
+        );
     }
 
     #[test]
@@ -31920,6 +40303,7 @@ mod tests {
                 state.clone(),
                 "guarded-start",
                 Some(PathBuf::from("/tmp/guarded-start.mkv")),
+                false,
                 &pipeline,
                 session_start_admission,
             );
@@ -31959,6 +40343,7 @@ mod tests {
                 state,
                 "running-start",
                 None,
+                false,
                 &pipeline,
                 session_start_admission,
             );
@@ -32700,6 +41085,7 @@ mod tests {
             session_id: "live-audio-lock-test".to_string(),
             pid: child.id().unwrap_or_default(),
             stdin: None,
+            replay_only: false,
             output_path: None,
             stream_url: None,
             ffmpeg_path: "test-ffmpeg".to_string(),
@@ -32719,6 +41105,7 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            source_iso: None,
             #[cfg(target_os = "windows")]
             windows_d3d11_monitor: None,
             #[cfg(target_os = "windows")]
@@ -32738,10 +41125,13 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            overlay_session_shape: None,
+            accepts_banners: true,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,
             compositor_capture_lease: None,
+            restarted_compositor_run_id: None,
             ffmpeg_progress: FfmpegProgressBeacon::default(),
         });
 
@@ -32868,14 +41258,80 @@ mod tests {
     #[test]
     fn default_recordings_dir_uses_videorc_media_folder() {
         let path = default_recordings_dir();
-        let media_component = if cfg!(target_os = "windows") {
-            "Videos"
-        } else {
-            "Movies"
-        };
-
-        assert!(path.iter().any(|c| c == media_component));
+        if cfg!(target_os = "windows") {
+            assert!(path.iter().any(|c| c == "Videos"));
+        } else if cfg!(target_os = "macos") {
+            assert!(path.iter().any(|c| c == "Movies"));
+        }
         assert!(path.ends_with(PathBuf::from("Videorc").join("Recordings")));
+    }
+
+    #[test]
+    fn screen_preview_failure_detail_ends_with_one_full_stop() {
+        assert_eq!(
+            screen_preview_failure_detail(Some(
+                "Timed out after 59s while starting screen capture."
+            )),
+            " Screen preview reported: Timed out after 59s while starting screen capture."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(Some("Portal closed")),
+            " Screen preview reported: Portal closed."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(Some(" . ")),
+            " Screen preview reported: failed without a message."
+        );
+        assert_eq!(
+            screen_preview_failure_detail(None),
+            " Screen preview reported: failed without a message."
+        );
+    }
+
+    // POSIX paths only: on Windows "/home/streamer" is not absolute and joins
+    // with `\`, so the XDG rules cannot be expressed there (they never run
+    // there either).
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_recordings_go_to_the_xdg_videos_folder_unless_movies_already_has_takes() {
+        let home = Path::new("/home/streamer");
+        let recordings = |dir: &str| PathBuf::from(dir).join("Videorc").join("Recordings");
+        // Nothing configured: ~/Videos, never a macOS ~/Movies.
+        assert_eq!(
+            linux_default_recordings_dir(home, None, None, false),
+            recordings("/home/streamer/Videos")
+        );
+        // user-dirs.dirs, with $HOME and a localized name.
+        let user_dirs = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_VIDEOS_DIR=\"$HOME/Vidéos\"\n";
+        assert_eq!(
+            linux_default_recordings_dir(home, None, Some(user_dirs), false),
+            recordings("/home/streamer/Vidéos")
+        );
+        // The environment wins over the file.
+        assert_eq!(
+            linux_default_recordings_dir(
+                home,
+                Some(PathBuf::from("/data/clips")),
+                Some(user_dirs),
+                false
+            ),
+            recordings("/data/clips")
+        );
+        // A videos folder set to home (disabled) or relative falls back.
+        assert_eq!(
+            linux_default_recordings_dir(
+                home,
+                Some(PathBuf::from("clips")),
+                Some("XDG_VIDEOS_DIR=\"$HOME/\""),
+                false
+            ),
+            recordings("/home/streamer/Videos")
+        );
+        // Earlier takes in ~/Movies/Videorc/Recordings keep that folder.
+        assert_eq!(
+            linux_default_recordings_dir(home, None, Some(user_dirs), true),
+            recordings("/home/streamer/Movies")
+        );
     }
 
     // Regression (2026-07-06): a Settings value of "~/Movies/…" was used as a
@@ -32916,6 +41372,71 @@ mod tests {
             resolve_output_directory(Some(absolute_fixture)).unwrap(),
             PathBuf::from(absolute_fixture)
         );
+    }
+
+    // Retest 154 A4: Record with a read-only recordings folder started the
+    // session, FFmpeg failed with Permission denied and a failed row stayed
+    // in the Library. The start must be refused before the row exists.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn record_refuses_an_unwritable_recordings_folder_before_the_session_row() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let folder = std::env::temp_dir().join(format!("videorc-ro-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root writes through mode 555, so there is nothing to refuse.
+        let blocked = std::fs::File::create(folder.join("root-check")).is_err();
+        let _ = std::fs::remove_file(folder.join("root-check"));
+        if !blocked {
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&folder);
+            eprintln!("skipped: running as root, mode 555 does not block writes");
+            return;
+        }
+
+        let probe_error = format!(
+            "{:#}",
+            ensure_output_directory_writable(&folder).await.unwrap_err()
+        );
+        assert_eq!(probe_error, output_directory_not_writable_message(&folder));
+
+        let state = test_state();
+        let mut params = base_params(true, false);
+        params.output.output_directory = Some(folder.display().to_string());
+        let error = format!(
+            "{:#}",
+            start_session(state.clone(), params).await.unwrap_err()
+        );
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let leftovers = std::fs::read_dir(&folder).unwrap().count();
+        let _ = std::fs::remove_dir_all(&folder);
+
+        assert!(
+            error.contains(&format!(
+                "Videorc can't save to {}. Choose another recordings folder in Output.",
+                folder.display()
+            )),
+            "{error}"
+        );
+        assert!(!error.contains("Permission denied"), "{error}");
+        assert!(state.recording.lock().await.is_none());
+        let page = state.database.list_session_items_page(None, 20).unwrap();
+        assert!(
+            page.items.is_empty(),
+            "a refused start leaves no Library row"
+        );
+        assert_eq!(leftovers, 0, "no probe or recording file is left behind");
+    }
+
+    #[tokio::test]
+    async fn a_writable_recordings_folder_passes_and_keeps_no_probe_file() {
+        let folder = std::env::temp_dir().join(format!("videorc-rw-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        ensure_output_directory_writable(&folder).await.unwrap();
+        let leftovers = std::fs::read_dir(&folder).unwrap().count();
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!(leftovers, 0);
     }
 
     #[test]
@@ -33229,6 +41750,7 @@ mod tests {
                     pipeline: None,
                     duration_ms: None,
                     message: Some("Stopping.".to_string()),
+                    replay_only: false,
                 },
             ))
             .unwrap();
@@ -33245,6 +41767,7 @@ mod tests {
                     pipeline: None,
                     duration_ms: None,
                     message: Some("Capture session finalized.".to_string()),
+                    replay_only: false,
                 },
             ))
             .unwrap();
@@ -33273,6 +41796,7 @@ mod tests {
         assert!(!should_finalize_recording_session(
             true,
             stop_intent_preceded_exit,
+            false,
             None,
             None
         ));
@@ -33301,6 +41825,7 @@ mod tests {
         assert!(should_finalize_recording_session(
             true,
             stop_intent_preceded_exit,
+            false,
             None,
             None
         ));
@@ -33342,15 +41867,37 @@ mod tests {
 
     #[test]
     fn only_an_explicit_graceful_stop_can_finalize_an_unbounded_capture() {
-        assert!(!should_finalize_recording_session(true, false, None, None));
+        assert!(!should_finalize_recording_session(
+            true, false, false, None, None
+        ));
+        #[cfg(target_os = "windows")]
         assert!(
-            !should_finalize_recording_session(false, true, None, None),
+            should_finalize_recording_session(false, true, false, None, None),
+            "a stopped Windows graph may have a non-zero exit while its MKV remains exportable"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            !should_finalize_recording_session(false, true, false, None, None),
             "a non-zero/forced FFmpeg exit after stop must remain failed"
         );
-        assert!(should_finalize_recording_session(true, true, None, None));
+        assert!(should_finalize_recording_session(
+            true, true, false, None, None
+        ));
+        assert!(
+            !should_finalize_recording_session(false, true, true, None, None),
+            "a forced TERM/KILL after Stop keeps the MKV as recovery media"
+        );
+        assert!(
+            should_finalize_recording_session(true, true, true, None, None),
+            "FFmpeg that still exited cleanly after escalation flushed its muxer"
+        );
+        let (_, health_code, _) =
+            classify_failed_ffmpeg_exit(true, true, None, "exit code: 1", true);
+        assert_eq!(health_code, "recording-stop-forced");
 
         assert!(!should_finalize_recording_session(
             true,
+            false,
             false,
             Some("recording raw-video encoder output stopped: FIFO timed out"),
             None
@@ -33358,6 +41905,7 @@ mod tests {
         assert!(!should_finalize_recording_session(
             false,
             true,
+            false,
             Some("recording raw-video encoder output stopped: FIFO timed out"),
             None
         ));
@@ -33371,6 +41919,7 @@ mod tests {
         assert!(should_finalize_recording_session(
             true,
             false,
+            false,
             None,
             Some("stream encoder output stopped: exceeded its bounded latency contract")
         ));
@@ -33378,10 +41927,12 @@ mod tests {
         assert!(!should_finalize_recording_session(
             true,
             false,
+            false,
             Some("recording raw-video encoder output stopped"),
             Some("stream encoder output stopped")
         ));
         assert!(!should_finalize_recording_session(
+            false,
             false,
             false,
             None,
@@ -33567,6 +42118,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: 20.0,
+            live: None,
         });
         params.scene = Some(scene);
 
@@ -33678,6 +42230,7 @@ mod tests {
             saturation_percent: 100.0,
             vignette_percent: 0.0,
             visibility_percent: visibility,
+            live: None,
         };
         let filter_at = |visibility: f64| {
             let mut scene = base_scene.clone();
@@ -33841,8 +42394,8 @@ mod tests {
         );
         assert_eq!(arg_value(&args, "-ar"), Some("48000"));
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
-        assert_eq!(arg_value(&args, "-b:a"), None);
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
+        assert_eq!(arg_value(&args, "-b:a"), Some(RECORD_AAC_BITRATE));
     }
 
     #[test]
@@ -33890,7 +42443,7 @@ mod tests {
             Some("aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&args, "-ac"), Some("2"));
-        assert_eq!(arg_value(&args, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
     }
 
     #[test]
@@ -34157,7 +42710,7 @@ mod tests {
             &mut args,
             &input_layout,
             &AudioSettings::default(),
-            true,
+            OutputAudioCodec::StreamAac,
             true,
         );
 
@@ -34215,6 +42768,45 @@ mod tests {
     }
 
     #[test]
+    fn post_recording_gate_never_auto_repairs_a_quick_check() {
+        let not_100 = |sampled| GateStatus::NotHundredPercent {
+            path: "/m/a.mp4".to_string(),
+            reasons: vec!["Frozen video segment detected.".to_string()],
+            needs_attention: true,
+            sampled,
+        };
+        // A full check with issues tries the backup-safe repair.
+        assert_eq!(
+            post_recording_gate_step(&not_100(false)),
+            PostRecordingGateStep::AttemptRepair
+        );
+        // Plan 200 C8: above 20 min the sampled report is shown, never repaired.
+        assert_eq!(
+            post_recording_gate_step(&not_100(true)),
+            PostRecordingGateStep::Complete
+        );
+        for status in [
+            GateStatus::Ready {
+                path: "/m/a.mp4".to_string(),
+                sampled: true,
+            },
+            GateStatus::Ready {
+                path: "/m/a.mp4".to_string(),
+                sampled: false,
+            },
+            GateStatus::Failed {
+                path: "/m/a.mp4".to_string(),
+                reason: "probe failed".to_string(),
+            },
+        ] {
+            assert_eq!(
+                post_recording_gate_step(&status),
+                PostRecordingGateStep::Complete
+            );
+        }
+    }
+
+    #[test]
     fn mkv_duration_tag_parses_hms_nanoseconds() {
         assert_eq!(parse_mkv_duration_tag("00:00:06.336000000"), Some(6.336));
         assert_eq!(parse_mkv_duration_tag("01:02:03.500000000"), Some(3723.5));
@@ -34226,7 +42818,7 @@ mod tests {
         let args = mp4_export_args(
             Path::new("/tmp/videorc-test.mkv"),
             Path::new("/tmp/videorc-test.mp4"),
-            None,
+            &Mp4ExportOptions::remux(),
         );
         assert!(!args.iter().any(|arg| arg == "-t"));
 
@@ -34234,7 +42826,10 @@ mod tests {
         let trimmed = mp4_export_args(
             Path::new("/tmp/videorc-test.mkv"),
             Path::new("/tmp/videorc-test.mp4"),
-            Some(6.336),
+            &Mp4ExportOptions {
+                trim_seconds: Some(6.336),
+                ..Mp4ExportOptions::remux()
+            },
         );
         assert_eq!(arg_value(&trimmed, "-t"), Some("6.336"));
         assert_eq!(
@@ -34257,6 +42852,398 @@ mod tests {
     }
 
     #[test]
+    fn mp4_export_includes_bt709_h264_metadata() {
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &Mp4ExportOptions::remux(),
+        );
+
+        assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_primaries"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_trc"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_range"), Some("tv"));
+        assert_eq!(
+            arg_value(&args, "-bsf:v"),
+            Some(
+                "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+            )
+        );
+    }
+
+    fn videorc_take(fps: Option<u32>) -> Mp4ExportTake {
+        Mp4ExportTake {
+            fps,
+            ..Mp4ExportTake::default()
+        }
+    }
+
+    fn probe_with_rate(rate: Option<(u64, u64)>) -> Mp4ExportProbe {
+        Mp4ExportProbe {
+            video_frame_rate: rate,
+            ..Mp4ExportProbe::default()
+        }
+    }
+
+    #[test]
+    fn mp4_export_snaps_frame_times_at_30_and_60_fps() {
+        for fps in [30, 60] {
+            let options = Mp4ExportOptions::plan(
+                &probe_with_rate(Some((u64::from(fps), 1))),
+                Some(&videorc_take(Some(fps))),
+            );
+            assert_eq!(options.snap_fps, Some(fps));
+            let args = mp4_export_args(
+                Path::new("/tmp/videorc-test.mkv"),
+                Path::new("/tmp/videorc-test.mp4"),
+                &options,
+            );
+            assert_eq!(
+                arg_value(&args, "-bsf:v"),
+                Some(
+                    format!(
+                        "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1,setts=time_base=1/{fps}:prescale=1:ts=round(PTS)"
+                    )
+                    .as_str()
+                )
+            );
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "-bsf:v").count(),
+                1,
+                "one bitstream filter chain, or FFmpeg keeps only the last"
+            );
+        }
+    }
+
+    #[test]
+    fn mp4_export_without_a_known_whole_frame_rate_does_not_snap() {
+        // No fps anywhere.
+        let options = Mp4ExportOptions::plan(&probe_with_rate(None), Some(&videorc_take(None)));
+        assert_eq!(options.snap_fps, None);
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &options,
+        );
+        assert!(!args.iter().any(|arg| arg.contains("setts")));
+
+        // A non-integer rate never snaps, even with a configured fps.
+        let ntsc = Mp4ExportOptions::plan(
+            &probe_with_rate(Some((30_000, 1_001))),
+            Some(&videorc_take(Some(30))),
+        );
+        assert_eq!(ntsc.snap_fps, None);
+
+        // An import (no Videorc take) never snaps.
+        let import = Mp4ExportOptions::plan(&probe_with_rate(Some((30, 1))), None);
+        assert_eq!(import.snap_fps, None);
+
+        // The configured rate wins; the probe fills in when it is absent.
+        assert_eq!(
+            Mp4ExportOptions::plan(&probe_with_rate(Some((30, 1))), Some(&videorc_take(None)))
+                .snap_fps,
+            Some(30)
+        );
+        assert_eq!(
+            Mp4ExportOptions::plan(&probe_with_rate(None), Some(&videorc_take(Some(60)))).snap_fps,
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn mp4_export_retry_drops_only_the_frame_time_snap() {
+        let options = Mp4ExportOptions {
+            trim_seconds: Some(4.0),
+            snap_fps: Some(30),
+            ..Mp4ExportOptions::remux()
+        };
+        let retry = options.without_frame_time_snap().unwrap();
+        assert_eq!(retry.snap_fps, None);
+        assert_eq!(retry.trim_seconds, Some(4.0));
+        assert!(retry.without_frame_time_snap().is_none());
+    }
+
+    #[test]
+    fn mp4_export_probe_reads_rate_durations_and_trim() {
+        let probe = Mp4ExportProbe::from_ffprobe_json(&serde_json::json!({
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264", "r_frame_rate": "30/1", "tags": {"DURATION": "00:00:06.400000000"}},
+                {"codec_type": "audio", "codec_name": "aac", "r_frame_rate": "0/0", "tags": {"DURATION": "00:00:06.336000000"}}
+            ],
+            "format": {"duration": "6.400000"}
+        }));
+        assert_eq!(probe.video_frame_rate, Some((30, 1)));
+        assert_eq!(probe.video_codec.as_deref(), Some("h264"));
+        assert_eq!(probe.audio_codec.as_deref(), Some("aac"));
+        assert_eq!(probe.trim_seconds(), Some(6.336));
+        assert_eq!(probe.exported_seconds(), Some(6.336));
+        assert_eq!(parse_ffprobe_rational("0/0"), None);
+        assert_eq!(parse_ffprobe_rational("30000/1001"), Some((30_000, 1_001)));
+        assert_eq!(
+            Mp4ExportProbe::from_ffprobe_json(&serde_json::json!({})),
+            Mp4ExportProbe::default()
+        );
+    }
+
+    fn probe_with_codecs(video: &str, audio: &str) -> Mp4ExportProbe {
+        Mp4ExportProbe {
+            video_codec: Some(video.to_string()),
+            audio_codec: Some(audio.to_string()),
+            video_frame_rate: Some((30, 1)),
+            ..Mp4ExportProbe::default()
+        }
+    }
+
+    fn plan_args(probe: &Mp4ExportProbe) -> Vec<String> {
+        mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &Mp4ExportOptions::plan(probe, Some(&videorc_take(Some(30)))),
+        )
+    }
+
+    #[test]
+    fn mp4_export_encodes_pcm_audio_and_tags_h264() {
+        let args = plan_args(&probe_with_codecs("h264", "pcm_s16le"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("aac"));
+        assert_eq!(arg_value(&args, "-b:a"), Some("256k"));
+        assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
+        assert!(arg_value(&args, "-bsf:v").is_some_and(|chain| chain.contains("setts")));
+    }
+
+    #[test]
+    fn mp4_export_copies_aac_audio_instead_of_encoding_it_again() {
+        let args = plan_args(&probe_with_codecs("h264", "aac"));
+        assert_eq!(arg_value(&args, "-c:a"), Some("copy"));
+        assert_eq!(arg_value(&args, "-b:a"), None);
+        assert_eq!(arg_value(&args, "-c:v"), Some("copy"));
+        assert_eq!(arg_value(&args, "-color_range"), Some("tv"));
+        assert!(arg_value(&args, "-bsf:v").is_some_and(|chain| chain.starts_with("h264_metadata")));
+    }
+
+    #[test]
+    fn mp4_export_leaves_non_h264_video_untagged() {
+        let probe = probe_with_codecs("hevc", "aac");
+        let args = plan_args(&probe);
+        assert_eq!(arg_value(&args, "-c:a"), Some("copy"));
+        assert_eq!(arg_value(&args, "-bsf:v"), None);
+        assert_eq!(arg_value(&args, "-colorspace"), None);
+        assert_eq!(arg_value(&args, "-color_range"), None);
+        assert!(!args.iter().any(|arg| arg.contains("setts")));
+        assert_eq!(
+            mp4_export_snap_fps(&probe, Some(&videorc_take(Some(30)))),
+            None
+        );
+        // A failed probe keeps today's H.264 assumption.
+        assert!(Mp4ExportProbe::default().video_is_h264());
+        assert!(!Mp4ExportProbe::default().audio_is_aac());
+    }
+
+    fn time_of_day(hour: u32, minute: u32, second: u32, nanos: u32) -> chrono::NaiveTime {
+        chrono::NaiveTime::from_hms_nano_opt(hour, minute, second, nanos).unwrap()
+    }
+
+    #[test]
+    fn mp4_export_timecode_counts_frames_from_the_sub_second() {
+        assert_eq!(
+            mp4_export_timecode(time_of_day(10, 4, 5, 0), 30),
+            "10:04:05:00"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(10, 4, 5, 500_000_000), 30),
+            "10:04:05:15"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(10, 4, 5, 500_000_000), 60),
+            "10:04:05:30"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(9, 0, 0, 999_999_999), 60),
+            "09:00:00:59"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(9, 0, 0, 33_333_334), 30),
+            "09:00:00:01"
+        );
+        // Midnight edges: the last instant of the day never rolls over.
+        assert_eq!(
+            mp4_export_timecode(time_of_day(23, 59, 59, 999_999_999), 30),
+            "23:59:59:29"
+        );
+        assert_eq!(
+            mp4_export_timecode(time_of_day(0, 0, 0, 0), 30),
+            "00:00:00:00"
+        );
+        // A leap second clamps to the last frame.
+        assert_eq!(
+            mp4_export_timecode(time_of_day(23, 59, 59, 1_500_000_000), 30),
+            "23:59:59:29"
+        );
+    }
+
+    #[test]
+    fn mp4_chapters_ffmetadata_titles_escapes_and_starts_with_start() {
+        let text = mp4_chapters_ffmetadata(
+            &[
+                (2.0, Some("a=b;c#d\\e\nf".to_string())),
+                (5.5, None),
+                (99.0, Some("past the end".to_string())),
+            ],
+            10.0,
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            ";FFMETADATA1\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Start\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=5500\ntitle=a\\=b\\;c\\#d\\\\e\\\nf\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=5500\nEND=10000\ntitle=Marker 2\n"
+        );
+
+        // A marker at 0 needs no "Start" chapter.
+        let at_zero = mp4_chapters_ffmetadata(&[(0.0, Some("Intro".to_string()))], 3.0).unwrap();
+        assert_eq!(
+            at_zero,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=3000\ntitle=Intro\n"
+        );
+
+        // No markers, or none inside the file: no chapters input at all.
+        assert_eq!(mp4_chapters_ffmetadata(&[], 10.0), None);
+        assert_eq!(mp4_chapters_ffmetadata(&[(12.0, None)], 10.0), None);
+        assert_eq!(mp4_chapters_ffmetadata(&[(1.0, None)], 0.0), None);
+    }
+
+    #[tokio::test]
+    async fn mp4_export_writes_no_chapters_file_without_markers() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-p200-chapters-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("export.mp4");
+        let probe = Mp4ExportProbe {
+            format_seconds: Some(10.0),
+            ..Mp4ExportProbe::default()
+        };
+        let take = Mp4ExportTake {
+            fps: Some(30),
+            started_at: None,
+            markers: Vec::new(),
+        };
+        assert_eq!(
+            write_mp4_export_chapters(Some(&take), &probe, &output)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            write_mp4_export_chapters(None, &probe, &output)
+                .await
+                .unwrap(),
+            None
+        );
+        let with_markers = Mp4ExportTake {
+            markers: vec![(1.0, Some("One".to_string()))],
+            ..take
+        };
+        let path = write_mp4_export_chapters(Some(&with_markers), &probe, &output)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(path.parent(), Some(directory.as_path()));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("title=One")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn mp4_export_stamps_creation_time_timecode_and_chapters() {
+        let started_at = DateTime::parse_from_rfc3339("2026-10-26T09:15:30.5Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let take = Mp4ExportTake {
+            fps: Some(30),
+            started_at: Some(started_at),
+            markers: Vec::new(),
+        };
+        let mut options =
+            Mp4ExportOptions::plan(&probe_with_codecs("h264", "pcm_s16le"), Some(&take));
+        assert_eq!(
+            options.creation_time.as_deref(),
+            Some("2026-10-26T09:15:30Z")
+        );
+        let local = started_at.with_timezone(&chrono::Local).time();
+        assert_eq!(options.timecode, Some((mp4_export_timecode(local, 30), 30)));
+        assert!(options.timecode.as_ref().unwrap().0.ends_with(":15"));
+        options.chapters_path = Some(PathBuf::from("/tmp/videorc-test/chapters.ffmetadata"));
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &options,
+        );
+        assert_eq!(
+            arg_value(&args, "-metadata"),
+            Some("creation_time=2026-10-26T09:15:30Z")
+        );
+        assert_eq!(
+            arg_value(&args, "-timecode"),
+            options
+                .timecode
+                .as_ref()
+                .map(|(timecode, _)| timecode.as_str())
+        );
+        // The tmcd track's rate is stated, never guessed from the copy.
+        assert_eq!(arg_value(&args, "-r:v"), Some("30"));
+        assert_eq!(arg_value(&args, "-f"), Some("ffmetadata"));
+        assert_eq!(arg_value(&args, "-map_chapters"), Some("1"));
+        assert_eq!(arg_value(&args, "-map"), Some("0"));
+        assert!(!args.iter().any(|arg| arg == "-map_metadata"));
+        let inputs: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-i")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(
+            inputs,
+            [
+                "/tmp/videorc-test.mkv",
+                "/tmp/videorc-test/chapters.ffmetadata"
+            ]
+        );
+
+        // An import carries none of the take's metadata.
+        let import = Mp4ExportOptions::plan(&probe_with_codecs("h264", "aac"), None);
+        assert_eq!(import.creation_time, None);
+        assert_eq!(import.timecode, None);
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            &import,
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "-timecode" || arg == "-metadata" || arg == "-map_chapters")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mp4_export_normalizes_windows_verbatim_paths() {
+        let args = mp4_export_args(
+            Path::new(r"\\?\C:\recordings\capture.mkv"),
+            Path::new(r"\\?\C:\recordings\.videorc-export.partial\export.mp4"),
+            &Mp4ExportOptions::remux(),
+        );
+        assert_eq!(arg_value(&args, "-i"), Some(r"C:\recordings\capture.mkv"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(r"C:\recordings\.videorc-export.partial\export.mp4")
+        );
+    }
+
+    #[test]
     fn mp4_export_uses_no_overwrite_with_an_absent_child_in_an_owned_directory() {
         let directory = std::env::temp_dir().join(format!(
             "videorc-mp4-private-staging-test-{}",
@@ -34266,7 +43253,11 @@ mod tests {
         let preferred = directory.join("recording.mp4");
 
         let staging = prepare_mp4_export_staging(&preferred).unwrap();
-        let args = mp4_export_args(&directory.join("recording.mkv"), &staging.output_path, None);
+        let args = mp4_export_args(
+            &directory.join("recording.mkv"),
+            &staging.output_path,
+            &Mp4ExportOptions::remux(),
+        );
 
         assert!(staging.directory_path.is_dir());
         assert!(!staging.output_path.exists());
@@ -34314,6 +43305,270 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// Plan 200 real-file fixtures live in their own unique temp folder.
+    fn plan200_fixture_directory(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir()
+            .join("p200")
+            .join(format!("{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// `true` when `ffmpeg` and `ffprobe` run; otherwise the real-file test
+    /// logs a skip line and returns.
+    fn plan200_ffmpeg_available(test: &str) -> bool {
+        let runs = |tool: &str| {
+            std::process::Command::new(tool)
+                .arg("-version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let available = runs("ffmpeg") && runs("ffprobe");
+        if !available {
+            eprintln!("{test}: skipped, ffmpeg/ffprobe are not on PATH");
+        }
+        available
+    }
+
+    /// A synthetic Videorc-like capture: H.264 without B-frames, PCM audio,
+    /// muxed into Matroska at its 1/1000 time base.
+    fn plan200_write_capture_mkv(path: &Path, seconds: &str, fps: u32) {
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(format!("testsrc2=size=320x180:rate={fps}"))
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                seconds,
+                "-c:v",
+                "libx264",
+                "-bf",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "pcm_s16le",
+                "-ac",
+                "2",
+            ])
+            .arg(path)
+            .status()
+            .expect("ffmpeg runs");
+        assert!(status.success(), "fixture FFmpeg failed");
+    }
+
+    fn plan200_ffprobe(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("ffprobe")
+            .args(["-v", "error"])
+            .args(args)
+            .arg(path)
+            .output()
+            .expect("ffprobe runs");
+        assert!(
+            output.status.success(),
+            "ffprobe failed on {}",
+            path.display()
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Plan 200 C1: a 1/1000 MKV exports to an MP4 whose every video packet
+    /// has the same duration (one 30 fps tick), so editors read constant
+    /// frame rate.
+    #[tokio::test]
+    #[ignore = "spawns ffmpeg/ffprobe and writes media; run with --ignored"]
+    async fn plan200_real_export_has_equal_frame_durations() {
+        if !plan200_ffmpeg_available("plan200_real_export_has_equal_frame_durations") {
+            return;
+        }
+        let directory = plan200_fixture_directory("c1-frame-times");
+        let input = directory.join("capture.mkv");
+        plan200_write_capture_mkv(&input, "3", 30);
+        assert_eq!(
+            plan200_ffprobe(
+                &input,
+                &[
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=time_base",
+                    "-of",
+                    "csv=p=0"
+                ]
+            )
+            .trim(),
+            "1/1000"
+        );
+        let output = directory.join("export.mp4");
+        export_mp4_from_mkv(
+            "ffmpeg",
+            &input,
+            &output,
+            Some(Mp4ExportTake {
+                fps: Some(30),
+                ..Mp4ExportTake::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        let durations = plan200_ffprobe(
+            &output,
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "packet=duration",
+                "-of",
+                "csv=p=0",
+            ],
+        );
+        let durations: Vec<&str> = durations.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(durations.len(), 90, "3 s at 30 fps");
+        assert!(
+            durations.iter().all(|duration| *duration == durations[0]),
+            "every packet has one duration, got {:?}",
+            durations.iter().collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(
+            plan200_ffprobe(
+                &output,
+                &[
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=r_frame_rate",
+                    "-of",
+                    "csv=p=0"
+                ]
+            )
+            .trim(),
+            "30/1"
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Plan 200 C3: two files of one take, exported with the take's two
+    /// markers, carry "Start" plus two titled chapters, a `tmcd` track and
+    /// the same timecode and creation time.
+    #[tokio::test]
+    #[ignore = "spawns ffmpeg/ffprobe and writes media; run with --ignored"]
+    async fn plan200_real_export_has_chapters_and_one_timecode_per_take() {
+        if !plan200_ffmpeg_available("plan200_real_export_has_chapters_and_one_timecode_per_take") {
+            return;
+        }
+        let directory = plan200_fixture_directory("c3-take-metadata");
+        let take = Mp4ExportTake {
+            fps: Some(30),
+            started_at: Some(
+                DateTime::parse_from_rfc3339("2026-10-26T09:15:30.5Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            markers: vec![(1.0, Some("Intro".to_string())), (2.0, None)],
+        };
+        let mut timecodes = Vec::new();
+        for role in ["combined", "camera"] {
+            let input = directory.join(format!("{role}.mkv"));
+            plan200_write_capture_mkv(&input, "3", 30);
+            // Each file exports from its own private staging folder.
+            let staging = directory.join(format!("{role}-staging"));
+            std::fs::create_dir_all(&staging).unwrap();
+            let output = staging.join("export.mp4");
+            export_mp4_from_mkv("ffmpeg", &input, &output, Some(take.clone()))
+                .await
+                .unwrap();
+
+            let chapters = plan200_ffprobe(
+                &output,
+                &[
+                    "-show_chapters",
+                    "-show_entries",
+                    "chapter_tags=title",
+                    "-of",
+                    "csv=p=0",
+                ],
+            );
+            // `-show_chapters` prints every chapter field; the title is last.
+            let chapters: Vec<(&str, &str)> = chapters
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    let fields: Vec<&str> = line.split(',').collect();
+                    (fields[3], fields[fields.len() - 1])
+                })
+                .collect();
+            assert_eq!(
+                chapters,
+                [
+                    ("0.000000", "Start"),
+                    ("1.000000", "Intro"),
+                    ("2.000000", "Marker 2")
+                ],
+                "{role} chapters"
+            );
+
+            let streams = plan200_ffprobe(
+                &output,
+                &[
+                    "-show_entries",
+                    "stream=codec_type,codec_tag_string",
+                    "-of",
+                    "csv=p=0",
+                ],
+            );
+            assert!(
+                streams.lines().any(|line| line.contains("tmcd")),
+                "{role}: {streams}"
+            );
+            assert_eq!(
+                plan200_ffprobe(
+                    &output,
+                    &[
+                        "-show_entries",
+                        "format_tags=creation_time",
+                        "-of",
+                        "csv=p=0"
+                    ]
+                )
+                .trim(),
+                "2026-10-26T09:15:30.000000Z"
+            );
+            let timecode = plan200_ffprobe(
+                &output,
+                &[
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream_tags=timecode",
+                    "-of",
+                    "csv=p=0",
+                ],
+            )
+            .trim()
+            .to_string();
+            assert!(!timecode.is_empty(), "{role} has a timecode");
+            timecodes.push(timecode);
+        }
+        assert_eq!(timecodes[0], timecodes[1], "one take, one timecode");
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     /// Exercises FFmpeg's actual `-n` behavior against the production argument
     /// builder. Ignored in default CI because the Rust test job deliberately
     /// has no FFmpeg dependency; run explicitly on recording-studio hosts.
@@ -34340,8 +43595,10 @@ mod tests {
                 "anullsrc=channel_layout=stereo:sample_rate=48000",
                 "-t",
                 "0.2",
+                // The MP4 export rewrites the H.264 VUI with `h264_metadata`,
+                // which rejects any other codec; recordings are always H.264.
                 "-c:v",
-                "mpeg4",
+                "libx264",
                 "-c:a",
                 "pcm_s16le",
             ])
@@ -34352,7 +43609,7 @@ mod tests {
 
         let staging = prepare_mp4_export_staging(&directory.join("recording.mp4")).unwrap();
         assert!(!staging.output_path.exists());
-        export_mp4_from_mkv("ffmpeg", &input, &staging.output_path)
+        export_mp4_from_mkv("ffmpeg", &input, &staging.output_path, None)
             .await
             .unwrap();
         assert!(std::fs::metadata(&staging.output_path).unwrap().len() > 0);
@@ -34360,7 +43617,7 @@ mod tests {
         let preexisting = directory.join("preexisting.mp4");
         std::fs::write(&preexisting, b"must survive").unwrap();
         assert!(
-            export_mp4_from_mkv("ffmpeg", &input, &preexisting)
+            export_mp4_from_mkv("ffmpeg", &input, &preexisting, None)
                 .await
                 .is_err()
         );
@@ -34513,7 +43770,13 @@ mod tests {
         ];
         append_audio_output_args(&mut args, &input_layout);
         args.extend(["-c:v".to_string(), "mpeg4".to_string()]);
-        append_audio_encoding_with_video_clock(&mut args, &input_layout, &audio, true, false);
+        append_audio_encoding_with_video_clock(
+            &mut args,
+            &input_layout,
+            &audio,
+            OutputAudioCodec::StreamAac,
+            false,
+        );
         args.push(output.display().to_string());
 
         let status = std::process::Command::new("ffmpeg")
@@ -34818,7 +44081,7 @@ mod tests {
             Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0,apad")
         );
         assert_eq!(arg_value(&with_mic, "-ac"), Some("2"));
-        assert_eq!(arg_value(&with_mic, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&with_mic, "-c:a"), Some("aac"));
         assert_eq!(
             ffmpeg_inputs(&without_mic),
             vec![
@@ -34832,7 +44095,7 @@ mod tests {
             Some("pan=stereo|c0=c0|c1=c0,aresample=async=1:first_pts=0")
         );
         assert_eq!(arg_value(&without_mic, "-ac"), Some("2"));
-        assert_eq!(arg_value(&without_mic, "-c:a"), Some("pcm_s16le"));
+        assert_eq!(arg_value(&without_mic, "-c:a"), Some("aac"));
     }
 
     #[test]
@@ -35399,6 +44662,39 @@ mod tests {
     }
 
     #[test]
+    fn the_raw_path_refuses_a_vertical_leg_it_cannot_encode() {
+        use crate::streaming::StreamOutputOrientation as Orientation;
+        let mut params = base_params(false, true);
+        params.streaming = Some(streaming_with_orientations(&[
+            Orientation::Horizontal,
+            Orientation::Vertical,
+        ]));
+        params.simulcast = Some(simulcast_leg());
+        let error = recording_compositor_stream_output_with_plan(
+            &params,
+            EncoderBridgeVideoOutput::RawYuv420p,
+            None,
+        )
+        .expect_err("a raw bridge cannot produce the vertical leg");
+        assert!(
+            error.to_string().contains("vertical destinations"),
+            "{error}"
+        );
+
+        // Without a vertical leg the raw path still has nothing to add.
+        params.simulcast = None;
+        assert_eq!(
+            recording_compositor_stream_output_with_plan(
+                &params,
+                EncoderBridgeVideoOutput::RawYuv420p,
+                None,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn vertical_targets_require_the_simulcast_leg_and_vice_versa() {
         use crate::streaming::StreamOutputOrientation as Orientation;
         // Vertical destination without a simulcast leg: refuse with the arm copy.
@@ -35504,6 +44800,36 @@ mod tests {
         params.simulcast = Some(simulcast_leg());
         let targets = stream_targets_from_streaming(&streaming).unwrap();
         (params, targets)
+    }
+
+    #[test]
+    fn source_iso_shared_input_uses_bounded_probe_without_changing_iso_off_streams() {
+        for (streaming, iso, expected) in [
+            (false, false, "4096"),
+            (true, false, "65536"),
+            (true, true, "4096"),
+        ] {
+            let mut params = base_params(true, streaming);
+            params.output.separate_source_recordings =
+                Some(crate::protocol::SeparateSourceRecordingsSettings {
+                    enabled: iso,
+                    keep_combined: true,
+                });
+            let mut args = Vec::new();
+            append_bridge_recording_input_args(
+                &mut args,
+                &CaptureInputs {
+                    video: VideoInput::TestPattern,
+                    camera_index: None,
+                    microphone: None,
+                },
+                &params,
+                Path::new("/tmp/owned-test-video"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            );
+            let index = args.iter().position(|arg| arg == "-probesize").unwrap();
+            assert_eq!(args[index + 1], expected);
+        }
     }
 
     #[test]
@@ -37120,69 +46446,90 @@ mod tests {
             let capture = bus_capture(VideoInput::TestPattern);
             let output = Path::new("/tmp/timing-record.mkv");
             let fifo = Path::new("/tmp/timing-record.ts");
-            let video = EncoderBridgeVideoOutput::VideoToolboxH264MpegTs;
             let timing = |role, output_index, filter_shift_ms| SourceSwitchOutputAudioTiming {
                 role,
                 output_index,
                 input_offset_ms: 0,
                 filter_shift_ms,
             };
-            let record_params = params_with_offset(true, false, 0);
-            let record_args =
-                bridge_recording_ffmpeg_args(&capture, &record_params, Some(output), fifo, video)
-                    .unwrap();
-            assert_eq!(
-                inspect_source_switch_output_audio_timing(
-                    &record_args,
+            // Media Foundation copies also carry color tags, the VUI rewrite
+            // and a declared `-r`; none of them may hide the audio timing.
+            for video in [
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            ] {
+                let record_params = params_with_offset(true, false, 0);
+                let record_args = bridge_recording_ffmpeg_args(
                     &capture,
+                    &record_params,
                     Some(output),
-                    &[]
-                ),
-                Some(vec![timing("local", 0, 0)])
-            );
-
-            let targets = vec![build_stream_url(&base_params(false, true).output.rtmp).unwrap()];
-            // Stream-only and same-profile combined both use neutral copy
-            // fanout. Mode flags therefore cannot establish an audio advance.
-            for local in [None, Some(output)] {
-                let params = params_with_offset(local.is_some(), true, 0);
-                let args =
-                    bridge_compositor_ffmpeg_args(&capture, &params, local, &targets, fifo, video)
-                        .unwrap();
-                let expected = if local.is_some() {
-                    vec![timing("local", 0, 0), timing("stream", 1, 0)]
-                } else {
-                    vec![timing("stream", 0, 0)]
-                };
+                    fifo,
+                    video,
+                )
+                .unwrap();
                 assert_eq!(
-                    inspect_source_switch_output_audio_timing(&args, &capture, local, &targets),
-                    Some(expected)
+                    inspect_source_switch_output_audio_timing(
+                        &record_args,
+                        &capture,
+                        Some(output),
+                        &[]
+                    ),
+                    Some(vec![timing("local", 0, 0)]),
+                    "{video:?}"
+                );
+
+                let targets =
+                    vec![build_stream_url(&base_params(false, true).output.rtmp).unwrap()];
+                // Stream-only and same-profile combined both use neutral copy
+                // fanout. Mode flags therefore cannot establish an audio advance.
+                for local in [None, Some(output)] {
+                    let params = params_with_offset(local.is_some(), true, 0);
+                    let args = bridge_compositor_ffmpeg_args(
+                        &capture, &params, local, &targets, fifo, video,
+                    )
+                    .unwrap();
+                    let expected = if local.is_some() {
+                        vec![timing("local", 0, 0), timing("stream", 1, 0)]
+                    } else {
+                        vec![timing("stream", 0, 0)]
+                    };
+                    assert_eq!(
+                        inspect_source_switch_output_audio_timing(&args, &capture, local, &targets),
+                        Some(expected),
+                        "{video:?}"
+                    );
+                }
+
+                let (params, targets) = simulcast_split_params(true);
+                let stream_output = recording_compositor_stream_output(&params, video)
+                    .unwrap()
+                    .expect("actual split topology");
+                let args = bridge_compositor_split_output_ffmpeg_args(
+                    &capture,
+                    &params,
+                    Some(output),
+                    &targets,
+                    fifo,
+                    Path::new("/tmp/timing-stream.ts"),
+                    video,
+                    stream_output,
+                )
+                .unwrap();
+                assert_eq!(
+                    inspect_source_switch_output_audio_timing(
+                        &args,
+                        &capture,
+                        Some(output),
+                        &targets
+                    ),
+                    Some(vec![
+                        timing("local", 0, 0),
+                        timing("stream", 1, -130),
+                        timing("stream", 2, -130)
+                    ]),
+                    "{video:?}"
                 );
             }
-
-            let (params, targets) = simulcast_split_params(true);
-            let stream_output = recording_compositor_stream_output(&params, video)
-                .unwrap()
-                .expect("actual split topology");
-            let args = bridge_compositor_split_output_ffmpeg_args(
-                &capture,
-                &params,
-                Some(output),
-                &targets,
-                fifo,
-                Path::new("/tmp/timing-stream.ts"),
-                video,
-                stream_output,
-            )
-            .unwrap();
-            assert_eq!(
-                inspect_source_switch_output_audio_timing(&args, &capture, Some(output), &targets),
-                Some(vec![
-                    timing("local", 0, 0),
-                    timing("stream", 1, -130),
-                    timing("stream", 2, -130)
-                ])
-            );
         }
 
         #[cfg(debug_assertions)]
@@ -37397,10 +46744,24 @@ mod tests {
             assert_eq!(capable.system_delay_frames, 0);
             assert_eq!(capable.system_gain_db, -9.0);
 
-            // Elsewhere the bus keeps its pre-mixer defaults exactly.
+            // Elsewhere the bus keeps its pre-mixer defaults, except Linux's
+            // longer deadline for the Pulse worker (retest 150).
+            let elsewhere = session_audio_options(&audio, false);
             assert_eq!(
-                session_audio_options(&audio, false),
+                crate::session_audio::SessionAudioOptions {
+                    playout_delay: crate::session_audio::SessionAudioOptions::default()
+                        .playout_delay,
+                    ..elsewhere
+                },
                 crate::session_audio::SessionAudioOptions::default()
+            );
+            assert_eq!(
+                elsewhere.playout_delay,
+                if cfg!(target_os = "linux") {
+                    crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
+                } else {
+                    crate::session_audio::PLAYOUT_DELAY
+                }
             );
 
             // A clamped offset splits from the clamped value.
@@ -38264,6 +47625,22 @@ mod low_end_windows_recording_tests {
     }
 
     #[test]
+    fn a_forced_stream_only_stop_never_mentions_a_file() {
+        // Linux plan 0017: a stream-only session has no recovery media.
+        let (stage, code, message) =
+            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)", false);
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-stop-forced");
+        assert!(!message.contains("file"), "{message}");
+        assert!(!message.contains("recovery"), "{message}");
+        assert!(message.contains("forced it to stop"), "{message}");
+        assert!(
+            message.contains("(FFmpeg exit: signal: 9 (SIGKILL))"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn forced_stop_is_never_reported_as_an_encoder_failure() {
         let (stage, code, message) = classify_failed_ffmpeg_exit(
             true,
@@ -38272,6 +47649,7 @@ mod low_end_windows_recording_tests {
                 "recording raw-video encoder output stopped: The pipe is being closed. (os error 232)",
             ),
             "exit code: 1",
+            true,
         );
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
@@ -38305,7 +47683,8 @@ mod low_end_windows_recording_tests {
 
     #[test]
     fn forced_stop_without_bridge_error_preserves_windows_exit() {
-        let (stage, code, message) = classify_failed_ffmpeg_exit(true, true, None, "exit code: 1");
+        let (stage, code, message) =
+            classify_failed_ffmpeg_exit(true, true, None, "exit code: 1", true);
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
         assert_forced_stop_message_reports_only_confirmed_outcome(&message, "exit code: 1");
@@ -38318,6 +47697,7 @@ mod low_end_windows_recording_tests {
             true,
             Some("Broken pipe (os error 32)"),
             "signal: 9 (SIGKILL)",
+            true,
         );
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
@@ -38329,7 +47709,7 @@ mod low_end_windows_recording_tests {
     #[test]
     fn forced_stop_without_bridge_error_preserves_sigkill_exit() {
         let (stage, code, message) =
-            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)");
+            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)", true);
         assert_eq!(stage, RecordingPipelineStage::Muxer);
         assert_eq!(code, "recording-stop-forced");
         assert_forced_stop_message_reports_only_confirmed_outcome(&message, "signal: 9 (SIGKILL)");
@@ -38339,20 +47719,21 @@ mod low_end_windows_recording_tests {
     fn unsolicited_failures_keep_their_original_owner() {
         // Bridge died on its own: no stop intent, no escalation.
         let (stage, code, message) =
-            classify_failed_ffmpeg_exit(false, false, Some("FIFO timed out"), "exit code: 1");
+            classify_failed_ffmpeg_exit(false, false, Some("FIFO timed out"), "exit code: 1", true);
         assert_eq!(stage, RecordingPipelineStage::VideoEncoder);
         assert_eq!(code, "encoder-bridge-failed");
         assert!(message.contains("FIFO timed out"));
         // Bridge failed first and the user then pressed Stop, but FFmpeg left
         // by itself: still the bridge's failure, not a forced stop.
         let (_, code, _) =
-            classify_failed_ffmpeg_exit(true, false, Some("FIFO timed out"), "exit code: 1");
+            classify_failed_ffmpeg_exit(true, false, Some("FIFO timed out"), "exit code: 1", true);
         assert_eq!(code, "encoder-bridge-failed");
         // An escalation without a user stop cannot happen through the ladder;
         // never let the flag alone relabel a crash.
-        let (_, code, _) = classify_failed_ffmpeg_exit(false, true, None, "exit code: 1");
+        let (_, code, _) = classify_failed_ffmpeg_exit(false, true, None, "exit code: 1", true);
         assert_eq!(code, "ffmpeg-exit");
-        let (stage, code, _) = classify_failed_ffmpeg_exit(false, false, None, "exit code: 1");
+        let (stage, code, _) =
+            classify_failed_ffmpeg_exit(false, false, None, "exit code: 1", true);
         assert_eq!(
             (stage, code),
             (RecordingPipelineStage::Muxer, "ffmpeg-exit")
@@ -38376,8 +47757,11 @@ mod low_end_windows_recording_tests {
             "progress cannot hold the ladder open forever"
         );
         // TERM + KILL must still land inside the stop RPC's finalize window so
-        // the first Stop click reaches a terminal status.
+        // the first Stop click reaches a terminal status, with or without a
+        // live RTMP leg (plan 0017: streams drain too).
         assert!(STOP_TERM_DRAIN_MAX + STOP_KILL_DELAY < STOP_FINALIZE_TIMEOUT);
+        assert!(STOP_TERM_DRAIN_MAX + STOP_KILL_DELAY_STREAMING < STOP_FINALIZE_TIMEOUT);
+        assert!(STOP_TERM_DELAY_STREAMING < STOP_TERM_DRAIN_MAX);
     }
 
     #[test]
@@ -38398,7 +47782,7 @@ mod low_end_windows_recording_tests {
     fn healthy_gpu_keeps_the_requested_canvas_with_one_probe() {
         let requested = video(2560, 1440, 30, 8_000);
         let mut probes = 0;
-        let selected = select_windows_recordable_video(&requested, 4, |_| {
+        let selected = select_windows_recordable_video(&requested, 4, None, |_| {
             probes += 1;
             true
         });
@@ -38414,8 +47798,9 @@ mod low_end_windows_recording_tests {
     #[test]
     fn rejected_1440p_steps_down_to_the_first_size_the_gpu_accepts() {
         let requested = video(2560, 1440, 30, 8_000);
-        let selected =
-            select_windows_recordable_video(&requested, 4, |candidate| candidate.height <= 1080);
+        let selected = select_windows_recordable_video(&requested, 4, None, |candidate| {
+            candidate.height <= 1080
+        });
         assert_eq!(selected.video, custom(1920, 1080, 30, 6_000));
         assert_eq!(
             selected.reason,
@@ -38429,19 +47814,134 @@ mod low_end_windows_recording_tests {
     fn no_hardware_at_any_size_caps_software_by_cpu_class() {
         let requested = video(2560, 1440, 30, 8_000);
         // The tester's 4-thread Gemini Lake.
-        let small = select_windows_recordable_video(&requested, 4, |_| false);
+        let small = select_windows_recordable_video(&requested, 4, None, |_| false);
         assert_eq!(small.video, custom(1280, 720, 30, 4_000));
         assert_eq!(
             small.reason,
             Some(WindowsRecordableVideoReason::SoftwareCap)
         );
-        let larger = select_windows_recordable_video(&requested, 8, |_| false);
+        let larger = select_windows_recordable_video(&requested, 8, None, |_| false);
         assert_eq!(larger.video, custom(1920, 1080, 30, 6_000));
         // Already inside the software envelope: untouched, no notice.
         let modest = video(1280, 720, 30, 4_000);
-        let kept = select_windows_recordable_video(&modest, 2, |_| false);
+        let kept = select_windows_recordable_video(&modest, 2, None, |_| false);
         assert_eq!(kept.video, modest);
         assert_eq!(kept.reason, None);
+    }
+
+    #[test]
+    fn a_measured_verdict_tightens_the_software_cap_but_never_loosens_it() {
+        // Plan 195 S5: the tester's Iris Xe laptop (8 logical cores, every
+        // hardware probe rejected) passed only 540p30 in its own check.
+        let requested = video(1920, 1080, 30, 6_000);
+        let capped = select_windows_recordable_video(&requested, 8, Some((540, 2_500)), |_| false);
+        assert_eq!(capped.video, custom(960, 540, 30, 2_500));
+        assert_eq!(
+            capped.reason,
+            Some(WindowsRecordableVideoReason::SoftwareCap)
+        );
+        let message = windows_recordable_video_health_message(&requested, &capped).unwrap();
+        assert!(
+            message.contains("1920x1080") && message.contains("960x540"),
+            "{message}"
+        );
+        // A vertical canvas keeps its orientation.
+        let vertical = video(1080, 1920, 30, 6_000);
+        let capped = select_windows_recordable_video(&vertical, 8, Some((720, 4_000)), |_| false);
+        assert_eq!(capped.video, custom(720, 1280, 30, 4_000));
+        // A verdict at or above the CPU-class cap changes nothing.
+        let loose = select_windows_recordable_video(&requested, 4, Some((1080, 6_000)), |_| false);
+        assert_eq!(loose.video, custom(1280, 720, 30, 4_000));
+        // A request already inside the verdict is untouched, no notice.
+        let modest = video(960, 540, 30, 2_500);
+        let kept = select_windows_recordable_video(&modest, 8, Some((540, 2_500)), |_| false);
+        assert_eq!(kept.video, modest);
+        assert_eq!(kept.reason, None);
+        // Hardware acceptance wins over any verdict.
+        let accepted = select_windows_recordable_video(&requested, 8, Some((540, 2_500)), |_| true);
+        assert_eq!(accepted.video, requested);
+        assert_eq!(accepted.reason, None);
+    }
+
+    #[test]
+    fn performance_check_software_cap_reads_the_highest_passed_rung_of_a_current_verdict() {
+        use crate::protocol::{
+            PerformanceCheckResult, PerformanceCheckRung, PerformanceCheckRungVerdict,
+            PerformanceCheckState,
+        };
+        let rung = |height: u32, bitrate: u32, verdict: PerformanceCheckRungVerdict| {
+            PerformanceCheckRung {
+                video: video(height * 16 / 9, height, 30, bitrate),
+                verdict,
+                encode_backend: None,
+                compositor_backend: None,
+                encoder_speed: None,
+                delivered_fps: None,
+                drain_after_stop_ms: None,
+                reasons: Vec::new(),
+            }
+        };
+        let result = |rungs: Vec<PerformanceCheckRung>, below_floor: bool| PerformanceCheckResult {
+            capability_key: "performance-check-v2:abc".to_string(),
+            checked_at: "2026-10-08T12:00:00Z".to_string(),
+            app_version: "0.9.150".to_string(),
+            duration_ms: 30_000,
+            recommended: video(960, 540, 30, 2_500),
+            below_floor,
+            rungs,
+        };
+        let state = |result: Option<PerformanceCheckResult>, stale: bool| PerformanceCheckState {
+            last_run_not_recorded: None,
+            running: false,
+            result,
+            stale,
+        };
+        assert_eq!(performance_check_software_cap(&state(None, false)), None);
+        // The tester's laptop: 1080p failed to start, 720p failed, 540p passed.
+        let laptop = result(
+            vec![
+                rung(1080, 6_000, PerformanceCheckRungVerdict::Failed),
+                rung(720, 4_000, PerformanceCheckRungVerdict::Failed),
+                rung(540, 2_500, PerformanceCheckRungVerdict::Passed),
+            ],
+            false,
+        );
+        assert_eq!(
+            performance_check_software_cap(&state(Some(laptop.clone()), false)),
+            Some((540, 2_500))
+        );
+        assert_eq!(
+            performance_check_software_cap(&state(Some(laptop), true)),
+            None,
+            "a verdict from another GPU, driver or app version is ignored"
+        );
+        // The highest passed rung, not the first listed.
+        let healthy = result(
+            vec![
+                rung(1440, 8_000, PerformanceCheckRungVerdict::Skipped),
+                rung(720, 4_000, PerformanceCheckRungVerdict::Passed),
+                rung(1080, 6_000, PerformanceCheckRungVerdict::Passed),
+            ],
+            false,
+        );
+        assert_eq!(
+            performance_check_software_cap(&state(Some(healthy), false)),
+            Some((1080, 6_000))
+        );
+        // Nothing passed: the floor, never below it.
+        let floor = result(
+            vec![rung(540, 2_500, PerformanceCheckRungVerdict::Failed)],
+            true,
+        );
+        assert_eq!(
+            performance_check_software_cap(&state(Some(floor), false)),
+            Some((540, 2_500))
+        );
+        let nothing_measured = result(Vec::new(), false);
+        assert_eq!(
+            performance_check_software_cap(&state(Some(nothing_measured), false)),
+            None
+        );
     }
 
     #[test]
@@ -38449,12 +47949,12 @@ mod low_end_windows_recording_tests {
         let four_k = video_with_preset(VideoPreset::Record4k30, 3840, 2160, 30, 30_000);
         validate_named_video_profile(&four_k).expect("the request itself is a valid preset");
         let selected =
-            select_windows_recordable_video(&four_k, 8, |candidate| candidate.height <= 1440);
+            select_windows_recordable_video(&four_k, 8, None, |candidate| candidate.height <= 1440);
         assert_eq!(selected.video, custom(2560, 1440, 30, 8_000));
         validate_named_video_profile(&selected.video)
             .expect("a stepped-down profile must not keep a fixed-value preset label");
         // Untouched requests keep their preset.
-        let kept = select_windows_recordable_video(&four_k, 8, |_| true);
+        let kept = select_windows_recordable_video(&four_k, 8, None, |_| true);
         assert_eq!(kept.video.preset, VideoPreset::Record4k30);
     }
 
@@ -38507,5 +48007,69 @@ mod low_end_windows_recording_tests {
                 .iter()
                 .all(|line| line.chars().count() <= FFMPEG_STDERR_TAIL_LINE_CHARS)
         );
+    }
+
+    // Retest 154 A5: a full recordings folder ended the take with only
+    // "FFmpeg exited with exit status: 228".
+    #[test]
+    fn a_full_disk_is_recognised_on_every_platform() {
+        for line in [
+            "[matroska @ 0x55] Error writing trailer: No space left on device",
+            "av_interleaved_write_frame(): No space left on device",
+            "[out#0/matroska @ 01] Error muxing a packet: There is not enough space on the disk.",
+        ] {
+            assert_eq!(
+                classify_ffmpeg_fatal_line(line),
+                Some("disk-full"),
+                "{line}"
+            );
+        }
+
+        let mut tail = FfmpegStderrTail::default();
+        tail.observe("frame=  900 fps= 30 q=-1.0 size=   12000KiB");
+        tail.observe("av_interleaved_write_frame(): No space left on device");
+        tail.observe("Error writing trailer: No space left on device");
+        tail.observe("Conversion failed!");
+        assert_eq!(tail.first_fatal_category, Some("disk-full"));
+        let summary = tail.summary().unwrap();
+        assert!(summary.starts_with("category=disk-full "), "{summary}");
+        assert!(
+            summary.contains("No space left on device"),
+            "raw text stays in logs"
+        );
+    }
+
+    #[test]
+    fn a_full_disk_says_plainly_that_the_folder_ran_out_of_space() {
+        let (stage, code, message) =
+            ffmpeg_disk_full_failure(Some("disk-full"), "exit status: 228", true).unwrap();
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-disk-full");
+        assert!(
+            message.contains("recordings folder ran out of space"),
+            "{message}"
+        );
+        assert!(message.contains("up to that point is kept"), "{message}");
+        assert!(message.contains("Free some space"), "{message}");
+        assert!(!message.contains("No space left on device"), "{message}");
+
+        // Other fatal causes, and a stream-only session, keep their own copy.
+        assert!(
+            ffmpeg_disk_full_failure(Some("encoder-open-failed"), "exit status: 1", true).is_none()
+        );
+        assert!(ffmpeg_disk_full_failure(None, "exit status: 228", true).is_none());
+        assert!(ffmpeg_disk_full_failure(Some("disk-full"), "exit status: 228", false).is_none());
+    }
+
+    #[test]
+    fn the_terminal_failure_reads_the_first_fatal_category_from_ffmpeg_evidence() {
+        let progress = FfmpegProgressBeacon::default();
+        progress
+            .evidence
+            .lock()
+            .unwrap()
+            .observe("Error writing trailer: No space left on device");
+        let category = progress.evidence.lock().unwrap().tail.first_fatal_category;
+        assert_eq!(category, Some(FFMPEG_DISK_FULL_CATEGORY));
     }
 }

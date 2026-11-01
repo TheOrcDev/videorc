@@ -45,10 +45,10 @@ describe('comments destination status', () => {
         providers,
         sendTargets: ['youtube', 'twitch']
       })
-    ).toBe('X receive-only')
+    ).toBe('X read-only')
   })
 
-  it('distinguishes a missing write scope from a receive-only provider', () => {
+  it('distinguishes a missing write scope from a read-only provider', () => {
     expect(
       commentsDestinationNotes({
         providers: [
@@ -57,7 +57,7 @@ describe('comments destination status', () => {
         ],
         sendTargets: []
       })
-    ).toBe('No writable destinations · Twitch reconnect to send · X receive-only')
+    ).toBe('No writable destinations · Twitch reconnect to send · X read-only')
   })
 
   it('names the bound account so a wrong-channel manual stream is visible', () => {
@@ -96,6 +96,11 @@ describe('comments destination status', () => {
     )
     expect(markup).toContain('Paused')
     expect(markup).not.toContain('Waiting')
+    // The resume time is visible text under the badge, never a title (S1.10).
+    expect(markup).not.toContain('title=')
+    expect(markup.replaceAll('<!-- -->', '')).toMatch(
+      /data-slot="comments-destination-detail">YouTube: YouTube chat is paused[^<]*It resumes at /
+    )
   })
 
   it('renders provider and failure status with the shared badge contract', () => {
@@ -114,8 +119,8 @@ describe('comments destination status', () => {
     expect(providerMarkup).toContain('aria-label="Chat destination status"')
     expect(providerMarkup).toContain('YouTube')
     expect(providerMarkup).toContain('Connected')
-    expect(providerMarkup).toContain('Receive-only')
-    expect(composerMarkup).toContain('X receive-only')
+    expect(providerMarkup).toContain('Read-only')
+    expect(composerMarkup).toContain('X read-only')
     expect(composerMarkup).not.toContain('Sends to')
     // A failed send speaks once, with its reason.
     expect(composerMarkup).toContain('Twitch: Token expired')
@@ -132,48 +137,12 @@ describe('comments destination status', () => {
   })
 })
 
-describe('co-host status chip', () => {
-  const cohost = {
-    sessionId: 'session-1',
-    status: 'listening' as const,
-    reason: null,
-    questions: [],
-    flags: [],
-    mood: null,
-    lastTickAt: null,
-    tickSeq: 3,
-    partial: false
-  }
-
-  it('sits in the destination strip and only goes live-green while listening', () => {
-    const listening = renderToStaticMarkup(
-      createElement(CommentsDestinationStatus, { cohostState: cohost, providers })
+describe('Buddy in the strip (plan 174 S3.14a)', () => {
+  it("names chat destinations only: Buddy's status lives in its pane header", () => {
+    const markup = renderToStaticMarkup(createElement(CommentsDestinationStatus, { providers }))
+    expect(markup).not.toContain('Buddy')
+    expect(renderToStaticMarkup(createElement(CommentsDestinationStatus, { providers: [] }))).toBe(
+      ''
     )
-    expect(listening).toContain('data-slot="cohost-status-chip"')
-    expect(listening).toContain('Orcle: listening')
-    expect(listening).toContain('data-variant="success"')
-
-    const paused = renderToStaticMarkup(
-      createElement(CommentsDestinationStatus, {
-        cohostState: { ...cohost, status: 'paused' as const, reason: 'quota-exhausted' as const },
-        providers: []
-      })
-    )
-    expect(paused).toContain('Orcle: paused · quota')
-    expect(paused).not.toContain('data-variant="success"')
-  })
-
-  it('stays out of the strip entirely when there is no co-host state', () => {
-    const markup = renderToStaticMarkup(
-      createElement(CommentsDestinationStatus, { providers, cohostState: null })
-    )
-    expect(markup).not.toContain('data-slot="cohost-status-chip"')
-  })
-
-  it('still renders the chip for a session with no chat providers at all', () => {
-    const markup = renderToStaticMarkup(
-      createElement(CommentsDestinationStatus, { cohostState: cohost, providers: [] })
-    )
-    expect(markup).toContain('data-slot="cohost-status-chip"')
   })
 })

@@ -17,9 +17,11 @@ import {
   summarizeNativePreviewRecordingDiagnostics
 } from './lib/native-preview-diagnostics.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
+import { configureWindowsD3d11RendererSources } from './lib/windows-d3d11-preview-sources.mjs'
 import {
   nativePreviewSurfaceStatusReady,
-  previewWindowSurfaceReady
+  previewWindowSurfaceReady,
+  windowsD3d11SurfaceReady
 } from './lib/native-preview-window-gates.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
@@ -112,6 +114,12 @@ const usePackagedWindowsScreen =
   (exerciseProofFramePolling ||
     windowsPreviewOptions.d3d11 ||
     windowsPreviewOptions.expectFallback === 'natural')
+// The renderer keeps its default camera scene unless it is told otherwise, and
+// every session it starts is then refused (the camera never starts here, and
+// the D3D11 scene map refuses the test pattern). The D3D11 presenter is only
+// configured by a running session, so the gate drives the renderer's own
+// sources to the real screen + ScreenOnly through the packaged bridge.
+const usePackagedWindowsD3d11Sources = usePackagedWindowsScreen && windowsPreviewOptions.d3d11
 const recordingProofPollingIntervalMs = 125
 const recordingProofPollingMaxWidth = 960
 const previewLatencyBudgets = resolveNativePreviewLatencyBudgets({
@@ -248,14 +256,17 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
       tab: 'studio',
       waitFor: '[data-videorc-preview-card]'
     })
+    if (usePackagedWindowsD3d11Sources) {
+      await configurePackagedWindowsD3d11RendererSources(smoke, packagedWindowsScreen.id)
+    }
     if (usePackagedWindowsScreen) {
       await applyPackagedWindowsScreenLayout(ws)
     }
     const bootstrap = await smokeCommand(smoke, 'inspect-native-preview-bootstrap')
     assertNativeBootstrap(bootstrap)
     await smokeCommand(smoke, 'preview-window-open')
-    await waitForPreviewWindowSurface(smoke)
-    const surfaceBefore = await waitForNativeSurface(ws)
+    await waitForPreviewWindowSurface(smoke, ws)
+    const surfaceBefore = await waitForNativeSurface(ws, smoke)
     const nativeStage = await smokeCommand(smoke, 'inspect-native-preview-bootstrap', {
       requireNativePlaceholder: true
     })
@@ -322,6 +333,14 @@ async function startPackagedWindowsScreenPreview(ws) {
   throw new Error(
     `No real Windows screen source could feed packaged preview polling: ${failures.join('; ') || 'no candidates'}`
   )
+}
+
+async function configurePackagedWindowsD3d11RendererSources(smoke, screenId) {
+  await configureWindowsD3d11RendererSources(
+    (command, params) => smokeCommand(smoke, command, params),
+    screenId
+  )
+  console.log(`Native-preview recording smoke set renderer sources to ${screenId} + ScreenOnly.`)
 }
 
 async function applyPackagedWindowsScreenLayout(ws) {
@@ -448,7 +467,7 @@ async function runNativePreviewRecordingScenario(
       )
       try {
         assertNativeMeasurement(scenario, measurement, {
-          armedInPlace: compositorPath.path === 'armed'
+          armedInPlace: compositorPath.path === 'armed' || expectWindowsD3d11Preview
         })
       } catch (error) {
         measurementFailure = errorMessage(error)
@@ -457,7 +476,7 @@ async function runNativePreviewRecordingScenario(
     }
 
     surfaceDuring = expectsPreview
-      ? await waitForNativeSurface(ws, previousSurface.framesRendered)
+      ? await waitForNativeSurface(ws, smoke, previousSurface.framesRendered)
       : await waitForHiddenNativeSurface(ws)
   } catch (error) {
     scenarioFailure = error
@@ -625,7 +644,7 @@ async function showNativePreviewSurface(ws, smoke, samples) {
     requireNativePlaceholder: true
   })
   assertNativeBootstrap(nativeStage, { requireNativePreview: true })
-  const surface = await waitForNativeSurface(ws)
+  const surface = await waitForNativeSurface(ws, smoke)
   await waitForNativePreviewDiagnostics(samples)
   return surface
 }
@@ -859,31 +878,40 @@ function fullFrameTransform() {
   }
 }
 
-async function waitForNativeSurface(ws, previousFrames = 0) {
+async function waitForNativeSurface(ws, smoke, previousFrames = 0) {
   const deadline = Date.now() + timeoutMs
   let lastStatus = null
+  let lastHostStatus = null
   while (Date.now() < deadline) {
     lastStatus = await request(ws, timeoutMs, 'preview.surface.status')
-    if (
+    if (expectWindowsD3d11Preview) {
+      lastHostStatus = await smokeCommand(smoke, 'native-preview-surface-status')
+      if (
+        windowsD3d11SurfaceReady(
+          { backendStatus: lastStatus, hostStatus: lastHostStatus },
+          { previousFrames }
+        )
+      ) {
+        return lastStatus
+      }
+    } else if (
       nativePreviewSurfaceStatusReady(lastStatus, {
         expectedTransport: expectedSurfaceTransport,
         expectedBacking: expectedSurfaceBacking,
         expectedHostKind: expectedNativePreviewHostKind,
         previousFrames
-      }) &&
-      (!expectWindowsD3d11Preview ||
-        (lastStatus.firstFrameContract === 'met' && lastStatus.framePollingSuppressed === true))
+      })
     ) {
       return lastStatus
     }
     await sleep(150)
   }
   throw new Error(
-    `Native preview surface did not become live. Last status: ${JSON.stringify(lastStatus)}`
+    `Native preview surface did not become live. Last status: ${JSON.stringify(lastStatus)}${lastHostStatus ? `. Electron host status: ${JSON.stringify(lastHostStatus)}` : ''}`
   )
 }
 
-async function waitForPreviewWindowSurface(smoke) {
+async function waitForPreviewWindowSurface(smoke, ws = null) {
   const deadline = Date.now() + timeoutMs
   let lastEvidence = null
   while (Date.now() < deadline) {
@@ -906,8 +934,30 @@ async function waitForPreviewWindowSurface(smoke) {
     await sleep(150)
   }
   throw new Error(
-    `Preview window surface did not open as ${expectedSurfaceTransport}/${expectedSurfaceBacking}. Last evidence: ${JSON.stringify(lastEvidence)}`
+    `Preview window surface did not open as ${expectedSurfaceTransport}/${expectedSurfaceBacking}. Last evidence: ${JSON.stringify(lastEvidence)}${await backendPreviewEvidence(ws)}`
   )
+}
+
+// The Electron-side evidence alone cannot say whether the backend ever got a
+// surface, trusted bounds, a recording session or a D3D11 presenter.
+async function backendPreviewEvidence(ws) {
+  if (!ws) return ''
+  try {
+    const [surface, diagnostics, recording] = await Promise.all([
+      request(ws, timeoutMs, 'preview.surface.status'),
+      request(ws, timeoutMs, 'diagnostics.stats'),
+      request(ws, timeoutMs, 'recording.status')
+    ])
+    return `. Backend evidence: ${JSON.stringify({
+      surface,
+      recording: { state: recording?.state, sessionId: recording?.sessionId },
+      diagnosticsSessionId: diagnostics?.sessionId ?? null,
+      previewTransport: diagnostics?.previewTransport ?? null,
+      windowsD3d11Media: diagnostics?.windowsD3d11Media ?? null
+    })}`
+  } catch (error) {
+    return `. Backend evidence unavailable: ${errorMessage(error)}`
+  }
 }
 
 async function waitForHiddenNativeSurface(ws) {
@@ -956,7 +1006,7 @@ async function waitForNativePreviewDiagnostics(samples) {
       if (
         sample.previewTransport === expectedSurfaceTransport &&
         sample.previewSurfaceBacking === expectedSurfaceBacking &&
-        (sample.previewPresentFps ?? 0) >= minPreviewFps &&
+        (sample.previewPresentFps ?? 0) >= previewDiagnosticsMinFps(sample) &&
         windowsD3d11DiagnosticsHealthy(sample)
       ) {
         return sample
@@ -1128,6 +1178,14 @@ function compositorPathForSession(sessionLogs, sessionId) {
     path: entry.code === 'recording-compositor-armed' ? 'armed' : 'restarted',
     detail: entry.message ?? null
   }
+}
+
+// The unified D3D11 path presents every frame its media generation composes,
+// so its preview runs at the session cadence, like an armed compositor.
+function previewDiagnosticsMinFps(sample) {
+  return expectWindowsD3d11Preview && Number.isFinite(sample.targetFps)
+    ? sample.targetFps * 0.9
+    : minPreviewFps
 }
 
 function nativeMeasurementMinFps(scenario, armedInPlace = false) {
@@ -1543,6 +1601,7 @@ function launchAndReadConnections() {
           ? { VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK: 'natural' }
           : {}),
         ...(usePackagedWindowsScreen ? { VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1' } : {}),
+        ...(usePackagedWindowsD3d11Sources ? { VIDEORC_WINDOWS_D3D11_PREVIEW_SMOKE: '1' } : {}),
         ...(packagedSmokeCapability
           ? {
               VIDEORC_PACKAGED_SMOKE_TEST: '1',

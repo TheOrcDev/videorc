@@ -1,21 +1,42 @@
-import { isGlobalShortcutAction, type GlobalShortcutAction } from '../../../shared/global-shortcuts'
+import {
+  globalShortcutLayout,
+  isGlobalShortcutAction,
+  type GlobalShortcutAction
+} from '../../../shared/global-shortcuts'
 export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
+import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
 import { toast } from '@/lib/toast'
+import { GO_LIVE_SHORTCUT_LABEL, RECORD_SHORTCUT_LABEL } from '@/lib/go-live-copy'
+import { layoutPresetLabel } from '@/lib/layout-labels'
 
-import type { DeviceStatus, GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
+import type {
+  ClipLength,
+  DeviceStatus,
+  GlobalShortcutsConfig,
+  GlobalShortcutsResult
+} from '@/lib/backend'
 import { openSettingsTab } from '@/lib/settings-tabs'
 import { systemAudioTarget } from '@/lib/system-audio'
 
 type RegisterFn = (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
 
 export interface GlobalShortcutContext {
+  toggleScreenHidden?: () => Promise<unknown>
   sessionActive: boolean
-  streamEnabled: boolean
-  startSession: () => Promise<unknown>
+  /**
+   * The Studio's two explicit starts (plan 174 S3.1, B-3): the record key
+   * records, the Go Live key goes live, whatever mode was saved last. Each
+   * refuses with its own reason when it cannot start, so the hotkey never
+   * needs a mode of its own.
+   */
+  startRecording: () => Promise<unknown>
+  startLivestream: () => Promise<unknown>
   stopSession: () => Promise<unknown>
   toggleMicrophoneMute: () => void
-  /** Plan 068 D6: mark a clip at the current moment. */
-  markClip?: () => void
+  /** Save a clip (plan 068 D6; plan 181 R4): the last seconds whenever the
+   * ring holds frames, and a mark in the recording while one runs. Plan 199:
+   * `seconds` is 30 or 60; none is the 30-second clip. */
+  markClip?: (seconds?: ClipLength) => void
   /** Plan 069 S6: the system-audio device status and the state the Studio
    * shows (the session's confirmed mix, else the request). */
   systemAudio?: readonly [status: DeviceStatus | undefined, shown: boolean]
@@ -29,30 +50,25 @@ export function executeGlobalShortcut(
   context: GlobalShortcutContext
 ): void {
   if (!isGlobalShortcutAction(action)) return
-  if (action.startsWith('layout')) {
+  if (action.startsWith('layout') || action.startsWith('scene:')) {
     context.switchLayout?.(action)
     return
   }
   if (action === 'record-toggle') {
-    void (context.sessionActive ? context.stopSession() : context.startSession())
+    void (context.sessionActive ? context.stopSession() : context.startRecording())
     return
   }
   if (action === 'stream-toggle') {
-    if (context.sessionActive) {
-      void context.stopSession()
-    } else if (context.streamEnabled) {
-      void context.startSession()
-    } else {
-      toast.error('Streaming is not configured', {
-        id: 'global-shortcut-stream',
-        description: 'Enable streaming in the Studio before using the Go Live shortcut.'
-      })
-    }
+    // Always a Go Live (plan 174 S3.1): with no destination ready the
+    // provider refuses with "Set up a destination to go live" and its fix.
+    void (context.sessionActive ? context.stopSession() : context.startLivestream())
     return
   }
+  if (action === 'screen-hide-toggle') void context.toggleScreenHidden?.()
   if (action === 'mic-toggle') context.toggleMicrophoneMute()
   if (action === 'system-audio-toggle') toggleSystemAudio(context)
   if (action === 'clip-mark') context.markClip?.()
+  if (action === 'clip-mark-long') context.markClip?.(LONG_CLIP_SECONDS)
 }
 
 function toggleSystemAudio(context: GlobalShortcutContext): void {
@@ -70,10 +86,37 @@ function toggleSystemAudio(context: GlobalShortcutContext): void {
       action: { label: 'Open Permissions', onClick: () => openSettingsTab('permissions') }
     })
   } else {
-    toast.warning('System audio is not available on this computer', {
+    toast.warning("System audio isn't available on this computer", {
       id: 'global-shortcut-system-audio'
     })
   }
+}
+
+// The one label table for global shortcuts: Settings → Shortcuts, its
+// "Already used by" refusal and the registration toast all read it (plan 174
+// S2.3a, after S2.4). The session pair is S2.2's verb pair.
+const GLOBAL_SHORTCUT_LABELS: Partial<Record<GlobalShortcutAction, string>> = {
+  'screen-hide-toggle': 'Hide screen',
+  'record-toggle': RECORD_SHORTCUT_LABEL,
+  'stream-toggle': GO_LIVE_SHORTCUT_LABEL,
+  'mic-toggle': 'Mute / unmute microphone',
+  'system-audio-toggle': 'Turn system audio on or off',
+  'clip-mark': 'Save a 30-second clip',
+  'clip-mark-long': 'Save a 1-minute clip',
+  'layout-next': 'Next scene',
+  'layout-previous': 'Previous scene'
+}
+
+/**
+ * Pure. What a global shortcut does, in words, never its id (plan 174 A-22).
+ * Read out of its list (a toast, "Already used by …"), so a vertical layout
+ * says so ("Vertical screen + camera").
+ */
+export function globalShortcutLabel(action: string): string {
+  if (!isGlobalShortcutAction(action)) return action
+  const layout = globalShortcutLayout(action)
+  if (layout) return layoutPresetLabel(layout, { bothOrientations: true })
+  return GLOBAL_SHORTCUT_LABELS[action] ?? action
 }
 
 // Plan 062: the latest per-action registration outcome, so Settings can mark
@@ -159,20 +202,26 @@ export class GlobalShortcutsRegistrar {
           .filter(([, ok]) => !ok)
           .map(([action]) => action)
         if (failed.length > 0) {
-          toast.error('Some global shortcuts could not be registered', {
-            id: 'global-shortcuts-conflict',
-            description: `${failed.join(', ')}: invalid, duplicate or already used by another app. Pick different bindings in Settings → Shortcuts.`,
-            action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
-          })
+          toast.error(
+            failed.length === 1
+              ? "A global shortcut didn't register"
+              : "Some global shortcuts didn't register",
+            {
+              id: 'global-shortcuts-conflict',
+              description: `${failed.map(globalShortcutLabel).join(', ')}: another app uses ${failed.length === 1 ? 'it' : 'them'}, or the keys are taken twice. Choose different keys in Settings → Shortcuts.`,
+              action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
+            }
+          )
         }
       })
       .catch((error: unknown) => {
         // The IPC itself failed — the user's shortcuts silently not working
         // is the one thing this must never do quietly.
         console.error('[global-shortcuts] registration failed', error)
-        toast.error('Global shortcuts could not be registered', {
+        toast.error("Global shortcuts didn't register", {
           id: 'global-shortcuts-conflict',
-          description: 'Videorc could not reach the system shortcut registry. Try again.'
+          description: "Restart Videorc if they still don't work.",
+          action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
         })
       })
   }

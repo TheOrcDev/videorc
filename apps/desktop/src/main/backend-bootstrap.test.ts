@@ -9,6 +9,58 @@ import {
   publicBackendConnectionJson
 } from './backend-bootstrap'
 
+describe('backend managed asset roots (release test 146, plan 0005)', () => {
+  const base = {
+    host: '127.0.0.1',
+    port: 9876,
+    token: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    adminToken: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    pid: 42
+  }
+
+  it('keeps the Screens and Banners folders READY names, for main only', () => {
+    const parsed = parseBackendBootstrap({
+      ...base,
+      managedAssetRoots: {
+        screens: '/home/u/.videorc/Screens',
+        banners: '/home/u/.videorc/Banners',
+        sounds: '/home/u/.videorc/Sounds'
+      }
+    })
+    expect(parsed.managedAssetRoots).toEqual({
+      screens: '/home/u/.videorc/Screens',
+      banners: '/home/u/.videorc/Banners',
+      sounds: '/home/u/.videorc/Sounds'
+    })
+    expect(JSON.stringify(parsed.renderer)).not.toContain('.videorc')
+    expect(publicBackendConnectionJson(parsed.renderer)).not.toContain('.videorc')
+  })
+
+  it('drops roots that are missing, relative or not text, and keeps the connection', () => {
+    expect(parseBackendBootstrap(base).managedAssetRoots).toBeNull()
+    expect(
+      parseBackendBootstrap({ ...base, managedAssetRoots: { screens: 'Screens', banners: '/b' } })
+        .managedAssetRoots
+    ).toBeNull()
+    expect(
+      parseBackendBootstrap({ ...base, managedAssetRoots: { screens: '/s', banners: 7 } })
+        .managedAssetRoots
+    ).toBeNull()
+    expect(parseBackendBootstrap({ ...base, managedAssetRoots: 'nope' }).renderer.port).toBe(9876)
+  })
+
+  it('keeps screens and banners when sounds is missing or relative (release test 147)', () => {
+    for (const sounds of [undefined, 'Sounds', 7]) {
+      expect(
+        parseBackendBootstrap({
+          ...base,
+          managedAssetRoots: { screens: '/s', banners: '/b', sounds }
+        }).managedAssetRoots
+      ).toEqual({ screens: '/s', banners: '/b' })
+    }
+  })
+})
+
 describe('backend bootstrap authority split', () => {
   it('keeps admin credential out of renderer connection and smoke serialization', () => {
     const adminToken = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'

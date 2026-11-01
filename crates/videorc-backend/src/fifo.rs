@@ -45,6 +45,30 @@ pub fn create_audio(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Creates an endpoint only if no owner has reserved this path. ISO startup
+/// uses this instead of the legacy recreation contract.
+pub(crate) fn create_new(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        create_with_capacity_policy(path, PIPE_OUT_BUFFER_BYTES, false)
+    }
+    #[cfg(not(windows))]
+    {
+        create(path)
+    }
+}
+
+pub(crate) fn create_audio_new(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        create_with_capacity_policy(path, AUDIO_PIPE_BUFFER_BYTES, false)
+    }
+    #[cfg(not(windows))]
+    {
+        create(path)
+    }
+}
+
 pub fn open_audio_writer(
     path: &Path,
     stop: &AtomicBool,
@@ -119,7 +143,18 @@ pub fn open_writer(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid FIFO path"))?;
 
     while !stop.load(Ordering::Relaxed) {
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+        // O_CLOEXEC: every child the backend spawns while a session runs
+        // (a camera FFmpeg restarted mid-take, a quality check) would
+        // otherwise inherit this write end and keep the FIFO open after the
+        // bridge closes it. FFmpeg then never reads EOF, ignores the graceful
+        // stop, and is SIGKILLed with an unfinalized file (Linux plans
+        // 0017/0026: ogre's camera FFmpeg held a dead session's FIFO).
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
         if fd >= 0 {
             if clear_nonblock {
                 let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, 0) };
@@ -180,6 +215,15 @@ pub fn create(path: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn create_with_capacity(path: &Path, output_buffer_bytes: u32) -> io::Result<()> {
+    create_with_capacity_policy(path, output_buffer_bytes, true)
+}
+
+#[cfg(windows)]
+fn create_with_capacity_policy(
+    path: &Path,
+    output_buffer_bytes: u32,
+    replace_stale: bool,
+) -> io::Result<()> {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_OUTBOUND,
@@ -199,14 +243,19 @@ fn create_with_capacity(path: &Path, output_buffer_bytes: u32) -> io::Result<()>
         ));
     }
 
-    {
-        let mut registry = pipe_registry()
-            .lock()
-            .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
-        // The stale server handle must be closed before CreateNamedPipeW runs:
-        // FILE_FLAG_FIRST_PIPE_INSTANCE checks existing OS pipe instances, so
-        // replacing the map entry after creation still leaves the old handle
-        // busy long enough for Windows to reject the replacement.
+    let mut registry = pipe_registry()
+        .lock()
+        .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
+    if !replace_stale && registry.contains_key(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "FIFO endpoint already has an owner",
+        ));
+    }
+    // Legacy callers explicitly recreate stale parked servers. ISO callers
+    // retain the existing handle on collision. Keep the reservation lock until
+    // the OS handle is inserted so another creator cannot cross this boundary.
+    if replace_stale {
         drop(registry.remove(path));
     }
 
@@ -229,9 +278,6 @@ fn create_with_capacity(path: &Path, output_buffer_bytes: u32) -> io::Result<()>
     }
     let owned = unsafe { OwnedHandle::from_raw_handle(handle.0 as _) };
 
-    let mut registry = pipe_registry()
-        .lock()
-        .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
     registry.insert(path.to_path_buf(), owned);
     Ok(())
 }
@@ -493,6 +539,59 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn a_child_spawned_while_writing_never_holds_the_fifo_open() {
+        // Linux plans 0017/0026: a process spawned during a session inherited
+        // the writer, so the reader (FFmpeg) never saw EOF after Stop.
+        let path = temp_fifo_path("cloexec");
+        let _ = std::fs::remove_file(&path);
+        create(&path).expect("create fifo");
+
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut file = std::fs::File::open(reader_path).expect("reader open");
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).expect("reader reaches EOF");
+            contents
+        });
+
+        let stop = AtomicBool::new(false);
+        let mut writer = open_writer(
+            &path,
+            &stop,
+            Duration::from_millis(5),
+            true,
+            "writer stopped before FIFO opened",
+        )
+        .expect("writer opens once the reader is attached");
+        {
+            use std::os::fd::AsRawFd;
+            let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFD) };
+            assert!(
+                flags & libc::FD_CLOEXEC != 0,
+                "FIFO writer must be close-on-exec"
+            );
+        }
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn a child while the writer is open");
+        writer.write_all(b"frame").expect("write to fifo");
+        drop(writer);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(reader.join().expect("reader thread"));
+        });
+        let contents = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the reader never saw EOF while a child was alive");
+        assert_eq!(contents, b"frame");
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 // The Windows twin of the contract above. These run on a Windows host (or
@@ -619,6 +718,35 @@ mod windows_tests {
         assert_eq!(&reader.join().expect("reader thread"), b"ping");
         stop.store(true, Ordering::Relaxed);
         cleanup(&path).expect("cleanup");
+    }
+
+    #[test]
+    fn source_iso_create_new_preserves_parked_pipe_ownership() {
+        use std::os::windows::io::AsRawHandle;
+        let path = transport_path(&format!("source-iso-collision-{}", uuid::Uuid::new_v4()));
+        create(&path).unwrap();
+        let original = pipe_registry()
+            .lock()
+            .unwrap()
+            .get(&path)
+            .unwrap()
+            .as_raw_handle() as usize;
+        for create_new_endpoint in [create_new as fn(&Path) -> io::Result<()>, create_audio_new] {
+            assert_eq!(
+                create_new_endpoint(&path).unwrap_err().kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(
+                pipe_registry()
+                    .lock()
+                    .unwrap()
+                    .get(&path)
+                    .unwrap()
+                    .as_raw_handle() as usize,
+                original
+            );
+        }
+        cleanup(&path).unwrap();
     }
 
     #[test]

@@ -84,21 +84,21 @@ async function render(patch: Partial<StreamManagerProps>): Promise<void> {
 
 function activeTab(slot: 'pane-tabs-narrow' | 'pane-tabs-wide'): string | null {
   const tab = container.querySelector<HTMLElement>(
-    `[data-slot="${slot}"] [role="tab"][data-state="active"]`
+    `[data-slot="${slot}"] [role="tab"][data-active]`
   )
   return tab?.textContent?.trim().toLowerCase() ?? null
 }
 
-describe('StreamManager: an Orcle removal card comes forward (plan 140, S6)', () => {
-  it('brings the Orcle pane forward for a new card, then returns to where you were', async () => {
+describe('StreamManager: a Buddy removal card comes forward (plan 140, S6)', () => {
+  it('brings the Buddy pane forward for a new card, then returns to where you were', async () => {
     await render({ moderationOperations: [] })
     expect(activeTab('pane-tabs-narrow')).toBe('chat')
     expect(activeTab('pane-tabs-wide')).toBe('activity')
 
     await render({ moderationOperations: [pending] })
-    expect(activeTab('pane-tabs-narrow')).toBe('orcle')
-    expect(activeTab('pane-tabs-wide')).toBe('orcle')
-    expect(container.querySelector('[data-slot="removal-card"]')).toBeTruthy()
+    expect(activeTab('pane-tabs-narrow')).toBe('buddy')
+    expect(activeTab('pane-tabs-wide')).toBe('buddy')
+    expect(container.querySelector('[data-testid="removal-card"]')).toBeTruthy()
     // It never takes focus from wherever the streamer is typing.
     expect(document.activeElement).toBe(document.body)
 
@@ -106,7 +106,7 @@ describe('StreamManager: an Orcle removal card comes forward (plan 140, S6)', ()
     await render({
       moderationOperations: [{ ...pending, phase: 'cancelled', updatedAt: '2020-01-01T00:00:00Z' }]
     })
-    expect(container.querySelector('[data-slot="removal-card"]')).toBeNull()
+    expect(container.querySelector('[data-testid="removal-card"]')).toBeNull()
     expect(activeTab('pane-tabs-narrow')).toBe('chat')
     expect(activeTab('pane-tabs-wide')).toBe('activity')
   })
@@ -114,7 +114,7 @@ describe('StreamManager: an Orcle removal card comes forward (plan 140, S6)', ()
   it('answers the card through the Stream Manager with the operation', async () => {
     const onAnswerRemoval = vi.fn()
     await render({ moderationOperations: [pending], onAnswerRemoval })
-    const cancel = container.querySelector<HTMLButtonElement>('[data-slot="removal-cancel"]')
+    const cancel = container.querySelector<HTMLButtonElement>('[data-testid="removal-cancel"]')
     await act(async () => cancel!.click())
     expect(onAnswerRemoval).toHaveBeenCalledWith(pending, 'cancel')
   })

@@ -5,7 +5,7 @@ import {
   HealthIcon,
   LibraryIcon,
   LivestreamIcon,
-  OrcleIcon,
+  BuddyIcon,
   OutputIcon,
   SceneIcon,
   SettingsIcon,
@@ -14,10 +14,12 @@ import {
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
-import type { OrcleTabId } from '@/lib/orcle-tabs'
-import type { SettingsTabId } from '@/lib/settings-tabs'
+import { BUDDY_TAB_LABEL, isBuddyTabId, type BuddyTabId } from '@/lib/buddy-tabs'
+import { isLivestreamViewId } from '@/lib/livestream-tabs'
+import { migrateSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
+import type { FirstRunSetupRequest, WorkspaceNavigation } from '@/lib/workspace-navigation'
 
-// Studio control pages, grouped under "Studio" in the sidebar: one click away, but
+// The Setup pages, listed under the sidebar's "Setup" label: one click away, but
 // they are FULL pages — studio content renders only on the Studio tab (user decision
 // 2026-06-09, overriding the earlier push-rail idea). Sources is the single home for
 // every capture device — screen/window, camera, AND microphone — so changing what
@@ -27,8 +29,9 @@ export type StudioPanel = 'sources' | 'layouts' | 'assets' | 'live' | 'captions'
 // Full pages: they replace the workspace content area.
 export type WorkspaceTab = 'studio' | StudioPanel | 'library' | 'ai' | 'diagnostics' | 'settings'
 
-// Sidebar zones (ux-ia-refactor-plan): the stage row, then SETUP (the studio
-// panels), then LIBRARY, then SYSTEM. 'setup' rows come from STUDIO_PANELS.
+// Sidebar zones (plan 174 D8): the stage rows (Studio, Buddy), then Setup
+// (STUDIO_PANELS, the only labelled group), then Library; the 'system' rows
+// sit in a bottom block above the account row. Health has no row at all.
 export type WorkspaceTabGroup = 'stage' | 'library' | 'system'
 
 export type WorkspaceTabMeta = {
@@ -47,12 +50,12 @@ export type StudioPanelMeta = {
   legacyTabId: string
 }
 
-// Orcle (plan 119) sits in the stage row, right under Studio. Its id is `ai`,
+// Buddy (plan 119) sits in the stage row, right under Studio. Its id is `ai`,
 // the id deep links, smokes, ⌘9 and the `data-videorc-tab-trigger` value
 // already use.
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
   { id: 'studio', label: 'Studio', icon: StudioIcon, group: 'stage' },
-  { id: 'ai', label: 'Orcle', icon: OrcleIcon, group: 'stage' },
+  { id: 'ai', label: BUDDY_TAB_LABEL, icon: BuddyIcon, group: 'stage' },
   { id: 'library', label: 'Library', icon: LibraryIcon, group: 'library' },
   { id: 'settings', label: 'Settings', icon: SettingsIcon, group: 'system' },
   { id: 'diagnostics', label: 'Health', icon: HealthIcon, group: 'system' }
@@ -72,7 +75,7 @@ export const STUDIO_PANELS: StudioPanelMeta[] = [
 ]
 
 // Page shortcuts. Studio, the Setup pages and Library take ⌘1–⌘8 in sidebar
-// order. Orcle takes ⌘9, the key tab id `ai` has always had, although it sits
+// order. Buddy takes ⌘9, the key tab id `ai` has always had, although it sits
 // under Studio (plan 119): muscle memory and deep links outrank a strict
 // sidebar order.
 // Settings keeps the platform-standard ⌘,. Health intentionally has NO digit — it
@@ -109,7 +112,7 @@ const SIDEBAR_ORDER: WorkspaceTab[] = [
 /**
  * A page's position down the sidebar. The reveal cascade uses it so the
  * shortcut chips arrive top-to-bottom, regardless of which sidebar group a row
- * sits in and of its digit (Orcle's ⌘9 sits second).
+ * sits in and of its digit (Buddy's ⌘9 sits second).
  */
 export function sidebarOrderFor(tab: WorkspaceTab): number {
   const index = SIDEBAR_ORDER.indexOf(tab)
@@ -124,12 +127,52 @@ export function workspaceTabLabel(tab: WorkspaceTab): string {
   )
 }
 
+/**
+ * The main window's title for a page (plan 174 S3.21, A-18): "Studio –
+ * Videorc", read by Mission Control, the Windows taskbar and screen readers.
+ * An en dash: app copy never uses an em dash (docs/ui-copy.md).
+ */
+export function workspaceWindowTitle(tab: WorkspaceTab): string {
+  return `${workspaceTabLabel(tab)} – Videorc`
+}
+
 export function isStudioPanel(value: unknown): value is StudioPanel {
   return STUDIO_PANELS.some((panel) => panel.id === value)
 }
 
 export function isWorkspaceTab(value: unknown): value is WorkspaceTab {
   return WORKSPACE_TABS.some((tab) => tab.id === value) || isStudioPanel(value)
+}
+
+/**
+ * The page a `videorc:navigate-workspace` event asks for (sent by
+ * `openWorkspaceTab`), or null for a page that does not exist. A sub-tab that
+ * does not exist opens the page on its remembered tab.
+ */
+export function readWorkspaceNavigation(detail: unknown): WorkspaceNavigation | null {
+  if (!detail || typeof detail !== 'object') return null
+  const { tab, settingsTab, buddyTab, livestreamView, sessionId } = detail as Record<
+    string,
+    unknown
+  >
+  if (tab === 'settings') {
+    // A link to a retired tab opens the tab that replaced it (plan 174 S3.6).
+    const current = migrateSettingsTabId(settingsTab)
+    return current ? { tab, settingsTab: current } : { tab }
+  }
+  if (tab === 'ai') return isBuddyTabId(buddyTab) ? { tab, buddyTab } : { tab }
+  if (tab === 'live') {
+    return isLivestreamViewId(livestreamView) ? { tab, livestreamView } : { tab }
+  }
+  if (tab === 'library') return typeof sessionId === 'string' ? { tab, sessionId } : { tab }
+  return isWorkspaceTab(tab) ? { tab } : null
+}
+
+/** The replay request behind `openFirstRunSetup` (plan 203 S5): an unknown page returns to Settings. */
+export function readFirstRunSetupRequest(detail: unknown): FirstRunSetupRequest {
+  const returnTo =
+    detail && typeof detail === 'object' ? (detail as Record<string, unknown>).returnTo : undefined
+  return { returnTo: isWorkspaceTab(returnTo) ? returnTo : 'settings' }
 }
 
 type WorkspaceNavValue = {
@@ -140,8 +183,8 @@ type WorkspaceNavValue = {
   closeStudioPanel: () => void
   /** Opens Settings on `tab`, or on the tab used last when none is named. */
   openSettings: (tab?: SettingsTabId) => void
-  /** Opens Orcle on `tab`, or on the tab used last when none is named (plan 150). */
-  openOrcle: (tab?: OrcleTabId) => void
+  /** Opens Buddy on `tab`, or on the tab used last when none is named (plan 150). */
+  openBuddy: (tab?: BuddyTabId) => void
 }
 
 export const WorkspaceNavContext = createContext<WorkspaceNavValue | null>(null)

@@ -1,5 +1,10 @@
 import type { AiCapabilities, CaptionTransport } from '@/lib/backend'
-import type { CaptionBurnTarget } from '@/lib/capture'
+import {
+  providerStreamOutputPlanOptions,
+  streamOutputVideosForTargets,
+  type CaptionBurnTarget,
+  type CaptureConfig
+} from '@/lib/capture'
 
 export type GoLiveCaptionsReadiness = {
   kind: 'disabled' | 'ready' | 'blocked' | 'skipped'
@@ -12,7 +17,12 @@ export type GoLiveCaptionsReadiness = {
 export type CaptionSessionOutputReadiness = {
   ready: boolean
   description?: string
+  /** Which rule the output breaks, for a short label (the Livestream checklist). */
+  reason?: CaptionOutputRule
 }
+
+/** The two output rules livestream captions have (plan 174 S3.4, D-9). */
+export type CaptionOutputRule = 'frame-rate' | 'one-stream-quality'
 
 type CaptionOutputProfile = {
   width: number
@@ -40,20 +50,71 @@ export function captionSessionOutputReadiness(input: {
   if (input.recordingVideo.fps > 30 || streamVideos.some((video) => video.fps > 30)) {
     return {
       ready: false,
+      reason: 'frame-rate',
       description:
-        'Livestream caption burn-in currently supports up to 30 fps. Choose a 30 fps output, select Recording only, or continue this session without captions.'
+        'Captions on a livestream work up to 30 fps. Choose a 30 fps quality in Output, or go live without captions this time.'
     }
   }
 
   if (input.recordEnabled && uniqueProfiles(streamVideos).length > 1) {
     return {
       ready: false,
+      reason: 'one-stream-quality',
       description:
-        'Captioned record + multistream currently requires one shared stream output profile. Match the enabled destination profiles, or continue this session without captions.'
+        'Captions on a livestream you also record need one stream quality for every destination. Give your destinations the same quality in Livestream, or go live without captions this time.'
     }
   }
 
   return { ready: true }
+}
+
+/** The short words for a broken rule, where a sentence doesn't fit (a checklist row). */
+export const CAPTION_OUTPUT_RULE_LABELS: Readonly<Record<CaptionOutputRule, string>> = {
+  'frame-rate': 'Need 30 fps or less',
+  'one-stream-quality': 'Need one stream quality'
+}
+
+/**
+ * The caption rule a livestream would break with today's setup, asked before
+ * Go Live (plan 174 S3.4, D-9): the Livestream checklist and the Captions
+ * page say it, so the Go Live dialog is never the first place it shows. The
+ * same check the dialog runs, as if going live now whatever the last start
+ * was. Null when captions are off or the output fits.
+ */
+export function livestreamCaptionsBlocker(input: {
+  captionsEnabled: boolean
+  burnTarget: CaptionBurnTarget
+  recordEnabled: boolean
+  recordingVideo: CaptionOutputProfile
+  streamVideos: CaptionOutputProfile[]
+}): { rule: CaptionOutputRule; description: string } | null {
+  if (!input.captionsEnabled) return null
+  const readiness = captionSessionOutputReadiness({ ...input, streamEnabled: true })
+  if (readiness.ready || !readiness.reason || !readiness.description) return null
+  return { rule: readiness.reason, description: readiness.description }
+}
+
+/**
+ * `livestreamCaptionsBlocker` for a whole capture config: the stream outputs
+ * the destinations would get if the streamer went live now.
+ */
+export function livestreamCaptionsBlockerFor(
+  config: Pick<
+    CaptureConfig,
+    'captions' | 'recordEnabled' | 'streamEnabled' | 'video' | 'streaming' | 'layout'
+  >
+): { rule: CaptionOutputRule; description: string } | null {
+  return livestreamCaptionsBlocker({
+    captionsEnabled: config.captions.enabled,
+    burnTarget: config.captions.burnTarget,
+    recordEnabled: config.recordEnabled,
+    recordingVideo: config.video,
+    streamVideos: streamOutputVideosForTargets(
+      config.video,
+      config.streaming,
+      providerStreamOutputPlanOptions(config)
+    ).map(({ video }) => video)
+  })
 }
 
 export function captionRuntimeStartBlocked(input: {
@@ -63,18 +124,47 @@ export function captionRuntimeStartBlocked(input: {
   return input.captureActive && !input.outputReadiness.ready
 }
 
+/**
+ * Live captions transcribe the microphone after gain and mute, which needs
+ * the native microphone path (CoreAudio). Linux feeds its microphone straight
+ * to FFmpeg, so the backend refuses every captioned session there and tells
+ * the streamer to pick "a supported microphone" Linux doesn't have (ogre,
+ * 2026-10-13). On Linux, sessions start without captions and say why; the
+ * saved setting is kept for when the path exists.
+ */
+export const CAPTIONS_LINUX_TITLE = "Live captions aren't available on Linux yet"
+export const CAPTIONS_LINUX_DETAIL =
+  "Videorc can't pass the microphone to captions here. Recordings and livestreams start without them, and your setting is kept."
+export const CAPTIONS_UNAVAILABLE_ON_LINUX = `${CAPTIONS_LINUX_TITLE}. ${CAPTIONS_LINUX_DETAIL}`
+
+/** Why live captions can't run on this platform at all, or null. */
+export function captionsPlatformUnavailableReason(platform: string | undefined): string | null {
+  return platform === 'linux' ? CAPTIONS_UNAVAILABLE_ON_LINUX : null
+}
+
 export function decideGoLiveCaptionsReadiness(input: {
   persistedEnabled: boolean
   suppressForSession: boolean
   capabilities: AiCapabilities | null
   outputReadiness?: CaptionSessionOutputReadiness
+  /** `captionsPlatformUnavailableReason`: this computer can't caption at all. */
+  platformUnavailable?: string | null
 }): GoLiveCaptionsReadiness {
   if (!input.persistedEnabled) {
     return {
       kind: 'disabled',
       blocksStart: false,
       title: 'Captions off',
-      description: 'Live captions are not enabled for this session.',
+      description: "Live captions aren't enabled for this session.",
+      transport: null
+    }
+  }
+  if (input.platformUnavailable) {
+    return {
+      kind: 'skipped',
+      blocksStart: false,
+      title: 'Captions unavailable',
+      description: input.platformUnavailable,
       transport: null
     }
   }
@@ -90,14 +180,14 @@ export function decideGoLiveCaptionsReadiness(input: {
   if (input.outputReadiness && !input.outputReadiness.ready) {
     return blocked(
       input.outputReadiness.description ??
-        'Live captions are not compatible with the selected output configuration.'
+        "Live captions aren't compatible with the selected output configuration."
     )
   }
 
   const captions = input.capabilities?.captions
   if (!captions) {
     return blocked(
-      'Videorc could not verify live-caption readiness for this deployment. Try again, or continue this session without captions.'
+      "Videorc couldn't verify live-caption readiness for this deployment. Try again, or continue this session without captions."
     )
   }
   if (!captions.available || !captions.preferredTransport) {
@@ -110,8 +200,8 @@ export function decideGoLiveCaptionsReadiness(input: {
     title: 'Captions ready',
     description:
       captions.preferredTransport === 'realtime'
-        ? 'Realtime microphone transcription is ready.'
-        : 'Caption transcription is ready with a slightly higher delay.',
+        ? 'Live microphone transcription is ready.'
+        : 'Caption transcription is ready in 3-second chunks, a few seconds behind.',
     transport: captions.preferredTransport
   }
 }
@@ -164,7 +254,7 @@ function unavailableReason(
 ): string {
   switch (reasonCode) {
     case 'cloud-ai-premium-required':
-      return 'Live captions are not available for this account. Continue without captions or review your plan.'
+      return "Live captions aren't available for this account. Continue without captions or review your plan."
     case 'ai-user-disabled':
       return 'Live captions are disabled for this account. Continue without captions or contact support.'
     case 'captions-monthly-quota-exhausted':
@@ -174,8 +264,8 @@ function unavailableReason(
       return 'Live captions are temporarily disabled on this Videorc deployment.'
     case 'captions-invalid-config':
     case 'captions-not-configured':
-      return 'Live captions are not configured correctly on this Videorc deployment.'
+      return "Live captions aren't configured correctly on this Videorc deployment."
     default:
-      return 'Live captions are not ready on this Videorc deployment.'
+      return "Live captions aren't ready on this Videorc deployment."
   }
 }

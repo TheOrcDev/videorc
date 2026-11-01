@@ -20,6 +20,7 @@ import {
 } from './lib/captions-live-artifact.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { evaluateMicrophoneLossContinuity } from './lib/microphone-loss-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -103,6 +104,7 @@ try {
 
   fake.state.realtimeAvailable = false
   fake.state.realtimeFailureCode = 'captions-realtime-disabled'
+  await ensureCaptionsOnBothOutputs(backend)
   await seedRendererCaptionsProfile(smoke)
   await waitForCaptionStatus(backend, (status) => {
     return status.state === 'ready' && status.desiredEnabled === true
@@ -373,9 +375,11 @@ try {
     timeoutMs,
     'microphone-input-lost health event'
   )
+  // This session records AND streams, so the audience hears the silence: the
+  // notice speaks of the livestream (plan 174 B-6, S2.2).
   await waitForRendererRuntimeNotice(
     smoke,
-    'Microphone stopped: recording continues with silence',
+    'Microphone stopped: livestream continues with silence',
     'persistent microphone-loss warning'
   )
 
@@ -583,6 +587,34 @@ try {
   }
 }
 
+/** Plan 164 D14: the captions item's two switches are the one home of the
+ * burn target. The renderer derives `captions.burnTarget` from them after
+ * every load, so a seeded `both` reads back as the default layout's `stream`.
+ * Both switches go on through the backend, written until the layout reads
+ * back the same twice in a row (the renderer pushes its own copy at start). */
+async function ensureCaptionsOnBothOutputs(ws) {
+  let steady = 0
+  let last = null
+  for (let attempt = 0; attempt < 20 && steady < 2; attempt += 1) {
+    last = await request(ws, timeoutMs, 'overlays.layout.get', {})
+    if (last?.captions?.showOnStream === true && last?.captions?.showInRecording === true) {
+      steady += 1
+    } else {
+      steady = 0
+      await request(ws, timeoutMs, 'overlays.layout.set', {
+        ...last,
+        captions: { ...last?.captions, showOnStream: true, showInRecording: true }
+      })
+    }
+    await sleep(750)
+  }
+  if (steady < 2) {
+    throw new Error(
+      `The overlay layout would not hold both captions switches: ${JSON.stringify(last?.captions)}`
+    )
+  }
+}
+
 async function seedRendererCaptionsProfile(smoke) {
   const seeded = await smokeCommand(smoke, 'eval-js', {
     code: `
@@ -608,6 +640,9 @@ async function seedRendererCaptionsProfile(smoke) {
       }
       localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
       localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
+      // The reload rides the seed's own eval: a second eval could find the
+      // renderer's own write already over the seed (plan 0008).
+      ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}
       return {
         captions: next.captions,
         video: next.video,
@@ -627,12 +662,6 @@ async function seedRendererCaptionsProfile(smoke) {
   ) {
     throw new Error(`Could not seed renderer caption profile: ${JSON.stringify(seeded)}`)
   }
-  await smokeCommand(smoke, 'eval-js', {
-    code: `
-      window.setTimeout(() => window.location.reload(), 150)
-      return { reloadScheduled: true }
-    `
-  })
   await sleep(750)
 
   let latest = null
@@ -678,7 +707,7 @@ async function seedRendererCaptionsProfile(smoke) {
 }
 
 // The session records and streams: the backend reports it as `recording`, and
-// the inspector pill reads "Streaming" because it is on air (plan 095 S5).
+// the inspector pill reads "On air" because it is (plan 095 S5, plan 174 D4).
 async function hydrateRendererActiveSession(smoke) {
   const hydrated = await smokeCommand(smoke, 'eval-js', {
     code: `
@@ -690,7 +719,7 @@ async function hydrateRendererActiveSession(smoke) {
       let sessionStatus = null
       while (Date.now() < deadline) {
         sessionStatus = document.querySelector('[data-videorc-session-status]')?.textContent?.trim() ?? null
-        if (sessionStatus === 'Streaming') break
+        if (sessionStatus === 'On air') break
         await sleep(50)
       }
       return { recordingState: recording.state, sessionStatus }
@@ -698,7 +727,7 @@ async function hydrateRendererActiveSession(smoke) {
   })
   if (
     hydrated?.result?.recordingState !== 'recording' ||
-    hydrated.result.sessionStatus !== 'Streaming'
+    hydrated.result.sessionStatus !== 'On air'
   ) {
     throw new Error(`Renderer did not hydrate record+stream: ${JSON.stringify(hydrated)}`)
   }
@@ -826,7 +855,9 @@ function safeFakeCounters(state) {
     emptyAudioAppends: state.emptyAudioAppends,
     chunkRequests: state.chunkRequests,
     chunkAudioInspections: state.chunkAudio.length,
-    usageReports: state.usageReports
+    usageReports: state.usageReports,
+    leases: state.leases.length,
+    settlements: state.settlements.length
   }
 }
 

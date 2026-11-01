@@ -1,5 +1,9 @@
 'use client'
 
+// Forked from audiocn (MIT, https://audiocn.dev) parameter-slider; Videorc's
+// changes: the range is the chrome fill, the thumb a chrome bead on the knob's
+// hairline rim, and Reset sits on rounded-row. Everything else is upstream's.
+
 import { mergeProps } from '@base-ui/react/merge-props'
 import { NumberField as NumberFieldPrimitive } from '@base-ui/react/number-field'
 import { Slider as SliderPrimitive } from '@base-ui/react/slider'
@@ -470,7 +474,7 @@ export const ParameterSliderReset = ({
         'aria-label': 'Reset',
         children: children ?? 'Reset',
         className: cn(
-          'text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring/30 inline-flex h-6 items-center rounded-md px-1.5 text-xs outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-0',
+          'text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring/30 rounded-row inline-flex h-6 items-center px-1.5 text-xs outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-0',
           className
         ),
         disabled: disabled || !modified,
@@ -554,14 +558,14 @@ export const ParameterSliderControl = ({
           data-slot="parameter-slider-track"
         >
           <div
-            className="bg-primary absolute inset-y-0 left-(--parameter-range-start) w-(--parameter-range-size) rounded-full"
+            className="chrome-fill absolute inset-y-0 left-(--parameter-range-start) w-(--parameter-range-size) rounded-full"
             data-slot="parameter-slider-range"
             style={range}
           />
           <SliderPrimitive.Thumb
             aria-describedby={descriptionId}
             aria-labelledby={labelId}
-            className="bg-background ring-foreground/15 hover:ring-ring/30 focus-visible:ring-ring/40 data-dragging:ring-ring/30 block size-4 shrink-0 rounded-full shadow-sm ring-1 outline-hidden transition-[box-shadow] hover:ring-4 focus-visible:ring-4 data-dragging:ring-4"
+            className="chrome-bead ring-knob-ring hover:ring-ring/30 focus-visible:ring-ring/40 data-dragging:ring-ring/30 block size-4 shrink-0 rounded-full ring-1 outline-hidden transition-[box-shadow] hover:ring-4 focus-visible:ring-4 data-dragging:ring-4"
             data-slot="parameter-slider-thumb"
             getAriaValueText={() => format(value)}
             onDoubleClick={() => {

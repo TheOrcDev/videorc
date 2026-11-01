@@ -80,3 +80,67 @@ test('malformed or unavailable native metadata throws only a reduced failure', a
     })
   }
 })
+
+test('cursor-free captures omit only the identified system cursor at its native level', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'videorc-glass-oracle-test-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const cursorWindowLevel = 2147483630
+  const window = {
+    id: 21,
+    pid: 42,
+    order: 1,
+    layer: 4,
+    alpha: 1,
+    x: 40,
+    y: 50,
+    width: 600,
+    height: 400,
+    ownerCategory: 'target-app'
+  }
+  const cursor = {
+    ...window,
+    id: 4,
+    pid: 395,
+    order: 0,
+    layer: cursorWindowLevel,
+    width: 28,
+    height: 40,
+    ownerCategory: 'system-cursor'
+  }
+  const ordinaryOverlay = {
+    ...cursor,
+    id: 80,
+    order: 2,
+    ownerCategory: 'other-app'
+  }
+  const systemDialog = {
+    ...cursor,
+    id: 81,
+    order: 3,
+    ownerCategory: 'system-dialog'
+  }
+  const mismatchedCursor = { ...cursor, id: 82, order: 4, layer: 10 }
+  const read = createGlassWindowReader(directory, {
+    execute: (command) =>
+      command === 'swiftc'
+        ? ''
+        : JSON.stringify({
+            observedAt: 1000,
+            cursorWindowLevel,
+            windows: [cursor, window, ordinaryOverlay, systemDialog, mismatchedCursor]
+          })
+  })
+  assert.deepEqual(read(), {
+    observedAt: 1000,
+    windows: [window, ordinaryOverlay, systemDialog, mismatchedCursor]
+  })
+  for (const level of [undefined, null, String(cursorWindowLevel), cursorWindowLevel + 0.5]) {
+    const uncertain = createGlassWindowReader(directory, {
+      execute: (command) =>
+        command === 'swiftc'
+          ? ''
+          : JSON.stringify({ observedAt: 1000, cursorWindowLevel: level, windows: [cursor] })
+    })
+    assert.deepEqual(uncertain().windows, [cursor], 'uncertain metadata must remain fail-closed')
+  }
+})

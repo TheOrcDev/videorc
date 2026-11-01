@@ -38,6 +38,29 @@ const REMOTE_CLIENT_JS: &str = include_str!("../remote_web/remote-client.js");
 const HMAC_JS: &str = include_str!("../remote_web/hmac.js");
 const MANIFEST: &str = include_str!("../remote_web/manifest.webmanifest");
 const ICON_SVG: &str = include_str!("../remote_web/icon.svg");
+/// YouTube's official icon, the same file the desktop app shows (plan 165,
+/// Google's ToS report III.F.2a): one copy in the repo, never redrawn.
+const YOUTUBE_ICON_SVG: &str = include_str!(
+    "../../../apps/desktop/src/renderer/src/assets/brand/youtube/youtube-icon-red.svg"
+);
+/// X's mark and verified checks from X's partner icon kit, the same files the
+/// desktop app shows (plan 167). White mark: the phone's tiles are dark.
+const X_LOGO_SVG: &str =
+    include_str!("../../../apps/desktop/src/renderer/src/assets/brand/x/x-logo-white.svg");
+const X_VERIFIED_BLUE_SVG: &str =
+    include_str!("../../../apps/desktop/src/renderer/src/assets/brand/x/verified-premium-blue.svg");
+const X_VERIFIED_BUSINESS_SVG: &str = include_str!(
+    "../../../apps/desktop/src/renderer/src/assets/brand/x/verified-business-gold.svg"
+);
+const X_VERIFIED_GOVERNMENT_SVG: &str = include_str!(
+    "../../../apps/desktop/src/renderer/src/assets/brand/x/verified-government-gray.svg"
+);
+/// The chrome ground under the page (plan 208 S6, D13): the S1 stills the
+/// desktop's windows sit on, the same files, never a copy that can drift.
+const CHROME_GROUND_DARK_WEBP: &[u8] =
+    include_bytes!("../../../assets/backgrounds/chrome-ground-dark.webp");
+const CHROME_GROUND_LIGHT_WEBP: &[u8] =
+    include_bytes!("../../../assets/backgrounds/chrome-ground-light.webp");
 
 /// Same-origin only, no third-party requests, no framing. `ws:` is spelled
 /// out because older WebKit does not fold websockets into `'self'`.
@@ -394,12 +417,40 @@ pub fn lan_router(state: AppState) -> Router {
             "/icon.svg",
             get(|| async { asset("image/svg+xml", ICON_SVG) }),
         )
+        .route(
+            "/youtube-icon.svg",
+            get(|| async { asset("image/svg+xml", YOUTUBE_ICON_SVG) }),
+        )
+        .route(
+            "/x-logo.svg",
+            get(|| async { asset("image/svg+xml", X_LOGO_SVG) }),
+        )
+        .route(
+            "/x-verified-blue.svg",
+            get(|| async { asset("image/svg+xml", X_VERIFIED_BLUE_SVG) }),
+        )
+        .route(
+            "/x-verified-business.svg",
+            get(|| async { asset("image/svg+xml", X_VERIFIED_BUSINESS_SVG) }),
+        )
+        .route(
+            "/x-verified-government.svg",
+            get(|| async { asset("image/svg+xml", X_VERIFIED_GOVERNMENT_SVG) }),
+        )
+        .route(
+            "/chrome-ground-dark.webp",
+            get(|| async { asset("image/webp", CHROME_GROUND_DARK_WEBP) }),
+        )
+        .route(
+            "/chrome-ground-light.webp",
+            get(|| async { asset("image/webp", CHROME_GROUND_LIGHT_WEBP) }),
+        )
         .route("/ws", get(lan_ws_handler))
         .layer(axum::middleware::from_fn(guard_and_harden))
         .with_state(state)
 }
 
-fn asset(content_type: &'static str, body: &'static str) -> Response {
+fn asset(content_type: &'static str, body: impl IntoResponse) -> Response {
     ([(header::CONTENT_TYPE, content_type)], body).into_response()
 }
 
@@ -797,6 +848,35 @@ mod tests {
         assert_eq!(page.headers()["cache-control"], "no-store");
         assert_eq!(page.headers()["x-content-type-options"], "nosniff");
 
+        // Plan 165: chat rows show YouTube's official icon file, unmodified.
+        let youtube_icon = client
+            .get(format!("http://{address}/youtube-icon.svg"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(youtube_icon.status(), 200);
+        assert_eq!(youtube_icon.headers()["content-type"], "image/svg+xml");
+        assert_eq!(youtube_icon.text().await.unwrap(), YOUTUBE_ICON_SVG);
+        assert!(YOUTUBE_ICON_SVG.contains("fill=\"rgb(100%, 0%, 19.999695%)\""));
+
+        // Plan 167: X's mark and verified checks, X's kit files unmodified.
+        for (path, body) in [
+            ("/x-logo.svg", X_LOGO_SVG),
+            ("/x-verified-blue.svg", X_VERIFIED_BLUE_SVG),
+            ("/x-verified-business.svg", X_VERIFIED_BUSINESS_SVG),
+            ("/x-verified-government.svg", X_VERIFIED_GOVERNMENT_SVG),
+        ] {
+            let response = client
+                .get(format!("http://{address}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200, "{path}");
+            assert_eq!(response.headers()["content-type"], "image/svg+xml");
+            assert_eq!(response.text().await.unwrap(), body);
+        }
+        assert!(X_VERIFIED_BLUE_SVG.contains("#1d9bf0"));
+
         // Everything the loopback router serves must be structurally absent.
         for path in [
             "/health",
@@ -823,6 +903,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rebound.status(), 421);
+    }
+
+    #[tokio::test]
+    async fn lan_router_serves_the_chrome_ground_from_the_desktop_files() {
+        let state = test_state();
+        let address = serve(&state).await;
+        let client = reqwest::Client::new();
+        let assets = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/backgrounds");
+
+        for (path, file) in [
+            ("/chrome-ground-dark.webp", "chrome-ground-dark.webp"),
+            ("/chrome-ground-light.webp", "chrome-ground-light.webp"),
+        ] {
+            let response = client
+                .get(format!("http://{address}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200, "{path}");
+            assert_eq!(response.headers()["content-type"], "image/webp", "{path}");
+            // The same hardening as every other page asset.
+            assert_eq!(response.headers()["cache-control"], "no-store", "{path}");
+            assert_eq!(
+                response.headers()["content-security-policy"],
+                CONTENT_SECURITY_POLICY,
+                "{path}"
+            );
+            let served = response.bytes().await.unwrap();
+            // Plan 208 S1's still, byte for byte: the file at the repository
+            // root that the desktop paints, never a copy.
+            let on_disk = std::fs::read(format!("{assets}/{file}")).unwrap();
+            assert_eq!(served.as_ref(), on_disk.as_slice(), "{path}");
+            assert_eq!(&served[..4], b"RIFF", "{path}");
+            assert_eq!(&served[8..12], b"WEBP", "{path}");
+        }
+
+        // A CSS background image is an image load: `img-src 'self'` covers
+        // the ground without widening the policy.
+        assert!(CONTENT_SECURITY_POLICY.contains("img-src 'self'"));
+        assert!(APP_CSS.contains("url('/chrome-ground-dark.webp')"));
+        assert!(APP_CSS.contains("url('/chrome-ground-light.webp')"));
     }
 
     #[tokio::test]

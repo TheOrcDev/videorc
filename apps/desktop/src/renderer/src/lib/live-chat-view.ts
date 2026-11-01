@@ -15,8 +15,11 @@ import type {
   LiveChatSnapshot,
   StreamPlatform
 } from '../../../shared/backend'
+import { isActivityOnlyEvent } from '../../../shared/backend'
+import { platformLabel } from './platform-copy'
 
-/** Platforms that can appear in the unified feed, in display order. */
+/** Platforms that can appear in the unified feed, in display order.
+ * Facebook joins with its connected Page (plan 206 S9). */
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'kick', 'x']
 
 /** Max persisted messages projected into the renderer at once; SQLite remains authoritative. */
@@ -265,6 +268,17 @@ export function sortMessagesChronological(messages: LiveChatMessage[]): LiveChat
   return [...messages].sort(compareMessagesChronological)
 }
 
+/**
+ * Whether the rows are already in `sortMessagesChronological` order (plan 191):
+ * one O(n) scan, so a buffer that arrives sorted is not copied and re-sorted.
+ */
+export function isSortedChronologically(messages: readonly LiveChatMessage[]): boolean {
+  for (let index = 1; index < messages.length; index++) {
+    if (compareMessagesChronological(messages[index - 1], messages[index]) > 0) return false
+  }
+  return true
+}
+
 function boundMessages(messages: LiveChatMessage[]): LiveChatMessage[] {
   return messages.length > MAX_LIVE_CHAT_VIEW_MESSAGES
     ? messages.slice(messages.length - MAX_LIVE_CHAT_VIEW_MESSAGES)
@@ -421,15 +435,27 @@ export function chatNeedsConnectionAction(providers: LiveChatProviderState[]): b
 
 export function liveChatEmptyMessage(
   snapshot: Pick<LiveChatSnapshot, 'providers'>,
-  noProviderMessage = 'Connect YouTube, Twitch, or X to read live comments.'
+  noProviderMessage = 'Connect YouTube, Twitch, or X to read live comments.',
+  /** What an empty chat says when no destination needs anything (plan 174 H-12). */
+  healthyMessage = 'No messages yet. Chat appears here once you go live.'
 ): string {
   if (snapshot.providers.length === 0) {
     return noProviderMessage
   }
-  const provider = snapshot.providers
+  return liveChatProviderNotice(snapshot.providers) ?? healthyMessage
+}
+
+/**
+ * What the destination whose chat most needs the streamer says (failed,
+ * reconnect, unavailable, unsupported), or null when none does. The one
+ * choice behind the empty chat's words and the Studio's Chat notice
+ * (plan 204).
+ */
+export function liveChatProviderNotice(providers: readonly LiveChatProviderState[]): string | null {
+  const provider = providers
     .filter(providerNeedsAction)
     .sort((left, right) => providerStatePriority(left) - providerStatePriority(right))[0]
-  return provider?.message ?? 'No messages yet. Chat appears here once you go live.'
+  return provider ? provider.message : null
 }
 
 /**
@@ -492,26 +518,29 @@ export function visibleMessages(messages: LiveChatMessage[], max: number): LiveC
   return messages.length > max ? messages.slice(messages.length - max) : messages
 }
 
+/** The platforms' names, from the one table (plan 174 S1.4, `platformLabel`). */
 export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
-  youtube: 'YouTube',
-  twitch: 'Twitch',
-  kick: 'Kick',
-  x: 'X',
-  tiktok: 'TikTok',
-  instagram: 'Instagram',
-  custom: 'Custom'
+  youtube: platformLabel('youtube'),
+  twitch: platformLabel('twitch'),
+  kick: platformLabel('kick'),
+  x: platformLabel('x'),
+  facebook: platformLabel('facebook'),
+  tiktok: platformLabel('tiktok'),
+  instagram: platformLabel('instagram'),
+  custom: platformLabel('custom')
 }
 
 export function commentCanHighlight(message: LiveChatMessage): boolean {
   if (message.isDeleted || message.eventType === 'deleted' || message.eventType === 'moderation') {
     return false
   }
-  // Notices go on stream only as activity events: a sub, a gift, a raid
-  // (plan 055, S11). Plain system text stays off the card.
+  // Notices go on stream only as activity events: a sub, a gift, a raid, a
+  // Power-up or a redemption (plan 055, S11; plan 162). Plain system text
+  // stays off the card.
   if (
     message.eventType === 'system' ||
     message.eventType === 'membership' ||
-    message.eventType === 'follow'
+    isActivityOnlyEvent(message.eventType)
   ) {
     return Boolean(message.details)
   }
@@ -528,7 +557,7 @@ export type CommentRowTint = 'paid' | 'spotlight' | 'member' | null
 
 /**
  * The one background a chat row paints (plan 154, D3). Lowest to highest:
- * a member's own message, Orcle's "Talking about this" pull-up, a paid
+ * a member's own message, Buddy's "Talking about this" pull-up, a paid
  * message. An on-stream row paints none: its button fill says so.
  */
 export function commentRowTint(

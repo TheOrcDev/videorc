@@ -74,9 +74,11 @@ try {
     screenName: 'Built-in Display',
     windowId: undefined,
     windowName: undefined,
+    captureOff: undefined,
     cameraId: 'camera:avfoundation-native:face-time',
     cameraName: 'FaceTime HD Camera',
     cameraOff: undefined,
+    microphoneOff: undefined,
     microphoneId: 'microphone:coreaudio:podcast',
     microphoneName: 'Podcast Mic',
     testPattern: false
@@ -135,9 +137,11 @@ try {
       screenName: 'Built-in Display',
       windowId: undefined,
       windowName: undefined,
+      captureOff: undefined,
       cameraId: 'camera:avfoundation-native:face-time',
       cameraName: 'FaceTime HD Camera',
       cameraOff: undefined,
+      microphoneOff: undefined,
       microphoneId: 'microphone:coreaudio:podcast',
       microphoneName: 'Podcast Mic'
     }
@@ -162,9 +166,11 @@ try {
       screenName: undefined,
       windowId: 'window:screencapturekit:111',
       windowName: 'Editor',
+      captureOff: undefined,
       cameraId: 'camera:avfoundation-native:desk',
       cameraName: 'Desk Camera',
       cameraOff: undefined,
+      microphoneOff: undefined,
       microphoneId: 'microphone:coreaudio:laptop',
       microphoneName: 'Laptop Mic'
     }
@@ -183,9 +189,11 @@ try {
     screenName: 'Built-in Display',
     windowId: undefined,
     windowName: undefined,
+    captureOff: undefined,
     cameraId: 'camera:avfoundation-native:face-time',
     cameraName: 'FaceTime HD Camera',
     cameraOff: undefined,
+    microphoneOff: undefined,
     microphoneId: 'microphone:coreaudio:podcast',
     microphoneName: 'Podcast Mic'
   })
@@ -222,9 +230,11 @@ try {
       screenName: 'Built-in Display',
       windowId: undefined,
       windowName: undefined,
+      captureOff: undefined,
       cameraId: undefined,
       cameraName: undefined,
       cameraOff: undefined,
+      microphoneOff: undefined,
       microphoneId: 'microphone:coreaudio:podcast',
       microphoneName: 'Podcast Mic'
     }
@@ -243,9 +253,11 @@ try {
     screenName: 'Built-in Display',
     windowId: undefined,
     windowName: undefined,
+    captureOff: undefined,
     cameraId: undefined,
     cameraName: undefined,
     cameraOff: true,
+    microphoneOff: undefined,
     microphoneId: 'microphone:coreaudio:podcast',
     microphoneName: 'Podcast Mic'
   })
@@ -253,6 +265,39 @@ try {
   const refreshedOffSources = reconcileSourceSelection(offSources, [...devices].reverse())
   assert.deepEqual(refreshedOffSources, offSources)
   assert.deepEqual(sourceSelectionChangeEvents(offSources, refreshedOffSources), [])
+
+  // Plan 0027: Microphone None is a choice too. It survives every refresh,
+  // and only a profile that never chose one gets the first microphone.
+  const explicitMicrophoneNone = {
+    screenId: 'screen:screencapturekit:222',
+    screenName: 'Built-in Display',
+    cameraId: 'camera:avfoundation-native:face-time',
+    cameraName: 'FaceTime HD Camera',
+    microphoneOff: true
+  }
+  const noneSources = reconcileSourceSelection(explicitMicrophoneNone, devices)
+  assert.equal(noneSources.microphoneId, undefined)
+  assert.equal(noneSources.microphoneOff, true)
+  assert.deepEqual(reconcileSourceSelection(noneSources, [...devices].reverse()), noneSources)
+
+  // Plan 0002 (#742): Screen None is a choice too. Reconcile keeps it on
+  // every device refresh instead of falling back to the first screen.
+  const explicitCaptureNone = {
+    captureOff: true,
+    cameraId: 'camera:avfoundation-native:face-time',
+    cameraName: 'FaceTime HD Camera',
+    microphoneId: 'microphone:coreaudio:podcast',
+    microphoneName: 'Podcast Mic'
+  }
+  const captureNoneSources = reconcileSourceSelection(explicitCaptureNone, devices)
+  assert.equal(captureNoneSources.screenId, undefined)
+  assert.equal(captureNoneSources.windowId, undefined)
+  assert.equal(captureNoneSources.captureOff, true)
+  assert.deepEqual(sourceSelectionChangeEvents(explicitCaptureNone, captureNoneSources), [])
+  assert.deepEqual(
+    reconcileSourceSelection(captureNoneSources, [...devices].reverse()),
+    captureNoneSources
+  )
 
   // Legacy profiles without an explicit Off still select an available camera.
   const legacySources = {
@@ -267,9 +312,11 @@ try {
     screenName: 'Built-in Display',
     windowId: undefined,
     windowName: undefined,
+    captureOff: undefined,
     cameraId: 'camera:avfoundation-native:face-time',
     cameraName: 'FaceTime HD Camera',
     cameraOff: undefined,
+    microphoneOff: undefined,
     microphoneId: 'microphone:coreaudio:podcast',
     microphoneName: 'Podcast Mic'
   })
@@ -298,7 +345,7 @@ try {
   assert.equal(avfoundationOnly.microphoneId, 'microphone:avfoundation:2')
 
   console.log(
-    'Source reconciliation smoke OK - persisted IDs, name rematch, explicit Camera Off, legacy fallback, and fallback-mic migration verified.'
+    'Source reconciliation smoke OK - persisted IDs, name rematch, explicit Camera Off, explicit Microphone None, explicit Screen None, legacy fallback, and fallback-mic migration verified.'
   )
 } finally {
   await rm(tempDir, { recursive: true, force: true })

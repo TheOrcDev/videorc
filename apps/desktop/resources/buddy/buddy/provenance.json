@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "referenceSha256": "ccbd771ddb9a66e986537428940d699712fe23c2a6077d1b2b37b689d52c88c7",
+  "sources": {
+    "extras": "780cda1c3feb74bdd31c9c37f99813d639711171dd3c5f772dcfaf042c2eb6ef",
+    "gaze-down1": "8239a1f9dc7cf195c44e1e5cef42fe25f5599d8540f427e8b7caaa2721c3180b",
+    "gaze-down2": "dd87a7b323b33b2db7dcde39930b9c29f6f8f7483538bb963d1a3a313ea64ac1",
+    "gaze-level": "73c92dd1548d731db9779b3af9b99013f1d83469385d92afc1d2ba15649cbc2b",
+    "gaze-up1": "c35889f41b442f4bd59e35d89133cc43418d081aca21bf26ea33d52d285cb756",
+    "gaze-up2": "4dd717023cf940625711cd24a7f151c2b1565453a76ff76bc4bfd7a302340317",
+    "pilot": "9eefc5633f36bcd0b295e726c773a3ace98532dc5365d9a280553c7a8e4b5b78",
+    "reactions-a": "da9f95746ba400a03049b79097ba1bb09c3e14830d9889b21ef4352a8a1206ca",
+    "reactions-b": "7b9cc4b419bc3494e5b0b9f069d7dc39dafc4ba886b30e8303a84c3fcc7a0a15"
+  },
+  "createdAt": "2026-10-09T21:58:13Z"
+}

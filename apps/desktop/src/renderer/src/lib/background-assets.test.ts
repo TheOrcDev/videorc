@@ -3,29 +3,40 @@ import { describe, expect, it } from 'vitest'
 import {
   BACKGROUND_SLOT_COUNT,
   applyBundledBackgroundAssets,
-  applySlot,
-  backgroundAssetDisplayUrl,
-  canApplySlot,
-  checkableBackgroundAssetPath,
-  clearActiveSlot,
+  applyLiveBackground,
   createDefaultRegistry,
-  createImportedAsset,
   defaultBackgroundStyle,
   effectiveSceneBackground,
-  importIntoSlot,
-  markSlotStatus,
-  markSlotMissingIfAssetMatches,
+  liveBackgroundSettings,
+  liveSceneBackground,
+  nextLiveBackgroundStatusView,
   reconcileRegistry,
+  registryForCommittedLiveBackground,
   removeSlotAsset,
-  restoreSlotDefault,
-  renameAsset,
-  setAssetStyle,
-  slotDisplayStatus,
-  slotName,
   type BackgroundAsset,
   type BackgroundAssetRegistry,
   type BackgroundAssetSlot
 } from './background-assets'
+import {
+  applySlot,
+  backgroundAssetDisplayUrl,
+  backgroundImportTarget,
+  canApplySlot,
+  checkableBackgroundAssetPath,
+  clearActiveSlot,
+  createImportedAsset,
+  importIntoSlot,
+  markSlotStatus,
+  markSlotMissingIfAssetMatches,
+  removeSlotNeedsConfirm,
+  restoreSlotDefault,
+  renameAsset,
+  setAssetStyle,
+  setLiveBackgroundSettings,
+  slotDisplayStatus,
+  slotName,
+  unattendedImportSlot
+} from './background-library'
 
 function importedAsset(id: string, name: string): BackgroundAsset {
   return createImportedAsset({
@@ -272,6 +283,27 @@ describe('background asset model', () => {
   })
 })
 
+describe('removeSlotNeedsConfirm (plan 174 S0.3, C-12)', () => {
+  it('asks for the active slot, the scene background, and any imported file', () => {
+    const base = createDefaultRegistry()
+    const imported = withReadySlot(base, 'bg-02', readyAsset('asset-2', 'Mine'))
+    // The active slot leaves the scene.
+    expect(removeSlotNeedsConfirm({ ...imported, activeSlotId: 'bg-02' }, 'bg-02', null)).toBe(true)
+    // The scene's background, even when the slot is not marked active.
+    expect(removeSlotNeedsConfirm(imported, 'bg-02', 'asset-2')).toBe(true)
+    // An imported file that is applied nowhere is still gone for good.
+    expect(removeSlotNeedsConfirm(imported, 'bg-02', null)).toBe(true)
+  })
+
+  it('lets a built-in slot empty without a question, and ignores unknown slots', () => {
+    const base = createDefaultRegistry()
+    const builtInSlot = base.slots.find((slot) => slot.assetId !== null)
+    expect(builtInSlot).toBeTruthy()
+    expect(removeSlotNeedsConfirm(base, builtInSlot!.id, null)).toBe(false)
+    expect(removeSlotNeedsConfirm(base, 'no-such-slot', null)).toBe(false)
+  })
+})
+
 describe('background asset import and editing', () => {
   it('creates an imported asset that is ready with default style', () => {
     const asset = importedAsset('a1', 'Sunset')
@@ -397,6 +429,69 @@ describe('reconcileRegistry with imported assets', () => {
     })
     expect(restored.assets.a1?.styleDefaults.blurPx).toBe(9)
     expect(restored.assets.a1?.styleDefaults.scale).toBe(100)
+  })
+
+  it("keeps a built-in's rename and style edits, with this build's URLs (plan 174, C-3)", () => {
+    let registry = renameAsset(createDefaultRegistry(), 'builtin-bg-03', 'My tutorial')
+    registry = setAssetStyle(registry, 'builtin-bg-03', { blurPx: 12, fit: 'fit' })
+    const stored = JSON.parse(JSON.stringify(registry))
+    // An older build's bundle URL (and a native path from main) never survives.
+    stored.assets['builtin-bg-03'].assetPath = '/assets/tutorial-OLDHASH.webp'
+    stored.assets['builtin-bg-03'].thumbnailPath = '/assets/tutorial-OLDHASH.webp'
+
+    const restored = reconcileRegistry(stored)
+    const fresh = createDefaultRegistry().assets['builtin-bg-03']!
+    expect(restored.assets['builtin-bg-03']).toEqual({
+      ...fresh,
+      name: 'My tutorial',
+      styleDefaults: { ...defaultBackgroundStyle(), blurPx: 12, fit: 'fit' }
+    })
+    expect(slotName(slotById(restored, 'bg-03'), restored)).toBe('My tutorial')
+    // Untouched built-ins and malformed records keep this build's record.
+    expect(restored.assets['builtin-bg-04']).toEqual(
+      createDefaultRegistry().assets['builtin-bg-04']
+    )
+    const malformed = reconcileRegistry({
+      ...stored,
+      assets: { 'builtin-bg-03': { name: '  ', styleDefaults: 'loud' } }
+    })
+    expect(malformed.assets['builtin-bg-03']).toEqual(fresh)
+  })
+})
+
+describe('where an imported background goes (plan 174, C-2 and C-7)', () => {
+  it('fills an empty slot without asking', () => {
+    const registry = removeSlotAsset(createDefaultRegistry(), 'bg-04')
+    expect(backgroundImportTarget(registry)).toEqual({ kind: 'slot', slotId: 'bg-04' })
+    expect(unattendedImportSlot(registry)).toEqual({ slotId: 'bg-04', replaces: null })
+  })
+
+  it('asks which background to replace on a fresh profile, starting from the last slot', () => {
+    const registry = createDefaultRegistry()
+    expect(registry.slots.every((slot) => slot.status === 'ready')).toBe(true)
+    expect(backgroundImportTarget(registry)).toEqual({
+      kind: 'replace',
+      preselectedSlotId: 'bg-10'
+    })
+  })
+
+  it('starts from the active background when there is one', () => {
+    const registry = applySlot(createDefaultRegistry(), 'bg-06')
+    expect(backgroundImportTarget(registry)).toEqual({
+      kind: 'replace',
+      preselectedSlotId: 'bg-06'
+    })
+  })
+
+  it('replaces the last built-in preset unasked, never an imported background first', () => {
+    let registry = importIntoSlot(createDefaultRegistry(), 'bg-10', importedAsset('mine', 'Mine'))
+    registry = applySlot(registry, 'bg-10')
+    expect(unattendedImportSlot(registry)).toEqual({ slotId: 'bg-09', replaces: 'Light Mode' })
+
+    for (const slot of registry.slots) {
+      registry = importIntoSlot(registry, slot.id, importedAsset(`own-${slot.id}`, slot.id))
+    }
+    expect(unattendedImportSlot(registry)).toEqual({ slotId: 'bg-10', replaces: 'bg-10' })
   })
 })
 
@@ -549,5 +644,131 @@ describe('backgroundAssetDisplayUrl', () => {
     ]) {
       expect(backgroundAssetDisplayUrl(passthrough)).toBe(passthrough)
     }
+  })
+})
+
+describe('live backgrounds in the registry (plan 190)', () => {
+  it('applies one background at a time: live replaces a picture and back', () => {
+    const picture = applySlot(createDefaultRegistry(), 'bg-01')
+    const live = applyLiveBackground(picture, 'silk')
+    expect(live.activeSlotId).toBeNull()
+    expect(live.live.activeId).toBe('silk')
+    const backToPicture = applySlot(live, 'bg-02')
+    expect(backToPicture.live.activeId).toBeNull()
+    expect(backToPicture.activeSlotId).toBe('bg-02')
+    expect(clearActiveSlot(applyLiveBackground(picture, 'silk')).live.activeId).toBeNull()
+  })
+
+  it('resolves the live background to its poster plus the shader spec', () => {
+    const registry = setLiveBackgroundSettings(
+      applyLiveBackground(createDefaultRegistry(), 'plasma-wave'),
+      'plasma-wave',
+      { look: 'ember', motion: 'normal', dimPercent: 30, visibilityPercent: 10 }
+    )
+    expect(effectiveSceneBackground(registry)).toStrictEqual({
+      assetId: 'live-plasma-wave-ember',
+      managedAssetPath: 'videorc-asset://background/live-plasma-wave-ember.webp',
+      fit: 'fill',
+      scale: 100,
+      offsetX: 0,
+      offsetY: 0,
+      blurPx: 0,
+      dimPercent: 30,
+      saturationPercent: 100,
+      vignettePercent: 0,
+      visibilityPercent: 10,
+      live: { id: 'plasma-wave', look: 'ember', motion: 'normal' }
+    })
+  })
+
+  it('defaults to the first look, Calm, and clamps stored choices', () => {
+    const registry = applyLiveBackground(createDefaultRegistry(), 'line-waves')
+    expect(liveBackgroundSettings(registry, 'line-waves')).toStrictEqual({
+      look: 'silk',
+      motion: 'calm',
+      dimPercent: 0,
+      visibilityPercent: 20
+    })
+    const clamped = setLiveBackgroundSettings(registry, 'line-waves', {
+      dimPercent: 95,
+      visibilityPercent: -3
+    })
+    expect(liveBackgroundSettings(clamped, 'line-waves')).toMatchObject({
+      dimPercent: 80,
+      visibilityPercent: 0
+    })
+  })
+
+  it('survives storage and drops what it does not know', () => {
+    const stored = JSON.parse(
+      JSON.stringify(
+        setLiveBackgroundSettings(applyLiveBackground(createDefaultRegistry(), 'silk'), 'silk', {
+          look: 'midnight'
+        })
+      )
+    )
+    const reloaded = reconcileRegistry(stored)
+    expect(reloaded.live.activeId).toBe('silk')
+    expect(reloaded.live.settings.silk?.look).toBe('midnight')
+    const junk = reconcileRegistry({
+      ...stored,
+      activeSlotId: 'bg-01',
+      live: { activeId: 'lava-lamp', settings: { silk: { look: 'Not A Look!', motion: 'warp' } } }
+    })
+    expect(junk.live.activeId).toBeNull()
+    expect(junk.activeSlotId).toBe('bg-01')
+    expect(junk.live.settings.silk).toMatchObject({ look: 'satin', motion: 'calm' })
+    // An older registry with no live section loads with nothing live.
+    const legacy = { ...stored }
+    delete legacy.live
+    expect(reconcileRegistry(legacy).live).toStrictEqual({ activeId: null, settings: {} })
+  })
+
+  it('takes a committed live background as the registry truth', () => {
+    const registry = applySlot(createDefaultRegistry(), 'bg-03')
+    const committed = liveSceneBackground('liquid-chrome', {
+      look: 'gold',
+      motion: 'calm',
+      dimPercent: 10,
+      visibilityPercent: 25
+    })
+    const next = registryForCommittedLiveBackground(registry, committed)
+    expect(next.activeSlotId).toBeNull()
+    expect(next.live.activeId).toBe('liquid-chrome')
+    expect(next.live.settings['liquid-chrome']).toStrictEqual({
+      look: 'gold',
+      motion: 'calm',
+      dimPercent: 10,
+      visibilityPercent: 25
+    })
+    expect(registryForCommittedLiveBackground(next, committed)).toBe(next)
+  })
+
+  it("keeps the status view while only the live background's timings move", () => {
+    const shader = nextLiveBackgroundStatusView(null, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'shader',
+      p95Ms: 0.4
+    })
+    expect(shader).toStrictEqual({ id: 'silk', rendering: 'shader', reason: undefined })
+    const sameShader = nextLiveBackgroundStatusView(shader, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'shader',
+      p95Ms: 0.9
+    })
+    expect(sameShader).toBe(shader)
+
+    const still = nextLiveBackgroundStatusView(sameShader, {
+      id: 'silk',
+      look: 'satin',
+      rendering: 'still',
+      reason: 'gpu-budget',
+      p95Ms: 6.1
+    })
+    expect(still).toStrictEqual({ id: 'silk', rendering: 'still', reason: 'gpu-budget' })
+    expect(nextLiveBackgroundStatusView(still, undefined)).toBeNull()
+    expect(nextLiveBackgroundStatusView(null, null)).toBeNull()
   })
 })

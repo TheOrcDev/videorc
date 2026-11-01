@@ -1,125 +1,80 @@
-import { DisabledIcon, ErrorIcon, LockIcon, RefreshIcon, SuccessIcon } from '@/components/icons'
+import { RefreshIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
+import { SystemAccessList } from '@/components/system-access-list'
 import { Button } from '@/components/ui/button'
-import { useStudioAudio, useStudioCore } from '@/hooks/use-studio'
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
+import { FieldGroup, SettingsRow } from '@/components/ui/field'
+import { useStudioCore } from '@/hooks/use-studio'
 import { osSettingsName } from '@/lib/platform'
-import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
 
-/** Settings → Permissions: what the OS lets Videorc capture right now. */
-export function PermissionsSettings({
-  onOpenPermissionsSetup
-}: {
-  onOpenPermissionsSetup: () => void
-}): ReactElement {
+/**
+ * Settings → Permissions: what the OS lets Videorc capture right now. The
+ * rows are the first-run dialog's own list (plan 174 S3.17, I-10), so a
+ * "set up permissions" step that reopened the same rows is gone.
+ */
+export function PermissionsSettings(): ReactElement {
   const {
-    deviceList,
     mediaAccess,
     refreshBackend,
     handleSystemPermission,
     openSystemPermissionSettings,
     runtimeInfo
   } = useStudioCore()
-  const { audioMeter } = useStudioAudio()
+  const platform = runtimeInfo?.platform
+  const settingsName = osSettingsName(platform)
 
-  const accessRows = systemAccessRows({
-    deviceList,
-    audioMeter,
-    platform: runtimeInfo?.platform,
-    mediaAccess
-  })
+  const accessRows = useSystemAccessRows()
 
   return (
     <PanelSection
-      description={`What ${osSettingsName(runtimeInfo?.platform)} lets Videorc capture right now.`}
+      description={`What ${settingsName} lets Videorc capture right now.`}
       title="System access"
       action={
-        <Button size="sm" variant="ghost" onClick={() => void refreshBackend()}>
+        <Button variant="ghost" onClick={() => void refreshBackend()}>
           <RefreshIcon data-icon="inline-start" />
           Refresh
         </Button>
       }
     >
-      <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
-        {accessRows.map((row) => {
-          const action = systemAccessAction({
-            pane: row.id,
-            state: row.state,
-            platform: runtimeInfo?.platform,
-            mediaAccessStatus:
-              row.id === 'camera' || row.id === 'microphone' ? mediaAccess?.[row.id] : undefined
-          })
-          return (
-            <div
-              key={row.id}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm"
+      {accessRows.length > 0 ? (
+        <>
+          <SystemAccessList
+            mediaAccess={mediaAccess}
+            platform={platform}
+            rows={accessRows}
+            onAction={handleSystemPermission}
+          />
+          <FieldGroup variant="grouped">
+            <SettingsRow
+              description={`Grants live in ${settingsName}. Come back here after changing one: the rows update on their own.`}
+              label="Change a permission"
             >
-              <span className="w-32 shrink-0 font-medium">{row.label}</span>
-              {/* Q4 (plan 022): the permission TARGET is the actionable part —
-                  truncation clipped it to "Captur…"/"Voice a…". The row
-                  flex-wraps, so let the detail take a full line when tight
-                  instead of truncating; tooltip keeps the hover affordance. */}
-              <span
-                className="min-w-0 flex-1 basis-56 text-xs text-muted-foreground"
-                title={`${row.purpose} ${row.detail}`}
+              <Button
+                variant="outline"
+                onClick={() => void openSystemPermissionSettings('privacy')}
               >
-                {row.purpose} {row.detail}
-              </span>
-              {action ? (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  onClick={() => void handleSystemPermission(row.id)}
-                >
-                  {action === 'request-media-access' ? 'Enable' : 'Open settings'}
-                </Button>
-              ) : row.state === 'granted' ? (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  onClick={() => void openSystemPermissionSettings(row.id)}
-                >
-                  Manage
-                </Button>
-              ) : null}
-              {row.state === 'granted' ? (
-                <SuccessIcon
-                  aria-label={`${row.label} granted`}
-                  className="size-4 shrink-0 text-success"
-                  weight="fill"
-                />
-              ) : row.state === 'not-granted' || row.state === 'device-issue' ? (
-                <ErrorIcon
-                  aria-label={
-                    row.state === 'device-issue'
-                      ? `${row.label} device issue`
-                      : `${row.label} not granted`
-                  }
-                  className="size-4 shrink-0 text-destructive"
-                  weight="fill"
-                />
-              ) : (
-                <DisabledIcon
-                  aria-label={`${row.label} checked on first use`}
-                  className="size-4 shrink-0 text-muted-foreground"
-                  weight="fill"
-                />
-              )}
-            </div>
-          )
-        })}
-      </div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <Button size="sm" variant="outline" onClick={onOpenPermissionsSetup}>
-          <LockIcon data-icon="inline-start" />
-          Set up permissions
-        </Button>
-        <p className="text-xs text-muted-foreground">
-          Grants live in {osSettingsName(runtimeInfo?.platform)}. After changing one, come back
-          here. Rows refresh automatically.
-        </p>
-      </div>
+                Open {settingsName}…
+              </Button>
+            </SettingsRow>
+          </FieldGroup>
+        </>
+      ) : (
+        // Linux (plan 174 I-8): no standing camera or microphone grant, and the
+        // desktop portal asks per capture, so there is nothing to list. Say so
+        // instead of an empty box.
+        <Empty className="p-4" data-testid="system-access-none">
+          <EmptyHeader>
+            <EmptyTitle>Nothing to grant here</EmptyTitle>
+            <EmptyDescription>
+              Linux keeps no capture permissions for apps. Your desktop may ask when Videorc starts
+              capturing the screen.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
     </PanelSection>
   )
 }

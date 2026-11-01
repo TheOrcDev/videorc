@@ -6,10 +6,10 @@ time. `/marker` saves an untitled point. The command works without connected
 chat destinations, including recording-only sessions and streams with Record
 turned off. Its confirmation shows the timestamp and offers Undo.
 
-For voice creation, enable Orcle and Listen, sign in with Premium, and allow
+For voice creation, enable Buddy and Listen, sign in with Premium, and allow
 Cloud AI processing. Stream Manager shows whether voice markers are listening
-or blocked. Say “Orcle, make a marker here for Shadcn New Library”, then pause.
-“Orcle, add a marker called …” and “Orcle, mark this as …” also work. The point
+or blocked. Say “Buddy, make a marker here for Shadcn New Library”, then pause.
+“Buddy, add a marker called …” and “Buddy, mark this as …” also work. The point
 uses the spoken command's capture time rather than the transcription's arrival
 time. Transcription runs through the existing caption provider; interpreting
 the marker command does not make an additional cloud command-parser request.
@@ -25,7 +25,7 @@ voice admission; queued audio from before the pause cannot create a marker.
 
 In Library, open **Session actions → Markers** to view the titles, sources and
 timestamps. Select a row or timeline pin to seek to that point in the original
-local video. Rename and delete are available there. The Orcle report also
+local video. Rename and delete are available there. The Buddy report also
 links to Markers. A stream without a local recording retains its timestamp
 list; it cannot play a local video. Markers refer to the original capture and
 are not remapped onto a Clean Cut export.

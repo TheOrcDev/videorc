@@ -64,6 +64,26 @@ export function buildRecordingStudioGateSteps({
       label: 'scene switch recording and stream pixel artifacts',
       command: 'pnpm',
       args: ['smoke:scene-switch-pixels']
+    },
+    {
+      label: 'app scenes, follow the app in front and Hide screen smoke (plan 210)',
+      command: 'pnpm',
+      args: ['smoke:smart-scenes']
+    },
+    {
+      label: 'separate source recordings fixture take',
+      command: 'pnpm',
+      args: ['smoke:separate-source-fixture']
+    },
+    {
+      label: 'soundboard fixture press',
+      command: 'pnpm',
+      args: ['smoke:soundboard-fixture']
+    },
+    {
+      label: 'separate source production session runtime',
+      command: 'pnpm',
+      args: ['smoke:separate-source-runtime']
     }
   ]
 
@@ -124,6 +144,21 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:screens']
       },
       {
+        // Plan 186: banners drawn, moved, routed per leg and blended in the
+        // recording and both stream orientations, above a takeover.
+        label: 'banners recording and stream smoke',
+        command: 'pnpm',
+        args: ['smoke:banners']
+      },
+      {
+        // Plan 190: a live background moves in the recording, never freezes,
+        // never draws over the stage, uploads nothing per frame, and releases
+        // everything when it comes off.
+        label: 'live background recording smoke',
+        command: 'pnpm',
+        args: ['smoke:live-background']
+      },
+      {
         // The reality gate: real capture config (no synthetic preview scene),
         // isolated backend state, and the first-frame contract at launch. This
         // is the scenario every other preview smoke bypasses via
@@ -146,6 +181,13 @@ export function buildRecordingStudioGateSteps({
         label: 'comment highlight stream artifact smoke',
         command: 'pnpm',
         args: ['smoke:comment-highlight-stream']
+      },
+      {
+        // Plan 168 S-C5: the animated Buddy pet on a real recording (follow
+        // reaction, gaze at the card, talk frames, Motion on and off, sleep).
+        label: 'living Buddy pet recording artifact smoke',
+        command: 'pnpm',
+        args: ['smoke:buddy-pet']
       },
       {
         label: 'detached Comments command relay probe',
@@ -197,6 +239,21 @@ export function buildRecordingStudioGateSteps({
           VIDEORC_PREVIEW_SURFACE_MAX_INTERVAL_P95_MS: '120',
           VIDEORC_PREVIEW_SURFACE_MAX_INPUT_TO_PRESENT_P95_MS: '100'
         }
+      },
+      {
+        // With frame polling on, as in a production build: Buddy, Clips and
+        // banners change while the native Preview must keep presenting.
+        label: 'native preview presentation across overlay changes smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-overlay-presentation']
+      },
+      {
+        // Plan 212: a performance check never shows in the Preview. Reads the
+        // frame main is handed (the lease-free dev oracle) while a real check
+        // runs with Clips on, off, and with Record pressed during rung 2.
+        label: 'performance check invisible in the Preview smoke',
+        command: 'pnpm',
+        args: ['smoke:preview-check-invisible']
       },
       {
         label: 'real ScreenCaptureKit screen recording smoke',

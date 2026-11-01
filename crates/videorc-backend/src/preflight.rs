@@ -368,6 +368,12 @@ fn destination_chat_preflight(
     (capability.read, capability.write, message)
 }
 
+/// X chat rides the native broadcast: the X sign-in plus Authorize X Live read
+/// it and send to it (`POST /2/broadcasts/:id/chat`, #229), the same as
+/// `live_chat::chat_capability`. Ready X chat is no limit, so it raises no
+/// Chat limits warning; YouTube's chat also attaches once its broadcast
+/// exists and reads as ready here too. A stream key has no broadcast, so it
+/// can neither read nor send.
 fn x_destination_chat_preflight(
     auth_mode: StreamAuthMode,
     account_connected: bool,
@@ -377,23 +383,29 @@ fn x_destination_chat_preflight(
     if auth_mode != StreamAuthMode::Oauth {
         return (
             CommentsReadState::Unavailable,
-            CommentsWriteState::ReadOnly,
-            "Manual RTMP has no native X broadcast context, so X live chat is receive-only and unavailable."
+            CommentsWriteState::Unavailable,
+            "With a stream key, Videorc can't read or send X chat. Choose Sign in to use it."
                 .to_string(),
         );
     }
-    if !account_connected || !native_available {
+    if !native_available {
         return (
             CommentsReadState::Unavailable,
-            CommentsWriteState::ReadOnly,
+            CommentsWriteState::Unavailable,
             capability_message,
         );
     }
+    if !account_connected {
+        return (
+            CommentsReadState::Unavailable,
+            CommentsWriteState::Unavailable,
+            "Reconnect X to read and send chat.".to_string(),
+        );
+    }
     (
-        CommentsReadState::WaitingForBroadcastContext,
-        CommentsWriteState::ReadOnly,
-        "X comments attach after the native broadcast is published; X live chat is receive-only."
-            .to_string(),
+        CommentsReadState::Ready,
+        CommentsWriteState::Ready,
+        "X chat is ready to read and send.".to_string(),
     )
 }
 
@@ -661,9 +673,9 @@ mod tests {
                 .any(|issue| issue.platform == Some(StreamPlatform::Youtube))
         );
         // This checkout has no release X consumer/user token, so preflight must not pretend
-        // it is merely waiting for publish context.
+        // X chat is ready.
         assert_eq!(x.chat_read, CommentsReadState::Unavailable);
-        assert_eq!(x.chat_write, CommentsWriteState::ReadOnly);
+        assert_eq!(x.chat_write, CommentsWriteState::Unavailable);
         assert!(x.chat_message.contains("OAuth 1.0a"));
         assert_eq!(youtube.chat_read, CommentsReadState::Ready);
         assert_eq!(youtube.chat_write, CommentsWriteState::Ready);
@@ -671,37 +683,54 @@ mod tests {
     }
 
     #[test]
-    fn x_comments_wait_for_publish_only_after_native_oauth_setup_is_ready() {
-        let waiting = x_destination_chat_preflight(
+    fn x_chat_reads_and_sends_once_x_live_is_ready_and_raises_no_chat_limit() {
+        // X chat send landed in #229; the old "receive-only" preflight raised a
+        // Chat limits warning on every healthy X Go Live.
+        let ready = x_destination_chat_preflight(
             StreamAuthMode::Oauth,
             true,
             true,
-            "X native live ready.".to_string(),
+            "X Livestream API credentials are configured.".to_string(),
         );
-        assert_eq!(waiting.0, CommentsReadState::WaitingForBroadcastContext);
-        assert_eq!(waiting.1, CommentsWriteState::ReadOnly);
-        assert!(
-            waiting
-                .2
-                .contains("after the native broadcast is published")
-        );
+        assert_eq!(ready.0, CommentsReadState::Ready);
+        assert_eq!(ready.1, CommentsWriteState::Ready);
+        assert_eq!(ready.2, "X chat is ready to read and send.");
 
-        let missing_account = x_destination_chat_preflight(
+        let not_authorized = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            true,
+            false,
+            "Authorize X Live to let Videorc create stream sources and broadcasts on your X account."
+                .to_string(),
+        );
+        assert_eq!(not_authorized.0, CommentsReadState::Unavailable);
+        assert_eq!(not_authorized.1, CommentsWriteState::Unavailable);
+        assert!(not_authorized.2.starts_with("Authorize X Live"));
+
+        let disconnected = x_destination_chat_preflight(
             StreamAuthMode::Oauth,
             false,
             true,
-            "Connect X before going live.".to_string(),
+            "X Livestream API credentials are configured.".to_string(),
         );
-        assert_eq!(missing_account.0, CommentsReadState::Unavailable);
+        assert_eq!(disconnected.0, CommentsReadState::Unavailable);
+        assert_eq!(disconnected.1, CommentsWriteState::Unavailable);
+        assert_eq!(disconnected.2, "Reconnect X to read and send chat.");
 
-        let manual = x_destination_chat_preflight(
+        let stream_key = x_destination_chat_preflight(
             StreamAuthMode::ManualRtmp,
             true,
             true,
             "ignored".to_string(),
         );
-        assert_eq!(manual.0, CommentsReadState::Unavailable);
-        assert!(manual.2.contains("Manual RTMP"));
+        assert_eq!(stream_key.0, CommentsReadState::Unavailable);
+        assert_eq!(stream_key.1, CommentsWriteState::Unavailable);
+        assert!(stream_key.2.contains("stream key"));
+
+        for (_, _, message) in [ready, not_authorized, disconnected, stream_key] {
+            assert!(!message.contains("receive-only"), "{message}");
+            assert!(!message.contains("Manual RTMP"), "{message}");
+        }
     }
 
     #[test]
@@ -831,6 +860,54 @@ mod tests {
         assert!(preflight.issues.is_empty());
     }
 
+    #[test]
+    fn facebook_stream_key_is_ready_and_warns_that_comments_need_sign_in() {
+        let mut targets = default_stream_targets();
+        let facebook = targets
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Facebook)
+            .unwrap();
+        facebook.enabled = true;
+        facebook.stream_key_present = true;
+        facebook.stream_key_secret_ref = Some("stream-target:facebook:test-key".to_string());
+        let streaming = StreamingSettings {
+            enabled: true,
+            mode: StreamMode::Single,
+            selected_target_id: Some("facebook".to_string()),
+            default_output_preset: crate::protocol::VideoPreset::Stream1080p60,
+            default_bitrate_kbps: 6000,
+            enabled_target_ids: vec!["facebook".to_string()],
+            targets,
+        };
+        let metadata = StreamMetadataDraft {
+            title: "Launch stream".to_string(),
+            ..default_stream_metadata_draft("2026-10-27T00:00:00Z".to_string())
+        };
+
+        let preflight = validate_go_live_preflight(
+            GoLivePreflightParams {
+                streaming,
+                scheduled_event_ids: HashMap::new(),
+                scheduled_metadata: HashMap::new(),
+                scheduled_confirmations: HashMap::new(),
+            },
+            &metadata,
+            &[],
+        );
+
+        assert!(preflight.valid, "{preflight:?}");
+        assert!(preflight.destinations[0].ready);
+        assert_eq!(preflight.issues.len(), 1, "{:?}", preflight.issues);
+        assert_eq!(
+            preflight.issues[0].severity,
+            GoLivePreflightIssueSeverity::Warning
+        );
+        assert_eq!(
+            preflight.issues[0].message,
+            crate::live_chat::FACEBOOK_COMMENTS_UNAVAILABLE
+        );
+    }
+
     fn account(platform: StreamPlatform, account_id: &str, label: &str) -> PlatformAccount {
         PlatformAccount {
             id: platform_id(platform).to_string(),
@@ -893,6 +970,7 @@ mod tests {
             StreamPlatform::Twitch => "twitch",
             StreamPlatform::Kick => "kick",
             StreamPlatform::X => "x",
+            StreamPlatform::Facebook => "facebook",
             StreamPlatform::Tiktok => "tiktok",
             StreamPlatform::Instagram => "instagram",
             StreamPlatform::Custom => "custom",

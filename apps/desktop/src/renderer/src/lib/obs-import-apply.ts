@@ -1,3 +1,5 @@
+import { type BackgroundAssetRegistry } from '@/lib/background-assets'
+import { applySlot, createImportedAsset, importIntoSlot } from '@/lib/background-library'
 import type { CaptureConfig } from '@/lib/capture'
 import type { ObsImportPlanResult } from '@/lib/obs-import-map'
 
@@ -72,4 +74,31 @@ export function mergeObsImportIntoConfig(
   }
 
   return next
+}
+
+/**
+ * The background half of an OBS apply (plan 174, C-7): exactly what the
+ * report promised. The OBS image goes into the slot the report named and
+ * becomes the scene background (the registry's active slot, which the Studio
+ * applies). A plan that promised no background leaves the registry alone.
+ */
+export function withObsBackground(
+  registry: BackgroundAssetRegistry,
+  plan: Pick<ObsImportPlanResult, 'backgroundAsset' | 'backgroundSlotId'>,
+  now: string = new Date().toISOString()
+): BackgroundAssetRegistry {
+  const imported = plan.backgroundAsset
+  const slotId = plan.backgroundSlotId
+  if (!imported || !slotId || !registry.slots.some((slot) => slot.id === slotId)) {
+    return registry
+  }
+  const asset = createImportedAsset({
+    id: imported.id,
+    name: imported.name,
+    assetPath: imported.assetPath,
+    thumbnailPath: imported.thumbnailPath,
+    createdAt: now,
+    updatedAt: now
+  })
+  return applySlot(importIntoSlot(registry, slotId, asset), slotId)
 }

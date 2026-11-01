@@ -270,6 +270,15 @@ export function reconcileWindowsD3d11PresenterStatus(
       windowsD3d11Presenter: presenter,
       presentedFrameId,
       framesRendered: Math.max(current.framesRendered, presentedFrameId),
+      // `current` still carries the hidden proof surface's last measurements;
+      // the presenter's cadence and latency come from the backend only.
+      presentFps: backend.presentFps,
+      intervalP95Ms: backend.intervalP95Ms,
+      intervalP99Ms: backend.intervalP99Ms,
+      inputToPresentLatencyMs: backend.inputToPresentLatencyMs,
+      inputToPresentLatencyP50Ms: backend.inputToPresentLatencyP50Ms,
+      inputToPresentLatencyP95Ms: backend.inputToPresentLatencyP95Ms,
+      inputToPresentLatencyP99Ms: backend.inputToPresentLatencyP99Ms,
       firstFrameContract: 'met',
       firstFrameReason: 'Backend D3D11 presenter completed its first live-source present.',
       updatedAt: backend.updatedAt,
@@ -438,10 +447,51 @@ export function nativePreviewProofPollingSuppressed(input: {
   lifecycleSuppressed: boolean
   nativeSurfaceOwnsPresentation: boolean
   nativeFailureFallbackActive?: boolean
+  nativeClaimPending?: boolean
 }): boolean {
   return (
     input.nativeSurfaceOwnsPresentation ||
+    // A pending claim already excludes named presenter failures, and main
+    // marks the waiting proof surface as the active fallback.
+    input.nativeClaimPending === true ||
     (input.lifecycleSuppressed && input.nativeFailureFallbackActive !== true)
+  )
+}
+
+/** A stalled claim hands the window back to the proof surface after this. */
+export const WINDOWS_D3D11_CLAIM_PENDING_TIMEOUT_MS = 5_000
+
+const WINDOWS_D3D11_WAITING_FALLBACK_REASONS = new Set([
+  'windows-d3d11-preview-waiting-trusted-window'
+])
+
+/**
+ * When the Preview window opens over a live Windows D3D11 media generation,
+ * the backend presenter is about to claim it. Every BMP frame the proof
+ * surface asked for meanwhile would be refused, and plan 040 keeps a
+ * D3D11-native run at zero BMP requests, so the proof surface stays quiet
+ * until the claim. A named presenter failure, a new generation, or a stalled
+ * claim hands presentation back to it.
+ */
+export function windowsD3d11ClaimPending(input: {
+  armed: { generation: number; atMs: number } | null
+  generation: number
+  nowMs: number
+  presenterFallbackReason?: string
+  timeoutMs?: number
+}): boolean {
+  if (!input.armed || input.armed.generation !== input.generation) {
+    return false
+  }
+  if (
+    input.nowMs - input.armed.atMs >=
+    (input.timeoutMs ?? WINDOWS_D3D11_CLAIM_PENDING_TIMEOUT_MS)
+  ) {
+    return false
+  }
+  return (
+    input.presenterFallbackReason === undefined ||
+    WINDOWS_D3D11_WAITING_FALLBACK_REASONS.has(input.presenterFallbackReason)
   )
 }
 
@@ -470,7 +520,7 @@ export function nativePreviewFramePollingSuppressionStatus(
     message: attachedNativeSurface
       ? status.message
       : suppressed
-        ? 'Electron proof preview surface frame polling is suppressed while recording.'
+        ? 'Electron proof preview surface frame polling is paused.'
         : 'Electron proof preview surface frame polling is enabled.'
   }
 }

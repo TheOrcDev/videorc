@@ -140,8 +140,10 @@ export function windowsPreviewLifecycleOpenFailures(state, mode) {
   if (state?.nativeOwnsPlacement !== true) {
     failures.push('backend presenter does not own placement')
   }
-  if (state?.surface?.exists === true || state?.surface?.visible === true) {
-    failures.push('Electron proof surface still exists')
+  // Like the macOS CAMetalLayer claim, the D3D11 claim hides the proof
+  // window and suspends its polling, keeping it as the instant fallback.
+  if (state?.surface?.visible === true) {
+    failures.push('Electron proof surface is still visible')
   }
   if (state?.framePollingSuppressedFlag !== true || status.framePollingSuppressed !== true) {
     failures.push('BMP/proof polling is not suppressed')

@@ -8,7 +8,7 @@ import {
   mediaAccessToState,
   microphoneAccessState,
   screenAccessState,
-  shouldShowPermissionsOnboarding,
+  mediaAccessStatusForPane,
   systemAccessAction,
   systemAccessRows
 } from './system-access'
@@ -76,78 +76,11 @@ describe('microphoneAccessState', () => {
 
 describe('isMediaAccessSnapshotReady', () => {
   it('does not let automatic onboarding decide from an unknown OS snapshot', () => {
-    expect(isMediaAccessSnapshotReady({ camera: 'unknown', microphone: 'not-determined' })).toBe(
-      false
-    )
-  })
-})
-
-describe('shouldShowPermissionsOnboarding', () => {
-  const allGranted = systemAccessRows({
-    deviceList: devices([
-      { id: 'screen:screencapturekit:1', kind: 'screen', status: 'available' },
-      { kind: 'camera', status: 'available' }
-    ]),
-    audioMeter: { status: 'ready' }
-  })
-  const missingSome = systemAccessRows({
-    deviceList: devices([
-      { id: 'screen:screencapturekit-missing', kind: 'screen', status: 'permission-required' }
-    ]),
-    audioMeter: null
-  })
-
-  it('shows for a fresh machine with missing grants', () => {
     expect(
-      shouldShowPermissionsOnboarding({ rows: missingSome, dismissed: false, backendReady: true })
-    ).toBe(true)
-  })
-  it('never shows when every grant already exists (reinstalls skip onboarding)', () => {
-    expect(
-      shouldShowPermissionsOnboarding({ rows: allGranted, dismissed: false, backendReady: true })
-    ).toBe(false)
-  })
-  it('first-use counts as missing — that is what drives the native prompts', () => {
-    const firstUse = systemAccessRows({ deviceList: devices([]), audioMeter: null })
-    expect(
-      shouldShowPermissionsOnboarding({ rows: firstUse, dismissed: false, backendReady: true })
-    ).toBe(true)
-  })
-  it('does not show for a mic device issue because permissions are not the fix', () => {
-    const noFrames = systemAccessRows({
-      deviceList: devices([
-        { id: 'screen:screencapturekit:1', kind: 'screen', status: 'available' },
-        { kind: 'camera', status: 'available' }
-      ]),
-      audioMeter: {
-        status: 'no-frames',
-        message: 'This microphone opened but did not send audio frames.'
-      }
-    })
-
-    expect(
-      shouldShowPermissionsOnboarding({ rows: noFrames, dismissed: false, backendReady: true })
-    ).toBe(false)
-    expect(noFrames[2].state).toBe('device-issue')
-    expect(noFrames[2].detail).toMatch(/did not send audio frames/)
-  })
-  it('a dismissal snoozes it even with grants still missing', () => {
-    expect(
-      shouldShowPermissionsOnboarding({ rows: missingSome, dismissed: true, backendReady: true })
-    ).toBe(false)
-  })
-  it('never shows before the backend has reported real device state', () => {
-    expect(
-      shouldShowPermissionsOnboarding({ rows: missingSome, dismissed: false, backendReady: false })
-    ).toBe(false)
-  })
-  it('never evaluates before the exact media-access snapshot has loaded', () => {
-    expect(
-      shouldShowPermissionsOnboarding({
-        rows: missingSome,
-        dismissed: false,
-        backendReady: true,
-        mediaAccessReady: false
+      isMediaAccessSnapshotReady({
+        camera: 'unknown',
+        microphone: 'not-determined',
+        screen: 'not-determined'
       })
     ).toBe(false)
   })
@@ -204,7 +137,7 @@ describe('systemAccessRows', () => {
     expect(unhealthy.find((row) => row.id === 'camera')?.state).toBe('device-issue')
     expect(unhealthy.find((row) => row.id === 'microphone')?.state).toBe('device-issue')
     expect(unhealthy.find((row) => row.id === 'camera')?.detail).toMatch(
-      /permission is granted.*no usable camera/i
+      /Granted, but no camera is connected/i
     )
   })
 
@@ -269,7 +202,7 @@ describe('systemAccessRows', () => {
     expect(missing.find((row) => row.id === 'microphone')?.state).toBe('not-granted')
   })
 
-  it('renders three rows with purposes and honest details', () => {
+  it('renders four rows with purposes and honest details', () => {
     const rows = systemAccessRows({
       deviceList: devices([
         { id: 'screen:screencapturekit:1', kind: 'screen', status: 'available' },
@@ -278,15 +211,20 @@ describe('systemAccessRows', () => {
       audioMeter: null,
       platform: 'darwin'
     })
-    expect(rows.map((row) => row.id)).toEqual(['screen-recording', 'camera', 'microphone'])
+    expect(rows.map((row) => row.id)).toEqual([
+      'screen-recording',
+      'system-audio',
+      'microphone',
+      'camera'
+    ])
     expect(rows[0].state).toBe('granted')
-    expect(rows[1].state).toBe('not-granted')
-    expect(rows[1].detail).toMatch(/System Settings/)
+    expect(rows[3].state).toBe('not-granted')
+    expect(rows[3].detail).toMatch(/System Settings/)
     expect(rows[2].state).toBe('first-use')
-    expect(rows[2].detail).toMatch(/mic check/)
+    expect(rows[2].detail).toBe('')
   })
 
-  it('omits the Screen Recording row on Windows (no per-app screen permission)', () => {
+  it('shows screen and system audio facts on Windows', () => {
     const rows = systemAccessRows({
       deviceList: devices([
         { id: 'screen:gdigrab:desktop', kind: 'screen', status: 'available' },
@@ -295,28 +233,17 @@ describe('systemAccessRows', () => {
       audioMeter: { status: 'ready' },
       platform: 'win32'
     })
-    expect(rows.map((row) => row.id)).toEqual(['camera', 'microphone'])
+    expect(rows.map((row) => row.id)).toEqual([
+      'screen-recording',
+      'system-audio',
+      'microphone',
+      'camera'
+    ])
+    expect(rows.slice(0, 2).map((row) => row.state)).toEqual(['not-required', 'not-required'])
     // No "macOS" / "System Settings" wording leaks to Windows users.
     for (const row of rows) {
       expect(row.detail).not.toMatch(/macOS|System Settings/)
     }
-  })
-
-  it('does not wedge onboarding open on a healthy Windows machine', () => {
-    // Windows: camera available (granted), mic meter ready (granted), no screen
-    // row — the dialog must be satisfiable, unlike the old screencapturekit +
-    // CoreAudio-only derivation that left it permanently first-use.
-    const rows = systemAccessRows({
-      deviceList: devices([
-        { id: 'screen:gdigrab:desktop', kind: 'screen', status: 'available' },
-        { kind: 'camera', status: 'available' }
-      ]),
-      audioMeter: { status: 'ready' },
-      platform: 'win32'
-    })
-    expect(shouldShowPermissionsOnboarding({ rows, dismissed: false, backendReady: true })).toBe(
-      false
-    )
   })
 
   it('derives Windows camera/mic from the real OS access status, not the meter', () => {
@@ -364,27 +291,6 @@ describe('systemAccessRows', () => {
       mediaAccess: { camera: 'not-applicable', microphone: 'not-applicable' }
     })
     expect(rows).toEqual([])
-    expect(
-      shouldShowPermissionsOnboarding({
-        rows,
-        dismissed: false,
-        backendReady: true,
-        mediaAccessReady: isMediaAccessSnapshotReady({
-          camera: 'not-applicable',
-          microphone: 'not-applicable'
-        })
-      })
-    ).toBe(false)
-  })
-
-  it('hides only the chip whose access is not applicable', () => {
-    const rows = systemAccessRows({
-      deviceList: devices([{ kind: 'camera', status: 'available' }]),
-      audioMeter: { status: 'ready' },
-      platform: 'linux',
-      mediaAccess: { camera: 'not-applicable', microphone: 'unknown' }
-    })
-    expect(rows.map((row) => row.id)).toEqual(['microphone'])
   })
 
   it('mediaAccessToState maps OS statuses to chip states', () => {
@@ -459,5 +365,286 @@ describe('systemAccessAction', () => {
         mediaAccessStatus: 'unknown'
       })
     ).toBe('open-settings')
+  })
+
+  it('asks for a never-asked screen in place on macOS (plan 203 S2), Settings otherwise', () => {
+    expect(
+      systemAccessAction({
+        pane: 'screen-recording',
+        state: 'not-granted',
+        platform: 'darwin',
+        mediaAccessStatus: 'not-determined'
+      })
+    ).toBe('request-media-access')
+    expect(
+      systemAccessAction({
+        pane: 'screen-recording',
+        state: 'not-granted',
+        platform: 'darwin',
+        mediaAccessStatus: 'denied'
+      })
+    ).toBe('open-settings')
+    expect(
+      systemAccessAction({
+        pane: 'screen-recording',
+        state: 'granted',
+        platform: 'darwin',
+        mediaAccessStatus: 'granted'
+      })
+    ).toBeNull()
+    expect(
+      systemAccessAction({
+        pane: 'screen-recording',
+        state: 'not-granted',
+        platform: 'win32',
+        mediaAccessStatus: 'not-determined'
+      })
+    ).toBe('open-settings')
+  })
+})
+
+describe('mediaAccessStatusForPane', () => {
+  it('reads each row its own grant, the screen row the Screen Recording grant, privacy none', () => {
+    const snapshot = {
+      camera: 'granted',
+      microphone: 'denied',
+      screen: 'not-determined'
+    } as const
+    expect(mediaAccessStatusForPane(snapshot, 'camera')).toBe('granted')
+    expect(mediaAccessStatusForPane(snapshot, 'microphone')).toBe('denied')
+    expect(mediaAccessStatusForPane(snapshot, 'screen-recording')).toBe('not-determined')
+    expect(mediaAccessStatusForPane(snapshot, 'privacy')).toBeUndefined()
+    expect(mediaAccessStatusForPane(null, 'screen-recording')).toBeUndefined()
+    expect(
+      mediaAccessStatusForPane({ camera: 'granted', microphone: 'granted' }, 'screen-recording')
+    ).toBeUndefined()
+  })
+})
+
+describe('first-run permission state matrix (plan 203 S3)', () => {
+  const blocked: DeviceList = {
+    devices: [
+      {
+        id: 'screen:screencapturekit',
+        kind: 'screen',
+        name: 'Screen',
+        status: 'permission-required'
+      },
+      {
+        id: 'system-audio',
+        kind: 'system-audio',
+        name: 'System audio',
+        status: 'permission-required',
+        detail: 'System audio needs the Screen Recording permission.'
+      }
+    ],
+    warnings: []
+  }
+  const healthy: DeviceList = {
+    devices: [
+      { id: 'screen:screencapturekit:1', kind: 'screen', name: 'Display', status: 'available' },
+      { id: 'system-audio', kind: 'system-audio', name: 'System audio', status: 'available' },
+      { id: 'mic', kind: 'microphone', name: 'Microphone', status: 'available' },
+      { id: 'camera', kind: 'camera', name: 'FaceTime HD Camera', status: 'available' }
+    ],
+    warnings: []
+  }
+  function rows(overrides: Partial<Parameters<typeof systemAccessRows>[0]> = {}) {
+    return systemAccessRows({
+      platform: 'darwin',
+      deviceList: blocked,
+      audioMeter: null,
+      mediaAccess: {
+        screen: 'not-determined',
+        camera: 'not-determined',
+        microphone: 'not-determined'
+      },
+      ...overrides
+    })
+  }
+  const granted = { screen: 'granted', camera: 'granted', microphone: 'granted' } as const
+  const action = (
+    row: ReturnType<typeof rows>[number],
+    status: 'restricted' | 'granted' | 'not-determined' = 'not-determined'
+  ) =>
+    systemAccessAction({
+      pane: row.id,
+      state: row.state,
+      checking: row.checking,
+      platform: 'darwin',
+      mediaAccessStatus: status
+    })
+
+  it.each([
+    ['23.6.0', 'Screen Recording'],
+    ['24.0.0', 'Screen & System Audio Recording'],
+    ['26.1.0', 'Screen & System Audio Recording']
+  ])('names the real pane on Darwin %s', (osRelease, pane) => {
+    const screen = rows({
+      osRelease,
+      pendingPane: 'screen-recording',
+      permissionTargetName: 'Electron'
+    })[0]
+    expect(screen.state).toBe('waiting')
+    expect(screen.detail).toBe(
+      `Turn on Electron in System Settings → Privacy & Security → ${pane}, then come back here.`
+    )
+    expect(rows({ osRelease, mediaAccess: { screen: 'denied' } })[0].detail).toContain(pane)
+  })
+
+  it('moves from never asked through waiting and checking to the replacement grant', () => {
+    const initial = rows()
+    expect(initial.map((row) => row.id)).toEqual([
+      'screen-recording',
+      'system-audio',
+      'microphone',
+      'camera'
+    ])
+    expect(initial.map((row) => row.required)).toEqual([true, false, true, false])
+    expect(initial[0].state).toBe('first-use')
+    expect(action(initial[0])).toBe('request-media-access')
+    const waiting = rows({ pendingPane: 'screen-recording' })
+    expect(waiting[0].state).toBe('waiting')
+    expect(waiting[1].state).toBe('waiting')
+    expect(waiting[1].detail).toBe('Comes with Screen Recording.')
+    expect(action(waiting[0])).toBe('open-settings')
+    const checking = rows({
+      mediaAccess: granted,
+      captureRestarting: true,
+      screenGrantStale: true,
+      lastKnownStates: { 'screen-recording': 'waiting', 'system-audio': 'waiting' }
+    })
+    expect(checking[0]).toMatchObject({ state: 'waiting', checking: true, detail: '' })
+    expect(action(checking[0], 'granted')).toBeNull()
+    const ready = rows({ mediaAccess: granted, deviceList: healthy })
+    expect(ready.every((row) => row.state === 'granted' && !row.checking)).toBe(true)
+    expect(ready[3].detail).toBe('FaceTime HD Camera')
+  })
+
+  it.each([
+    'first-use',
+    'waiting',
+    'granted',
+    'not-granted',
+    'device-issue',
+    'needs-relaunch'
+  ] as const)(
+    'checking preserves a usable chip from %s and never reads not-granted',
+    (previous) => {
+      const checking = rows({
+        mediaAccess: granted,
+        captureRestarting: true,
+        lastKnownStates: { 'screen-recording': previous, microphone: previous, camera: previous }
+      })
+      expect(
+        checking.every((row) => row.checking && row.state !== 'not-granted' && row.detail === '')
+      ).toBe(true)
+      if (previous === 'granted' || previous === 'waiting' || previous === 'first-use')
+        expect(checking[0].state).toBe(previous)
+    }
+  )
+
+  it('requires a fresh replacement device list before showing Reopen', () => {
+    expect(rows({ mediaAccess: granted, screenGrantStale: true })[0]).toMatchObject({
+      checking: true,
+      state: 'first-use'
+    })
+    const screen = rows({ mediaAccess: granted, screenGrantStale: false })[0]
+    expect(screen).toMatchObject({
+      checking: false,
+      state: 'needs-relaunch',
+      detail: 'macOS turns this on after Videorc reopens.'
+    })
+    expect(action(screen, 'granted')).toBe('relaunch')
+  })
+
+  it.each(['denied', 'restricted'] as const)(
+    'shows an exact %s decision, even against healthy devices',
+    (status) => {
+      const result = rows({
+        deviceList: healthy,
+        mediaAccess: { screen: status, camera: status, microphone: status }
+      })
+      expect(result.every((row) => row.state === 'not-granted')).toBe(true)
+      expect(result[1].detail).toBe('Comes with Screen Recording.')
+      if (status === 'restricted') {
+        expect(result[0].detail).toBe('Restricted by macOS policy and may not be changeable here.')
+        expect(action(result[0], 'restricted')).toBeNull()
+      } else expect(result[0].detail).toContain('Turn on Videorc')
+    }
+  )
+
+  it('reports missing cameras after a real grant without another permission action', () => {
+    const camera = rows({ deviceList: { devices: [], warnings: [] }, mediaAccess: granted })[3]
+    expect(camera).toMatchObject({
+      state: 'device-issue',
+      detail: 'Granted, but no camera is connected.'
+    })
+    expect(action(camera, 'granted')).toBeNull()
+  })
+
+  it('refines system audio only after the screen grant and never offers it an action', () => {
+    const unsupported: DeviceList = {
+      devices: [
+        {
+          id: 'system-audio',
+          kind: 'system-audio',
+          name: 'System audio',
+          status: 'unavailable',
+          detail: 'System audio is not supported on this Mac.'
+        }
+      ],
+      warnings: []
+    }
+    expect(rows({ deviceList: unsupported })[1]).toMatchObject({
+      state: 'first-use',
+      detail: 'Comes with Screen Recording.'
+    })
+    const audio = rows({ deviceList: unsupported, mediaAccess: granted })[1]
+    expect(audio).toMatchObject({ state: 'unavailable', detail: unsupported.devices[0].detail })
+    for (const state of [
+      'first-use',
+      'waiting',
+      'needs-relaunch',
+      'unavailable',
+      'granted'
+    ] as const) {
+      expect(action({ ...audio, state })).toBeNull()
+    }
+  })
+
+  it.each([true, false])('Windows loopback supported: %s', (supported) => {
+    const result = rows({
+      platform: 'win32',
+      mediaAccess: { screen: 'not-applicable', camera: 'denied', microphone: 'denied' },
+      deviceList: {
+        devices: [
+          {
+            id: 'system-audio',
+            kind: 'system-audio',
+            name: 'System audio',
+            status: supported ? 'available' : 'unavailable',
+            detail: 'System audio needs a newer Windows build.'
+          }
+        ],
+        warnings: []
+      }
+    })
+    expect(result.map((row) => row.required)).toEqual([false, false, true, false])
+    expect(result[0]).toMatchObject({
+      state: 'not-required',
+      detail: "Windows doesn't ask for this."
+    })
+    expect(result[1]).toMatchObject(
+      supported
+        ? { state: 'not-required', detail: "Windows doesn't ask for this." }
+        : { state: 'unavailable', detail: 'System audio needs a newer Windows build.' }
+    )
+    expect(result[2].detail).toContain('Let desktop apps access your microphone')
+    expect(result[3].detail).toContain('Let desktop apps access your camera')
+  })
+
+  it('Linux has no standing grant rows, even before the exact snapshot loads', () => {
+    expect(rows({ platform: 'linux', mediaAccess: null })).toEqual([])
   })
 })

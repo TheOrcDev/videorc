@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CLIP_COMMAND_LENGTH_ERROR,
   classifyComposerDraft,
   createMarkerParamsSchema,
   markerLabel,
@@ -12,6 +13,31 @@ import {
   validateBackendRpcResult
 } from './backend-rpc-contract'
 import { roleCanInvokeChannel } from './renderer-security-policy'
+
+describe('the /clip command (plan 199 D6)', () => {
+  it('saves 30 s by default, the minute with 60, and names the lengths for anything else', () => {
+    for (const draft of ['/clip', ' /CLIP ', '/clip 30', '/Clip   30 ']) {
+      expect(classifyComposerDraft(draft), draft).toEqual({ kind: 'clip', seconds: 30 })
+    }
+    for (const draft of ['/clip 60', '/CLIP 60 ']) {
+      expect(classifyComposerDraft(draft), draft).toEqual({ kind: 'clip', seconds: 60 })
+    }
+    for (const draft of ['/clip 45', '/clip 1m', '/clip long', '/clip 060', '/clip 60 now']) {
+      expect(classifyComposerDraft(draft), draft).toEqual({
+        kind: 'error',
+        message: CLIP_COMMAND_LENGTH_ERROR
+      })
+    }
+    expect(CLIP_COMMAND_LENGTH_ERROR).toBe('A clip is 30 seconds or 1 minute: /clip or /clip 60.')
+    // Not the command: a longer word, or an escaped slash.
+    expect(classifyComposerDraft('/clipboard')).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('/clipboard')).not.toEqual({
+      kind: 'error',
+      message: CLIP_COMMAND_LENGTH_ERROR
+    })
+    expect(classifyComposerDraft('//clip 60')).toEqual({ kind: 'chat', text: '/clip 60' })
+  })
+})
 
 describe('named marker trust boundaries', () => {
   it('classifies local commands before provider send and escapes one slash', () => {
@@ -29,6 +55,66 @@ describe('named marker trust boundaries', () => {
     expect(classifyComposerDraft('docs /marker https://ui.shadcn.com')).toEqual({
       kind: 'chat',
       text: 'docs /marker https://ui.shadcn.com'
+    })
+  })
+  it('turns /sound into a local press or Stop all, never chat (plan 189 S9)', () => {
+    const sounds = [
+      { id: 'airhorn', name: 'Airhorn', mode: 'oneShot' as const },
+      { id: 'applause', name: 'Applause', mode: 'toggle' as const }
+    ]
+    expect(classifyComposerDraft('/sound air', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'press', id: 'airhorn' }
+    })
+    expect(classifyComposerDraft(' /SOUND a ', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'press', id: 'airhorn' }
+    })
+    expect(classifyComposerDraft('/sound stop', [], sounds)).toEqual({
+      kind: 'sound',
+      action: { action: 'stopAll' }
+    })
+    expect(classifyComposerDraft('/sound gong', [], sounds)).toEqual({
+      kind: 'error',
+      message: 'No sound called “gong”.'
+    })
+    expect(classifyComposerDraft('/soundx', [], sounds)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('//sound stop', [], sounds)).toEqual({
+      kind: 'chat',
+      text: '/sound stop'
+    })
+  })
+
+  it('turns /banner into a local show or hide, never chat (plan 186 S7)', () => {
+    const banners = [
+      { id: 'sponsor', name: 'Sponsor', shown: false },
+      { id: 'spring', name: 'Spring sale', shown: true }
+    ]
+    expect(classifyComposerDraft('/banner sponsor', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'show', id: 'sponsor' }
+    })
+    expect(classifyComposerDraft(' /BANNER spring ', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'hide', id: 'spring' }
+    })
+    expect(classifyComposerDraft('/banner off', banners)).toEqual({
+      kind: 'banner',
+      action: { action: 'hideAll' }
+    })
+    expect(classifyComposerDraft('/banner acme', banners)).toEqual({
+      kind: 'error',
+      message: 'No banner called “acme”.'
+    })
+    expect(classifyComposerDraft('/banner sp', banners)).toEqual({
+      kind: 'error',
+      message: '“sp” matches Sponsor and Spring sale.'
+    })
+    expect(classifyComposerDraft('/banner', banners)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('/bannerx', banners)).toMatchObject({ kind: 'error' })
+    expect(classifyComposerDraft('//banner off', banners)).toEqual({
+      kind: 'chat',
+      text: '/banner off'
     })
   })
   it('validates Unicode code points without truncation or losing punctuation', () => {
@@ -69,7 +155,11 @@ describe('named marker trust boundaries', () => {
     expect(roleCanInvokeChannel('comments', 'comments-window:marker-result-push')).toBe(false)
     expect(roleCanInvokeChannel('notes', 'comments-window:marker')).toBe(false)
   })
-  it('formats stream timeline times', () => expect(markerTime(3672.7)).toBe('01:01:12'))
+  it('formats stream timeline times as the one timecode (plan 174 S1.4)', () => {
+    expect(markerTime(3672.7)).toBe('1:01:12')
+    expect(markerTime(12)).toBe('0:12')
+    expect(markerTime(125)).toBe('2:05')
+  })
   it('accepts the renamed marker RPC receipt and separate change event shape', () => {
     const marker = {
       id: 'm1',

@@ -1,5 +1,5 @@
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import type { VideoPreset } from '@/lib/backend'
 import { streamQualityOptions } from '@/lib/output-quality'
 
@@ -24,31 +24,26 @@ export function StreamQualityControl({
   return (
     <Field data-disabled={disabled}>
       <FieldLabel>Stream quality</FieldLabel>
-      <ToggleGroup
-        aria-label="Stream quality"
-        className="flex-wrap"
+      <SegmentedControl<VideoPreset | 'default'>
         disabled={disabled}
-        size="sm"
-        type="single"
+        options={[
+          ...(inherit ? [{ value: 'default' as const, label: 'Use default' }] : []),
+          ...options.map((option) =>
+            // The untouched default shows as 1080p30; choosing it again makes
+            // it the user's pick, which Go Live never steps down.
+            value === 'tutorial-1080p30' && option.value === 'stream-safe-1080p30'
+              ? { ...option, onClick: () => onChange('stream-safe-1080p30') }
+              : option
+          )
+        ]}
         value={selected}
-        variant="outline"
-        onValueChange={(next) => {
-          if (next === 'default' || options.some((option) => option.value === next))
-            onChange(next as VideoPreset | 'default')
-        }}
-      >
-        {inherit ? <ToggleGroupItem value="default">Use default</ToggleGroupItem> : null}
-        {options.map((option) => (
-          <ToggleGroupItem key={option.value} value={option.value}>
-            {option.label}
-          </ToggleGroupItem>
-        ))}
-      </ToggleGroup>
+        onValueChange={onChange}
+      />
       <FieldDescription>
         {custom ? 'Using a saved custom profile. ' : ''}
         {value === 'stream-youtube-4k30'
           ? '4K needs normal latency on YouTube. Other destinations keep their supported quality.'
-          : 'Streaming quality is independent of your local recording.'}
+          : 'Your recording keeps its own quality when this computer can run two encodes. Otherwise it matches the stream.'}
       </FieldDescription>
     </Field>
   )

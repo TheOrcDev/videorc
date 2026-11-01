@@ -1,15 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
 import { toast } from '@/lib/toast'
+import { toastUserError, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
 
-import { AppErrorBoundary } from '@/components/error-boundary'
+import { BuddyConsentDialog } from '@/components/buddy-consent-dialog'
+import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
 import { removeMessagesReconnectStarted } from '@/components/stream-manager/remove-messages-reconnect'
 import { WindowFrame } from '@/components/window-frame'
+import { WindowProviders } from '@/components/window-providers'
 import type {
   CohostActionKind,
+  CohostBuddyActionCommand,
+  CohostAutoChatRelayPatch,
   CohostQuestion,
   CohostState,
+  CohostUtteranceState,
   CohostWindowState,
   CommentHighlightAnchor,
   CommentHighlightState,
@@ -28,12 +34,18 @@ import { applyCohostState } from '@/lib/cohost-state'
 import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { DEFAULT_TWITCH_GIF_MODE, type TwitchGifMode } from '../../shared/chat-gif'
 import type { CommandAnswer } from '@/components/stream-manager/command-cards'
+
+/** A Buddy action before main's request id (distributive, one per kind). */
+type BuddyActionBody = CohostBuddyActionCommand extends infer Command
+  ? Command extends { requestId: string }
+    ? Omit<Command, 'requestId'>
+    : never
+  : never
 import {
   cohostHighlightMessageId,
   cohostNudgeDismissedFromStorage,
   COHOST_NUDGE_STORAGE_KEY
 } from '@/lib/cohost-view'
-import { Toaster } from '@/components/ui/sonner'
 import {
   createCommentsMarker,
   markerCreateParams,
@@ -41,7 +53,8 @@ import {
   MarkerRemovedError
 } from '@/lib/marker-command'
 import type { CreateMarkerParams, MarkerContext } from '../../shared/session-markers'
-import { clipMarkedToast } from '../../shared/clip-marks'
+import { clipMarkSavedClip, clipMarkedToast, type ClipMarkedToast } from '../../shared/clip-marks'
+import { clipSavingToast, type ClipLength } from '../../shared/clip-lengths'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
@@ -51,14 +64,33 @@ import {
   commentsSendTransportFailureCanReplace
 } from '../../shared/comments-send-operation'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
-import { removalOutcomeToast, type RemovalAnswer } from '@/lib/chat-removal-view'
-import { mergeModerationOperations } from '../../shared/chat-moderation'
 import {
-  reconcileBrokerCommentsSnapshot,
-  applyCommentsSnapshotDelta
-} from '../../shared/comments-snapshot-delta'
+  REMOVE_UNDO_MS,
+  removalOutcomeToast,
+  removalUndoToast,
+  type RemovalAnswer
+} from '@/lib/chat-removal-view'
+import { holdUndoableAction, type UndoableAction } from '@/lib/undoable-action'
+import { mergeModerationOperations } from '../../shared/chat-moderation'
+import { reconcileBrokerCommentsSnapshot } from '../../shared/comments-snapshot-delta'
+import { CommentsDeltaBatcher, scheduleCommentsDeltaFlush } from '@/lib/comments-delta-batcher'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
+import type { BannerRelayAction, BannerSummary } from '../../shared/banner-commands'
+import type { SoundRelayAction, SoundboardSummary } from '../../shared/sound-commands'
+import { BUDDY_UNREACHABLE, type CohostActAnswer } from '../../shared/buddy-act'
 import '@/styles.css'
+
+/** What a failed Buddy action was, for its toast (plan 174 S2.4). */
+function buddyActionContext(command: BuddyActionBody): UserErrorContext {
+  switch (command.kind) {
+    case 'buddy-say':
+      return { action: 'send', object: "Buddy's line" }
+    case 'buddy-show-on-stream':
+      return { action: command.showOnStream ? 'show' : 'hide', object: 'Buddy on stream' }
+    case 'buddy-react':
+      return { action: 'play', object: "Buddy's reaction" }
+  }
+}
 
 // Long-lived second window: drop React's dev perf-track measures, which buffer
 // outside the V8 heap and leak over time (see videorc-react-dev-perf-track-leak).
@@ -86,6 +118,22 @@ function CommentsWindowApp(): ReactElement {
     snapshot: emptyLiveChatSnapshot(new Date().toISOString())
   }))
   const [markerContext, setMarkerContext] = useState<MarkerContext | null>(null)
+  // The one Clip action (plan 181 R4): the status bar's button and /clip
+  // both relay through the main window, which owns the backend socket. The
+  // reply's words are the toast (button) or the composer's notice (/clip).
+  // Plan 199: `seconds` is the length asked for (none is the 30-second
+  // clip), and the toast names that length, never the ring's.
+  const saveClip = (seconds?: ClipLength): Promise<ClipMarkedToast> => {
+    const asked = seconds ?? markerContext?.clip?.seconds
+    return (
+      window.videorc?.markClipFromCommentsWindow?.({
+        requestId: crypto.randomUUID(),
+        ...(seconds ? { seconds } : {})
+      }) ?? Promise.reject(new Error("The Stream Manager can't reach Videorc right now."))
+    ).then((event) =>
+      clipMarkSavedClip(event) ? clipSavingToast(event, asked) : clipMarkedToast(event)
+    )
+  }
   const markerRetry = useRef<CreateMarkerParams | null>(null)
   const [markerRetrySessionId, setMarkerRetrySessionId] = useState<string | null>(null)
   useEffect(() => {
@@ -98,6 +146,107 @@ function CommentsWindowApp(): ReactElement {
       disposed = true
       off?.()
     }
+  }, [])
+  // Banners (plan 186 S7): the read-only list Studio pushes through main.
+  // A push that lands before the seed answers wins over the seed.
+  const [banners, setBanners] = useState<BannerSummary[] | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsBanners?.((list) => {
+      pushed = true
+      setBanners(list)
+    })
+    void window.videorc?.getCommentsBanners?.().then((list) => {
+      if (!disposed && !pushed) setBanners(list)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // One show or hide, relayed to Studio. Nothing says so when it works (the
+  // picture and the menu's check are the confirmation); a refusal is a
+  // warning with its own sentence. The banner rules load only then.
+  const runBanner = useCallback(async (action: BannerRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.bannerFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.bannerFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'banner-refusal' }
+      await import('@/lib/banners').then(
+        ({ bannerActionContext, bannerActionError }) =>
+          toastUserError(bannerActionError(error), bannerActionContext(action.action), options),
+        () => toastUserError(error, { action: 'change', object: 'the banner' }, options)
+      )
+      return false
+    }
+  }, [])
+  // Sounds (plan 189 S9): the read-only board Studio pushes through main.
+  // A push that lands before the seed answers wins over the seed.
+  const [sounds, setSounds] = useState<SoundboardSummary | null>(null)
+  useEffect(() => {
+    let disposed = false
+    let pushed = false
+    const off = window.videorc?.onCommentsSounds?.((board) => {
+      pushed = true
+      setSounds(board)
+    })
+    void window.videorc?.getCommentsSounds?.().then((board) => {
+      if (!disposed && !pushed) setSounds(board)
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
+  // One pad, `/sound` or Stop all, relayed to Studio, which plays it. Nothing
+  // says so when it works (the pad's ring is the confirmation); a refusal is
+  // a warning with its own sentence. The sound rules load only then.
+  const runSound = useCallback(async (action: SoundRelayAction): Promise<boolean> => {
+    try {
+      if (!window.videorc?.soundFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.soundFromCommentsWindow({ requestId: crypto.randomUUID(), ...action })
+      return true
+    } catch (error) {
+      const options = { id: 'sound-refusal' }
+      await import('@/lib/sounds').then(
+        ({ soundActionContext, soundActionError }) =>
+          toastUserError(soundActionError(error), soundActionContext(action.action), options),
+        () => toastUserError(error, { action: 'play', object: 'the sound' }, options)
+      )
+      return false
+    }
+  }, [])
+  // Hide screen or Show screen (plan 210 S8b), relayed to Studio like `/hide`.
+  // Nothing says so when it works: the stats chip and the Preview do.
+  const runScreenPrivacy = useCallback(async (hidden: boolean): Promise<boolean> => {
+    try {
+      if (!window.videorc?.markerFromCommentsWindow)
+        throw new Error('Stream Manager is disconnected.')
+      await window.videorc.markerFromCommentsWindow({
+        requestId: crypto.randomUUID(),
+        action: hidden ? 'screenHide' : 'screenShow'
+      })
+      return true
+    } catch (error) {
+      toastUserError(
+        error,
+        { action: hidden ? 'hide' : 'show', object: 'your screen' },
+        { id: 'screen-privacy' }
+      )
+      return false
+    }
+  }, [])
+  // `/buddy <words>` (plan 209 S20): relayed to Studio, which owns the
+  // backend socket and the Cloud AI consent. The answer is the composer's
+  // notice, so nothing toasts here.
+  const runBuddy = useCallback(async (sentence: string): Promise<CohostActAnswer> => {
+    if (!window.videorc?.buddyActFromCommentsWindow) throw new Error(BUDDY_UNREACHABLE)
+    return window.videorc.buddyActFromCommentsWindow({ requestId: crypto.randomUUID(), sentence })
   }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
@@ -195,9 +344,22 @@ function CommentsWindowApp(): ReactElement {
         setSendPending(false)
       }
     }
+    // Plan 191: main relays one delta per chat message. They queue and apply
+    // together at the next frame (or after 16 ms with no frame), so busy chat
+    // renders and reconciles this window once per frame, not once per message.
+    const deltas = new CommentsDeltaBatcher({
+      view: () => viewRef.current,
+      commit: applyView,
+      schedule: scheduleCommentsDeltaFlush
+    })
     void window.videorc
       ?.getCommentsSnapshot?.()
-      .then((initial) => initial && applyView(initial))
+      .then((initial) => {
+        if (!initial) return
+        // Deltas that arrived before the seed still apply before it.
+        deltas.flush()
+        applyView(initial)
+      })
       .catch(() => {})
     void window.videorc
       ?.getCommentsWindowState?.()
@@ -208,14 +370,13 @@ function CommentsWindowApp(): ReactElement {
         setAutoShowActivity(state.autoShowActivity === true)
       })
       .catch(() => {})
-    const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => applyView(next))
-    const offDelta = window.videorc?.onCommentsDelta?.((delta) => {
-      const current = viewRef.current
-      if (current.mode.kind !== 'live') return
-      const snapshot = applyCommentsSnapshotDelta(current.snapshot, delta)
-      if (snapshot === current.snapshot) return
-      applyView({ ...current, snapshot })
+    const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => {
+      // Main applies each delta to its view before relaying it, so a pushed
+      // snapshot already holds every delta still queued here (plan 191).
+      deltas.supersede()
+      applyView(next)
     })
+    const offDelta = window.videorc?.onCommentsDelta?.((delta) => deltas.push(delta))
     void window.videorc
       ?.getViewerSample?.()
       .then((sample) => setViewerSample(sample ?? null))
@@ -252,6 +413,7 @@ function CommentsWindowApp(): ReactElement {
       .catch(() => {})
     const offCohost = window.videorc?.onCohostWindowState?.((state) => setCohost(state))
     return () => {
+      deltas.dispose()
       offSnapshot?.()
       offDelta?.()
       offViewers?.()
@@ -294,36 +456,63 @@ function CommentsWindowApp(): ReactElement {
       else next.delete(id)
       return next
     })
-  // "Remove from chat" is the express consent: it runs at once, as manual.
+  // "Remove from chat" is the express consent, and it runs after a short
+  // Undo (plan 174 D20): the row says Removing… at once, and the toast's
+  // own lifecycle runs the removal when it closes, never a clock beside it
+  // (Sonner pauses the toast under the pointer and while the window is
+  // hidden), so Undo is never on screen for a removal that already ran.
+  const pendingRemovals = useRef(new Map<string, UndoableAction>())
   const removeFromChat = (message: LiveChatMessage): void => {
     const sessionId = snapshot.sessionId
     const moderate = window.videorc?.moderateFromCommentsWindow
-    if (!sessionId || !moderate) return
+    if (!sessionId || !moderate || pendingRemovals.current.has(message.id)) return
     flagId(setRemovalRequestIds, message.id, true)
-    void moderate({
-      requestId: crypto.randomUUID(),
-      sessionId,
-      action: 'remove',
-      operationId: crypto.randomUUID(),
-      messageId: message.id
-    })
-      .then((operation) => {
-        noteRemoval(operation)
-        const outcome = removalOutcomeToast(operation, { includeSuccess: false })
-        if (outcome) {
-          ;(outcome.kind === 'error' ? toast.error : toast.warning)(outcome.text, {
-            id: `chat-removal:${operation.operationId}`
-          })
-        }
+    const undoToast = removalUndoToast(message)
+    const action = holdUndoableAction(() => {
+      pendingRemovals.current.delete(message.id)
+      void moderate({
+        requestId: crypto.randomUUID(),
+        sessionId,
+        action: 'remove',
+        operationId: crypto.randomUUID(),
+        messageId: message.id
       })
-      .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not remove the message.', {
-          id: `chat-removal:${message.id}`
+        .then((operation) => {
+          noteRemoval(operation)
+          const outcome = removalOutcomeToast(operation, { includeSuccess: false })
+          if (outcome) {
+            ;(outcome.kind === 'error' ? toast.error : toast.warning)(outcome.text, {
+              id: `chat-removal:${operation.operationId}`
+            })
+          }
         })
-      )
-      .finally(() => flagId(setRemovalRequestIds, message.id, false))
+        .catch((error) =>
+          toastUserError(
+            error,
+            { action: 'remove', object: 'the message' },
+            { id: `chat-removal:${message.id}` }
+          )
+        )
+        .finally(() => flagId(setRemovalRequestIds, message.id, false))
+    })
+    pendingRemovals.current.set(message.id, action)
+    toast.message(undoToast.title, {
+      id: undoToast.id,
+      duration: REMOVE_UNDO_MS,
+      onAutoClose: () => action.flush(),
+      onDismiss: () => action.flush(),
+      action: {
+        label: undoToast.action,
+        onClick: () => {
+          action.undo()
+          pendingRemovals.current.delete(message.id)
+          flagId(setRemovalRequestIds, message.id, false)
+          toast.dismiss(undoToast.id)
+        }
+      }
+    })
   }
-  // An Orcle removal card's Remove or Cancel (Enter or Esc).
+  // A Buddy removal card's Remove or Cancel (Enter or Esc).
   const answerRemoval = (operation: ModerationOperation, answer: RemovalAnswer): void => {
     const sessionId = snapshot.sessionId
     const moderate = window.videorc?.moderateFromCommentsWindow
@@ -337,9 +526,13 @@ function CommentsWindowApp(): ReactElement {
     })
       .then(noteRemoval)
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer the removal.', {
-          id: `chat-removal:${operation.operationId}`
-        })
+        toastUserError(
+          error,
+          answer === 'confirm'
+            ? { action: 'remove', object: 'the message' }
+            : { action: 'keep', object: 'the message' },
+          { id: `chat-removal:${operation.operationId}` }
+        )
       )
       .finally(() => flagId(setRemovalAnsweringIds, operation.operationId, false))
   }
@@ -365,7 +558,7 @@ function CommentsWindowApp(): ReactElement {
         if (highlightIntentRef.current !== intent) return
         setHighlightFailure({
           messageId: message.id,
-          reason: error instanceof Error ? error.message : 'Highlight failed.'
+          reason: userErrorMessage(error, { action: 'show', object: 'the message on stream' }).text
         })
       })
       .finally(() => {
@@ -396,19 +589,52 @@ function CommentsWindowApp(): ReactElement {
           return state
         })
         .catch((error) => {
-          setSendFailures([
-            {
-              destinationId: 'cohost-command',
-              platform: 'custom',
-              reason: error instanceof Error ? error.message : 'Orcle action failed.'
-            }
-          ])
+          // A toast, not a send badge: this was never a chat send (H-4).
+          toastUserError(
+            error,
+            kind === 'approve-utterance'
+              ? { action: 'post', object: "Buddy's message" }
+              : { action: 'update', object: 'Buddy' },
+            { id: 'cohost-action' }
+          )
           return null
         })
         .finally(() => setCohostActionPending(false))
     }
 
-  // Answers to Orcle's voice command cards (plan 140, S6 part B). The reply
+  // The Buddy's own actions (plan 164 S-C4): the Say box and the Show on
+  // stream switch. Not chat commands, so no session is required; the Say box
+  // names the live session when there is one so the line can also be posted
+  // per the chat mode (D7). Studio makes the call and the window state push
+  // follows.
+  const [buddyPending, setBuddyPending] = useState(false)
+  const sendBuddyAction = (command: BuddyActionBody): Promise<void> => {
+    const send = window.videorc?.sendCohostAction
+    if (!send) return Promise.resolve()
+    setBuddyPending(true)
+    return send({ requestId: crypto.randomUUID(), ...command } as CohostBuddyActionCommand)
+      .then(() => undefined)
+      .catch((error) => {
+        toastUserError(error, buddyActionContext(command), { id: 'buddy-action' })
+      })
+      .finally(() => setBuddyPending(false))
+  }
+  const sayBuddy = (text: string, state: CohostUtteranceState): Promise<void> =>
+    sendBuddyAction({
+      kind: 'buddy-say',
+      text,
+      state,
+      ...(live && snapshot.sessionId ? { sessionId: snapshot.sessionId } : {})
+    })
+  const setBuddyShowOnStream = (showOnStream: boolean): void => {
+    void sendBuddyAction({ kind: 'buddy-show-on-stream', showOnStream })
+  }
+  // Plan 168 S-D3: a reaction chip plays on air (Studio calls cohost.pet.react).
+  const reactBuddy = (reaction: string): void => {
+    void sendBuddyAction({ kind: 'buddy-react', reaction })
+  }
+
+  // Answers to Buddy's voice command cards (plan 140, S6 part B). The reply
   // merges like an event: the newer command (by `at`) wins.
   const [commandAnsweringId, setCommandAnsweringId] = useState<string | null>(null)
   const answerCommand = (commandId: string, answer: CommandAnswer): void => {
@@ -421,34 +647,94 @@ function CommentsWindowApp(): ReactElement {
         setCohost((current) => ({ ...current, state: applyCohostState(current.state, state) }))
       )
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer Orcle.', {
-          id: `cohost-command:${commandId}`
-        })
+        toastUserError(
+          error,
+          { action: 'answer', object: 'Buddy' },
+          { id: `cohost-command:${commandId}` }
+        )
       )
       .finally(() => setCommandAnsweringId((current) => (current === commandId ? null : current)))
   }
 
-  // Orcle Live's one switch (plan 119), relayed: on means Orcle reads chat AND
-  // hears you (`listen: true`), off only stops it joining. Every way on (the
-  // status popover, the nudge, the consent CTA and the listening card) sends
-  // the same command; the consent CTA also grants cloud-AI consent in the same
-  // click. The settings are main-renderer owned, and the relay reply carries
-  // the truth back so the switch reflects what happened, not what was clicked.
-  const setOrcleLive = (on: boolean, grantConsent = false): void => {
+  // The Buddy Live switch (plan 174 S3.14a, D7), relayed: `enabled` and
+  // nothing else. It never names listening: the microphone is the listening
+  // card's own choice below. The pane header's switch and the nudge send it.
+  // The settings are main-renderer owned, and the relay reply carries the
+  // truth back so the switch reflects what happened, not what was clicked.
+  const setBuddyLive = (on: boolean): void => {
+    void window.videorc
+      ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled: on })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: on ? 'turn on' : 'turn off', object: 'Buddy Live' },
+          { id: 'cohost-enable' }
+        )
+      )
+  }
+
+  // The one-time listening card's Turn on (plan 068 D3): listening alone,
+  // with its explicit grant, so Studio saves it even though Buddy already
+  // runs. No other on-path ever names the microphone (plan 174 S3.14a).
+  const turnListeningOn = (): void => {
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
-        enabled: on,
-        grantConsent,
-        ...(on ? { listen: true } : {})
+        enabled: true,
+        listen: true,
+        grantListen: true
       })
       .then((state) => state && setCohost(state))
       .catch((error) =>
-        toast.error(
-          error instanceof Error ? error.message : 'Could not change the Orcle setting.',
-          {
-            id: 'cohost-enable'
-          }
+        toastUserError(error, { action: 'turn on', object: 'listening' }, { id: 'cohost-enable' })
+      )
+  }
+
+  // The behaviour chips (plan 174 S3.14a, D7) link to their one home: main
+  // shows the main window and the shell opens Buddy → Chat.
+  const openBuddyChatSettings = (): void => {
+    void window.videorc
+      ?.openBuddyTabFromCommentsWindow?.({ requestId: crypto.randomUUID(), tab: 'chat' })
+      .catch((error) =>
+        toastUserError(error, { action: 'open', object: 'Buddy → Chat' }, { id: 'buddy-open-tab' })
+      )
+  }
+
+  // Cloud-AI consent (plan 174 S0.2): "Turn on cloud AI…" opens the one
+  // consent dialog, and only its Allow grants consent and turns Buddy on.
+  // Listening is never in that click: Studio writes `listen` only when a
+  // command names it, and the listening card asks for it next.
+  const [buddyConsentAsked, setBuddyConsentAsked] = useState(false)
+  const answerBuddyConsent = (accepted: boolean): void => {
+    setBuddyConsentAsked(false)
+    if (!accepted) return
+    void window.videorc
+      ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled: true, grantConsent: true })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toastUserError(error, { action: 'turn on', object: 'Buddy Live' }, { id: 'cohost-enable' })
+      )
+  }
+
+  // Plan 164 S-D6, plan 174 S3.14a (D7): the pane's posting mode governs
+  // only what Buddy posts. It keeps `enabled` exactly as it is and never
+  // names listening, so the save is `{autoChat}` alone: neither Buddy nor its
+  // microphone ever turns on from here. The templates and cooldowns live in
+  // the Buddy tab and ride along untouched (Studio merges the block).
+  const setBuddyAutoChat = (patch: CohostAutoChatRelayPatch): void => {
+    void window.videorc
+      ?.sendCohostEnable?.({
+        requestId: crypto.randomUUID(),
+        enabled: cohost.enabled,
+        autoChat: patch
+      })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: 'change', object: "Buddy's chat mode" },
+          { id: 'cohost-auto-chat' }
         )
       )
   }
@@ -468,7 +754,7 @@ function CommentsWindowApp(): ReactElement {
     : {
         allowed: false,
         featureId: 'live-cohost',
-        reason: cohost.entitlementReason ?? 'Orcle requires Videorc Premium.',
+        reason: cohost.entitlementReason ?? 'Buddy requires Videorc Premium.',
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 
@@ -478,8 +764,8 @@ function CommentsWindowApp(): ReactElement {
     live && cohost.enabled && cohost.entitled && cohost.consented && cohost.state.status === 'off'
 
   return (
-    // Real glass: the OS material under the body's window coat, and the
-    // frame's content coat on top (plan 050), like every other window.
+    // The body's window coat under the frame's content coat (plan 050), like
+    // every other window.
     <WindowFrame>
       <ChatGifModeProvider mode={gifMode}>
         <StreamManager
@@ -501,9 +787,23 @@ function CommentsWindowApp(): ReactElement {
           cohostEnabled={cohost.enabled}
           cohostGate={cohostGate}
           cohostListen={cohost.listen}
+          cohostAutoChat={cohost.autoChat}
+          onCohostAutoChatChange={setBuddyAutoChat}
+          onCohostOpenChatSettings={openBuddyChatSettings}
+          onCohostUtteranceApprove={(utterance) =>
+            void sendCohostAction('approve-utterance')(utterance.id)
+          }
+          onCohostUtteranceDismiss={(utterance) =>
+            void sendCohostAction('dismiss-utterance')(utterance.id)
+          }
           cohostNudgeDismissedForever={cohostNudgeDismissed}
           cohostStarting={cohostStarting}
           cohostState={cohost.state}
+          cohostBuddy={cohost.buddy}
+          buddyPending={buddyPending}
+          onBuddySay={sayBuddy}
+          onBuddyShowOnStream={setBuddyShowOnStream}
+          onBuddyReact={reactBuddy}
           moderationOperations={moderationOperations}
           removalAnsweringIds={removalAnsweringIds}
           removalRequestIds={removalRequestIds}
@@ -522,9 +822,9 @@ function CommentsWindowApp(): ReactElement {
           onCohostAuthorGreeted={(entry) =>
             void sendCohostAction('author-greeted')(entry.authorKey)
           }
-          onCohostEnable={(enabled) => setOrcleLive(enabled)}
-          onCohostEnableConsent={() => setOrcleLive(true, true)}
-          onCohostListenOn={() => setOrcleLive(true)}
+          onCohostEnable={(enabled) => setBuddyLive(enabled)}
+          onCohostEnableConsent={() => setBuddyConsentAsked(true)}
+          onCohostListenOn={turnListeningOn}
           onCohostNudgeDismiss={() => {
             setCohostNudgeDismissed(true)
             localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')
@@ -551,44 +851,36 @@ function CommentsWindowApp(): ReactElement {
                       sessionId: snapshot.sessionId!
                     })
                     .catch((error) =>
-                      setSendFailures([
-                        {
-                          destinationId: 'comments-clear-command',
-                          platform: 'custom',
-                          reason:
-                            error instanceof Error
-                              ? error.message
-                              : 'Could not clear the chat view.'
-                        }
-                      ])
-                    )
-                }
-              : undefined
-          }
-          onHighlight={live ? requestHighlight : undefined}
-          onMarkClip={
-            live
-              ? () => {
-                  void window.videorc
-                    ?.markClipFromCommentsWindow?.({ requestId: crypto.randomUUID() })
-                    .then((event) => {
-                      const copy = clipMarkedToast(event)
-                      ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
-                        id: 'clip-marked',
-                        description: copy.description
-                      })
-                    })
-                    .catch((error) =>
-                      toast.error(
-                        error instanceof Error ? error.message : 'Could not mark the clip.',
-                        {
-                          id: 'clip-marked'
-                        }
+                      // A toast, not a send badge: Clear isn't a send (H-4).
+                      toastUserError(
+                        error,
+                        { action: 'clear', object: 'the chat view' },
+                        { id: 'comments-clear' }
                       )
                     )
                 }
               : undefined
           }
+          onHighlight={live ? requestHighlight : undefined}
+          onMarkClip={(seconds) => {
+            void saveClip(seconds)
+              .then((copy) => {
+                ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
+                  id: 'clip-marked',
+                  description: copy.description
+                })
+              })
+              .catch((error) =>
+                toastUserError(error, { action: 'save', object: 'the clip' }, { id: 'clip-marked' })
+              )
+          }}
+          onClip={(seconds) => saveClip(seconds).then((copy) => copy.title)}
+          onScreenPrivacy={runScreenPrivacy}
+          banners={banners}
+          onBanner={runBanner}
+          sounds={sounds}
+          onSound={runSound}
+          onBuddy={runBuddy}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onShowFollowNames={() => {
             void window.videorc
@@ -597,14 +889,17 @@ function CommentsWindowApp(): ReactElement {
                 platform: 'twitch'
               })
               .then(() =>
-                toast.success('Allow the follow permission in your browser', {
+                // A step to take, so info (plan 174 S2.4, H-32).
+                toast.info('Approve the Twitch permissions in your browser', {
                   id: 'follow-names',
-                  description: 'New Twitch followers show by name once Twitch confirms.'
+                  description:
+                    'Follower names, Power-ups and channel points show once Twitch confirms.'
                 })
               )
               .catch((error) =>
-                toast.error(
-                  error instanceof Error ? error.message : 'Could not open the Twitch reconnect.',
+                toastUserError(
+                  error,
+                  { action: 'open', object: 'the Twitch page' },
                   { id: 'follow-names' }
                 )
               )
@@ -614,14 +909,15 @@ function CommentsWindowApp(): ReactElement {
             void window.videorc
               ?.reconnectScopesFromCommentsWindow?.({ requestId: crypto.randomUUID(), platform })
               .then(() =>
-                toast.success(started.title, {
+                toast.info(started.title, {
                   id: 'reconnect-scopes',
                   description: started.description
                 })
               )
               .catch((error) =>
-                toast.error(
-                  error instanceof Error ? error.message : 'Could not open the reconnect.',
+                toastUserError(
+                  error,
+                  { action: 'open', object: `the ${started.platformName} page` },
                   { id: 'reconnect-scopes' }
                 )
               )
@@ -715,7 +1011,8 @@ function CommentsWindowApp(): ReactElement {
                   {
                     destinationId: 'comments-command',
                     platform: 'custom',
-                    reason: error instanceof Error ? error.message : 'Send failed.'
+                    reason: userErrorMessage(error, { action: 'send', object: 'the message' })
+                      .description
                   }
                 ])
               })
@@ -736,9 +1033,7 @@ function CommentsWindowApp(): ReactElement {
           }
         />
       </ChatGifModeProvider>
-      {/* sonner needs its own host here because this is a separate React root;
-          with no theme provider it follows prefers-color-scheme, like the page. */}
-      <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" visibleToasts={3} />
+      <BuddyConsentDialog open={buddyConsentAsked} onAnswer={answerBuddyConsent} />
     </WindowFrame>
   )
 }
@@ -746,7 +1041,12 @@ function CommentsWindowApp(): ReactElement {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <AppErrorBoundary>
-      <CommentsWindowApp />
+      {/* A separate React root: its own tooltips, and toasts above its 32 px
+          status bar. With no theme provider sonner follows
+          prefers-color-scheme, like the page. */}
+      <WindowProviders window="stream-manager">
+        <CommentsWindowApp />
+      </WindowProviders>
     </AppErrorBoundary>
   </React.StrictMode>
 )

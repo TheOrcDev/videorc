@@ -499,6 +499,7 @@ mod macos {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 1,
             height: 1,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -507,6 +508,9 @@ mod macos {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
         compositor
             .compose_bgra(16, 16, [0.0, 0.0, 0.0, 1.0], &[source])
@@ -581,6 +585,7 @@ mod macos {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 1,
             height: 1,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -589,6 +594,9 @@ mod macos {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
         compositor
             .compose_bgra(16, 16, [0.0, 0.0, 0.0, 1.0], &[source])

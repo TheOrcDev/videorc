@@ -451,6 +451,21 @@ describe('createMicVisualPipeline', () => {
     expect(pipeline.getFrameSnapshot()).toEqual({ bands: [], history: [], peakDb: null })
   })
 
+  it('opens the meter on Linux, where no OS microphone grant exists (plan 0011)', async () => {
+    const harness = pipelineHarness()
+    const pipeline = retainedPipeline(harness.dependencies)
+    pipeline.configure({
+      selectionKey: 'microphone:linux-pulse:alsa_input.pci',
+      deviceName: 'Built-in Audio Analog Stereo',
+      enabled: true,
+      permissionStatus: 'not-applicable'
+    })
+
+    await vi.waitFor(() => expect(harness.contexts).toHaveLength(1))
+    expect(harness.getUserMedia).toHaveBeenCalledTimes(1)
+    expect(pipeline.getLifecycleSnapshot()).toEqual({ status: 'active', active: true })
+  })
+
   it('never turns a visual meter into an implicit microphone permission request', () => {
     const harness = pipelineHarness()
     const pipeline = retainedPipeline(harness.dependencies)

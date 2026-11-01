@@ -5,11 +5,11 @@ import type {
   LiveChatProviderState,
   PlatformAudience,
   StreamPlatform,
-  StreamTargetRuntime,
-  StreamTargetState,
   ViewerSample,
   SessionChatTotals
 } from '@/lib/backend'
+import { NO_VALUE, plural } from '@/lib/format'
+import { formatTimecode } from '@/lib/format-time'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { chatActivity, type ActivityTotals } from '@/lib/stream-activity'
 import { formatViewerCount, viewerSampleStale } from '@/lib/viewer-count-view'
@@ -19,28 +19,23 @@ import type { LiveDashboardState } from '../../../shared/live-dashboard'
 // The Stream Manager's stats bar (plan 057, D1), as pure item models. A stat
 // exists only when its source exists for this session, and a value is never
 // a zero nobody measured: a platform that cannot report says why on hover.
-// Quiet when fine, specific when not: health shows the bitrate until
-// something needs the streamer, then it names the problem instead.
 
-export type StatId = 'session' | 'viewers' | 'health' | 'followers' | 'supporters' | 'tips' | 'chat'
+export type StatId = 'session' | 'viewers' | 'followers' | 'supporters' | 'tips' | 'chat'
 
 export type StatTone = 'neutral' | 'subtle' | 'good' | 'warning' | 'error'
 export type SessionBadge = 'live' | 'recording' | 'off-air' | 'history'
-export type StatDot = 'good' | 'warn' | 'error' | 'neutral'
 
 /** One row of a stat's hover card. */
 export interface StatDetailRow {
   label: string
   value: string
   platform?: StreamPlatform
-  /** A destination's state, drawn as a status dot. */
-  dot?: StatDot
   note?: string
 }
 
 export interface StatItemModel {
   id: StatId
-  /** The hover card's heading: "Viewers", "Stream health". */
+  /** The hover card's heading: "Viewers", "Followers". */
   label: string
   /** What the bar shows: the number, or the problem when there is one. */
   value: string
@@ -79,26 +74,10 @@ function confirmedTotals(input: StatsInput): SessionChatTotals | null {
   return totals && totals.sessionId === owner ? totals : null
 }
 
-function missingTotal(id: 'supporters' | 'tips', input: StatsInput): StatItemModel {
-  const reason =
-    confirmedTotals(input)?.status === 'legacy-unavailable'
-      ? 'This earlier session has no complete total.'
-      : 'Session total not available yet.'
-  return {
-    id,
-    label: id === 'supporters' ? 'Supporters this stream' : 'Tips this stream',
-    value: '–',
-    tone: 'subtle',
-    details: [{ label: 'This stream', value: 'Not available', note: reason }],
-    description: reason
-  }
-}
-
 /** The bar's order when the streamer has not rearranged it (plan 057, D2). */
 export const DEFAULT_STAT_ORDER: readonly StatId[] = [
   'session',
   'viewers',
-  'health',
   'followers',
   'supporters',
   'tips',
@@ -106,23 +85,16 @@ export const DEFAULT_STAT_ORDER: readonly StatId[] = [
 ]
 
 const TIP_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube'])
+// Facebook joins with its connected Page (plan 206 S10); a key shares none.
 const VIEWER_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube', 'kick', 'x'])
 
+/** The ON AIR clock: the one timecode (plan 174 S1.4). */
 export function formatClock(elapsedMs: number): string {
-  const total = Math.max(0, Math.floor(elapsedMs / 1000))
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const seconds = total % 60
-  const pad = (value: number): string => String(value).padStart(2, '0')
-  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+  return formatTimecode(elapsedMs)
 }
 
 function signed(delta: number): string {
   return `${delta > 0 ? '+' : '−'}${Math.abs(delta).toLocaleString()}`
-}
-
-function plural(count: number, one: string, many: string): string {
-  return `${count.toLocaleString()} ${count === 1 ? one : many}`
 }
 
 /** "$20" for a whole amount, "$4.99" otherwise. */
@@ -147,13 +119,18 @@ function timeOfDay(iso: string): string {
     : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/** A finished session's day, the one spelling the window uses (plan 174 H-30). */
+export function formatHistoryDate(iso: string): string {
+  const started = new Date(iso)
+  return Number.isNaN(started.getTime())
+    ? 'History'
+    : started.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
 function sessionItem(input: StatsInput): StatItemModel {
   const session = input.dashboard?.session
   if (input.history) {
-    const started = new Date(input.history.startedAt)
-    const date = Number.isNaN(started.getTime())
-      ? 'History'
-      : started.toLocaleDateString([], { month: 'short', day: 'numeric' })
+    const date = formatHistoryDate(input.history.startedAt)
     return {
       id: 'session',
       label: 'Session',
@@ -210,7 +187,7 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
         { label: 'Peak', value: formatViewerCount(peak) },
         { label: 'Average', value: formatViewerCount(average) }
       ],
-      description: `Peak ${formatViewerCount(peak)} viewers, average ${formatViewerCount(average)}`
+      description: `Peak ${formatViewerCount(peak)} ${peak === 1 ? 'viewer' : 'viewers'}, average ${formatViewerCount(average)}`
     } satisfies StatItemModel
   }
   const live = input.dashboard?.session.state === 'live'
@@ -243,106 +220,16 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
       })),
       ...waiting.map((platform) => ({
         label: CHAT_PLATFORM_LABELS[platform],
-        value: 'waiting',
+        value: 'Waiting',
         platform
       })),
       ...(peak !== null ? [{ label: 'Peak', value: formatViewerCount(peak) }] : []),
       ...(latest && stale ? [{ label: 'Updated', value: 'over a minute ago' }] : [])
     ],
     description: latest
-      ? `${count} viewers${peak !== null ? `, peak ${formatViewerCount(peak)}` : ''}`
+      ? `${count} ${latest.total === 1 ? 'viewer' : 'viewers'}${peak !== null ? `, peak ${formatViewerCount(peak)}` : ''}`
       : 'No viewer count yet'
   } satisfies StatItemModel
-}
-
-const TARGET_STATE_LABELS: Record<StreamTargetState, string> = {
-  'not-configured': 'Not set up',
-  ready: 'Ready',
-  connecting: 'Connecting',
-  live: 'Live',
-  warning: 'Unstable',
-  failed: 'Failed',
-  stopped: 'Stopped'
-}
-
-const TARGET_DOTS: Partial<Record<StreamTargetState, StatDot>> = {
-  live: 'good',
-  connecting: 'warn',
-  warning: 'warn',
-  failed: 'error'
-}
-
-/**
- * The one health reading the bar shows, most urgent first: a failed
- * destination, dropped frames, a sagging bitrate, a destination still
- * connecting. Healthy is just the bitrate.
- */
-function healthReading(
-  targets: readonly StreamTargetRuntime[],
-  droppedLastMinute: number,
-  sagging: boolean,
-  bitrate: string
-): { value: string; tone: StatTone } {
-  const failed = targets.filter((target) => target.state === 'failed')
-  if (failed.length === 1) return { value: `${failed[0].label} failed`, tone: 'error' }
-  if (failed.length > 1) return { value: `${failed.length} failed`, tone: 'error' }
-  if (droppedLastMinute > 0) return { value: `${droppedLastMinute} dropped/min`, tone: 'warning' }
-  if (sagging) return { value: 'Low bitrate', tone: 'warning' }
-  const unsettled = targets.find(
-    (target) => target.state === 'connecting' || target.state === 'warning'
-  )
-  if (unsettled) {
-    return {
-      value: unsettled.state === 'connecting' ? 'Connecting' : `${unsettled.label} unstable`,
-      tone: 'warning'
-    }
-  }
-  return { value: bitrate, tone: bitrate === '–' ? 'neutral' : 'good' }
-}
-
-function healthItem(dashboard: LiveDashboardState | null, nowMs: number): StatItemModel | null {
-  if (dashboard?.session.state !== 'live') return null
-  const health = dashboard.health
-  const latest = health?.latest
-  const points = health?.bitrateHistory ?? []
-  const minuteAgo = points.find((point) => Date.parse(point.at) >= nowMs - 60_000)
-  const droppedLastMinute =
-    typeof latest?.droppedFrames === 'number' && typeof minuteAgo?.droppedFrames === 'number'
-      ? Math.max(0, latest.droppedFrames - minuteAgo.droppedFrames)
-      : 0
-  const recent = points.slice(-150).map((point) => point.kbps)
-  const typical = recent.length
-    ? [...recent].sort((a, b) => a - b)[Math.floor(recent.length / 2)]
-    : 0
-  const kbps = latest?.bitrateKbps
-  const sagging = typeof kbps === 'number' && typical > 0 && kbps < typical * 0.7
-  const bitrate = typeof kbps === 'number' ? `${Math.round(kbps).toLocaleString()} kbps` : '–'
-  const reading = healthReading(dashboard.targets, droppedLastMinute, sagging, bitrate)
-  const fps = typeof latest?.fps === 'number' ? `${Math.round(latest.fps)} fps` : null
-  const dropped = droppedLastMinute > 0 ? `${droppedLastMinute} in the last minute` : 'None'
-  return {
-    id: 'health',
-    label: 'Stream health',
-    value: reading.value,
-    tone: reading.tone,
-    spark: points.map((point) => point.kbps),
-    details: [
-      { label: 'Bitrate', value: bitrate },
-      ...(fps ? [{ label: 'Frame rate', value: fps }] : []),
-      { label: 'Dropped frames', value: dropped },
-      ...dashboard.targets.map((target) => ({
-        label: target.label,
-        value: TARGET_STATE_LABELS[target.state],
-        platform: target.platform,
-        dot: TARGET_DOTS[target.state] ?? 'neutral',
-        ...(target.message ? { note: target.message } : {})
-      }))
-    ],
-    description:
-      reading.value === bitrate
-        ? `Stream health: ${[bitrate, fps, droppedLastMinute > 0 ? `${dropped} dropped` : 'no dropped frames'].filter(Boolean).join(', ')}`
-        : `Stream health: ${reading.value}`
-  }
 }
 
 const METRIC_LABELS: Record<PlatformAudience['metric'], string> = {
@@ -424,6 +311,50 @@ function followersItem(audience: AudienceSnapshot | null): StatItemModel | null 
   }
 }
 
+/**
+ * The polled follower totals with the follows Activity has shown since each
+ * platform's last read, so the count moves the moment a follow arrives
+ * instead of on the next poll. A follow counts once per message id, and only
+ * while it is newer than the platform's reading: the next read already
+ * includes it and wins. Kick has no total; its follows already reach the
+ * snapshot as a delta.
+ */
+export function withLiveFollows(
+  audience: AudienceSnapshot | null,
+  messages: readonly LiveChatMessage[]
+): AudienceSnapshot | null {
+  if (!audience) return audience
+  const counted = new Set<string>()
+  const pending = new Map<StreamPlatform, number>()
+  for (const message of messages) {
+    if (message.details?.kind !== 'follow' || message.isDeleted || counted.has(message.id)) continue
+    const entry = audience.platforms.find((candidate) => candidate.platform === message.platform)
+    if (
+      !entry ||
+      entry.metric !== 'followers' ||
+      entry.capability !== 'available' ||
+      entry.total === undefined ||
+      !entry.at
+    ) {
+      continue
+    }
+    const received = Date.parse(message.receivedAt)
+    const read = Date.parse(entry.at)
+    if (!Number.isFinite(received) || !Number.isFinite(read) || received <= read) continue
+    counted.add(message.id)
+    pending.set(message.platform, (pending.get(message.platform) ?? 0) + 1)
+  }
+  if (pending.size === 0) return audience
+  return {
+    ...audience,
+    platforms: audience.platforms.map((entry) => {
+      const follows = pending.get(entry.platform)
+      if (!follows || entry.total === undefined) return entry
+      return { ...entry, total: entry.total + follows, delta: (entry.delta ?? 0) + follows }
+    })
+  }
+}
+
 /** Subs on Twitch, members on YouTube, supporters when both are live. */
 export function supportersUnit(platforms: ReadonlySet<StreamPlatform>, count: number): string {
   const twitch = platforms.has('twitch')
@@ -501,6 +432,22 @@ function chatItem(input: StatsInput): StatItemModel {
         : 'Session chat total not available'
     }
   }
+  // No platform reads chat right now, so the pace is not a measured zero
+  // (H-10): one placeholder, with the reason.
+  if (
+    input.providers.length > 0 &&
+    !input.providers.some((provider) => provider.state === 'connected')
+  ) {
+    const reason = "Chat isn't connected"
+    return {
+      id: 'chat',
+      label: 'Chat',
+      value: NO_VALUE,
+      tone: 'subtle',
+      details: [{ label: 'Messages in the last minute', value: NO_VALUE, note: reason }, chatters],
+      description: reason
+    }
+  }
   return {
     id: 'chat',
     label: 'Chat',
@@ -534,18 +481,17 @@ export function statItems(input: StatsInput): StatItemModel[] {
   const items: (StatItemModel | null)[] = [
     sessionItem(input),
     viewersItem(input, livePlatforms),
-    input.history ? null : healthItem(dashboard, input.nowMs),
     followersItem(
-      input.history ? (input.history.stats?.audience ?? null) : (dashboard?.audience ?? null)
+      input.history
+        ? (input.history.stats?.audience ?? null)
+        : withLiveFollows(dashboard?.audience ?? null, input.messages)
     )
   ]
-  if ([...chatPlatforms].some((platform) => TIP_PLATFORMS.has(platform))) {
-    items.push(
-      totals
-        ? supportersItem(totals, chatPlatforms, dashboard?.audience ?? null)
-        : missingTotal('supporters', input),
-      totals ? tipsItem(totals) : missingTotal('tips', input)
-    )
+  // Subs and tips exist once their total is measured (plan 174 V-8): until
+  // the session's totals arrive the bar shows nothing for them, never a run
+  // of placeholders.
+  if (totals && [...chatPlatforms].some((platform) => TIP_PLATFORMS.has(platform))) {
+    items.push(supportersItem(totals, chatPlatforms, dashboard?.audience ?? null), tipsItem(totals))
   }
   if (input.providers.length > 0 || input.messages.length > 0 || (totals?.messageCount ?? 0) > 0)
     items.push(chatItem(input))

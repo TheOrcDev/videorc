@@ -32,19 +32,43 @@ export const REQUIRED_WINDOWS_FFMPEG_FILTERS = ['afftdn', ...CLEAN_CUT_FFMPEG_FI
  * package gate. */
 export const OPTIONAL_WINDOWS_FFMPEG_ENCODERS = ['h264_qsv', 'libopenh264']
 
+/** The replay buffer (plan 181) writes a rolling ring of MPEG-TS segments
+ * with the `segment` muxer and stream-copies them into an MP4 through the
+ * `concat` demuxer; the MP4 muxer inserts `aac_adtstoasc` on its own. A
+ * build without any of these cannot save a replay. */
+export const REQUIRED_WINDOWS_FFMPEG_MUXERS = ['segment', 'mpegts', 'mp4']
+export const REQUIRED_WINDOWS_FFMPEG_DEMUXERS = ['concat', 'mpegts']
+export const REQUIRED_WINDOWS_FFMPEG_BITSTREAM_FILTERS = ['aac_adtstoasc']
+
 function hasWord(output, word) {
   return new RegExp(`(^|[^A-Za-z0-9_])${word}([^A-Za-z0-9_]|$)`, 'm').test(output)
 }
 
+/** The component names a `-muxers` / `-demuxers` / `-bsfs` listing carries:
+ * flags first, then the name (a comma-joined alias list is one component).
+ * Descriptions are ignored, so "streaming segment muxer" never passes for
+ * `segment`. */
+function listedComponentNames(output) {
+  return String(output ?? '')
+    .split(/\r?\n/)
+    .flatMap((line) => line.trim().split(/\s+/).slice(0, 2))
+    .flatMap((token) => token.split(','))
+}
+
 /**
- * Assesses `ffmpeg -protocols` and `ffmpeg -encoders` output against the
- * required capability set. Returns `{ ok, missing }` where `missing` entries
- * are `protocol:<name>` / `encoder:<name>` strings suitable for error copy.
+ * Assesses `ffmpeg -protocols`, `-encoders`, `-filters`, `-muxers`,
+ * `-demuxers` and `-bsfs` output against the required capability set.
+ * Returns `{ ok, missing }` where `missing` entries are `protocol:<name>` /
+ * `encoder:<name>` / `filter:<name>` / `muxer:<name>` / `demuxer:<name>` /
+ * `bsf:<name>` strings suitable for error copy.
  */
 export function assessWindowsFfmpegCapabilities({
   protocolsOutput = '',
   encodersOutput = '',
-  filtersOutput = ''
+  filtersOutput = '',
+  muxersOutput = '',
+  demuxersOutput = '',
+  bitstreamFiltersOutput = ''
 }) {
   const missing = []
   for (const protocol of REQUIRED_WINDOWS_FFMPEG_PROTOCOLS) {
@@ -60,6 +84,24 @@ export function assessWindowsFfmpegCapabilities({
   for (const filter of REQUIRED_WINDOWS_FFMPEG_FILTERS) {
     if (!hasWord(filtersOutput, filter)) {
       missing.push(`filter:${filter}`)
+    }
+  }
+  const muxers = listedComponentNames(muxersOutput)
+  for (const muxer of REQUIRED_WINDOWS_FFMPEG_MUXERS) {
+    if (!muxers.includes(muxer)) {
+      missing.push(`muxer:${muxer}`)
+    }
+  }
+  const demuxers = listedComponentNames(demuxersOutput)
+  for (const demuxer of REQUIRED_WINDOWS_FFMPEG_DEMUXERS) {
+    if (!demuxers.includes(demuxer)) {
+      missing.push(`demuxer:${demuxer}`)
+    }
+  }
+  const bitstreamFilters = listedComponentNames(bitstreamFiltersOutput)
+  for (const bsf of REQUIRED_WINDOWS_FFMPEG_BITSTREAM_FILTERS) {
+    if (!bitstreamFilters.includes(bsf)) {
+      missing.push(`bsf:${bsf}`)
     }
   }
   const optionalMissing = OPTIONAL_WINDOWS_FFMPEG_ENCODERS.filter(
@@ -82,6 +124,9 @@ export function probeWindowsFfmpegCapabilities(ffmpegPath, { execFileSync }) {
   return assessWindowsFfmpegCapabilities({
     protocolsOutput: run('-protocols'),
     encodersOutput: run('-encoders'),
-    filtersOutput: run('-filters')
+    filtersOutput: run('-filters'),
+    muxersOutput: run('-muxers'),
+    demuxersOutput: run('-demuxers'),
+    bitstreamFiltersOutput: run('-bsfs')
   })
 }

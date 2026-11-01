@@ -1,8 +1,8 @@
 //! The `<recording>.srt` transcript as timed cues (plan 119 S1).
 //!
-//! Live captions and Orcle listening write one `.srt` next to the finished
+//! Live captions and Buddy listening write one `.srt` next to the finished
 //! recording (`captions.rs`). Everything that reads it back (clip moments,
-//! the Orcle report, Clean cut's re-timed captions) shares this
+//! the Buddy report, Clean cut's re-timed captions) shares this
 //! parser so a cue means the same thing everywhere.
 
 /// One caption cue from a live-captions `.srt` (kept with timing for
@@ -51,16 +51,38 @@ pub fn parse_srt(content: &str) -> Vec<CaptionCue> {
 }
 
 fn srt_timestamp_ms(value: &str) -> Option<u64> {
-    // "HH:MM:SS,mmm" (SRT) or "HH:MM:SS.mmm".
+    // "HH:MM:SS,mmm" (SRT) or "HH:MM:SS.mmm". The file beside a recording may
+    // come from another tool or a hand edit, so nothing here may overflow.
     let value = value.trim();
-    let mut clock_and_millis = value.split([',', '.']);
-    let clock = clock_and_millis.next()?;
-    let millis: u64 = clock_and_millis.next().unwrap_or("0").trim().parse().ok()?;
+    let mut clock_and_fraction = value.split([',', '.']);
+    let clock = clock_and_fraction.next()?;
+    let millis = fraction_millis(clock_and_fraction.next().unwrap_or("0").trim())?;
     let mut parts = clock.split(':').rev();
     let seconds: u64 = parts.next()?.trim().parse().ok()?;
     let minutes: u64 = parts.next()?.trim().parse().ok()?;
     let hours: u64 = parts.next().unwrap_or("0").trim().parse().ok()?;
-    Some(((hours * 60 + minutes) * 60 + seconds) * 1000 + millis)
+    hours
+        .checked_mul(60)?
+        .checked_add(minutes)?
+        .checked_mul(60)?
+        .checked_add(seconds)?
+        .checked_mul(1000)?
+        .checked_add(millis)
+}
+
+/// The fraction of a second as milliseconds by its digit count: "5" is
+/// 500 ms and "12" is 120 ms, not 5 ms and 12 ms; more than three digits
+/// truncate to milliseconds.
+fn fraction_millis(fraction: &str) -> Option<u64> {
+    if fraction.is_empty() {
+        return Some(0);
+    }
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let digits = &fraction[..fraction.len().min(3)];
+    let value: u64 = digits.parse().ok()?;
+    Some(value * 10_u64.pow(3 - digits.len() as u32))
 }
 
 /// Plain prose, one cue per line (test fixture since plan 119 removed Publish).
@@ -171,6 +193,21 @@ mod tests {
         assert_eq!(srt_timestamp_ms("01:02:03,456"), Some(3_723_456));
         assert_eq!(srt_timestamp_ms(" 00:00:00.001 "), Some(1));
         assert_eq!(srt_timestamp_ms("garbage"), None);
+    }
+
+    #[test]
+    fn srt_timestamps_scale_short_fractions_and_refuse_overflow() {
+        // Other tools write one or two fraction digits; they are tenths and
+        // hundredths, not single milliseconds.
+        assert_eq!(srt_timestamp_ms("00:00:01.5"), Some(1_500));
+        assert_eq!(srt_timestamp_ms("00:00:01,12"), Some(1_120));
+        assert_eq!(srt_timestamp_ms("00:00:01,4567"), Some(1_456));
+        assert_eq!(srt_timestamp_ms("00:00:01,"), Some(1_000));
+        assert_eq!(srt_timestamp_ms("00:00:01,12x"), None);
+        // A hand-edited cue cannot panic the Buddy report in debug or wrap in
+        // release.
+        assert_eq!(srt_timestamp_ms("99999999999999999:00:00,000"), None);
+        assert_eq!(srt_timestamp_ms("18446744073709551615:00:00,000"), None);
     }
 
     #[test]

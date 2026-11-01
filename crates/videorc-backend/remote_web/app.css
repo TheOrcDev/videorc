@@ -1,18 +1,63 @@
-/* Videorc Remote: the desktop's black-glass language (videorc-design) in
-   plain CSS: monochrome chrome, hairlines, one LED-red accent that only ever
-   means record / live / on stream. Light mode is the porcelain twin. */
+/* Videorc Remote: the desktop's Liquid Chrome (plan 208, D13) in plain CSS.
+   The page sits on the chrome ground, the frosted still of Liquid Chrome
+   every desktop window sits on (served from assets/backgrounds/, the same
+   files), under the work area's cover of the base tone. Every neutral is
+   chroma 0; the primary is polished chrome and Record a red LED that glows
+   while a session runs. Red only ever means record / live / on stream.
+   Light mode is the crisp invert.
+
+   The values mirror the desktop and must not drift: the solids, text tiers
+   and covers are apps/desktop/src/main/window-palette.ts, everything else
+   is styles.css (the dark column is .dark, the light column :root).
+   served_page_palette.rs fails when a copy changes on its own. */
 
 :root {
-  --bg: #0d0d0f;
-  --card: #141417;
-  --text: #f4f4f5;
-  --text-2: #a1a1aa;
-  --text-3: #71717a;
-  --hairline: rgba(255, 255, 255, 0.1);
-  --hover: rgba(255, 255, 255, 0.08);
-  --pressed: rgba(255, 255, 255, 0.12);
+  --bg: #070707;
+  --card: #0d0d0d;
+  --text: #f5f5f5;
+  --text-2: #a1a1a1;
+  --text-3: #868686;
+  --hairline: oklch(1 0 0 / 10%);
+  --hover: oklch(1 0 0 / 8%);
+  --pressed: oklch(1 0 0 / 12%);
+  /* MediaCard's selected edge: the text tone at 25%. */
+  --selected-edge: rgba(245, 245, 245, 0.25);
+  /* Plan 174 I-12: a focus ring that reads in both themes (3:1 or better). */
+  --focus: rgba(255, 255, 255, 0.7);
   --red: oklch(0.62 0.24 27);
   --green: oklch(0.7 0.15 150);
+  /* The chrome ground and how much of the base tone covers it (the desktop's
+     work cover, which the contrast test proves for every text tier). */
+  --ground-image: url('/chrome-ground-dark.webp');
+  --ground-cover: 0.82;
+  /* Chrome controls (plan 208 S4): polished silver on black. */
+  --chrome-fill-stops:
+    oklch(1 0 0) 0%, oklch(0.93 0 0) 40%, oklch(0.75 0 0) 52%, oklch(0.88 0 0) 78%,
+    oklch(0.97 0 0) 100%;
+  --chrome-fill-flat: oklch(0.88 0 0);
+  --chrome-fill-ink: oklch(0.13 0 0);
+  --chrome-fill-hi: oklch(1 0 0);
+  --chrome-fill-lo: oklch(0 0 0 / 30%);
+  --chrome-fill-drop: oklch(0 0 0 / 60%);
+  --chrome-fill-lift: oklch(1 0 0 / 14%);
+  --chrome-press: oklch(0 0 0 / 40%);
+  --chrome-plate-top: oklch(1 0 0 / 14%);
+  --chrome-plate-bottom: oklch(1 0 0 / 4%);
+  --chrome-plate-hi: oklch(1 0 0 / 16%);
+  --chrome-plate-rim: oklch(1 0 0 / 5%);
+  --chrome-led-stops: oklch(0.7 0.21 27) 0%, oklch(0.56 0.23 27) 55%, oklch(0.5 0.21 27) 100%;
+  --chrome-led-flat: oklch(0.56 0.23 27);
+  /* The LED's ink: the desktop's --live-foreground, both themes. */
+  --live-foreground: oklch(0.985 0 0);
+  --chrome-led-hi: oklch(1 0 0 / 38%);
+  --chrome-led-lo: oklch(0 0 0 / 30%);
+  --chrome-led-drop: oklch(0 0 0 / 50%);
+  --chrome-led-lift: oklch(1 0 0 / 10%);
+  /* The desktop's color-mix(in oklch, var(--live) 40%, transparent), spelled
+     out so a phone without color-mix still draws the LED. */
+  --chrome-led-glow: oklch(0.62 0.24 27 / 40%);
+  /* The edge a fill or LED gains under Increase Contrast. */
+  --chrome-edge: transparent;
   --radius-panel: 18px;
   --radius-row: 10px;
   --radius-chip: 6px;
@@ -21,18 +66,82 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #fafafb;
+    --bg: #fafafa;
     --card: #ffffff;
-    --text: #1c1c1e;
-    --text-2: #6e6e73;
-    --text-3: #98989d;
-    --hairline: rgba(0, 0, 0, 0.08);
-    --hover: rgba(0, 0, 0, 0.06);
-    --pressed: rgba(0, 0, 0, 0.1);
+    --text: #0f0f0f;
+    --text-2: #5b5b5b;
+    --text-3: #6f6f6f;
+    --hairline: oklch(0 0 0 / 12%);
+    --hover: oklch(0 0 0 / 6%);
+    --pressed: oklch(0 0 0 / 10%);
+    --selected-edge: rgba(15, 15, 15, 0.25);
+    --focus: rgba(0, 0, 0, 0.6);
     --red: oklch(0.55 0.24 27);
     --green: oklch(0.55 0.14 150);
+    --ground-image: url('/chrome-ground-light.webp');
+    --ground-cover: 0.86;
+    /* The crisp invert: polished graphite with white ink. */
+    --chrome-fill-stops:
+      oklch(0.45 0 0) 0%, oklch(0.27 0 0) 40%, oklch(0.13 0 0) 54%, oklch(0.23 0 0) 82%,
+      oklch(0.4 0 0) 100%;
+    --chrome-fill-flat: oklch(0.27 0 0);
+    --chrome-fill-ink: oklch(0.985 0 0);
+    --chrome-fill-hi: oklch(1 0 0 / 35%);
+    --chrome-fill-lo: oklch(0 0 0 / 35%);
+    --chrome-fill-drop: oklch(0 0 0 / 35%);
+    --chrome-fill-lift: oklch(1 0 0 / 10%);
+    --chrome-press: oklch(0 0 0 / 45%);
+    --chrome-plate-top: oklch(0 0 0 / 9%);
+    --chrome-plate-bottom: oklch(0 0 0 / 3%);
+    --chrome-plate-hi: oklch(1 0 0 / 90%);
+    --chrome-plate-rim: oklch(0 0 0 / 7%);
+    --chrome-led-stops: oklch(0.64 0.22 27) 0%, oklch(0.52 0.24 27) 55%, oklch(0.46 0.22 27) 100%;
+    --chrome-led-flat: oklch(0.52 0.24 27);
+    --chrome-led-hi: oklch(1 0 0 / 38%);
+    --chrome-led-lo: oklch(0 0 0 / 25%);
+    --chrome-led-drop: oklch(0 0 0 / 30%);
+    --chrome-led-lift: oklch(1 0 0 / 10%);
+    --chrome-led-glow: oklch(0.55 0.24 27 / 30%);
     color-scheme: light;
   }
+}
+
+/* Increase Contrast (the desktop's D12): stronger hairlines and edges, the
+   secondary and tertiary tiers one step closer to the primary, and the
+   ground under a 95% cover. */
+@media (prefers-contrast: more) {
+  :root {
+    --hairline: oklch(1 0 0 / 24%);
+    --text-2: oklch(0.8 0 0);
+    --text-3: oklch(0.68 0 0);
+    --ground-cover: 0.95;
+    --chrome-edge: oklch(1 0 0 / 55%);
+    --chrome-plate-rim: oklch(1 0 0 / 30%);
+  }
+}
+
+@media (prefers-contrast: more) and (prefers-color-scheme: light) {
+  :root {
+    --hairline: oklch(0 0 0 / 28%);
+    --text-2: oklch(0.38 0 0);
+    --text-3: oklch(0.45 0 0);
+    --ground-cover: 0.95;
+    --chrome-edge: oklch(0 0 0 / 60%);
+    --chrome-plate-rim: oklch(0 0 0 / 28%);
+  }
+}
+
+/* The chrome controls' light and shade, cut from the theme's tokens above:
+   a top line, a bottom line and a drop, plus the Increase Contrast edge.
+   Pressed is concave: a shade along the top and no drop. */
+:root {
+  --chrome-fill-shadow:
+    inset 0 1px 0 var(--chrome-fill-hi), inset 0 -1px 0 var(--chrome-fill-lo),
+    0 1px 3px var(--chrome-fill-drop), 0 0 0 1px var(--chrome-edge);
+  --chrome-led-shadow:
+    inset 0 1px 0 var(--chrome-led-hi), inset 0 -1px 0 var(--chrome-led-lo),
+    0 1px 3px var(--chrome-led-drop), 0 0 0 1px var(--chrome-edge);
+  --chrome-pressed-shadow: inset 0 1px 2px var(--chrome-press), 0 0 0 1px var(--chrome-edge);
 }
 
 * {
@@ -65,6 +174,27 @@ body {
   -webkit-user-select: none;
 }
 
+/* The chrome ground (D13): the still covers the screen, and the base tone
+   paints its cover over it, so the ground shows through at 1 - cover. The
+   page never scrolls (the views do), so the ground stays put. Decoration
+   only: no filter, no motion, never under the pointer. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: var(--ground-image) center / cover no-repeat;
+  opacity: calc(1 - var(--ground-cover));
+  pointer-events: none;
+}
+
+/* Reduce Transparency: the plain base, nothing behind the text. */
+@media (prefers-reduced-transparency: reduce) {
+  body::before {
+    display: none;
+  }
+}
+
 [hidden] {
   display: none !important;
 }
@@ -80,8 +210,12 @@ button {
 }
 
 button:focus-visible {
-  outline: 2px solid rgba(255, 255, 255, 0.28);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+button:disabled {
+  opacity: 0.4;
 }
 
 .spring {
@@ -115,6 +249,28 @@ button:focus-visible {
   letter-spacing: 0.04em;
 }
 
+/* Recording without a livestream: the red dot carries the state, the words
+   stay monochrome (ON AIR is the only filled red chip). */
+.rec {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-chip);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.rec::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--red);
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -137,6 +293,49 @@ button:focus-visible {
 
 .pill[data-status='unpaired']::before {
   background: var(--red);
+}
+
+/* Banners: offline and the one-time auto-lock tip ------------------------- */
+
+.banner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px calc(env(safe-area-inset-right) + 16px) 10px calc(env(safe-area-inset-left) + 16px);
+  border-bottom: 1px solid var(--hairline);
+  background: var(--hover);
+  font-size: 13px;
+}
+
+.banner p {
+  margin: 0;
+}
+
+.banner-actions,
+.gate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.gate-actions {
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.banner-actions button,
+.gate-actions button,
+.deck-footer button {
+  min-height: 32px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.banner-actions button:first-child,
+.gate-actions .action {
+  padding: 0 12px;
+  border-radius: var(--radius-chip);
+  font-weight: 500;
 }
 
 /* Views -------------------------------------------------------------- */
@@ -172,10 +371,16 @@ main {
 }
 
 .gate p,
-.empty {
+.empty,
+.hint-line {
   margin: 0;
-  color: var(--text-3);
+  /* Plan 174 I-5: instructions use the secondary tier, which passes AA. */
+  color: var(--text-2);
   font-size: 13px;
+}
+
+.hint-line {
+  padding: 4px 8px 8px;
 }
 
 .empty {
@@ -185,7 +390,7 @@ main {
 
 .label {
   margin: 16px 8px 8px;
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: 12px;
   font-weight: 400;
 }
@@ -203,7 +408,10 @@ main {
 
 .comment {
   display: grid;
-  grid-template-columns: 24px 1fr;
+  min-width: 0;
+  /* Avatar · name and message · platform mark on the far right (plan 165,
+     like the Stream Manager rows). */
+  grid-template-columns: 36px minmax(0, 1fr) auto;
   gap: 2px 12px;
   width: 100%;
   min-height: 44px;
@@ -212,13 +420,17 @@ main {
   user-select: none;
 }
 
-.comment:active {
+.comment:active:not(:disabled) {
   background: var(--pressed);
 }
 
 .comment[data-live='true'] {
   background: var(--hover);
   box-shadow: inset 2px 0 0 var(--red);
+}
+
+.comment:disabled {
+  opacity: 0.6;
 }
 
 .comment[data-pending='true'] {
@@ -231,8 +443,27 @@ main {
   pointer-events: none;
 }
 
+/* The viewer's initials: the phone never receives avatar URLs (the LAN
+   projection carries no URLs), so this is the desktop's monogram fallback. */
+.avatar {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .glyph {
-  grid-row: span 2;
+  grid-column: 3;
+  grid-row: 1;
+  align-self: start;
   display: grid;
   place-items: center;
   width: 24px;
@@ -247,7 +478,15 @@ main {
 /* Platform colour is information (which chat this came from), the only
    saturated colour on the page besides red. */
 .glyph[data-platform='youtube'] {
-  background: #e62117;
+  width: auto;
+  background: none;
+}
+/* YouTube's official icon file (plan 165): never tinted, the mark 20 px
+   tall (its width follows the mark's 1.43 aspect). */
+.youtube-icon {
+  display: block;
+  width: 28.55px;
+  height: 20px;
 }
 .glyph[data-platform='twitch'] {
   background: #9146ff;
@@ -256,6 +495,13 @@ main {
   background: #000;
   box-shadow: inset 0 0 0 1px var(--hairline);
 }
+/* X's mark from its partner kit (plan 167), white on the black tile in the
+   proportions of X's lockup: 18 px, above the kit's 16 px minimum. */
+.x-mark {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
 .glyph[data-platform='tiktok'] {
   background: #111;
   box-shadow: inset 0 0 0 1px var(--hairline);
@@ -263,8 +509,13 @@ main {
 .glyph[data-platform='instagram'] {
   background: #d6249f;
 }
+.glyph[data-platform='facebook'] {
+  background: #0866ff;
+}
 
 .meta {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   align-items: baseline;
   gap: 8px;
@@ -277,6 +528,14 @@ main {
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* X's verified check (plan 167): X's own file, never tinted. */
+.verified {
+  flex: none;
+  align-self: center;
+  width: 16px;
+  height: 16px;
 }
 
 .role,
@@ -304,7 +563,8 @@ main {
 }
 
 .text {
-  grid-column: 2;
+  grid-column: 2 / span 2;
+  grid-row: 2;
   color: var(--text);
   overflow-wrap: anywhere;
 }
@@ -356,12 +616,17 @@ main {
   transition: background 100ms ease-out;
 }
 
-.key:active {
-  background: var(--pressed);
+/* A press tints the card, which stays opaque over the ground. */
+.key:active:not(:disabled) {
+  background-image: linear-gradient(var(--pressed), var(--pressed));
 }
 
-.key:disabled {
-  opacity: 0.4;
+.deck-footer {
+  display: flex;
+  justify-content: center;
+  margin-top: 24px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
 }
 
 .key .name {
@@ -375,18 +640,15 @@ main {
   font-size: 12px;
 }
 
+/* On (a scene, a takeover, a banner, a sound, system audio): the desktop's
+   selected card, the chrome plate under the text tone's edge. */
 .key[data-on='true'] {
-  border-color: rgba(255, 255, 255, 0.28);
-  background: var(--hover);
-}
-
-.key[data-accent='red'][data-on='true'] {
-  border-color: var(--red);
-  box-shadow: inset 0 0 0 1px var(--red);
-}
-
-.key[data-accent='red'][data-on='true'] .hint {
-  color: var(--red);
+  border-color: var(--selected-edge);
+  background-image: linear-gradient(to bottom, var(--chrome-plate-top), var(--chrome-plate-bottom));
+  background-origin: border-box;
+  box-shadow:
+    inset 0 1px 0 var(--chrome-plate-hi),
+    inset 0 0 0 1px var(--chrome-plate-rim);
 }
 
 /* Press-and-hold fill for stop: a pocket tap must never end a stream. */
@@ -402,6 +664,69 @@ main {
 .key[data-holding='true'] .hold {
   transform: scaleX(1);
   transition: transform 700ms linear;
+}
+
+/* Chrome controls (plan 208 S4's materials, D8) --------------------------- */
+
+/* The primary is polished chrome: the gate's and the banners' first action,
+   and Go Live. No border colour, so the light and shade reach the edge. */
+.banner-actions button:first-child,
+.gate-actions .action,
+.key[data-accent='primary'] {
+  border-color: transparent;
+  color: var(--chrome-fill-ink);
+  background-color: var(--chrome-fill-flat);
+  background-image: linear-gradient(to bottom, var(--chrome-fill-stops));
+  background-origin: border-box;
+  box-shadow: var(--chrome-fill-shadow);
+}
+
+/* Record is a red LED, unlit while idle. The stop key is the lit LED: it
+   glows while a recording or livestream runs. Nothing else is ever an LED. */
+.key[data-accent='record'] {
+  border-color: transparent;
+  color: var(--live-foreground);
+  background-color: var(--chrome-led-flat);
+  background-image: linear-gradient(to bottom, var(--chrome-led-stops));
+  background-origin: border-box;
+  box-shadow: var(--chrome-led-shadow);
+}
+
+.key[data-accent='record'][data-lit] {
+  box-shadow:
+    var(--chrome-led-shadow),
+    0 0 12px var(--chrome-led-glow);
+}
+
+/* On chrome the hint takes the material's ink ("Hold to stop" is essential
+   copy), and the hold fill draws in it, not in the LED's own red. */
+.key[data-accent] .hint {
+  color: inherit;
+}
+
+.key[data-accent='record'] .hold {
+  background: var(--live-foreground);
+}
+
+/* Pressed is concave: the gradient turns over and the drop becomes a shade
+   along the top. */
+.banner-actions button:first-child:active:not(:disabled),
+.gate-actions .action:active:not(:disabled),
+.key[data-accent='primary']:active:not(:disabled) {
+  background-image: linear-gradient(to top, var(--chrome-fill-stops));
+  box-shadow: var(--chrome-pressed-shadow);
+}
+
+.key[data-accent='record']:active:not(:disabled) {
+  background-image: linear-gradient(to top, var(--chrome-led-stops));
+  box-shadow: var(--chrome-pressed-shadow);
+}
+
+.banner-actions button:first-child:disabled,
+.gate-actions .action:disabled,
+.key[data-accent]:disabled {
+  background-image: none;
+  box-shadow: 0 0 0 1px var(--chrome-edge);
 }
 
 /* Snackbar + tabs ---------------------------------------------------- */
@@ -435,10 +760,14 @@ main {
   text-align: center;
 }
 
+/* The selected tab wears the chrome plate, like the desktop's tabs. */
 .tabs button[aria-pressed='true'] {
-  background: var(--hover);
   color: var(--text);
   font-weight: 500;
+  background-image: linear-gradient(to bottom, var(--chrome-plate-top), var(--chrome-plate-bottom));
+  box-shadow:
+    inset 0 1px 0 var(--chrome-plate-hi),
+    inset 0 0 0 1px var(--chrome-plate-rim);
 }
 
 @media (prefers-reduced-motion: reduce) {

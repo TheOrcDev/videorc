@@ -92,7 +92,7 @@ vi.mock('@/lib/backend-audio-levels', async (importOriginal) => {
   }
 })
 
-import { MicrophoneSection } from '@/components/studio/microphone-section'
+import { AudioSection } from '@/components/studio/audio-section'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SourcesAudioMixer } from '@/components/sources/sources-audio-mixer'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -139,7 +139,7 @@ describe('production microphone meter demand', () => {
   })
 
   async function render(
-    consumer: typeof MicrophoneSection | typeof SourcesAudioMixer | null,
+    consumer: typeof AudioSection | typeof SourcesAudioMixer | null,
     enabled = true,
     sliver = false
   ) {
@@ -179,7 +179,7 @@ describe('production microphone meter demand', () => {
   }
 
   for (const [label, consumer] of [
-    ['Studio', MicrophoneSection],
+    ['Studio', AudioSection],
     ['Sources', SourcesAudioMixer]
   ] as const) {
     it(`starts and paints ${label}'s idle fallback with warming disabled`, async () => {
@@ -293,12 +293,12 @@ describe('production microphone meter demand', () => {
 
   it('keeps another production visual consumer alive when the meter returns to backend levels', async () => {
     fixture.sessionActive = true
-    await render(MicrophoneSection, true, true)
+    await render(AudioSection, true, true)
     expect(container.querySelector('[data-videorc-session-mic-sliver]')).not.toBeNull()
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
     await publishLevels(-6)
     expect(environment.stopped).not.toHaveBeenCalled()
-    await render(MicrophoneSection)
+    await render(AudioSection)
     expect(environment.stopped).toHaveBeenCalledTimes(1)
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
   })
@@ -335,16 +335,16 @@ describe('production microphone meter demand', () => {
   })
 
   it('releases real meter demand while source selection is pending or checking and when no mic is selected', async () => {
-    await render(MicrophoneSection)
+    await render(AudioSection)
     fixture.pending = 'microphone'
-    await render(MicrophoneSection)
+    await render(AudioSection)
     expect(environment.stopped).toHaveBeenCalledTimes(1)
     fixture.pending = null
     fixture.checking = true
-    await render(MicrophoneSection)
+    await render(AudioSection)
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
     fixture.checking = false
-    await render(MicrophoneSection)
+    await render(AudioSection)
     expect(environment.getUserMedia).toHaveBeenCalledTimes(2)
     fixture.microphoneId = undefined
     await render(SourcesAudioMixer)
@@ -364,10 +364,10 @@ describe('production microphone meter demand', () => {
   )
 
   it.each([
-    ['NotAllowedError', "Videorc can't use this mic. Check Settings → Permissions."],
+    ['NotAllowedError', "Videorc doesn't have permission to use this microphone."],
     [
       'NotReadableError',
-      "Another app is using this mic. Its level comes back when it's free. Recording still works."
+      "Another app is using this microphone. Its level comes back when it's free. Recording still works."
     ]
   ])(
     'keeps %s truthful without repeatedly trying the failed browser device',
@@ -394,7 +394,7 @@ describe('production microphone meter demand', () => {
     await frames()
     expect(readMeter()).toBeCloseTo(-18, 1)
     expect(container.querySelector('[data-videorc-mic-monitor-state="live"]')).not.toBeNull()
-    expect(container.textContent).not.toContain('Another app is using this mic')
+    expect(container.textContent).not.toContain('Another app is using this microphone')
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
   })
 

@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import WebSocket from 'ws'
 
 export interface RemoteState {
+  screenHidden?: boolean
   sessionState?: string
   sessionActive?: boolean
   recordEnabled?: boolean
@@ -21,6 +22,8 @@ export interface RemoteState {
   /** Plan 069; absent from apps that predate system audio. */
   systemAudioOn?: boolean
   systemAudioAvailable?: boolean
+  savedScenes?: Array<{ id: string; name: string }>
+  activeSavedSceneId?: string | null
   layoutPreset?: string
   activeTakeoverId?: string | null
   windows?: { notes?: boolean; comments?: boolean; preview?: boolean }
@@ -29,7 +32,69 @@ export interface RemoteState {
 export interface RemoteDescribe {
   layoutPresets?: string[]
   takeovers?: Array<{ id: string; name: string }>
+  /** Plan 186; absent from apps that predate banners. */
+  banners?: Array<{ id: string; name: string; shown: boolean }>
+  /** Plan 189; absent from apps that predate the soundboard. */
+  sounds?: Array<{ id: string; name: string; playing: boolean }>
   windows?: string[]
+}
+
+/** Longest banner name a key title shows before it ends in "…". */
+const BANNER_TITLE_MAX_CHARS = 10
+
+/**
+ * A Banner key's title (plan 186): the banner's name, with ON while it
+ * shows. A key whose banner is gone, or not picked yet, says Banner.
+ */
+export function bannerKeyTitle(
+  describe: RemoteDescribe | null,
+  bannerId: string | undefined,
+  connected: boolean
+): string {
+  if (!connected) return 'Videorc\noffline'
+  const banner = describe?.banners?.find((candidate) => candidate.id === bannerId)
+  if (!banner) return 'Banner'
+  const name =
+    banner.name.length > BANNER_TITLE_MAX_CHARS
+      ? `${banner.name.slice(0, BANNER_TITLE_MAX_CHARS - 1).trimEnd()}…`
+      : banner.name
+  return banner.shown ? `${name}\nON` : name
+}
+
+/** A Banner key's intent: a toggle by id, or nothing until one is picked. */
+export function bannerKeyIntent(bannerId: string | undefined): Record<string, unknown> | null {
+  return bannerId ? { kind: 'bannerToggle', bannerId } : null
+}
+
+/** Longest sound name a key title shows before it ends in "…". */
+const SOUND_TITLE_MAX_CHARS = 10
+
+/**
+ * A Play sound key's title (plan 189): the sound's name, with ON while it
+ * plays. A key whose sound is gone, or not picked yet, says Sound.
+ */
+export function soundKeyTitle(
+  describe: RemoteDescribe | null,
+  soundId: string | undefined,
+  connected: boolean
+): string {
+  if (!connected) return 'Videorc\noffline'
+  const sound = describe?.sounds?.find((candidate) => candidate.id === soundId)
+  if (!sound) return 'Sound'
+  const name =
+    sound.name.length > SOUND_TITLE_MAX_CHARS
+      ? `${sound.name.slice(0, SOUND_TITLE_MAX_CHARS - 1).trimEnd()}…`
+      : sound.name
+  return sound.playing ? `${name}\nON` : name
+}
+
+/**
+ * A Play sound key's intent: a press by id, so the sound plays the way its
+ * mode says (Play once restarts, Play/stop and Loop stop a playing sound),
+ * or nothing until one is picked.
+ */
+export function soundKeyIntent(soundId: string | undefined): Record<string, unknown> | null {
+  return soundId ? { kind: 'soundPlay', soundId } : null
 }
 
 interface Discovery {
@@ -95,6 +160,9 @@ export class VideorcClient extends EventEmitter {
   private pendingRequests = new Map<string, (ok: boolean) => void>()
   /** Admitted intents awaiting the renderer's remote.ack, keyed by intentId. */
   private pendingAcks = new Map<string, (ok: boolean) => void>()
+  /** One describe read at a time; a state that lands meanwhile reads again. */
+  private describeInFlight: string | null = null
+  private describeStale = false
 
   constructor(private readonly discoveryPath: string = defaultDiscoveryPath()) {
     super()
@@ -166,8 +234,9 @@ export class VideorcClient extends EventEmitter {
     ws.on('open', () => {
       this.connected = true
       this.emit('connected')
-      this.nextRequestId += 1
-      ws.send(JSON.stringify({ id: `sd-${this.nextRequestId}`, method: 'remote.describe' }))
+      this.describeInFlight = null
+      this.describeStale = false
+      this.requestDescribe()
     })
     ws.on('message', (raw) => {
       let parsed: unknown
@@ -196,6 +265,9 @@ export class VideorcClient extends EventEmitter {
       if (message.event === 'remote.state') {
         this.state = message.payload as RemoteState
         this.emit('state', this.state)
+        // Every publish from the app arrives as remote.state, and a banner
+        // shown or hidden changes describe, not state (plan 186): read it again.
+        this.requestDescribe()
         return
       }
       // The renderer executed (or refused) an admitted intent.
@@ -220,6 +292,13 @@ export class VideorcClient extends EventEmitter {
           settle(true)
         }
         return
+      }
+      if (message.id && message.id === this.describeInFlight) {
+        this.describeInFlight = null
+        if (this.describeStale) {
+          this.describeStale = false
+          this.requestDescribe()
+        }
       }
       if (message.payload?.describe !== undefined || message.payload?.state !== undefined) {
         if (message.payload.describe) {
@@ -247,6 +326,17 @@ export class VideorcClient extends EventEmitter {
     ws.on('error', onGone)
   }
 
+  private requestDescribe(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    if (this.describeInFlight) {
+      this.describeStale = true
+      return
+    }
+    this.nextRequestId += 1
+    this.describeInFlight = `sd-${this.nextRequestId}`
+    this.ws.send(JSON.stringify({ id: this.describeInFlight, method: 'remote.describe' }))
+  }
+
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnectTimer) {
       return
@@ -258,4 +348,18 @@ export class VideorcClient extends EventEmitter {
       }
     }, RECONNECT_DELAY_MS)
   }
+}
+
+export function sceneKeyTitle(
+  state: RemoteState | null,
+  sceneId: string | undefined,
+  connected: boolean
+): string {
+  if (!connected) return 'Videorc\noffline'
+  const scene = state?.savedScenes?.find((scene) => scene.id === sceneId)
+  if (!scene) return 'Scene'
+  return state?.activeSavedSceneId === scene.id ? `${scene.name}\nON` : scene.name
+}
+export function sceneKeyIntent(sceneId: string | undefined): Record<string, unknown> | null {
+  return sceneId ? { kind: 'sceneApply', sceneId } : null
 }

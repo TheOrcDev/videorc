@@ -26,7 +26,7 @@ const item = (id: StatId): StatItemModel => ({
   description: id
 })
 
-const ALL: StatId[] = ['session', 'viewers', 'health', 'followers', 'supporters', 'tips', 'chat']
+const ALL: StatId[] = ['session', 'viewers', 'followers', 'supporters', 'tips', 'chat']
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial))
@@ -40,13 +40,13 @@ function memoryStorage(initial: Record<string, string> = {}) {
 describe('stats bar layout (plan 057, D2)', () => {
   it('fills the main slots by position, whatever the session lacks', () => {
     const { main, more } = arrangeStats(
-      ['chat', 'followers', 'viewers', 'session'].map((id) => item(id as StatId)),
+      ['chat', 'supporters', 'viewers', 'session'].map((id) => item(id as StatId)),
       DEFAULT_STATS_LAYOUT
     )
-    // No health this session: the third main slot stays empty rather than
-    // pulling Followers forward, so a stat never jumps between groups.
+    // No followers this session: the third main slot stays empty rather than
+    // pulling Supporters forward, so a stat never jumps between groups.
     expect(main.map((stat) => stat.id)).toEqual(['session', 'viewers'])
-    expect(more.map((stat) => stat.id)).toEqual(['followers', 'chat'])
+    expect(more.map((stat) => stat.id)).toEqual(['supporters', 'chat'])
   })
 
   it('moves a stat, and puts another into the third main slot', () => {
@@ -54,23 +54,22 @@ describe('stats bar layout (plan 057, D2)', () => {
     expect(tipsFirstOfTheRest.order).toEqual([
       'session',
       'viewers',
-      'health',
-      'tips',
       'followers',
+      'tips',
       'supporters',
       'chat'
     ])
-    const followersInMain = moveStat(DEFAULT_STATS_LAYOUT, 'followers', 2)
-    expect(arrangeStats(ALL.map(item), followersInMain).main.map((stat) => stat.id)).toEqual([
+    const supportersInMain = moveStat(DEFAULT_STATS_LAYOUT, 'supporters', 2)
+    expect(arrangeStats(ALL.map(item), supportersInMain).main.map((stat) => stat.id)).toEqual([
       'session',
       'viewers',
-      'followers'
+      'supporters'
     ])
     // The viewers can lead: both locked stats are still in the main slots.
     expect(moveStat(DEFAULT_STATS_LAYOUT, 'viewers', 0).order.slice(0, 3)).toEqual([
       'viewers',
       'session',
-      'health'
+      'followers'
     ])
   })
 
@@ -79,7 +78,7 @@ describe('stats bar layout (plan 057, D2)', () => {
     const followersFirst = moveStat(DEFAULT_STATS_LAYOUT, 'followers', 0)
     expect(moveStat(followersFirst, 'tips', 0)).toBe(followersFirst)
     // Not a move at all: the same layout.
-    expect(moveStat(DEFAULT_STATS_LAYOUT, 'health', 2)).toBe(DEFAULT_STATS_LAYOUT)
+    expect(moveStat(DEFAULT_STATS_LAYOUT, 'followers', 2)).toBe(DEFAULT_STATS_LAYOUT)
   })
 
   it('hides and shows any stat but the clock and the viewer count', () => {
@@ -100,19 +99,15 @@ describe('stats bar layout (plan 057, D2)', () => {
     })
     // Unknown and repeated ids go, missing ones return in default order, and
     // a locked stat is never hidden.
-    expect(partial.order).toEqual([
-      'tips',
-      'session',
-      'viewers',
-      'health',
-      'followers',
-      'supporters',
-      'chat'
-    ])
+    expect(partial.order).toEqual(['tips', 'session', 'viewers', 'followers', 'supporters', 'chat'])
     expect(partial.hidden).toEqual(['chat'])
+    // A layout saved while the bar had a health stat loads without it.
+    expect(
+      normalizeStatsLayout({ order: ['session', 'viewers', 'health'], hidden: ['health'] })
+    ).toEqual(DEFAULT_STATS_LAYOUT)
     // A stored order that pushed the viewers out falls back to the default.
     expect(
-      normalizeStatsLayout({ order: ['health', 'tips', 'chat', 'viewers', 'session'] }).order
+      normalizeStatsLayout({ order: ['followers', 'tips', 'chat', 'viewers', 'session'] }).order
     ).toEqual(DEFAULT_STATS_LAYOUT.order)
   })
 
@@ -148,15 +143,7 @@ describe('stats bar layout (plan 057, D2)', () => {
       createElement(StatsBar, { items: ALL.map(item), layout, onLayoutChange: () => undefined })
     )
     const order = [...markup.matchAll(/data-stat="([a-z]+)"/g)].map((match) => match[1])
-    expect(order).toEqual([
-      'viewers',
-      'session',
-      'health',
-      'chat',
-      'followers',
-      'supporters',
-      'tips'
-    ])
+    expect(order).toEqual(['viewers', 'session', 'followers', 'chat', 'supporters', 'tips'])
     expect(markup).toContain('draggable="true"')
     // Without a change handler the order is fixed and nothing drags.
     const fixed = renderToStaticMarkup(createElement(StatsBar, { items: ALL.map(item) }))

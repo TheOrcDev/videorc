@@ -1,43 +1,37 @@
-import * as React from 'react'
-import { cva, type VariantProps } from 'class-variance-authority'
+'use client'
 
+import { Input as InputPrimitive } from '@base-ui/react/input'
+import type { ComponentProps } from 'react'
+
+import { useFieldControlId, useFieldDescribedBy } from '@/components/ui/field-context'
 import { cn } from '@/lib/utils'
 
-const inputVariants = cva(
-  'h-control w-full min-w-0 px-2.5 py-1 text-base transition-[color,box-shadow] duration-150 outline-none file:inline-flex file:h-6 file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm',
-  {
-    variants: {
-      variant: {
-        default:
-          'rounded-chip border border-transparent bg-input/50 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40',
-        // Borderless on-panel input (videorc-design): the glass panel is the
-        // input surface; no box, no focus ring — the caret and placeholder
-        // tier carry the affordance.
-        ghost:
-          'rounded-none border-0 bg-transparent focus-visible:ring-0 aria-invalid:text-destructive'
-      }
-    },
-    defaultVariants: {
-      variant: 'default'
-    }
-  }
-)
-
+// The desktop control height (28 px) and 14 px text at every width: never the
+// mobile 16 px, which only exists to stop iOS zooming into a focused field.
+// Inside a Field it registers its id, so the FieldLabel names it, and the
+// Field's descriptions describe it.
 function Input({
   className,
   type,
-  variant = 'default',
+  id,
+  'aria-describedby': ariaDescribedBy,
   ...props
-}: React.ComponentProps<'input'> & VariantProps<typeof inputVariants>) {
+}: ComponentProps<'input'>) {
+  const controlId = useFieldControlId(id)
+  const describedBy = useFieldDescribedBy(ariaDescribedBy)
   return (
-    <input
-      type={type}
+    <InputPrimitive
+      aria-describedby={describedBy}
+      className={cn(
+        'bg-input/50 file:text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/30 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 h-control rounded-chip w-full min-w-0 border border-transparent px-2.5 py-1 text-sm transition-[color,box-shadow] duration-150 outline-none file:inline-flex file:h-6 file:border-0 file:bg-transparent file:text-sm file:font-medium focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-50 aria-invalid:ring-3',
+        className
+      )}
       data-slot="input"
-      data-variant={variant}
-      className={cn(inputVariants({ variant }), className)}
+      id={controlId}
+      type={type}
       {...props}
     />
   )
 }
 
-export { Input, inputVariants }
+export { Input }

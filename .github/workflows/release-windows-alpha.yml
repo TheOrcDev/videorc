@@ -67,6 +67,167 @@ jobs:
           VIDEORC_RELEASE_CONTROL_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_RELEASE_CONTROL_READ_S3_SECRET_ACCESS_KEY }}
           VIDEORC_RELEASE_CONTROL_DATA_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_RELEASE_CONTROL_DATA_READ_S3_ACCESS_KEY_ID }}
           VIDEORC_RELEASE_CONTROL_DATA_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_RELEASE_CONTROL_DATA_READ_S3_SECRET_ACCESS_KEY }}
+  # Legacy path only. These two jobs used to sit in front of packaging on the
+  # unsigned Windows runner (~32-45 min, almost all of it a cold debug
+  # cargo test compile). They now run beside packaging. Signing still requires
+  # both, plus the hash-bound unsigned payload. A successful same-SHA CI job
+  # can replace the local commands; the helper verifies the exact commit.
+  source-js:
+    if: ${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED != 'true' }}
+    name: JS source gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out dispatch commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify current protected-main source
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "Windows candidate builds must be dispatched from the protected main branch."
+            exit 1
+          fi
+          actual="$(git rev-parse HEAD)"
+          if [ "${actual}" != "${EXPECTED_SOURCE_COMMIT}" ]; then
+            echo "Checked out ${actual}, expected ${EXPECTED_SOURCE_COMMIT}."
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          current_main="$(git rev-parse origin/main)"
+          if [ "${actual}" != "${current_main}" ]; then
+            echo "Main advanced to ${current_main}. Re-dispatch the candidate build from current main."
+            exit 1
+          fi
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+        with:
+          version: 11.0.9
+          run_install: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.6.0
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Reuse same-commit CI JS gates when they already passed
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: node scripts/reuse-release-ci-gates.mjs --spec windows-js
+      - name: Run JS source gates
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
+        run: |
+          set -euo pipefail
+          pnpm format:check
+          pnpm check:text-files
+          pnpm test:scripts
+          pnpm typecheck
+          pnpm lint
+          pnpm --filter @videorc/desktop test
+  source-rust:
+    if: ${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED != 'true' }}
+    name: Windows Rust source gates
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '1'
+    steps:
+      - name: Check out dispatch commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Verify current protected-main source
+        shell: pwsh
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'Windows candidate builds must be dispatched from the protected main branch.'
+          }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:EXPECTED_SOURCE_COMMIT) {
+            throw "Checked out $actual, expected $env:EXPECTED_SOURCE_COMMIT."
+          }
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to fetch the protected main branch.'
+          }
+          $currentMain = (git rev-parse origin/main).Trim()
+          if ($actual -ne $currentMain) {
+            throw "Main advanced to $currentMain. Re-dispatch the candidate build from current main."
+          }
+      - name: Set up Rust
+        shell: pwsh
+        run: >
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          --no-self-update
+
+          rustup default stable
+      - name: Cache Windows debug gate artifacts
+        uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97
+        with:
+          shared-key: release-windows-debug-gates-v1
+          cache-workspace-crates: true
+          cache-on-failure: false
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.6.0
+      - name: Reuse same-commit Windows CI source gates when they already passed
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: node scripts/reuse-release-ci-gates.mjs --spec windows-rust
+      - name: Run Windows Rust source gates
+        if: ${{ steps.reuse.outputs.reused != 'true' }}
+        shell: pwsh
+        run: >
+          $ErrorActionPreference = 'Stop'
+
+          function Invoke-NativeGate {
+            param(
+              [Parameter(Mandatory)] [string] $Label,
+              [Parameter(Mandatory)] [scriptblock] $Command
+            )
+            & $Command
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) {
+              throw "$Label failed with exit code $exitCode."
+            }
+          }
+
+
+          Invoke-NativeGate 'Rustfmt' { cargo fmt --check --all }
+
+          Invoke-NativeGate 'Rust tests' { cargo test -p videorc-backend }
+
+          # Same allow list as the windows.yml Clippy gate, and for the same
+
+          # reason: macOS-only helpers are dead code under cfg(windows), the
+
+          # known cross-check warning wall (docs/windows-port-plan.md). Without
+
+          # the allows this gate fails on 92 pre-existing dead-code findings and
+
+          # no Windows candidate can ever be cut. Burn the wall down, then drop
+
+          # the allows from BOTH gates together — they must not drift again.
+
+          Invoke-NativeGate 'Clippy' { cargo clippy -p videorc-backend -- -D warnings -A dead_code
+          -A unused_imports -A unused_variables -A unused_mut }
   gates:
     needs: resolve
     if: ${{ needs.resolve.result == 'success' }}
@@ -96,6 +257,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ needs.resolve.outputs.source_sha || github.sha }}
+      - name: Cache capture FFmpeg sources
+        # Same pin-keyed cache as windows.yml. SHA-256 is still verified
+        # before configure; this only removes the ffmpeg.org timeout flake.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            vendor/ffmpeg/_src
+            vendor/ffmpeg/_build/windows-download.zip
+          key: windows-ffmpeg-capture-src-${{ hashFiles('vendor/ffmpeg/windows-capture-pin.json', 'vendor/ffmpeg/windows-pin.json') }}
       - name: Verify current protected-main source
         if: ${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED != 'true' }}
         shell: pwsh
@@ -132,15 +302,14 @@ jobs:
       - name: Set up Rust
         shell: pwsh
         run: >
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          --no-self-update
+          rustup toolchain install stable --profile minimal --no-self-update
 
           rustup default stable
       - name: Cache trusted release dependencies
         uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97
         with:
           shared-key: release-windows-package-v1
-          cache-workspace-crates: false
+          cache-workspace-crates: true
           cache-on-failure: false
           env-vars: CARGO CC CFLAGS CXX CMAKE RUST
       - name: Install dependencies
@@ -154,55 +323,6 @@ jobs:
           key: >-
             release-windows-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{
             hashFiles('pnpm-lock.yaml', 'apps/desktop/package.json') }}
-      - name: Run source and unit gates
-        if: ${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED != 'true' }}
-        shell: pwsh
-        run: >
-          $ErrorActionPreference = 'Stop'
-
-          function Invoke-NativeGate {
-            param(
-              [Parameter(Mandatory)] [string] $Label,
-              [Parameter(Mandatory)] [scriptblock] $Command
-            )
-            & $Command
-            $exitCode = $LASTEXITCODE
-            if ($exitCode -ne 0) {
-              throw "$Label failed with exit code $exitCode."
-            }
-          }
-
-
-          Invoke-NativeGate 'Prettier' { pnpm format:check }
-
-          Invoke-NativeGate 'text integrity' { pnpm check:text-files }
-
-          Invoke-NativeGate 'script tests' { pnpm test:scripts }
-
-          Invoke-NativeGate 'TypeScript' { pnpm typecheck }
-
-          Invoke-NativeGate 'ESLint' { pnpm lint }
-
-          Invoke-NativeGate 'desktop tests' { pnpm --filter @videorc/desktop test }
-
-          Invoke-NativeGate 'Rustfmt' { cargo fmt --check --all }
-
-          Invoke-NativeGate 'Rust tests' { cargo test -p videorc-backend }
-
-          # Same allow list as the windows.yml Clippy gate, and for the same
-
-          # reason: macOS-only helpers are dead code under cfg(windows), the
-
-          # known cross-check warning wall (docs/windows-port-plan.md). Without
-
-          # the allows this gate fails on 92 pre-existing dead-code findings and
-
-          # no Windows candidate can ever be cut. Burn the wall down, then drop
-
-          # the allows from BOTH gates together — they must not drift again.
-
-          Invoke-NativeGate 'Clippy' { cargo clippy -p videorc-backend -- -D warnings -A dead_code
-          -A unused_imports -A unused_variables -A unused_mut }
       - name: Set up minimal Windows capture-worker toolchain
         id: capture-msys2
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
@@ -354,13 +474,18 @@ jobs:
     steps:
       - run: echo 'Source stability, advisory and exact packaged artifact gates passed.'
   sign:
-    # The legacy path skips `resolve`, and a skipped ancestor fails the implicit
-    # success() check, so name the status explicitly or signing never runs.
+    # The legacy path skips `resolve`. source-js / source-rust / unsigned must
+    # all succeed; a skipped ancestor would fail the implicit success() check,
+    # so name every required status explicitly or signing never runs.
     if: >-
-      ${{ !cancelled() && needs.unsigned.result == 'success' && vars.VIDEORC_RELEASE_CONTROLLER_ENABLED
+      ${{ !cancelled() && needs.unsigned.result == 'success' && needs.source-js.result ==
+      'success' && needs.source-rust.result == 'success' && vars.VIDEORC_RELEASE_CONTROLLER_ENABLED
       != 'true' }}
     name: OIDC-sign, validate, and store exact candidate
-    needs: unsigned
+    needs:
+      - source-js
+      - source-rust
+      - unsigned
     runs-on: windows-latest
     timeout-minutes: 120
     environment: windows-alpha-release

@@ -24,7 +24,11 @@ import {
   waitForRemoteEvent as waitForRemoteEventClient
 } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
-import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import {
+  CAPTURE_CONFIG_STORAGE_KEY,
+  RELOAD_KEEPING_SEED_JS
+} from './lib/renderer-profile-seed.mjs'
+import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
@@ -69,6 +73,46 @@ try {
   stopApp = launch.stop
   const renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
   const smoke = launch.connections['preview-motion-ready']
+
+  // A camera-free profile, as the record-latency smoke seeds: the ring checked
+  // in 4b runs the app's own scene, and the default layout shows a camera.
+  // On a host whose camera the dev app can read (Linux) that camera gives no
+  // frames here (no source preview), so the ring was refused three times and
+  // gave up before 4's sceneApply removed the camera; Camera off holds the
+  // ring on its blocked reason instead, and screen-only clears it.
+  await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
+  await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `
+        const key = ${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)};
+        let current = {};
+        try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+        // Camera None on purpose: no id (capture.ts drops cameraOff beside one).
+        const sources = { ...(current.sources ?? {}), cameraId: undefined, cameraName: undefined, cameraOff: true };
+        localStorage.setItem(key, JSON.stringify({ ...current, sources }));
+        window.__remoteSmokeBeforeReload = true;
+        ${RELOAD_KEEPING_SEED_JS}
+        return true;
+      `
+    },
+    { timeoutMs }
+  )
+  const reloadDeadline = Date.now() + timeoutMs
+  for (;;) {
+    const reloaded = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: 'return !window.__remoteSmokeBeforeReload && typeof window.__videorcSmokeSetReplayBuffer === "function"'
+      },
+      { timeoutMs: 5000 }
+    ).catch(() => null)
+    if (reloaded?.result === true) break
+    if (Date.now() > reloadDeadline) fail('the renderer did not reload its camera-free profile')
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
+  }
 
   // 1. Enable + discovery file contract.
   const status = await request(renderer, timeoutMs, 'remote.control.enable')
@@ -186,17 +230,56 @@ try {
   await sceneStatePromise
   console.log('remote-control smoke: sceneApply ack + confirmed state OK')
 
-  // 4b. clipMark (plan 068 D6) is on the allowlist and relays through the
-  // renderer: with no session running the renderer refuses it with a reason,
-  // so the round trip proves admission + relay + ack without touching disk.
+  // 4b. clipMark (plan 068 D6; plan 181 R4) is on the allowlist and relays
+  // through the renderer. The ring runs by default (R2), so with nothing
+  // recording the press is admitted and saves a clip (the file is proven by
+  // pnpm smoke:replay-buffer); with the switch off the renderer refuses it
+  // with the reason, so the round trip proves admission + relay + ack both
+  // ways.
+  const ringOn = await waitForBackendState(
+    renderer,
+    'replay.status',
+    (ring) => ring?.state === 'on',
+    'the default ring'
+  )
+  console.log(`remote-control smoke: ring on by default (${ringOn.seconds} s)`)
+  const clipOnAckPromise = waitForRemoteEvent(remote, 'remote.ack')
+  const clipOnTicket = await remoteRequest(remote, 'remote.intent', { kind: 'clipMark' })
+  if (!clipOnTicket.payload?.accepted) fail('clipMark intent was not accepted')
+  const clipOnAck = await clipOnAckPromise
+  if (clipOnAck?.intentId !== clipOnTicket.payload.intentId || clipOnAck?.ok !== true) {
+    fail(`clipMark with the ring on was not acknowledged: ${JSON.stringify(clipOnAck)}`)
+  }
+  console.log('remote-control smoke: clipMark relay with the ring on OK')
+  await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
+  const switched = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
+    { timeoutMs }
+  )
+  if (switched?.result !== true) fail('the renderer has no clip buffer smoke hook')
+  await waitForBackendState(
+    renderer,
+    'replay.status',
+    (ring) => ring?.state === 'off',
+    'the ring off after the switch'
+  )
+  // A buffer-only stop is quick enough to land inside the 150 ms debounce
+  // window of the clip intent above: let it pass, this is not the bounce test.
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, 400))
   const clipAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const clipTicket = await remoteRequest(remote, 'remote.intent', { kind: 'clipMark' })
-  if (!clipTicket.payload?.accepted) fail('clipMark intent was not accepted')
+  if (!clipTicket.payload?.accepted) {
+    fail(`clipMark intent was not accepted: ${JSON.stringify(clipTicket.payload)}`)
+  }
   const clipAck = await clipAckPromise
   if (clipAck?.intentId !== clipTicket.payload.intentId || clipAck?.ok !== false) {
-    fail(`clipMark without a session was not refused through the renderer: ${JSON.stringify(clipAck)}`)
+    fail(
+      `clipMark with the ring off and no session was not refused through the renderer: ${JSON.stringify(clipAck)}`
+    )
   }
-  if (clipAck?.message !== 'No active session.') {
+  if (clipAck?.message !== "Clips are off, and you're not recording or live.") {
     fail(`clipMark refusal carried the wrong reason: ${JSON.stringify(clipAck)}`)
   }
   console.log('remote-control smoke: clipMark relay + refusal reason OK')
@@ -236,11 +319,61 @@ try {
     console.log('remote-control smoke: systemAudioToggle ack + confirmed state OK')
   } else {
     const refused = await toggleSystemAudio(null)
-    if (refused?.ok !== false || refused?.message !== 'System audio is not available.') {
+    if (refused?.ok !== false || refused?.message !== "System audio isn't available.") {
       fail(`systemAudioToggle without the device was not refused: ${JSON.stringify(refused)}`)
     }
     console.log('remote-control smoke: systemAudioToggle refused without the device OK')
   }
+
+  // Plan 210 S6: a saved-scene key uses only the projected id and name.
+  const saved = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `return window.__videorcSmokeScenePresets.save('Figma');`
+    },
+    { timeoutMs }
+  )
+  if (saved?.result !== true) fail(`could not save the Figma fixture: ${JSON.stringify(saved)}`)
+  const catalog = await waitForBackendState(
+    renderer,
+    'remote.describe',
+    (surface) => surface?.state?.savedScenes?.some((scene) => scene.name === 'Figma'),
+    'saved scene projection'
+  )
+  const savedScene = catalog.state.savedScenes.find((scene) => scene.name === 'Figma')
+  if (Object.keys(savedScene).sort().join(',') !== 'id,name')
+    fail('saved scene projection leaked extra fields')
+  await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `window.__videorcSmokeScenePresets.layout({ layoutPreset: 'screen-only' }); return true;`
+    },
+    { timeoutMs }
+  )
+  await waitForBackendState(
+    renderer,
+    'remote.describe',
+    (surface) => surface?.state?.activeSavedSceneId === null,
+    'built-in layout confirmation'
+  )
+  const savedAckPromise = waitForRemoteEvent(remote, 'remote.ack')
+  const savedStatePromise = waitForRemoteEvent(
+    remote,
+    'remote.state',
+    (state) => state?.activeSavedSceneId === savedScene.id
+  )
+  const savedTicket = await remoteRequest(remote, 'remote.intent', {
+    kind: 'sceneApply',
+    sceneId: savedScene.id
+  })
+  if (!savedTicket.payload?.accepted) fail('saved scene intent not accepted')
+  const savedAck = await savedAckPromise
+  if (savedAck?.intentId !== savedTicket.payload.intentId || savedAck?.ok !== true)
+    fail(`saved scene intent refused: ${JSON.stringify(savedAck)}`)
+  await savedStatePromise
+  console.log('remote-control smoke: saved Figma scene ack + confirmed state OK')
 
   // 5. Regenerate cuts the paired client.
   const closed = new Promise((resolveClose) => remote.once('close', resolveClose))

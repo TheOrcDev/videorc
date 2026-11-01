@@ -2,7 +2,8 @@ import { CameraIcon, ExternalLinkIcon, PinIcon, WarningIcon } from '@/components
 import type { ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -14,14 +15,19 @@ import type {
   PreviewWindowState,
   SystemPermissionPane
 } from '@/lib/backend'
+import { systemAccessActionLabel } from '@/lib/system-access-view'
 import {
-  systemAccessAction,
-  systemAccessRows,
   type SystemAccessAction,
-  type SystemAccessRow
+  type SystemAccessRow,
+  mediaAccessStatusForPane,
+  systemAccessAction
 } from '@/lib/system-access'
-import { displayAccelerator } from '@/lib/platform'
+import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
+import { previewHoldLabel } from '@/lib/performance-check'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { cn } from '@/lib/utils'
+import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
+import { WINDOW_NAMES } from '../../../shared/window-names'
 
 type PreviewStageProps = {
   previewLiveStatus?: PreviewLiveStatus
@@ -35,6 +41,18 @@ type PreviewStageProps = {
 type PreviewPermissionAccess = {
   action: SystemAccessAction
   row: SystemAccessRow | undefined
+}
+
+/**
+ * The fix button for the preview's missing grant (plan 174 B-23): the
+ * Permissions list's one wording, "Allow access…" or "Open System
+ * Settings…", never "Resolve permission".
+ */
+function permissionActionLabel(
+  access: PreviewPermissionAccess | null,
+  platform: string | undefined
+): string {
+  return systemAccessActionLabel(access?.action ?? null, platform) ?? 'Open Permissions'
 }
 
 export function PreviewStage({
@@ -52,16 +70,12 @@ export function PreviewStage({
     setPreviewWindowAlwaysOnTop,
     setPreviewWindowMode,
     captureConfig,
-    deviceList,
     mediaAccess,
-    runtimeInfo
+    runtimeInfo,
+    performanceCheck,
+    performanceCheckProgress
   } = useStudioCore()
-  const accessRows = systemAccessRows({
-    deviceList,
-    audioMeter: null,
-    platform: runtimeInfo?.platform,
-    mediaAccess
-  })
+  const accessRows = useSystemAccessRows()
   const permissionPane = previewPermissionPane(previewWindow.supervisor)
   const permissionRow = accessRows.find((candidate) => candidate.id === permissionPane)
   const permissionAccess: PreviewPermissionAccess | null = permissionPane
@@ -69,12 +83,10 @@ export function PreviewStage({
         row: permissionRow,
         action: systemAccessAction({
           pane: permissionPane,
+          checking: permissionRow?.checking,
           state: permissionRow?.state,
           platform: runtimeInfo?.platform,
-          mediaAccessStatus:
-            permissionPane === 'camera' || permissionPane === 'microphone'
-              ? mediaAccess?.[permissionPane]
-              : undefined
+          mediaAccessStatus: mediaAccessStatusForPane(mediaAccess, permissionPane)
         })
       }
     : null
@@ -92,6 +104,7 @@ export function PreviewStage({
           width: captureConfig.video.width,
           height: captureConfig.video.height
         }}
+        checkingLabel={previewHoldLabel(performanceCheck, performanceCheckProgress)}
         className={className}
         previewSurfaceStatus={previewSurfaceStatus}
         previewWindow={previewWindow}
@@ -100,6 +113,7 @@ export function PreviewStage({
         onClose={() => void closePreviewWindow()}
         onOpenPermissions={onOpenPermissions}
         onPopOut={() => void setPreviewWindowMode('floating')}
+        platform={runtimeInfo?.platform}
       />
     )
   }
@@ -144,15 +158,14 @@ export function previewDisabledCopy(
 ): PreviewDisabledCopy {
   if (platform === 'linux') {
     return {
-      title: 'Linux CPU preview',
-      detail:
-        'Open the Preview window to see the Electron proof surface (CPU composition, not a native surface).',
+      title: 'Preview runs on the CPU',
+      detail: 'Open Preview to watch your scene. Linux draws it on the CPU, so it can lag.',
       retryable: true,
       tone: 'expected'
     }
   }
   return {
-    title: 'Native preview is disabled',
+    title: 'The fast preview is off',
     detail: disabledMessage,
     retryable: true,
     tone: 'warn'
@@ -196,16 +209,21 @@ function DockedPreviewFrame({
   onClose,
   permissionAccess,
   onOpenPermissions,
+  platform,
+  checkingLabel,
   className
 }: {
   previewWindow: PreviewWindowState
   previewSurfaceStatus?: PreviewSurfaceStatus
   aspect: { width: number; height: number }
   slotRef: (element: HTMLElement | null) => void
+  /** Plan 212: the Preview holds its last picture while a check runs; this says why. */
+  checkingLabel?: string | null
   onPopOut: () => void
   onClose: () => void
   permissionAccess: PreviewPermissionAccess | null
   onOpenPermissions?: (pane: SystemPermissionPane) => void
+  platform?: string
   className?: string
 }): ReactElement {
   const supervisor = previewWindow.supervisor
@@ -250,7 +268,9 @@ function DockedPreviewFrame({
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
             <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
             <span className="text-sm font-medium text-video-ground-foreground">{status.title}</span>
-            <span className="text-xs text-video-ground-muted">{status.detail}</span>
+            {status.detail ? (
+              <span className="text-xs text-video-ground-muted">{status.detail}</span>
+            ) : null}
           </div>
         </div>
       </div>
@@ -258,22 +278,26 @@ function DockedPreviewFrame({
           panel around it): session status left, dock controls right, flush
           with the video edges. */}
       <div className="flex items-center justify-end gap-1.5 pt-2">
+        {checkingLabel ? (
+          <span
+            className="mr-auto flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+            data-videorc-preview-checking
+            role="status"
+          >
+            <Spinner aria-hidden className="size-3.5 shrink-0" />
+            <span className="truncate">{checkingLabel}</span>
+          </span>
+        ) : null}
         {permissionPane && permissionAccess?.action && onOpenPermissions ? (
-          <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
-            Resolve permission
+          <Button variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
+            {permissionActionLabel(permissionAccess, platform)}
           </Button>
         ) : null}
-        <Button
-          data-videorc-preview-pop-out
-          size="sm"
-          title="Pop the preview out into its own window"
-          variant="secondary"
-          onClick={onPopOut}
-        >
+        <Button data-videorc-preview-pop-out variant="secondary" onClick={onPopOut}>
           <ExternalLinkIcon className="size-4" />
           Pop out
         </Button>
-        <Button size="sm" variant="secondary" onClick={onClose}>
+        <Button variant="secondary" onClick={onClose}>
           Close
         </Button>
       </div>
@@ -288,11 +312,11 @@ export function dockHiddenDisplay(
 ): { title: string; detail: string } | null {
   switch (reason) {
     case 'no-slot-report':
-      return { title: 'Placing preview', detail: 'Sticking the preview into this panel.' }
+      return { title: 'Placing preview…', detail: '' }
     case 'overlay-open':
       return {
-        title: 'Preview paused behind dialog',
-        detail: 'It returns as soon as the dialog closes.'
+        title: 'Preview hidden under this window',
+        detail: 'It returns as soon as it closes. Recording and streaming keep going.'
       }
     case 'scrolled-away':
       return {
@@ -353,22 +377,26 @@ function DetachedPreviewCard({
     previewSupervisor,
     previewSurfaceStatus,
     previewLiveStatus,
-    permissionAccess
+    permissionAccess,
+    platform
   )
-  const transportLabel = previewWindowOpen
-    ? (supervisorStatus.transportLabel ??
-      previewTransportLabel(
-        previewSurfaceStatus?.transport ?? 'unavailable',
-        previewSurfaceStatus?.backing,
-        previewSurfaceStatus?.nativePreviewHostKind,
-        platform
-      ))
-    : null
+  // The path is named only when it is a fallback (plan 174 B-23).
+  const transportLabel =
+    previewWindowOpen && supervisorStatus.title !== PREVIEW_FALLBACK_LABEL
+      ? (supervisorStatus.transportLabel ??
+        previewFallbackLabel(
+          previewSurfaceStatus?.transport,
+          previewSurfaceStatus?.backing,
+          previewSurfaceStatus?.nativePreviewHostKind,
+          platform
+        ))
+      : null
+  const detail = [supervisorStatus.detail, transportLabel].filter(Boolean).join(' · ')
   const disabledCopy = previewDisabledCopy(
     platform,
     previewLiveStatus?.message ??
       previewSurfaceStatus?.message ??
-      'Native preview surface is disabled.'
+      'Videorc is using a slower preview path.'
   )
   const permissionPane = previewPermissionPane(previewSupervisor)
   const showPermissionAction =
@@ -379,7 +407,7 @@ function DetachedPreviewCard({
       className={cn(
         // Output-aspect rect (same as the open/docked preview) so the layout
         // never jumps when the preview opens, docks, or closes.
-        'flex w-full flex-col items-center justify-center gap-3 rounded-panel bg-foreground/[0.03] px-6 text-center',
+        'flex w-full flex-col items-center justify-center gap-3 rounded-panel bg-inset px-6 text-center',
         className
       )}
       data-videorc-preview-card
@@ -401,29 +429,22 @@ function DetachedPreviewCard({
           <>
             <div className="flex flex-col gap-1">
               <span className="text-sm font-medium">{supervisorStatus.title}</span>
-              <span className="text-xs text-muted-foreground">
-                {supervisorStatus.detail}
-                {transportLabel ? ` - ${transportLabel}` : ''}
-              </span>
+              {detail ? <span className="text-xs text-muted-foreground">{detail}</span> : null}
             </div>
             <div className="flex flex-wrap justify-center gap-2">
-              <Button size="sm" variant="secondary" onClick={onOpen}>
-                Focus window
+              <Button variant="secondary" onClick={onOpen}>
+                {`Show ${WINDOW_NAMES.preview}`}
               </Button>
-              <Button data-videorc-preview-stick size="sm" variant="outline" onClick={onStick}>
+              <Button data-videorc-preview-stick variant="outline" onClick={onStick}>
                 <PinIcon className="size-4" />
                 Stick to app
               </Button>
-              <Button size="sm" variant="outline" onClick={onClose}>
-                Close preview
+              <Button variant="outline" onClick={onClose}>
+                {`Close ${WINDOW_NAMES.preview}`}
               </Button>
               {showPermissionAction && permissionPane && onOpenPermissions ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => onOpenPermissions(permissionPane)}
-                >
-                  Resolve permission
+                <Button variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
+                  {permissionActionLabel(permissionAccess, platform)}
                 </Button>
               ) : null}
             </div>
@@ -437,12 +458,12 @@ function DetachedPreviewCard({
             <div className="flex flex-col gap-1">
               <span className="text-sm font-medium">Preview lives in its own window</span>
               <span className="text-xs text-muted-foreground">
-                Open it to watch the program output, or stick it into this panel.
+                Open it to watch your scene as viewers see it.
               </span>
             </div>
-            <Button data-videorc-open-preview-window size="sm" onClick={onOpen}>
-              Open preview
-              <Kbd className="ml-1">{displayAccelerator('Cmd+P')}</Kbd>
+            <Button data-videorc-open-preview-window onClick={onOpen}>
+              {`Open ${WINDOW_NAMES.preview}`}
+              <ShortcutKeys accelerator={shortcutAccelerator('preview-window')} className="ml-1" />
             </Button>
           </>
         )
@@ -453,14 +474,25 @@ function DetachedPreviewCard({
             <span className="text-xs text-muted-foreground">{disabledCopy.detail}</span>
           </div>
           <div className="flex flex-wrap justify-center gap-2">
+            {/* The panel header no longer repeats the stage's actions (plan
+                174 S3.3, B-23), so the window opens from here too. */}
+            {!previewWindowOpen ? (
+              <Button variant="outline" onClick={onOpen}>
+                Open preview
+                <ShortcutKeys
+                  accelerator={shortcutAccelerator('preview-window')}
+                  className="ml-1"
+                />
+              </Button>
+            ) : null}
             {onRetry && disabledCopy.retryable ? (
-              <Button size="sm" variant="outline" onClick={onRetry}>
+              <Button variant="outline" onClick={onRetry}>
                 Retry preview
               </Button>
             ) : null}
             {permissionPane && permissionAccess?.action && onOpenPermissions ? (
-              <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
-                Resolve permission
+              <Button variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
+                {permissionActionLabel(permissionAccess, platform)}
               </Button>
             ) : null}
           </div>
@@ -482,12 +514,13 @@ export function previewSupervisorDisplay(
   supervisor: PreviewSupervisorState,
   previewSurfaceStatus?: PreviewSurfaceStatus,
   previewLiveStatus?: PreviewLiveStatus,
-  permissionAccess?: PreviewPermissionAccess | null
+  permissionAccess?: PreviewPermissionAccess | null,
+  platform?: string
 ): PreviewSupervisorDisplay {
   if (!previewWindowOpen) {
     return {
       title: 'Preview lives in its own window',
-      detail: 'Open it to watch the program output.',
+      detail: 'Open it to watch your scene as viewers see it.',
       tone: 'normal'
     }
   }
@@ -495,24 +528,21 @@ export function previewSupervisorDisplay(
   switch (supervisor.lifecycleState) {
     case 'surface-live':
       return {
-        title: 'Preview is live in its own window',
-        detail: 'Drag, resize, or close it anytime',
-        transportLabel: previewTransportLabel(
+        title: 'Preview is open in its own window',
+        detail: 'Drag, resize or close it anytime.',
+        transportLabel: previewFallbackLabel(
           supervisor.transport,
           supervisor.backing,
-          supervisor.nativePreviewHostKind
+          supervisor.nativePreviewHostKind,
+          platform
         ),
         tone: 'normal'
       }
     case 'surface-fallback':
+      // AGENTS.md: a fallback is never silent. The reason stays on the card.
       return {
-        title: 'Preview is using fallback rendering',
-        detail: supervisor.fallbackReason ?? 'Native surface is not available yet.',
-        transportLabel: previewTransportLabel(
-          supervisor.transport,
-          supervisor.backing,
-          supervisor.nativePreviewHostKind
-        ),
+        title: PREVIEW_FALLBACK_LABEL,
+        detail: supervisor.fallbackReason ?? 'The faster preview path isn’t available yet.',
         tone: 'warn'
       }
     case 'permission-required':
@@ -546,32 +576,19 @@ export function previewSupervisorDisplay(
           supervisor.lastError ??
           previewSurfaceStatus?.message ??
           previewLiveStatus?.message ??
-          'The preview surface could not start.',
+          'The preview couldn’t start.',
         tone: 'warn'
       }
     case 'opening-window':
-      return {
-        title: 'Opening preview window',
-        detail: 'Preparing the detached preview.',
-        tone: 'normal'
-      }
     case 'starting-surface':
-      return {
-        title: 'Starting preview surface',
-        detail: 'Connecting the preview window to the compositor.',
-        tone: 'normal'
-      }
+      return { title: 'Opening preview…', detail: '', tone: 'normal' }
     case 'closing':
-      return {
-        title: 'Closing preview',
-        detail: 'Tearing down the detached preview surface.',
-        tone: 'normal'
-      }
+      return { title: 'Closing preview…', detail: '', tone: 'normal' }
     case 'open-no-surface':
     case 'closed':
       return {
         title: 'Preview is open in its own window',
-        detail: 'Waiting for the preview surface.',
+        detail: 'Waiting for the first frame…',
         tone: 'normal'
       }
   }
@@ -610,28 +627,43 @@ export function previewPermissionPane(
   }
 }
 
-function previewTransportLabel(
-  transport: PreviewLiveStatus['transport'] | PreviewSupervisorState['transport'],
+/** What the preview card says when the preview runs on a slower path (plan 174 B-23). */
+export const PREVIEW_FALLBACK_LABEL = 'Using a slower preview path'
+
+/**
+ * The preview path, named only when it is a fallback for this platform:
+ * "Using a slower preview path", or null. The transport's engineering names
+ * ("Surface proof", "Electron proof") stay in Health. Linux has no native
+ * surface, so its CPU path is the preview; Windows ships the proof surface as
+ * its production presenter (AGENTS.md), so it is not a fallback there, and
+ * nothing ever calls it native.
+ */
+export function previewFallbackLabel(
+  transport: PreviewLiveStatus['transport'] | PreviewSupervisorState['transport'] | undefined,
   backing?: PreviewSurfaceStatus['backing'] | PreviewSupervisorState['backing'],
   hostKind?:
     | PreviewSurfaceStatus['nativePreviewHostKind']
     | PreviewSupervisorState['nativePreviewHostKind'],
   platform?: string
 ): string | null {
-  switch (transport) {
-    case 'native-surface':
-      return backing === 'cametal-layer' ? 'Native preview' : 'Surface proof'
-    case 'd3d11-shared-texture':
-      return backing === 'directcomposition-swapchain' && hostKind === 'backend-d3d11-presenter'
-        ? 'Native preview'
-        : 'Surface proof'
-    case 'electron-proof-surface':
-      return platform === 'linux' ? 'Linux CPU preview' : 'Electron proof'
-    case 'latest-jpeg-polling':
-      return 'JPEG fallback'
-    case 'mjpeg-stream':
-      return 'MJPEG debug'
-    default:
-      return null
+  const os = platform ?? 'darwin'
+  if (os !== 'darwin' && os !== 'win32') return null
+  if (
+    !transport ||
+    transport === 'unavailable' ||
+    transport === 'none' ||
+    transport === 'unknown'
+  ) {
+    return null
   }
+  if (os === 'win32' && transport === 'electron-proof-surface') return null
+  const native = isNativePreviewCapability(
+    {
+      transport,
+      backing: backing === 'unknown' || backing === undefined ? 'none' : backing,
+      nativePreviewHostKind: hostKind
+    },
+    os
+  )
+  return native ? null : PREVIEW_FALLBACK_LABEL
 }

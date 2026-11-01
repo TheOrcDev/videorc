@@ -31,9 +31,10 @@ pub const SYSTEM_AUDIO_PLAYOUT_DELAY: Duration = Duration::from_millis(150);
 /// The enable/disable envelope for a mixed source and the microphone handoff
 /// ramp: 5 ms at 48 kHz.
 const RAMP_FRAMES: u16 = 240;
-/// Peak limiter on the mixed sum (plan 069 decision 7): -1 dBFS ceiling,
-/// instant attack, about 50 ms release. It runs only while a system source is
-/// attached, or while it is still releasing after one detached.
+/// Peak limiter on the session's output (plan 069 decision 7): -1 dBFS
+/// ceiling, instant attack, about 50 ms release. Since plan 200 A2 it runs on
+/// every chunk, the microphone-only path included, so a hot microphone is
+/// limited instead of hard-clamped at full scale.
 const LIMITER_CEILING: f32 = 0.891_250_9;
 const LIMITER_RELEASE_FRAMES: f64 = 0.050 * 48_000.0;
 
@@ -329,15 +330,16 @@ impl AudioTimeline {
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::audio::{
-    AudioCaptureStats, AudioProcessingSettings, AudioProcessingSettingsHandle,
-    NativeAudioInputState, NativeAudioSource, process_interleaved_f32,
+    AudioCaptureStats, AudioProcessingSettings, AudioProcessingSettingsHandle, FoldPlan,
+    NativeAudioInputState, NativeAudioSource, VoiceFold, fold_interleaved_f32,
 };
+use crate::sound_mix::{SoundVoices, VoiceStart};
 
 const WRITE_DEADLINE: Duration = Duration::from_secs(5);
 const EPOCH_DEADLINE: Duration = Duration::from_secs(30);
@@ -591,6 +593,9 @@ pub struct ProducerSource {
     stats: Arc<AudioCaptureStats>,
     _owner: Box<dyn Send>,
     failure: Option<Arc<std::sync::Mutex<Option<String>>>>,
+    /// The capture worker's last stderr lines (plan 195 S1); only a worker
+    /// source has them.
+    stderr_tail: Option<crate::audio_capture_adapter::StderrTail>,
     #[cfg(debug_assertions)]
     caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
 }
@@ -608,6 +613,7 @@ impl ProducerSource {
             caption_injector: source.caption_contract_test_injector.clone(),
             _owner: Box::new(source),
             failure: None,
+            stderr_tail: None,
         }
     }
     fn worker(device_id: String, source: crate::audio_capture_adapter::CapturedInput) -> Self {
@@ -618,9 +624,16 @@ impl ProducerSource {
             stats: source.stats,
             _owner: source.owner,
             failure: Some(source.failure),
+            stderr_tail: Some(source.stderr_tail),
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
+    }
+    /// The worker's redacted stderr tail, when it printed anything.
+    fn worker_stderr_tail(&self) -> Option<String> {
+        self.stderr_tail
+            .as_ref()
+            .and_then(|tail| tail.lock().unwrap_or_else(|p| p.into_inner()).render())
     }
     /// Plan 069 S2: adapt a system-audio capture (S3's
     /// `system_audio_capture.rs` handle on macOS, S8's WASAPI loopback on
@@ -642,6 +655,7 @@ impl ProducerSource {
             stats,
             _owner: owner,
             failure: Some(failure),
+            stderr_tail: None,
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
@@ -765,6 +779,306 @@ impl std::fmt::Display for PreparationCleanupPending {
 }
 impl std::error::Error for PreparationCleanupPending {}
 
+/// How long a microphone may take, after its open returned, to deliver the
+/// first frame the bus can accept. CoreAudio and Pulse deliver well inside
+/// this; see [`microphone_readiness_budget`] for DirectShow (plan 195).
+const MICROPHONE_READINESS_BUDGET: Duration = Duration::from_secs(2);
+
+/// Plan 195 S2: a laptop DSP microphone over DirectShow (the tester's Cirrus
+/// Logic on an Iris Xe) took longer than 2 s to deliver its first buffer, and
+/// the same device needed 4.8–7.2 s to start inside FFmpeg's graph. The
+/// fallback that followed cost the user live microphone switching and system
+/// audio on every take. A slow microphone keeps the capture worker; only one
+/// that never delivers falls back. `recording.rs` adds this to FFmpeg's
+/// output-startup deadline when the fallback does keep a direct device input.
+pub(crate) const DSHOW_MICROPHONE_READINESS_BUDGET: Duration = Duration::from_secs(10);
+
+/// The readiness budget a microphone gets by its protocol: DirectShow the
+/// laptop budget, everything else the standard 2 s.
+pub(crate) fn microphone_readiness_budget(device_id: &str) -> Duration {
+    if crate::audio::parse_windows_dshow_microphone_id(device_id).is_some() {
+        DSHOW_MICROPHONE_READINESS_BUDGET
+    } else {
+        MICROPHONE_READINESS_BUDGET
+    }
+}
+
+/// Plan 195 Part W: test-only controls for Windows testers (W3 cases B and
+/// C). Honored only with `VIDEORC_ENABLE_SMOKE_RPC=1`, in packaged builds
+/// too, because testers run CI installers. Read once per open, never in a
+/// hot loop.
+pub(crate) const TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV: &str =
+    "VIDEORC_TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_MS";
+pub(crate) const TEST_CAPTURE_WORKER_FAIL_ENV: &str = "VIDEORC_TEST_CAPTURE_WORKER_FAIL";
+const INJECTED_WORKER_READINESS_FAILURE: &str =
+    "Injected capture-worker readiness failure (VIDEORC_TEST_CAPTURE_WORKER_FAIL=1)";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CaptureWorkerTestFaults {
+    /// Discard the worker's frames for this long after the open, so
+    /// readiness sees its first fresh frame then (the slow laptop microphone).
+    first_pcm_delay: Option<Duration>,
+    /// Fail readiness at once, which drives the direct DirectShow fallback.
+    fail: bool,
+}
+
+/// The faults the environment asks for. Without the smoke-RPC gate both
+/// variables are inert; with it, a malformed delay is an error the tester
+/// sees, not a silently ignored setting.
+fn capture_worker_test_faults(
+    smoke_rpc: Option<&str>,
+    first_pcm_delay_ms: Option<&str>,
+    fail: Option<&str>,
+) -> Result<CaptureWorkerTestFaults, String> {
+    if smoke_rpc != Some("1") {
+        return Ok(CaptureWorkerTestFaults::default());
+    }
+    let first_pcm_delay = match first_pcm_delay_ms.map(str::trim) {
+        None | Some("") => None,
+        Some(text) => Some(Duration::from_millis(text.parse::<u64>().map_err(
+            |_| {
+                format!(
+                    "{TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV} must be a whole number of milliseconds, got {text:?}"
+                )
+            },
+        )?)),
+    };
+    Ok(CaptureWorkerTestFaults {
+        first_pcm_delay,
+        fail: fail.map(str::trim) == Some("1"),
+    })
+}
+
+fn capture_worker_test_faults_from_env() -> Result<CaptureWorkerTestFaults, String> {
+    let smoke_rpc = std::env::var("VIDEORC_ENABLE_SMOKE_RPC").ok();
+    let first_pcm_delay_ms = std::env::var(TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV).ok();
+    let fail = std::env::var(TEST_CAPTURE_WORKER_FAIL_ENV).ok();
+    if smoke_rpc.as_deref() != Some("1") && (first_pcm_delay_ms.is_some() || fail.is_some()) {
+        tracing::warn!(
+            "{TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV} / {TEST_CAPTURE_WORKER_FAIL_ENV} are set without VIDEORC_ENABLE_SMOKE_RPC=1 and ignored"
+        );
+    }
+    capture_worker_test_faults(
+        smoke_rpc.as_deref(),
+        first_pcm_delay_ms.as_deref(),
+        fail.as_deref(),
+    )
+}
+
+/// How a microphone proves itself after opening. `None` at the call site
+/// means no readiness wait at all (the warm standby, a system source).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadinessPolicy {
+    /// The owner thread's deadline for the first fresh frame. The caller's
+    /// outer wait gets this plus a margin, so the owner's reason (with its
+    /// evidence) wins over a bare timeout.
+    budget: Duration,
+    /// Test-only: frames before `open + this` are discarded (counted as
+    /// withheld), so readiness sees its first fresh frame then.
+    withhold_first_pcm: Option<Duration>,
+    /// Test-only: fail readiness at once with this reason.
+    fail_with: Option<&'static str>,
+}
+
+impl ReadinessPolicy {
+    const fn standard() -> Self {
+        Self {
+            budget: MICROPHONE_READINESS_BUDGET,
+            withhold_first_pcm: None,
+            fail_with: None,
+        }
+    }
+
+    fn for_worker(device_id: &str, faults: CaptureWorkerTestFaults) -> Self {
+        Self {
+            budget: microphone_readiness_budget(device_id),
+            withhold_first_pcm: faults.first_pcm_delay,
+            fail_with: faults.fail.then_some(INJECTED_WORKER_READINESS_FAILURE),
+        }
+    }
+}
+
+/// Margin the caller's outer readiness wait adds past the owner thread's
+/// deadline: the owner must have had its chance to report what it saw.
+const READINESS_OUTER_MARGIN: Duration = Duration::from_millis(500);
+
+/// `10s`, `2s`, `2.5s`: the budget as the readiness sentences print it.
+fn readiness_budget_label(budget: Duration) -> String {
+    let seconds = budget.as_secs_f64();
+    if seconds.fract() == 0.0 {
+        format!("{}s", seconds as u64)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// How the readiness wait judged one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessVerdict {
+    Fresh,
+    Stale,
+    FutureDated,
+    Malformed,
+    /// Discarded by the test-only first-PCM delay.
+    Withheld,
+}
+
+/// What the readiness wait saw (plan 195 S1), so the failure reason in a
+/// support bundle separates a microphone that never delivered from one whose
+/// frames the bus could not accept: too old, stamped in the future, or the
+/// wrong shape.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ReadinessEvidence {
+    received: u64,
+    stale: u64,
+    future_dated: u64,
+    malformed: u64,
+    withheld: u64,
+    /// When the first frame of any kind arrived, after the open returned.
+    first_arrival: Option<Duration>,
+    /// Age of the youngest stale frame when it was judged.
+    newest_stale_age: Option<Duration>,
+    /// How far ahead of the clock the furthest future-dated frame was.
+    furthest_ahead: Option<Duration>,
+    largest_frame: Option<Duration>,
+}
+
+impl ReadinessEvidence {
+    fn judge(
+        &mut self,
+        frame: &AudioFrame,
+        now: Instant,
+        since: Instant,
+        withheld: bool,
+    ) -> ReadinessVerdict {
+        self.received += 1;
+        self.first_arrival
+            .get_or_insert_with(|| now.saturating_duration_since(since));
+        let duration = frame_duration(frame);
+        self.largest_frame = Some(
+            self.largest_frame
+                .map_or(duration, |largest| largest.max(duration)),
+        );
+        if withheld {
+            self.withheld += 1;
+            return ReadinessVerdict::Withheld;
+        }
+        if !valid_frame_shape(frame) {
+            self.malformed += 1;
+            return ReadinessVerdict::Malformed;
+        }
+        if frame.captured_at > now {
+            self.future_dated += 1;
+            let ahead = frame.captured_at.duration_since(now);
+            self.furthest_ahead = Some(
+                self.furthest_ahead
+                    .map_or(ahead, |furthest| furthest.max(ahead)),
+            );
+            return ReadinessVerdict::FutureDated;
+        }
+        let age = now.duration_since(frame.captured_at);
+        if age > MAX_FRAME_AGE {
+            self.stale += 1;
+            self.newest_stale_age =
+                Some(self.newest_stale_age.map_or(age, |newest| newest.min(age)));
+            return ReadinessVerdict::Stale;
+        }
+        ReadinessVerdict::Fresh
+    }
+
+    /// `0 frames received`, or `9 frames received, all stale (newest 480 ms
+    /// old), largest packet 500 ms, first after 1210 ms`.
+    fn summary(&self) -> String {
+        if self.received == 0 {
+            return "0 frames received".to_string();
+        }
+        let ms = |duration: Duration| duration.as_millis();
+        let count = |n: u64| {
+            if n == self.received {
+                "all".to_string()
+            } else {
+                n.to_string()
+            }
+        };
+        let mut parts = vec![format!("{} frames received", self.received)];
+        if self.stale > 0 {
+            parts.push(format!(
+                "{} stale (newest {} ms old)",
+                count(self.stale),
+                self.newest_stale_age.map_or(0, ms)
+            ));
+        }
+        if self.future_dated > 0 {
+            parts.push(format!(
+                "{} future-dated (up to {} ms ahead)",
+                count(self.future_dated),
+                self.furthest_ahead.map_or(0, ms)
+            ));
+        }
+        if self.malformed > 0 {
+            parts.push(format!("{} malformed", count(self.malformed)));
+        }
+        if self.withheld > 0 {
+            parts.push(format!(
+                "{} withheld by {TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_ENV}",
+                count(self.withheld)
+            ));
+        }
+        if let Some(largest) = self.largest_frame {
+            parts.push(format!("largest packet {} ms", ms(largest)));
+        }
+        if let Some(first) = self.first_arrival {
+            parts.push(format!("first after {} ms", ms(first)));
+        }
+        parts.join(", ")
+    }
+}
+
+fn frame_duration(frame: &AudioFrame) -> Duration {
+    let frames = frame.samples.len() / usize::from(frame.channels.max(1));
+    Duration::from_secs_f64(frames as f64 / f64::from(frame.sample_rate.max(1)))
+}
+
+/// Counts the readiness wait never reached the bus: the capture worker
+/// accepts and drops packets before they leave the adapter (plan 195 S1).
+fn worker_stats_summary(stats: &AudioCaptureStats) -> Option<String> {
+    let (captured, dropped) = (stats.captured_frames(), stats.dropped_frames());
+    (captured > 0 || dropped > 0)
+        .then(|| format!("capture worker passed {captured} and dropped {dropped} PCM frames"))
+}
+
+/// The readiness failure a support bundle can answer from: the first sentence
+/// with the budget, then what arrived, the worker's own counts, and its last
+/// stderr lines when it has any.
+fn readiness_failure_reason(
+    source: &ProducerSource,
+    budget: Duration,
+    evidence: &ReadinessEvidence,
+    stopped: bool,
+) -> String {
+    let first = if stopped {
+        "The microphone stopped before readiness".to_string()
+    } else {
+        format!(
+            "The microphone did not deliver fresh PCM within {}",
+            readiness_budget_label(budget)
+        )
+    };
+    let mut detail = vec![evidence.summary()];
+    detail.extend(worker_stats_summary(&source.stats));
+    let fallback = format!("{first}: {}.", detail.join("; "));
+    let mut reason = source.failure_reason(&fallback);
+    if reason != fallback {
+        // The platform's own failure (the worker died, the stream stopped)
+        // leads; the readiness counts still follow it.
+        reason = format!("{reason} ({})", detail.join("; "));
+    }
+    if let Some(tail) = source.worker_stderr_tail() {
+        reason = format!("{reason} Worker stderr: {tail}");
+    }
+    reason
+}
+
 async fn prepare_producer_with(
     open: impl FnOnce() -> anyhow::Result<ProducerSource> + Send + 'static,
     operation_cancelled: Arc<AtomicBool>,
@@ -780,7 +1094,7 @@ async fn prepare_producer_with(
         count,
         spawn,
         phase,
-        require_readiness,
+        require_readiness.then_some(ReadinessPolicy::standard()),
     )
     .await
 }
@@ -792,7 +1106,7 @@ async fn prepare_producer_in(
     count: Arc<AtomicU64>,
     spawn: impl FnOnce(OwnerTask) -> io::Result<thread::JoinHandle<()>>,
     phase: impl Fn(OwnerPhase) + Send + 'static,
-    require_readiness: bool,
+    readiness: Option<ReadinessPolicy>,
 ) -> anyhow::Result<ManagedProducer> {
     let permit = ProducerPermit::acquire_role(role, count)?;
     let mut cancellation = OpenCancellation(Some(Arc::new(AtomicBool::new(false))));
@@ -801,6 +1115,9 @@ async fn prepare_producer_in(
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (completion_guard, completion) = completion_channel();
     let mut closed = completion.state.clone();
+    // Shared with the outer wait, so a timeout there still reports the counts.
+    let evidence: Arc<std::sync::Mutex<ReadinessEvidence>> = Arc::default();
+    let owner_evidence = evidence.clone();
     spawn(Box::new(move || {
         let _completion = completion_guard;
         let _permit = permit;
@@ -821,28 +1138,51 @@ async fn prepare_producer_in(
         if cancelled() || opened_tx.send(Ok(())).is_err() {
             return;
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if !require_readiness {
-                break;
-            }
-            if cancelled() {
+        if let Some(policy) = readiness {
+            let opened_at = Instant::now();
+            let deadline = opened_at + policy.budget;
+            let withhold_until = policy.withhold_first_pcm.map(|delay| opened_at + delay);
+            if let Some(reason) = policy.fail_with {
+                let _ = ready_tx.send(Err(anyhow::anyhow!(reason)));
                 return;
             }
-            if Instant::now() >= deadline {
-                let _ = ready_tx.send(Err(anyhow::anyhow!(
-                    source.failure_reason("The microphone did not deliver fresh PCM within 2s.")
-                )));
-                return;
-            }
-            match source.receiver.recv_timeout(Duration::from_millis(20)) {
-                Ok(frame) if valid_fresh_frame(&frame, Instant::now()) => break,
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = ready_tx.send(Err(anyhow::anyhow!(
-                        source.failure_reason("The microphone stopped before readiness.")
-                    )));
+            loop {
+                if cancelled() {
                     return;
+                }
+                if Instant::now() >= deadline {
+                    let evidence = owner_evidence.lock().unwrap_or_else(|p| p.into_inner());
+                    let _ = ready_tx.send(Err(anyhow::anyhow!(readiness_failure_reason(
+                        &source,
+                        policy.budget,
+                        &evidence,
+                        false
+                    ))));
+                    return;
+                }
+                match source.receiver.recv_timeout(Duration::from_millis(20)) {
+                    Ok(frame) => {
+                        let now = Instant::now();
+                        let withheld = withhold_until.is_some_and(|until| now < until);
+                        let verdict = owner_evidence
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .judge(&frame, now, opened_at, withheld);
+                        if verdict == ReadinessVerdict::Fresh {
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let evidence = owner_evidence.lock().unwrap_or_else(|p| p.into_inner());
+                        let _ = ready_tx.send(Err(anyhow::anyhow!(readiness_failure_reason(
+                            &source,
+                            policy.budget,
+                            &evidence,
+                            true
+                        ))));
+                        return;
+                    }
                 }
             }
         }
@@ -865,9 +1205,17 @@ async fn prepare_producer_in(
                     role.open_budget().as_secs()
                 )
             })???;
-        let producer = tokio::time::timeout(Duration::from_secs(2), ready_rx)
+        let budget = readiness.map_or(MICROPHONE_READINESS_BUDGET, |policy| policy.budget);
+        let producer = tokio::time::timeout(budget + READINESS_OUTER_MARGIN, ready_rx)
             .await
-            .map_err(|_| anyhow::anyhow!("Microphone readiness exceeded 2s."))???;
+            .map_err(|_| {
+                let evidence = evidence.lock().unwrap_or_else(|p| p.into_inner());
+                anyhow::anyhow!(
+                    "Microphone readiness exceeded {}: {}.",
+                    readiness_budget_label(budget),
+                    evidence.summary()
+                )
+            })???;
         Ok(producer)
     }
     .await;
@@ -1076,6 +1424,7 @@ impl LevelWindow {
 struct BusLevelWindows {
     microphone: LevelWindow,
     system: LevelWindow,
+    sounds: LevelWindow,
     master: LevelWindow,
     master_clipped_samples: u64,
 }
@@ -1087,6 +1436,9 @@ pub struct BusLevels {
     pub microphone: Option<crate::protocol::AudioLevelReading>,
     /// The gained system-audio contribution, while it is mixed.
     pub system_audio: Option<crate::protocol::AudioLevelReading>,
+    /// Plan 189: the soundboard's contribution (after every gain), while a
+    /// sound plays.
+    pub sounds: Option<crate::protocol::AudioLevelReading>,
     /// The chunk as written: what the recording and the stream get.
     pub master: Option<crate::protocol::AudioLevelReading>,
     pub master_clipped_samples: u64,
@@ -1094,7 +1446,10 @@ pub struct BusLevels {
 
 impl BusLevels {
     pub fn is_empty(&self) -> bool {
-        self.microphone.is_none() && self.system_audio.is_none() && self.master.is_none()
+        self.microphone.is_none()
+            && self.system_audio.is_none()
+            && self.sounds.is_none()
+            && self.master.is_none()
     }
 }
 
@@ -1113,6 +1468,9 @@ struct AudioShared {
     system_stats: Arc<AudioCaptureStats>,
     mix_clipped_samples: u64,
     levels: BusLevelWindows,
+    /// Plan 157: per-source PCM taps (microphone → Camera file, system →
+    /// Screen file). `None` on every session without separate recordings.
+    source_taps: Option<Arc<crate::source_audio_tap::SourceAudioTaps>>,
     #[cfg(test)]
     caption_observer: Option<CaptionObserver>,
     #[cfg(test)]
@@ -1121,6 +1479,8 @@ struct AudioShared {
     cancellation_input: Option<(u64, fn(&mut AudioTimeline))>,
     #[cfg(test)]
     mix_observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
+    #[cfg(test)]
+    mix_fixture_gate: Option<Arc<MixFixtureGate>>,
     #[cfg(debug_assertions)]
     caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
 }
@@ -1295,7 +1655,10 @@ async fn prepare_adapter(
     cancelled: Arc<AtomicBool>,
     count: Arc<AtomicU64>,
 ) -> anyhow::Result<ManagedProducer> {
-    prepare_producer_with(
+    let faults = capture_worker_test_faults_from_env().map_err(anyhow::Error::msg)?;
+    let policy = ReadinessPolicy::for_worker(&device_id, faults);
+    prepare_producer_in(
+        SourceRole::Microphone,
         move || {
             crate::audio_capture_adapter::open(&ffmpeg_path, &device_id)
                 .map(|source| ProducerSource::worker(device_id, source))
@@ -1304,7 +1667,7 @@ async fn prepare_adapter(
         count,
         spawn_owner,
         |_| {},
-        true,
+        Some(policy),
     )
     .await
 }
@@ -1352,6 +1715,7 @@ pub struct SessionAudio {
     pub fifo_path: PathBuf,
     handle: AudioSwitchHandle,
     system: SystemAudioHandle,
+    soundboard: SoundboardHandle,
     processing_settings: AudioProcessingSettingsHandle,
     writer: Option<thread::JoinHandle<()>>,
     finished: mpsc::Receiver<()>,
@@ -1429,6 +1793,11 @@ impl SessionAudio {
     pub fn system_audio(&self) -> SystemAudioHandle {
         self.system.clone()
     }
+    /// Plan 189: the session's soundboard voices (start, stop, the board
+    /// level).
+    pub fn soundboard(&self) -> SoundboardHandle {
+        self.soundboard.clone()
+    }
     #[cfg(test)]
     pub async fn attach_system(&self, producer: SystemAudioProducer) -> anyhow::Result<u64> {
         self.system.attach(producer).await
@@ -1487,9 +1856,24 @@ impl SessionAudio {
         self.handle.request_silent_drain()
     }
 
+    /// Plan 157: arms the per-source PCM taps. Call before the bus writes its
+    /// first chunk (it waits for the video epoch, so right after attach is
+    /// early enough). Replaces any previous taps.
+    pub fn set_source_taps(&self, taps: Arc<crate::source_audio_tap::SourceAudioTaps>) {
+        self.handle
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .source_taps = Some(taps);
+    }
+
     pub fn request_stop(&self) {
+        self.request_stop_at(Instant::now());
+    }
+
+    pub(crate) fn request_stop_at(&self, boundary: Instant) {
         // The instant first, so a bus that sees the flag drains to it.
-        let _ = self.handle.stop_requested_at.set(Instant::now());
+        let _ = self.handle.stop_requested_at.set(boundary);
         self.handle.stop.store(true, Ordering::Release);
         let stats = self.stats();
         stats.mark_stopped();
@@ -1529,6 +1913,7 @@ impl AudioSwitchHandle {
         let reading = BusLevels {
             microphone: levels.microphone.take(),
             system_audio: levels.system.take(),
+            sounds: levels.sounds.take(),
             master: levels.master.take(),
             master_clipped_samples: std::mem::take(&mut levels.master_clipped_samples),
         };
@@ -1862,6 +2247,7 @@ pub fn attach_prepared_with(
         system_stats: Arc::new(AudioCaptureStats::default()),
         mix_clipped_samples: 0,
         levels: BusLevelWindows::default(),
+        source_taps: None,
         #[cfg(test)]
         caption_observer: None,
         #[cfg(test)]
@@ -1870,6 +2256,8 @@ pub fn attach_prepared_with(
         cancellation_input: None,
         #[cfg(test)]
         mix_observation: None,
+        #[cfg(test)]
+        mix_fixture_gate: None,
         #[cfg(debug_assertions)]
         caption_injector: source.as_ref().and_then(|source| source.caption_injector()),
     }));
@@ -1906,6 +2294,16 @@ pub fn attach_prepared_with(
         stop: stop.clone(),
         draining: draining.clone(),
         echo_guard: echo_guard.clone(),
+    };
+    // Plan 189: presses are small and frequent; the bus visits the channel
+    // every chunk, so a few dozen queued is a stalled bus, not a fast drummer.
+    let (sound_commands, sound_command_rx) = mpsc::sync_channel(64);
+    let sound_volume_db = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+    let soundboard = SoundboardHandle {
+        commands: sound_commands,
+        volume_db: sound_volume_db.clone(),
+        stop: stop.clone(),
+        draining: draining.clone(),
     };
     let timing = BusTiming {
         playout_delay: options.playout_delay,
@@ -1946,6 +2344,8 @@ pub fn attach_prepared_with(
                         timing,
                         shared: &shared,
                         echo_guard: &echo_guard,
+                        sound_commands: &sound_command_rx,
+                        sound_volume_db: &sound_volume_db,
                     },
                 )
             });
@@ -1979,6 +2379,7 @@ pub fn attach_prepared_with(
         fifo_path,
         handle,
         system,
+        soundboard,
         processing_settings,
         writer: Some(writer),
         finished,
@@ -2730,6 +3131,110 @@ impl MixWindowTrace {
     }
 }
 
+/// Opt-in routing-fixture coordination. Real producers and real-time loss
+/// tests retain their autonomous clock. This fixture waits for post-send
+/// source readiness and bounds producer lookahead before rendering a chunk.
+#[cfg(test)]
+#[derive(Default)]
+struct MixFixtureGate {
+    state: std::sync::Mutex<MixFixtureGateState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MixFixtureGateState {
+    armed: bool,
+    rendered: u64,
+    delivered: [u64; 2],
+    failure: Option<String>,
+}
+
+#[cfg(test)]
+impl MixFixtureGate {
+    fn arm(&self) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).armed = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_for(
+        &self,
+        stop: &AtomicBool,
+        draining: Option<&AtomicBool>,
+        ready: impl Fn(&MixFixtureGateState) -> bool,
+    ) -> io::Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if stop.load(Ordering::Acquire)
+                || draining.is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                return Ok(false);
+            }
+            if let Some(error) = &state.failure {
+                return Err(io::Error::other(error.clone()));
+            }
+            if ready(&state) {
+                return Ok(true);
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                let error = format!(
+                    "routing fixture readiness deadline: rendered={} delivered={:?}",
+                    state.rendered, state.delivered
+                );
+                state.failure = Some(error.clone());
+                self.changed.notify_all();
+                return Err(io::Error::new(io::ErrorKind::TimedOut, error));
+            };
+            // The condvar is the readiness signal. This bounded cancellation
+            // poll also releases shutdown when an owner stops without sending.
+            state = self
+                .changed
+                .wait_timeout(state, remaining.min(Duration::from_millis(20)))
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+    }
+
+    fn permit_packet(&self, end: u64, stop: &AtomicBool) -> io::Result<bool> {
+        // More than the next complete 480-frame chunk plus either fixture's
+        // 512/960-frame packet, but far below the production one-second cap.
+        self.wait_for(stop, None, |state| {
+            state.armed && end <= state.rendered + 4096
+        })
+    }
+
+    fn delivered(&self, role: SourceRole, end: u64) {
+        let index = if role == SourceRole::Microphone { 0 } else { 1 };
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .delivered[index] = end;
+        self.changed.notify_all();
+    }
+
+    fn before_ingest(
+        &self,
+        cursor: u64,
+        stop: &AtomicBool,
+        draining: &AtomicBool,
+    ) -> io::Result<()> {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .rendered = cursor;
+        self.changed.notify_all();
+        self.wait_for(stop, Some(draining), |state| {
+            state.armed
+                && state
+                    .delivered
+                    .iter()
+                    .all(|end| *end >= cursor + CHUNK_FRAMES as u64)
+        })?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 struct MixTestObservation {
     epoch: Instant,
@@ -2748,6 +3253,7 @@ struct MixTestObservation {
     omitted_boundaries: u64,
     delivery: [MixDeliveryObservation; 2],
     trace: Option<MixWindowTrace>,
+    fixture_gate: Option<Arc<MixFixtureGate>>,
 }
 
 #[cfg(test)]
@@ -2770,6 +3276,7 @@ impl MixTestObservation {
             omitted_boundaries: 0,
             delivery: Default::default(),
             trace: None,
+            fixture_gate: None,
         }
     }
 
@@ -2959,7 +3466,19 @@ struct SourceClock {
     /// position. The bus can only delay; the FFmpeg whole-track shift carries
     /// the common part of the offsets.
     delay_frames: u64,
+    /// The least a packet's capture time ran ahead of its mapped start in the
+    /// current lag window, and the device position that closes the window.
+    lag_min: f64,
+    lag_window_end: f64,
 }
+
+/// How long the mapping must stay behind its capture times before it steps.
+const LAG_WINDOW_FRAMES: f64 = 24_000.0;
+/// How far behind its capture times the mapping may stay for a whole
+/// [`LAG_WINDOW_FRAMES`] before it steps forward: beyond capture-time jitter
+/// (Pulse stamps carry 20 ms) and far inside the playout delay.
+const LAG_STEP_FRAMES: f64 = 1_920.0;
+
 impl SourceClock {
     fn new(frame: &AudioFrame, epoch: Instant) -> Self {
         let start = frame
@@ -2975,6 +3494,8 @@ impl SourceClock {
             observations: VecDeque::new(),
             last_observation: f64::NEG_INFINITY,
             delay_frames: 0,
+            lag_min: f64::INFINITY,
+            lag_window_end: frame.timestamp_micros as f64 * 0.048 + LAG_WINDOW_FRAMES,
         }
     }
 
@@ -3031,7 +3552,25 @@ impl SourceClock {
         // tolerance; genuine missing intervals remain silence in the bus.
         let gap = device_start - self.device_end;
         let gap = if gap.abs() < 0.05 { 0.0 } else { gap };
-        let start = self.mapped_end + gap * self.ratio;
+        let mut start = self.mapped_end + gap * self.ratio;
+        // Retest 153: on a loaded Linux desktop Pulse overruns lose a few
+        // milliseconds at a time, each too short to read as a dropout, so the
+        // count falls behind the capture clock faster than the rate estimate
+        // may follow (0.1%). Unchecked, the mapping drifted past the playout
+        // delay, every buffer landed on audio already played, and the
+        // microphone went silent for 2 s until the timeline re-anchored. A
+        // mapping that stays behind its capture times for half a second steps
+        // forward by the least lag it saw: the lost audio becomes a gap of its
+        // own length. Only forward: a count ahead of its capture times is
+        // slewed by the rate estimate, never replayed.
+        self.lag_min = self.lag_min.min(observed_end - frames - start);
+        if device_end >= self.lag_window_end {
+            if self.lag_min > LAG_STEP_FRAMES {
+                start += self.lag_min;
+            }
+            self.lag_min = f64::INFINITY;
+            self.lag_window_end = device_end + LAG_WINDOW_FRAMES;
+        }
         self.mapped_end = start + frames * self.ratio;
         self.device_end = device_end;
         let start = start.round().max(0.0) as u64;
@@ -3101,8 +3640,10 @@ pub(crate) fn test_current_audio_on_epoch(
             let mixed = mix_chunk(
                 &mic.samples,
                 AudioProcessingSettings::default(),
+                FoldPlan::one_shot(&mic.samples, 2),
                 &sys.samples,
                 AudioProcessingSettings::default(),
+                None,
                 PeakLimiter::default(),
             );
             for (index, frame) in mixed.output.chunks_exact(2).enumerate() {
@@ -3362,10 +3903,11 @@ impl EnableRamp {
     }
 }
 
-/// Stereo-linked peak limiter on the mixed sum (plan 069 decision 7): -1 dBFS
-/// ceiling, instant attack (no look-ahead, so it adds no latency), and a
-/// one-pole release with a 50 ms time constant. Unity gain is exact, so an
-/// idle limiter is a no-op.
+/// Stereo-linked peak limiter on the session output (plan 069 decision 7,
+/// every path since plan 200 A2): -1 dBFS ceiling, instant attack (no
+/// look-ahead, so it adds no latency), and a one-pole release with a 50 ms
+/// time constant. Unity gain is exact, so an idle limiter is a no-op: a
+/// microphone that stays under the ceiling is written byte for byte.
 #[derive(Debug, Clone, Copy)]
 struct PeakLimiter {
     gain: f32,
@@ -3376,6 +3918,9 @@ impl Default for PeakLimiter {
     }
 }
 impl PeakLimiter {
+    /// Unity gain. The bus no longer branches on it (plan 200 A2: the
+    /// limiter runs on every path); tests read it.
+    #[cfg(test)]
     fn idle(&self) -> bool {
         self.gain >= 1.0
     }
@@ -3416,17 +3961,28 @@ struct MixedSamples {
     limiter: PeakLimiter,
 }
 
-/// The mix (plan 069 decisions 3, 5, 7): the microphone keeps exactly today's
-/// fold, gain and mute (`process_interleaved_f32`); system audio keeps its
-/// stereo image and takes its own gain only; the sum passes the limiter.
+/// The mix (plan 069 decisions 3, 5, 7): the microphone keeps the
+/// microphone-only path's fold, gain and mute (`fold` is the chunk's
+/// [`FoldPlan`], plan 200 A1); system audio keeps its stereo image and takes
+/// its own gain only; the soundboard (plan 189) is already at its gain and
+/// joins only while a sound plays, so the sum is unchanged without one; the
+/// sum passes the limiter. Plan 200 A2: the sum takes the microphone before
+/// the full-scale clamp, so the limiter (not the clamp) holds a hot mic; the
+/// microphone ingredient (taps, meter) stays clamped as before.
 fn mix_chunk(
     microphone_raw: &[f32],
     microphone: AudioProcessingSettings,
+    fold: FoldPlan,
     system_raw: &[f32],
     system: AudioProcessingSettings,
+    sounds: Option<&[f32]>,
     mut limiter: PeakLimiter,
 ) -> MixedSamples {
-    let microphone_samples = process_interleaved_f32(microphone_raw, 2, microphone);
+    let microphone_unclamped = fold_interleaved_f32(microphone_raw, 2, microphone, fold, false);
+    let microphone_samples = microphone_unclamped
+        .iter()
+        .map(|sample| sample.clamp(-1.0, 1.0))
+        .collect::<Vec<_>>();
     let system_gain = if system.muted {
         0.0
     } else {
@@ -3436,11 +3992,16 @@ fn mix_chunk(
         .iter()
         .map(|sample| sample * system_gain)
         .collect::<Vec<_>>();
-    let mut output = microphone_samples
+    let mut output = microphone_unclamped
         .iter()
         .zip(&system_samples)
         .map(|(microphone, system)| microphone + system)
         .collect::<Vec<_>>();
+    if let Some(sounds) = sounds {
+        for (output, sound) in output.iter_mut().zip(sounds) {
+            *output += sound;
+        }
+    }
     let mut clipped = vec![false; output.len()];
     limiter.process(&mut output, &mut clipped);
     MixedSamples {
@@ -3544,7 +4105,7 @@ async fn prepare_system_audio_in(
         count,
         spawn_system_owner,
         |_| {},
-        false,
+        None,
     )
     .await?;
     let failure = failure_slot
@@ -3632,6 +4193,193 @@ fn refuse_system_command(command: SystemCommand, reason: &str) {
         }
         SystemCommand::Detach { acknowledgement } => {
             let _ = acknowledgement.send(Ok(None));
+        }
+    }
+}
+
+/// Plan 189: a soundboard voice entering the bus. The PCM is decoded and
+/// levelled at import; the gain is `levelDb + volumeDb` as linear gain, and
+/// the board level is applied per chunk from [`SoundboardHandle`].
+pub struct SoundVoiceStart {
+    /// The player's key for this voice; a stop names it.
+    pub key: u64,
+    /// Interleaved stereo s16 at 48 kHz.
+    pub pcm: Arc<[i16]>,
+    pub gain: f32,
+    pub looping: bool,
+}
+
+/// Where a pressed sound went (plan 189).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundPlacement {
+    /// Into the mix from `sample`. `late` when the press arrived after its
+    /// sample had passed (an output stall) and the voice starts at the
+    /// cursor instead.
+    OnAir { sample: u64, late: bool },
+    /// Not mixed: the press came before the epoch, during a drain, or after
+    /// the stop. Only the monitor plays it.
+    MonitorOnly,
+}
+
+enum SoundCommand {
+    Start {
+        voice: SoundVoiceStart,
+        /// The instant the backend received the press: the voice starts at
+        /// `(received_at - epoch) * 48000`.
+        received_at: Instant,
+        acknowledgement: tokio::sync::oneshot::Sender<SoundPlacement>,
+    },
+    /// One voice, or every voice without a key.
+    Stop { key: Option<u64> },
+}
+
+fn refuse_sound_command(command: SoundCommand) {
+    if let SoundCommand::Start {
+        acknowledgement, ..
+    } = command
+    {
+        let _ = acknowledgement.send(SoundPlacement::MonitorOnly);
+    }
+}
+
+/// A press the bus does not place within this is monitor only: the bus
+/// visits its commands every chunk, so this only trips on a stalled bus.
+const SOUND_START_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Controls the session's soundboard voices (plan 189). Cloneable; every
+/// call is non-blocking or bounded. Shaped like [`SystemAudioHandle`].
+#[derive(Clone)]
+pub struct SoundboardHandle {
+    commands: mpsc::SyncSender<SoundCommand>,
+    /// The board level in dB (`f32` bits), re-read by the bus every chunk.
+    volume_db: Arc<AtomicU32>,
+    stop: Arc<AtomicBool>,
+    draining: Arc<AtomicBool>,
+}
+impl SoundboardHandle {
+    /// Starts a voice at the bus sample of `received_at`. Resolves at the
+    /// next chunk boundary with where the voice went; a stopping or draining
+    /// bus, or one that does not answer, places nothing.
+    pub async fn start(&self, voice: SoundVoiceStart, received_at: Instant) -> SoundPlacement {
+        if self.stop.load(Ordering::Acquire) || self.draining.load(Ordering::Acquire) {
+            return SoundPlacement::MonitorOnly;
+        }
+        let (acknowledgement, receipt) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .try_send(SoundCommand::Start {
+                voice,
+                received_at,
+                acknowledgement,
+            })
+            .is_err()
+        {
+            return SoundPlacement::MonitorOnly;
+        }
+        match tokio::time::timeout(SOUND_START_DEADLINE, receipt).await {
+            Ok(Ok(placement)) => placement,
+            Ok(Err(_)) | Err(_) => SoundPlacement::MonitorOnly,
+        }
+    }
+
+    /// Ramps one voice (or every voice) to zero over 5 ms from the next
+    /// chunk boundary. Never waits; a bus that is gone has no voices.
+    pub fn stop(&self, key: Option<u64>) {
+        let _ = self.commands.try_send(SoundCommand::Stop { key });
+    }
+
+    /// The board level from Sources, applied to every voice from the next
+    /// chunk (ramped across it).
+    pub fn set_volume_db(&self, volume_db: f32) {
+        self.volume_db.store(volume_db.to_bits(), Ordering::Release);
+    }
+
+    /// A handle that answers `OnAir` and counts `start` calls. Used to prove
+    /// a replay-only session (no `session_started`) never mixes a press.
+    #[cfg(test)]
+    pub(crate) fn test_recording_bus() -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::Ordering;
+        let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (commands, rx) = mpsc::sync_channel(16);
+        let counted = starts.clone();
+        std::thread::spawn(move || {
+            while let Ok(command) = rx.recv() {
+                match command {
+                    SoundCommand::Start {
+                        acknowledgement, ..
+                    } => {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let _ = acknowledgement.send(SoundPlacement::OnAir {
+                            sample: 0,
+                            late: false,
+                        });
+                    }
+                    SoundCommand::Stop { .. } => {}
+                }
+            }
+        });
+        (
+            Self {
+                commands,
+                volume_db: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0f32.to_bits())),
+                stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                draining: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            starts,
+        )
+    }
+}
+
+/// Applies queued sound commands at a chunk boundary (`cursor` is the next
+/// sample the bus renders). Before the epoch, or once the bus stops or
+/// drains, every start is monitor only.
+fn accept_sound_commands(
+    commands: &mpsc::Receiver<SoundCommand>,
+    voices: &mut SoundVoices,
+    cursor: u64,
+    epoch: Option<Instant>,
+    stop: &AtomicBool,
+    draining: &AtomicBool,
+) {
+    while let Ok(command) = commands.try_recv() {
+        match command {
+            SoundCommand::Start {
+                voice,
+                received_at,
+                acknowledgement,
+            } => {
+                let placement = match epoch {
+                    Some(epoch)
+                        if !stop.load(Ordering::Acquire)
+                            && !draining.load(Ordering::Acquire)
+                            && received_at >= epoch =>
+                    {
+                        let press = (received_at.duration_since(epoch).as_nanos()
+                            * u128::from(NATIVE_AUDIO_SAMPLE_RATE)
+                            / 1_000_000_000) as u64;
+                        let sample = voices.start(
+                            VoiceStart {
+                                key: voice.key,
+                                pcm: voice.pcm,
+                                start_sample: press,
+                                gain: voice.gain,
+                                looping: voice.looping,
+                            },
+                            cursor,
+                        );
+                        SoundPlacement::OnAir {
+                            sample,
+                            late: sample != press,
+                        }
+                    }
+                    _ => SoundPlacement::MonitorOnly,
+                };
+                let _ = acknowledgement.send(placement);
+            }
+            SoundCommand::Stop { key: Some(key) } => {
+                voices.stop(key);
+            }
+            SoundCommand::Stop { key: None } => voices.stop_all(),
         }
     }
 }
@@ -4265,6 +5013,16 @@ impl StopDrain {
     }
 }
 
+// Stereo PCM after this source-clock boundary would be future capture, not
+// buffered pre-Stop content. Keep the corrected tail truthful while flushing.
+fn silence_after_source_boundary(samples: &mut [f32], start: u64, end: u64) {
+    let keep = end
+        .saturating_sub(start)
+        .saturating_mul(2)
+        .min(samples.len() as u64) as usize;
+    samples[keep..].fill(0.0);
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BusTiming {
     playout_delay: Duration,
@@ -4283,6 +5041,9 @@ struct BusContext<'a> {
     shared: &'a std::sync::Mutex<AudioShared>,
     /// Plan 076: a detected loop pauses system audio.
     echo_guard: &'a AtomicBool,
+    /// Plan 189: the soundboard's presses and its board level.
+    sound_commands: &'a mpsc::Receiver<SoundCommand>,
+    sound_volume_db: &'a AtomicU32,
 }
 
 fn run_bus(
@@ -4296,6 +5057,7 @@ fn run_bus(
     let mut retired = Vec::new();
     let mut system_retired = Vec::new();
     let shared = context.shared;
+    let sound_commands = context.sound_commands;
     let result = run_bus_owned(
         &mut producer,
         path,
@@ -4323,6 +5085,10 @@ fn run_bus(
         );
     }
     drop(system_commands);
+    // Plan 189: a press that raced the end of the bus is monitor only.
+    while let Ok(command) = sound_commands.try_recv() {
+        refuse_sound_command(command);
+    }
     if let Some(producer) = producer {
         retired.push(producer.retire());
     }
@@ -4416,13 +5182,20 @@ fn run_bus_owned(
         timing,
         shared,
         echo_guard,
+        sound_commands,
+        sound_volume_db,
     } = context;
     let playout_delay = timing.playout_delay;
-    // Plan 069: the system slot, and the limiter that runs only while one is
-    // attached (or still releasing after one left). With no slot ever
-    // attached, every chunk takes the unchanged microphone-only write path.
+    // Plan 069: the system slot. With no slot attached, a chunk takes the
+    // microphone-only write path. Plan 200 A2: the limiter runs on both paths
+    // and carries its state across them.
     let mut system: Option<SourceSlot> = None;
     let mut limiter = PeakLimiter::default();
+    // Plan 200 A1: the microphone fold's level detector, across chunks.
+    let mut voice_fold = VoiceFold::default();
+    // Plan 189: the soundboard's voices. Idle, they render nothing and the
+    // chunk takes the same microphone-only path.
+    let mut sound_voices = SoundVoices::new();
     let system_stats = shared
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -4470,6 +5243,8 @@ fn run_bus_owned(
                 draining,
                 shared,
             );
+            // A press before the epoch is monitor only (plan 189).
+            accept_sound_commands(sound_commands, &mut sound_voices, 0, None, stop, draining);
             if let Some(slot) = system.as_ref() {
                 while slot.receiver.try_recv().is_ok() {}
             }
@@ -4477,6 +5252,20 @@ fn run_bus_owned(
         },
         None => Instant::now(),
     };
+    // Fixture producers may publish only after the bus has left the loop
+    // that discards pre-epoch packets. Publishing the epoch alone does not
+    // acknowledge that transition to a concurrently scheduled producer.
+    #[cfg(test)]
+    {
+        let gate = shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .mix_fixture_gate
+            .clone();
+        if let Some(gate) = gate {
+            gate.arm();
+        }
+    }
     let totals = shared
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -4512,8 +5301,21 @@ fn run_bus_owned(
     let mut drain: Option<StopDrain> = None;
     loop {
         if stop.load(Ordering::Acquire) {
-            let drain =
-                drain.get_or_insert_with(|| StopDrain::at(stop_requested_at, epoch, playout_delay));
+            let drain = drain.get_or_insert_with(|| {
+                let mut drain = StopDrain::at(stop_requested_at, epoch, playout_delay);
+                // ISO muxers trim the common negative track shift. Flush the
+                // already captured system samples delayed by that same shift;
+                // the existing unpaced bounded drain does not await new audio.
+                if shared
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .source_taps
+                    .is_some()
+                {
+                    drain.target = drain.target.saturating_add(timing.system_delay_frames);
+                }
+                drain
+            });
             if drain.done(timeline.cursor(), Instant::now()) {
                 break;
             }
@@ -4536,6 +5338,8 @@ fn run_bus_owned(
                     cutover_sample: timeline.cursor(),
                 });
             }
+            // Every voice ends with the capture (plan 189).
+            sound_voices.stop_all();
         }
         accept_system_commands(
             system_commands,
@@ -4545,6 +5349,14 @@ fn run_bus_owned(
             stop,
             draining,
             shared,
+        );
+        accept_sound_commands(
+            sound_commands,
+            &mut sound_voices,
+            timeline.cursor(),
+            Some(epoch),
+            stop,
+            draining,
         );
         if !draining.load(Ordering::Acquire)
             && pending.is_none()
@@ -4570,6 +5382,17 @@ fn run_bus_owned(
             timeline.counters.dropped_frames += new_drops;
             timeline.losses.producer_queue_full += new_drops;
             previous_producer_drops = drops;
+        }
+        #[cfg(test)]
+        {
+            let gate = shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .mix_fixture_gate
+                .clone();
+            if let Some(gate) = gate {
+                gate.before_ingest(timeline.cursor(), stop, draining)?;
+            }
         }
         let placement = Placement {
             epoch,
@@ -4933,11 +5756,49 @@ fn run_bus_owned(
         if ramp_in {
             ramp_through_zero(&mut raw.samples, true);
         }
-        let system_raw = system.as_mut().map(|slot| {
+        let mut system_raw = system.as_mut().map(|slot| {
             debug_assert_eq!(slot.timeline.cursor(), start, "sources render in lockstep");
             slot.render()
         });
-        let mixing = system_raw.is_some() || !limiter.idle();
+        // Plan 189: the soundboard's voices at the board level, re-read per
+        // chunk. `None` while nothing plays.
+        let mut sounds_raw = sound_voices.render(
+            start,
+            CHUNK_FRAMES,
+            crate::audio::db_to_gain(f32::from_bits(sound_volume_db.load(Ordering::Acquire))),
+        );
+        if drain.is_some()
+            && shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .source_taps
+                .is_some()
+        {
+            let source_end = StopDrain::at(stop_requested_at, epoch, playout_delay).target;
+            silence_after_source_boundary(
+                &mut raw.samples,
+                start,
+                source_end.saturating_add(timing.microphone_delay_frames),
+            );
+            if let Some(system_raw) = system_raw.as_mut() {
+                silence_after_source_boundary(
+                    &mut system_raw.samples,
+                    start,
+                    source_end.saturating_add(timing.system_delay_frames),
+                );
+            }
+            // Sounds have no bus delay: silent from the stop instant.
+            if let Some(sounds_raw) = sounds_raw.as_mut() {
+                silence_after_source_boundary(sounds_raw, start, source_end);
+            }
+        }
+        // A ramp-in starts a new or restored input: its fold decides from its
+        // own first chunk, not the previous device's channel levels.
+        if ramp_in {
+            voice_fold = VoiceFold::default();
+        }
+        let microphone_fold = voice_fold.plan(&raw.samples, 2);
+        let mixing = system_raw.is_some() || sounds_raw.is_some();
         let write_started = Instant::now();
         let mut deferred_health = Vec::new();
         let mut wait = || {
@@ -5006,8 +5867,10 @@ fn run_bus_owned(
                 &mut file,
                 &raw.samples,
                 settings,
+                microphone_fold,
                 system_samples,
                 system_settings,
+                sounds_raw.as_deref(),
                 limiter,
                 &write_stop,
                 draining,
@@ -5020,6 +5883,8 @@ fn run_bus_owned(
                 &mut file,
                 &raw.samples,
                 settings,
+                microphone_fold,
+                limiter,
                 &write_stop,
                 draining,
                 Instant::now,
@@ -5034,27 +5899,57 @@ fn run_bus_owned(
                 return Err(error);
             }
         };
-        // The microphone tap (captions, Orcle voice activity, the mic meter)
+        // The microphone tap (captions, Buddy voice activity, the mic meter)
         // is the processed microphone chunk as written, before any sum
-        // (decision 5). Without a system slot it is the written chunk itself.
+        // (decision 5). On both paths it is the clamped ingredient, not the
+        // limited output (plan 200 A2): without a system slot it equals the
+        // written chunk while the microphone stays under the ceiling.
         // Plan 092 Phase C: the written chunk is what the recording and the
         // stream get, so it feeds the master meter.
-        let (stale_from, microphone_samples, mixed, master_levels) = match outcome {
-            ChunkOutcome::Microphone(written) => {
-                let master = ChunkLevels::of(&written.samples);
-                (written.stale_from, written.samples, None, master)
+        let mut clipped_samples = 0;
+        let (stale_from, microphone_samples, mixed, master_levels, sounds_levels) = match outcome {
+            ChunkOutcome::Microphone(write) => {
+                limiter = write.limiter;
+                clipped_samples = write.clipped_samples;
+                let master = ChunkLevels::of(&write.written.samples);
+                (
+                    write.written.stale_from,
+                    write.microphone,
+                    None,
+                    master,
+                    None,
+                )
             }
             ChunkOutcome::Mixed(mixed) => {
                 limiter = mixed.limiter;
                 let master = ChunkLevels::of(&mixed.written.samples);
+                // Plan 189: the sounds meter reads the sounds as written;
+                // the taps, captions and the mic meter below never see them.
+                let sounds_levels = mixed.sounds.as_deref().map(ChunkLevels::of);
                 (
                     mixed.written.stale_from,
                     mixed.microphone,
                     Some((mixed.system, mixed.clipped_samples)),
                     master,
+                    sounds_levels,
                 )
             }
         };
+        // Plan 157: the ISO files get the SAME written ingredients the Combined
+        // sum was built from — a stale or draining suffix is zeros in both.
+        if let Some(taps) = shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .source_taps
+            .clone()
+        {
+            taps.offer_chunk(
+                &microphone_samples,
+                mixed
+                    .as_ref()
+                    .map(|(system_samples, _)| system_samples.as_slice()),
+            );
+        }
         let microphone_levels = ChunkLevels::of(&microphone_samples);
         let system_levels = mixed
             .as_ref()
@@ -5159,13 +6054,18 @@ fn run_bus_owned(
             let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
             shared.status.sample_cursor = timeline.cursor();
             shared.status.counters = after;
-            if let Some((_, clipped)) = mixed.as_ref() {
-                shared.mix_clipped_samples += clipped;
-                shared.levels.master_clipped_samples += clipped;
-            }
+            // Plan 200 A2: clipping counts on every path.
+            let clipped = mixed
+                .as_ref()
+                .map_or(clipped_samples, |(_, clipped)| *clipped);
+            shared.mix_clipped_samples += clipped;
+            shared.levels.master_clipped_samples += clipped;
             shared.levels.microphone.add(microphone_levels);
             if let Some(system_levels) = system_levels {
                 shared.levels.system.add(system_levels);
+            }
+            if let Some(sounds_levels) = sounds_levels {
+                shared.levels.sounds.add(sounds_levels);
             }
             shared.levels.master.add(master_levels);
             #[cfg(test)]
@@ -5231,7 +6131,7 @@ fn run_bus_owned(
 }
 
 enum ChunkOutcome {
-    Microphone(WrittenChunk),
+    Microphone(MicrophoneWrite),
     Mixed(MixedWrite),
 }
 
@@ -5243,25 +6143,75 @@ struct WrittenChunk {
     silent_from: Option<usize>,
 }
 
-/// The microphone-only write path, byte for byte the pre-mixer writer.
+/// What the microphone-only path wrote, with its limiter.
+struct MicrophoneWrite {
+    written: WrittenChunk,
+    /// The processed microphone ingredient (fold, gain, mute, clamped at full
+    /// scale; zero where the chunk went stale or drained), exactly as the
+    /// mixed path's `MixedWrite::microphone`. The taps, the microphone meter
+    /// and the echo reference read this, so the Microphone file and meter
+    /// get the same signal whether or not anything is mixed (plan 200 A2).
+    microphone: Vec<f32>,
+    /// Samples the limiter had to pull under its ceiling.
+    clipped_samples: u64,
+    limiter: PeakLimiter,
+}
+
+/// The microphone-only write path: the pre-mixer writer plus the peak
+/// limiter (plan 200 A2). Under the ceiling with an idle limiter the bytes
+/// are exactly the pre-mixer writer's. `fold` is planned once per chunk, so a
+/// re-render under new controls folds the chunk the same way; like the mixed
+/// path, each attempt re-limits from the limiter state at the chunk start.
+#[allow(clippy::too_many_arguments)]
 fn write_chunk_with_clock(
     file: &mut impl Write,
     raw: &[f32],
     settings: &AudioProcessingSettingsHandle,
+    fold: FoldPlan,
+    limiter: PeakLimiter,
     stop: &AtomicBool,
     draining: &AtomicBool,
     now: impl FnMut() -> Instant,
     wait: impl FnMut(),
-) -> io::Result<WrittenChunk> {
-    write_rendered_chunk(
+) -> io::Result<MicrophoneWrite> {
+    let mut clipped = vec![false; raw.len()];
+    let mut microphone = vec![0.0; raw.len()];
+    let mut limiter_after = limiter;
+    let written = write_rendered_chunk(
         file,
         raw.len(),
-        |_| process_interleaved_f32(raw, 2, settings.load()),
+        |from| {
+            // Unclamped: the limiter, not a clamp at full scale, holds it.
+            let mut samples = fold_interleaved_f32(raw, 2, settings.load(), fold, false);
+            // The ingredient is clamped, as `mix_chunk` clamps it.
+            for (ingredient, sample) in microphone[from..].iter_mut().zip(&samples[from..]) {
+                *ingredient = sample.clamp(-1.0, 1.0);
+            }
+            let mut flags = vec![false; samples.len()];
+            let mut chunk_limiter = limiter;
+            chunk_limiter.process(&mut samples, &mut flags);
+            clipped[from..].copy_from_slice(&flags[from..]);
+            limiter_after = chunk_limiter;
+            samples
+        },
         stop,
         draining,
         now,
         wait,
-    )
+    )?;
+    if let Some(from) = match (written.stale_from, written.silent_from) {
+        (Some(stale), Some(silent)) => Some(stale.min(silent)),
+        (stale, silent) => stale.or(silent),
+    } {
+        microphone[from * 2..].fill(0.0);
+        clipped[from * 2..].fill(false);
+    }
+    Ok(MicrophoneWrite {
+        written,
+        microphone,
+        clipped_samples: clipped.iter().filter(|clipped| **clipped).count() as u64,
+        limiter: limiter_after,
+    })
 }
 
 struct MixedWrite {
@@ -5270,6 +6220,8 @@ struct MixedWrite {
     microphone: Vec<f32>,
     /// The gained system contribution as written.
     system: Vec<f32>,
+    /// Plan 189: the soundboard's contribution as written, while one plays.
+    sounds: Option<Vec<f32>>,
     clipped_samples: u64,
     limiter: PeakLimiter,
 }
@@ -5282,8 +6234,10 @@ fn write_mixed_chunk_with_clock(
     file: &mut impl Write,
     microphone_raw: &[f32],
     microphone_settings: &AudioProcessingSettingsHandle,
+    microphone_fold: FoldPlan,
     system_raw: &[f32],
     system_settings: &AudioProcessingSettingsHandle,
+    sounds_raw: Option<&[f32]>,
     limiter: PeakLimiter,
     stop: &AtomicBool,
     draining: &AtomicBool,
@@ -5302,8 +6256,10 @@ fn write_mixed_chunk_with_clock(
             let mixed = mix_chunk(
                 microphone_raw,
                 microphone_settings.load(),
+                microphone_fold,
                 system_raw,
                 system_settings.load(),
+                sounds_raw,
                 limiter,
             );
             microphone[from..].copy_from_slice(&mixed.microphone[from..]);
@@ -5317,6 +6273,7 @@ fn write_mixed_chunk_with_clock(
         now,
         wait,
     )?;
+    let mut sounds = sounds_raw.map(<[f32]>::to_vec);
     // What was not written as rendered was written as zeros: a stale suffix,
     // or the silence of a drain that began mid-chunk.
     if let Some(from) = match (written.stale_from, written.silent_from) {
@@ -5325,12 +6282,16 @@ fn write_mixed_chunk_with_clock(
     } {
         microphone[from * 2..].fill(0.0);
         system[from * 2..].fill(0.0);
+        if let Some(sounds) = sounds.as_mut() {
+            sounds[from * 2..].fill(0.0);
+        }
         clipped[from * 2..].fill(false);
     }
     Ok(MixedWrite {
         written,
         microphone,
         system,
+        sounds,
         clipped_samples: clipped.iter().filter(|clipped| **clipped).count() as u64,
         limiter: limiter_after,
     })
@@ -5744,6 +6705,70 @@ mod tests {
         assert_eq!(timeline.counters().captured_frames, 994 * 480);
     }
 
+    /// Retest 153: under load a Pulse microphone loses 5 ms every half
+    /// second in overruns too short to read as dropouts. Its count falls
+    /// 1% behind its capture clock, ten times what the rate estimate may
+    /// follow. The mapping steps forward instead of drifting past the playout
+    /// delay: nothing lands on audio already played, no silence reaches
+    /// 200 ms, and every packet stays within 60 ms of its capture time.
+    #[test]
+    fn a_count_losing_audio_to_short_overruns_steps_forward_with_its_capture_clock() {
+        let epoch = Instant::now();
+        let playout = 7_200_u64;
+        let mut packet = frame(0.3, 480);
+        packet.captured_at = epoch + Duration::from_millis(10);
+        let mut clock = SourceClock::new(&packet, epoch);
+        let mut timeline = AudioTimeline::new();
+        let mut captured_end = 0_u64;
+        let (mut silent_run, mut longest_silence, mut heard) = (0_u64, 0_u64, false);
+        for index in 0..12_000_u64 {
+            captured_end += 480 + if index % 50 == 49 { 240 } else { 0 };
+            packet.timestamp_micros = index * 10_000;
+            packet.captured_at = epoch + Duration::from_secs_f64(captured_end as f64 / 48_000.0);
+            let (start, count) = clock.interval(&packet).unwrap();
+            let lag = (captured_end - 480) as i64 - start as i64;
+            assert!(
+                lag.abs() <= 2_880,
+                "packet {index} mapped {lag} frames from its capture"
+            );
+            timeline.push(0, start, resample_frame(packet.clone(), count));
+            while timeline.cursor() + 480 + playout <= captured_end {
+                for captured in timeline.render_with_provenance().captured {
+                    heard |= captured;
+                    silent_run = if captured { 0 } else { silent_run + 1 };
+                    if heard {
+                        longest_silence = longest_silence.max(silent_run);
+                    }
+                }
+            }
+        }
+        assert_eq!(timeline.losses().discarded_overlap, 0);
+        assert!(
+            longest_silence < 9_600,
+            "silence of {longest_silence} frames"
+        );
+    }
+
+    /// The step reads the least lag of a half second, so callbacks that wake
+    /// late (a capture time 30 ms past the count, one packet in seven) never
+    /// move a mapping that keeps time.
+    #[test]
+    fn late_callbacks_never_step_a_mapping_that_keeps_time() {
+        let epoch = Instant::now();
+        let mut packet = frame(0.3, 480);
+        packet.captured_at = epoch + Duration::from_millis(10);
+        let mut clock = SourceClock::new(&packet, epoch);
+        let mut end = 0;
+        for index in 0..6_000_u64 {
+            packet.timestamp_micros = index * 10_000;
+            let late = if index % 7 == 3 { 0.030 } else { 0.0 };
+            packet.captured_at = epoch + Duration::from_secs_f64((index + 1) as f64 * 0.01 + late);
+            let (start, count) = clock.interval(&packet).unwrap();
+            assert!(start.abs_diff(end) <= 1, "packet {index} stepped");
+            end = start + count as u64;
+        }
+    }
+
     #[test]
     fn device_clock_drift_is_gradually_resampled_with_callback_jitter() {
         for drift in [-100.0, -30.0, 30.0, 100.0] {
@@ -5810,12 +6835,15 @@ mod tests {
             &mut writer,
             &[0.25; 960],
             &settings,
+            FoldPlan::one_shot(&[0.25; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now,
             || {},
         )
-        .unwrap();
+        .unwrap()
+        .written;
         let gained = 0.25 * 10.0_f32.powf(6.0 / 20.0);
         assert!((result.samples[0] - gained).abs() < 0.00001);
         assert!((result.samples[1] - gained).abs() < 0.00001);
@@ -5870,12 +6898,15 @@ mod tests {
             &mut writer,
             &[0.8; 960],
             &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
             || now.set(now.get() + Duration::from_millis(200)),
         )
-        .unwrap();
+        .unwrap()
+        .written;
         assert!(result.samples.iter().all(|sample| *sample == 0.0));
         assert_eq!(result.stale_from, Some(0));
         let mut writer = BlockOnce {
@@ -5886,6 +6917,8 @@ mod tests {
             &mut writer,
             &[0.8; 960],
             &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
@@ -5902,6 +6935,8 @@ mod tests {
             &mut writer,
             &[0.8; 960],
             &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
             &stop,
             &AtomicBool::new(false),
             || now.get(),
@@ -5949,12 +6984,15 @@ mod tests {
             &mut writer,
             &[0.25; 960],
             &settings,
+            FoldPlan::one_shot(&[0.25; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &draining,
             || now,
             || {},
         )
-        .unwrap();
+        .unwrap()
+        .written;
         assert_eq!(&written.samples[..2], &[0.25, 0.25]);
         assert!(written.samples[2..].iter().all(|sample| *sample == 0.0));
         assert_eq!(
@@ -5966,12 +7004,15 @@ mod tests {
             &mut next,
             &[0.75; 960],
             &settings,
+            FoldPlan::one_shot(&[0.75; 960], 2),
+            PeakLimiter::default(),
             &AtomicBool::new(false),
             &draining,
             || now,
             || {},
         )
-        .unwrap();
+        .unwrap()
+        .written;
         assert!(written.samples.iter().all(|sample| *sample == 0.0));
     }
 
@@ -6480,6 +7521,7 @@ mod tests {
             stats: Arc::new(AudioCaptureStats::default()),
             _owner: Box::new(SignalDrop(closed)),
             failure: None,
+            stderr_tail: None,
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
@@ -6634,6 +7676,7 @@ mod tests {
                     receiver,
                     stats: Arc::new(AudioCaptureStats::default()),
                     failure: None,
+                    stderr_tail: None,
                     _owner: Box::new(PcmTestOwner {
                         stop,
                         thread: Some(worker),
@@ -7002,6 +8045,7 @@ mod tests {
                         receiver: pcm_rx,
                         stats: Arc::new(AudioCaptureStats::default()),
                         failure: None,
+                        stderr_tail: None,
                         _owner: Box::new(HeldClose {
                             started: Some(close_tx),
                             release: release_rx,
@@ -7188,6 +8232,483 @@ mod tests {
         }
     }
 
+    #[test]
+    fn readiness_evidence_counts_what_the_bus_could_not_accept() {
+        // Plan 195 S1: the failure reason says what arrived, so the next
+        // support bundle separates "nothing" from "stale" from "future-dated".
+        let mut evidence = ReadinessEvidence::default();
+        assert_eq!(evidence.summary(), "0 frames received");
+        let opened_at = Instant::now() - Duration::from_millis(1_210);
+        let now = Instant::now();
+        let mut stale = frame(0.1, 24_000);
+        stale.captured_at = now - Duration::from_millis(2_480);
+        assert_eq!(
+            evidence.judge(&stale, now, opened_at, false),
+            ReadinessVerdict::Stale
+        );
+        let mut staler = frame(0.1, 480);
+        staler.captured_at = now - Duration::from_millis(3_000);
+        assert_eq!(
+            evidence.judge(&staler, now, opened_at, false),
+            ReadinessVerdict::Stale
+        );
+        let summary = evidence.summary();
+        assert_eq!(
+            summary,
+            "2 frames received, all stale (newest 2480 ms old), largest packet 500 ms, first after 1210 ms",
+            "{summary}"
+        );
+        let mut ahead = frame(0.1, 480);
+        ahead.captured_at = now + Duration::from_millis(30);
+        assert_eq!(
+            evidence.judge(&ahead, now, opened_at, false),
+            ReadinessVerdict::FutureDated
+        );
+        let mut malformed = frame(0.1, 480);
+        malformed.sample_rate = 44_100;
+        assert_eq!(
+            evidence.judge(&malformed, now, opened_at, false),
+            ReadinessVerdict::Malformed
+        );
+        let mut fresh = frame(0.1, 480);
+        fresh.captured_at = now - Duration::from_millis(5);
+        assert_eq!(
+            evidence.judge(&fresh, now, opened_at, true),
+            ReadinessVerdict::Withheld
+        );
+        assert_eq!(
+            evidence.judge(&fresh, now, opened_at, false),
+            ReadinessVerdict::Fresh
+        );
+        let summary = evidence.summary();
+        assert_eq!(
+            summary,
+            "6 frames received, 2 stale (newest 2480 ms old), 1 future-dated (up to 30 ms ahead), 1 malformed, 1 withheld by VIDEORC_TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_MS, largest packet 500 ms, first after 1210 ms",
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn directshow_microphones_get_the_laptop_readiness_budget() {
+        // Plan 195 S2: DirectShow 10 s, everything else 2 s.
+        assert_eq!(
+            microphone_readiness_budget(&crate::audio::windows_dshow_microphone_device_id(
+                "Digital Microphone (2- Cirrus Logic High Definition Audio)"
+            )),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            microphone_readiness_budget("microphone:coreaudio:42"),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            microphone_readiness_budget(
+                "microphone:pulse:alsa_input.pci-0000_02_00.3.HiFi__Mic__source"
+            ),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            microphone_readiness_budget("microphone:avfoundation-uid:6465736b"),
+            Duration::from_secs(2)
+        );
+        assert_eq!(DSHOW_MICROPHONE_READINESS_BUDGET, Duration::from_secs(10));
+        assert_eq!(readiness_budget_label(Duration::from_secs(10)), "10s");
+        assert_eq!(readiness_budget_label(Duration::from_millis(2_500)), "2.5s");
+    }
+
+    #[test]
+    fn capture_worker_test_faults_need_the_smoke_rpc_gate() {
+        // Plan 195 Part W: inert without the gate, parsed with it, and a
+        // malformed delay is an error the tester sees.
+        let off = CaptureWorkerTestFaults::default();
+        assert_eq!(capture_worker_test_faults(None, None, None), Ok(off));
+        assert_eq!(
+            capture_worker_test_faults(None, Some("6000"), Some("1")),
+            Ok(off)
+        );
+        assert_eq!(
+            capture_worker_test_faults(Some("0"), Some("6000"), Some("1")),
+            Ok(off)
+        );
+        assert_eq!(
+            capture_worker_test_faults(Some("1"), Some("6000"), None),
+            Ok(CaptureWorkerTestFaults {
+                first_pcm_delay: Some(Duration::from_millis(6_000)),
+                fail: false,
+            })
+        );
+        assert_eq!(
+            capture_worker_test_faults(Some("1"), None, Some("1")),
+            Ok(CaptureWorkerTestFaults {
+                first_pcm_delay: None,
+                fail: true,
+            })
+        );
+        assert_eq!(
+            capture_worker_test_faults(Some("1"), Some(""), Some("0")),
+            Ok(off)
+        );
+        let error = capture_worker_test_faults(Some("1"), Some("six"), None).unwrap_err();
+        assert!(
+            error.contains("VIDEORC_TEST_CAPTURE_WORKER_FIRST_PCM_DELAY_MS")
+                && error.contains("six"),
+            "{error}"
+        );
+        let policy = ReadinessPolicy::for_worker(
+            "microphone:coreaudio:1",
+            CaptureWorkerTestFaults {
+                first_pcm_delay: Some(Duration::from_secs(6)),
+                fail: true,
+            },
+        );
+        assert_eq!(policy.withhold_first_pcm, Some(Duration::from_secs(6)));
+        assert!(
+            policy
+                .fail_with
+                .unwrap()
+                .contains("VIDEORC_TEST_CAPTURE_WORKER_FAIL=1")
+        );
+    }
+
+    /// A producer that sends nothing until `release` is signaled, then fresh
+    /// 10 ms frames; `stop` ends it. The first frame is a channel, not a
+    /// sleep, so a loaded runner cannot slide it across a readiness deadline.
+    fn gated_fresh_source(
+        release: mpsc::Receiver<()>,
+        closed: mpsc::Sender<()>,
+    ) -> (ProducerSource, Arc<AtomicBool>) {
+        let (sender, receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let producer_stop = stop.clone();
+        thread::spawn(move || {
+            if release.recv().is_err() {
+                return;
+            }
+            while !producer_stop.load(Ordering::Acquire) {
+                let mut packet = frame(0.3, 480);
+                packet.captured_at = Instant::now();
+                if sender.send(packet).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let mut source = fake_source(receiver, closed);
+        source.device_id = "microphone:windows-dshow:test".into();
+        (source, stop)
+    }
+
+    /// The owner closes the source first, then drops the permit (see
+    /// `cancelled_open_and_ready_handoffs_close_the_owned_source_before_releasing_capacity`).
+    /// Waiting only on source-close races the permit on a loaded Windows runner.
+    fn assert_source_closed_and_capacity_released(
+        count: &AtomicU64,
+        closed_rx: &mpsc::Receiver<()>,
+    ) {
+        closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("source close");
+        assert!(
+            wait_for_producer_cleanup(count, Instant::now() + Duration::from_secs(2)),
+            "owner capacity stayed held after the source closed"
+        );
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
+    fn stop_gated_source(stop_slot: &std::sync::Mutex<Option<Arc<AtomicBool>>>) {
+        if let Some(stop) = stop_slot.lock().unwrap().take() {
+            stop.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_first_frame_passes_inside_its_budget_and_fails_outside_it() {
+        // Plan 195 S2, scaled: the first frame is held on a channel until the
+        // test releases it. A 1.5 s budget (the DirectShow shape) accepts a
+        // frame that arrives after the open; a 300 ms budget with no frame
+        // reports the budget and that nothing arrived.
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        let opened_tx = std::sync::Mutex::new(Some(opened_tx));
+        let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
+        let opened_stop = stop_slot.clone();
+        let task_count = count.clone();
+        let task = tokio::spawn(async move {
+            prepare_producer_in(
+                SourceRole::Microphone,
+                move || {
+                    let (source, stop) = gated_fresh_source(release_rx, closed_tx);
+                    *opened_stop.lock().unwrap() = Some(stop);
+                    Ok(source)
+                },
+                Arc::new(AtomicBool::new(false)),
+                task_count,
+                spawn_owner,
+                move |phase| {
+                    if phase == OwnerPhase::BeforeOpened {
+                        if let Some(tx) = opened_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                },
+                Some(ReadinessPolicy {
+                    budget: Duration::from_millis(1_500),
+                    withhold_first_pcm: None,
+                    fail_with: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), opened_rx)
+            .await
+            .expect("owner opened")
+            .expect("opened handoff");
+        assert!(
+            !task.is_finished(),
+            "readiness must still be waiting for the first frame"
+        );
+        release_tx.send(()).unwrap();
+        let producer = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("readiness after release")
+            .expect("prepare task")
+            .expect("a 1.5 s budget must accept a frame after the open");
+        drop(producer);
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
+        let opened_stop = stop_slot.clone();
+        let result = prepare_producer_in(
+            SourceRole::Microphone,
+            move || {
+                let (source, stop) = gated_fresh_source(release_rx, closed_tx);
+                *opened_stop.lock().unwrap() = Some(stop);
+                Ok(source)
+            },
+            Arc::new(AtomicBool::new(false)),
+            count.clone(),
+            spawn_owner,
+            |_| {},
+            Some(ReadinessPolicy {
+                budget: Duration::from_millis(300),
+                withhold_first_pcm: None,
+                fail_with: None,
+            }),
+        )
+        .await;
+        drop(release_tx);
+        let error = match result {
+            Ok(_) => panic!("a 300 ms budget must not accept a microphone that never delivered"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.starts_with(
+                "The microphone did not deliver fresh PCM within 0.3s: 0 frames received"
+            ),
+            "{error}"
+        );
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+    }
+
+    #[tokio::test]
+    async fn the_injected_first_pcm_delay_holds_readiness_and_the_injected_failure_ends_it() {
+        // Part W, W3 cases B and C on the real path minus the worker binary.
+        // Fresh frames are available at the open; the injected delay must
+        // hold readiness until it expires, then the owner becomes ready.
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        let opened_tx = std::sync::Mutex::new(Some(opened_tx));
+        let stop_slot: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>> = Arc::default();
+        let opened_stop = stop_slot.clone();
+        let task_count = count.clone();
+        let started = Instant::now();
+        let task = tokio::spawn(async move {
+            prepare_producer_in(
+                SourceRole::Microphone,
+                move || {
+                    let (source, stop) = gated_fresh_source(release_rx, closed_tx);
+                    *opened_stop.lock().unwrap() = Some(stop);
+                    release_tx.send(()).unwrap();
+                    Ok(source)
+                },
+                Arc::new(AtomicBool::new(false)),
+                task_count,
+                spawn_owner,
+                move |phase| {
+                    if phase == OwnerPhase::BeforeOpened {
+                        if let Some(tx) = opened_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                },
+                Some(ReadinessPolicy {
+                    budget: Duration::from_secs(2),
+                    withhold_first_pcm: Some(Duration::from_millis(400)),
+                    fail_with: None,
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), opened_rx)
+            .await
+            .expect("owner opened")
+            .expect("opened handoff");
+        assert!(
+            !task.is_finished(),
+            "the injected first-PCM delay must still be holding readiness"
+        );
+        let producer = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("readiness after withhold")
+            .expect("prepare task")
+            .expect("withheld frames must become ready once the delay expires");
+        assert!(
+            started.elapsed() >= Duration::from_millis(390),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(producer);
+        stop_gated_source(&stop_slot);
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let (_keep_tx, receiver) = mpsc::channel();
+        let result = prepare_producer_in(
+            SourceRole::Microphone,
+            move || Ok(fake_source(receiver, closed_tx)),
+            Arc::new(AtomicBool::new(false)),
+            count.clone(),
+            spawn_owner,
+            |_| {},
+            Some(ReadinessPolicy {
+                budget: Duration::from_secs(2),
+                withhold_first_pcm: None,
+                fail_with: Some(INJECTED_WORKER_READINESS_FAILURE),
+            }),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("an injected failure must not become ready"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("VIDEORC_TEST_CAPTURE_WORKER_FAIL=1"),
+            "{error}"
+        );
+        assert!(
+            crate::audio_capture_adapter::worker_start_failure_kind(&anyhow::anyhow!(
+                error.clone()
+            ))
+            .is_none(),
+            "an injected failure drives the direct DirectShow fallback, never silence"
+        );
+        assert_source_closed_and_capacity_released(&count, &closed_rx);
+    }
+
+    #[test]
+    fn readiness_failure_reason_keeps_the_first_sentence_then_the_evidence_and_worker_tail() {
+        let (_tx, receiver) = mpsc::channel();
+        let (closed_tx, _closed_rx) = mpsc::channel();
+        let mut source = fake_source(receiver, closed_tx);
+        let evidence = ReadinessEvidence::default();
+        assert_eq!(
+            readiness_failure_reason(&source, Duration::from_secs(10), &evidence, false),
+            "The microphone did not deliver fresh PCM within 10s: 0 frames received."
+        );
+        assert_eq!(
+            readiness_failure_reason(&source, Duration::from_millis(2_500), &evidence, true),
+            "The microphone stopped before readiness: 0 frames received."
+        );
+        // A worker that accepted and dropped packets before the bus saw any,
+        // plus its last stderr lines, with the device redacted.
+        source.stats.record_captured_frames(960);
+        source.stats.record_dropped_frames(24_000);
+        let mut tail =
+            crate::audio_capture_adapter::WorkerStderrTail::new(vec!["Test microphone".into()]);
+        tail.push("[dshow @ 0x1] real-time buffer [Test microphone] [audio input] too full");
+        source.stderr_tail = Some(Arc::new(std::sync::Mutex::new(tail)));
+        let reason = readiness_failure_reason(&source, Duration::from_secs(2), &evidence, false);
+        assert_eq!(
+            reason,
+            "The microphone did not deliver fresh PCM within 2s: 0 frames received; capture worker passed 960 and dropped 24000 PCM frames. Worker stderr: [dshow @ 0x1] real-time buffer [<device>] [audio input] too full",
+            "{reason}"
+        );
+        // The platform's own failure leads when the worker died.
+        let failure: ProducerFailure = Arc::new(std::sync::Mutex::new(Some(
+            "Capture PCM read failed: broken pipe".to_string(),
+        )));
+        source.failure = Some(failure);
+        let reason = readiness_failure_reason(&source, Duration::from_secs(2), &evidence, true);
+        assert!(
+            reason.starts_with(
+                "Capture PCM read failed: broken pipe (0 frames received; capture worker passed 960 and dropped 24000 PCM frames) Worker stderr: "
+            ),
+            "{reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_only_producer_fails_readiness_with_its_counts_inside_the_budget() {
+        // A producer whose every frame is older than `MAX_FRAME_AGE` never
+        // becomes ready; the reason carries the budget and the counts, and the
+        // owner's deadline reports before the caller's outer wait.
+        let count = Arc::new(AtomicU64::new(0));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let started = Instant::now();
+        let result = prepare_producer_in(
+            SourceRole::Microphone,
+            move || {
+                let (sender, receiver) = mpsc::channel();
+                for _ in 0..3 {
+                    let mut stale = frame(0.2, 480);
+                    stale.captured_at = Instant::now() - MAX_FRAME_AGE - Duration::from_millis(500);
+                    sender.send(stale).unwrap();
+                }
+                // Keep the sender alive past readiness so the loop sees a
+                // deadline, not a disconnect.
+                std::mem::forget(sender);
+                Ok(fake_source(receiver, closed_tx))
+            },
+            Arc::new(AtomicBool::new(false)),
+            count.clone(),
+            spawn_owner,
+            |_| {},
+            Some(ReadinessPolicy {
+                budget: Duration::from_millis(300),
+                withhold_first_pcm: None,
+                fail_with: None,
+            }),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("a stale-only producer must not become ready"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.starts_with(
+                "The microphone did not deliver fresh PCM within 0.3s: 3 frames received, all stale (newest "
+            ),
+            "{error}"
+        );
+        assert!(error.contains("largest packet 10 ms"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
     #[tokio::test]
     async fn failed_readiness_waits_for_actual_owner_close_before_returning() {
         let count = Arc::new(AtomicU64::new(0));
@@ -7205,6 +8726,7 @@ mod tests {
                         receiver: rx,
                         stats: Arc::new(AudioCaptureStats::default()),
                         failure: None,
+                        stderr_tail: None,
                         _owner: Box::new(HeldClose {
                             started: Some(close_tx),
                             release: release_rx,
@@ -7740,20 +9262,37 @@ mod mix_tests {
 
     const FIXTURE_FRAMES: usize = 480_000; // 10 s at 48 kHz.
     const FIXTURE_PACKET: usize = 512;
-    /// SHA-256 of the first 10 s the pre-S2 bus wrote for `fixture_sample`
-    /// at +3 dB (512-frame packets, 50 ms playout), captured on the pre-change
-    /// writer on macOS. The fixture uses `f32::sin`, whose last bits differ
-    /// between platform math libraries, so the pinned digest is checked on
-    /// macOS only. Every platform instead compares the real bus byte for byte
-    /// with `reference_writer_bytes`, the chunk-by-chunk writer path the
-    /// digest pins.
+    /// SHA-256 of the first 10 s the mic-only bus writes for `fixture_sample`
+    /// at +3 dB (512-frame packets, 50 ms playout), captured on macOS. The
+    /// fixture uses `f32::sin`, whose last bits differ between platform math
+    /// libraries, so the pinned digest is checked on macOS only. Every
+    /// platform instead compares the real bus byte for byte with
+    /// `reference_writer_bytes`, the chunk-by-chunk writer path the digest
+    /// pins.
+    ///
+    /// Re-pinned by plan 200 A1 (was `ed3f07a9…683fc7`, the pre-S2 writer):
+    /// the fold now decides per block with a ~150 ms level detector instead
+    /// of per sample. The fixture's 100 ms one-channel-silent stretches are
+    /// too short to move the detector 20 dB, so they are now averaged with
+    /// the silent channel (half level) instead of switching to the live
+    /// channel sample by sample, and samples under 1e-5 are no longer zeroed
+    /// (A1 digest `02d599b4…1683c9`).
+    ///
+    /// Re-pinned again by plan 200 A2: the microphone-only path now runs the
+    /// peak limiter. This fixture is not under the ceiling: at +3 dB the
+    /// average of its 0.6 and 0.9 tones peaks near 1.06, which the old path
+    /// clamped at full scale and the limiter now holds at -1 dBFS. Its quiet
+    /// stretches still pass at exact unity once the limiter releases, and
+    /// `a_mic_under_the_ceiling_writes_exactly_the_unlimited_bytes` pins the
+    /// byte identity of a microphone that stays under the ceiling.
     #[cfg(target_os = "macos")]
     const MIC_ONLY_GOLDEN_SHA256: &str =
-        "ed3f07a9b312bf01561301c02406f6c9827df05af98b1b720f19e59eee683fc7";
+        "79dddc3133cecec949aec3960d897a896149f498f2d5728f44da089f8adb57b5";
 
     /// Deterministic stereo fixture addressed by absolute sample position:
-    /// different L/R tones, with one-channel-silent stretches every second so
-    /// every `centered_voice_sample` branch and the +3 dB clamp are exercised.
+    /// different L/R tones, with one-channel-silent and both-silent stretches
+    /// every second, and the +3 dB gain pushing the average past the limiter
+    /// ceiling.
     fn fixture_sample(position: usize) -> (f32, f32) {
         let t = position as f32 / 48_000.0;
         let left = 0.6 * (std::f32::consts::TAU * 440.0 * t).sin();
@@ -7832,6 +9371,13 @@ mod mix_tests {
         let (sender, receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        let fixture = observation.as_ref().and_then(|observation| {
+            let observation = observation.lock().unwrap();
+            observation
+                .fixture_gate
+                .clone()
+                .map(|gate| (gate, observation.epoch))
+        });
         let worker = thread::spawn(move || {
             for packet in packets {
                 loop {
@@ -7842,6 +9388,21 @@ mod mix_tests {
                         Some(remaining) => thread::sleep(remaining.min(Duration::from_millis(5))),
                         None => break,
                     }
+                }
+                let fixture_end = fixture.as_ref().map(|(_, epoch)| {
+                    (packet
+                        .captured_at
+                        .saturating_duration_since(*epoch)
+                        .as_secs_f64()
+                        * 48_000.0)
+                        .round() as u64
+                });
+                if let Some((gate, _)) = &fixture
+                    && !gate
+                        .permit_packet(fixture_end.unwrap(), &worker_stop)
+                        .unwrap_or(false)
+                {
+                    return;
                 }
                 let delivery = observation.as_ref().map(|_| {
                     (
@@ -7864,6 +9425,9 @@ mod mix_tests {
                         sent,
                     );
                 }
+                if let Some((gate, _)) = &fixture {
+                    gate.delivered(role, fixture_end.unwrap());
+                }
             }
             while !worker_stop.load(Ordering::Acquire) {
                 thread::sleep(Duration::from_millis(5));
@@ -7879,6 +9443,7 @@ mod mix_tests {
                 thread: Some(worker),
             }),
             failure,
+            stderr_tail: None,
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
@@ -8098,6 +9663,10 @@ mod mix_tests {
         let settings = AudioProcessingSettingsHandle::new(fixture_settings());
         let mut bytes = Vec::with_capacity(FIXTURE_FRAMES * 8);
         let stop = AtomicBool::new(false);
+        // Plan 200 A1: one fold across the stream, planned per chunk as the
+        // bus does. Plan 200 A2: one limiter across the stream too.
+        let mut fold = VoiceFold::default();
+        let mut limiter = PeakLimiter::default();
         while timeline.cursor() < FIXTURE_FRAMES as u64 {
             // Deliver every packet that starts within the next 100 ms.
             while next_packet * FIXTURE_PACKET < timeline.cursor() as usize + 4_800 {
@@ -8109,17 +9678,20 @@ mod mix_tests {
             }
             let raw = timeline.render_with_provenance();
             let now = Instant::now();
-            let written = write_chunk_with_clock(
+            let write = write_chunk_with_clock(
                 &mut bytes,
                 &raw.samples,
                 &settings,
+                fold.plan(&raw.samples, 2),
+                limiter,
                 &stop,
                 &AtomicBool::new(false),
                 || now,
                 || {},
             )
             .unwrap();
-            assert_eq!(written.stale_from, None);
+            limiter = write.limiter;
+            assert_eq!(write.written.stale_from, None);
         }
         assert_eq!(bytes.len(), FIXTURE_FRAMES * 8);
         bytes
@@ -8410,12 +9982,17 @@ mod mix_tests {
             crate::audio::native_audio_fifo_path(&format!("mix-bus-{}", uuid::Uuid::new_v4()));
         crate::audio::create_native_audio_fifo(&path).unwrap();
         let (reader, progress) = spawn_fifo_reader_with_stall(path.clone(), reader_stall);
+        let fixture_gate = observation
+            .as_ref()
+            .and_then(|observation| observation.lock().unwrap().fixture_gate.clone());
         let video_epoch = Arc::new(OnceLock::new());
-        video_epoch.set(epoch).unwrap();
+        if fixture_gate.is_none() {
+            video_epoch.set(epoch).unwrap();
+        }
         let session = attach_prepared_with(
             source,
             path,
-            Some(video_epoch),
+            Some(video_epoch.clone()),
             settings,
             crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
             options,
@@ -8423,6 +10000,10 @@ mod mix_tests {
         if let Some(observation) = &observation {
             observation.lock().unwrap().reader = Some(progress.clone());
             session.handle.shared.lock().unwrap().mix_observation = Some(observation.clone());
+        }
+        if let Some(gate) = fixture_gate {
+            session.handle.shared.lock().unwrap().mix_fixture_gate = Some(gate.clone());
+            video_epoch.set(epoch).unwrap();
         }
         Bus {
             session,
@@ -9210,6 +10791,605 @@ mod mix_tests {
         );
     }
 
+    /// Plan 200 A2 on the real bus: a microphone-only session at +12 dB is
+    /// limited under the -1 dBFS ceiling and counts its clipped samples
+    /// (`audioMixClippedSamples`), with no system audio attached.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hot_mic_only_session_is_limited_and_counted() {
+        let epoch = Instant::now() + Duration::from_millis(100);
+        let microphone = signal_packets(epoch, 0, 48_000, 512, |position| {
+            let sample = 0.5 * (std::f32::consts::TAU * 440.0 * position as f32 / 48_000.0).sin();
+            (sample, sample)
+        });
+        let bus = start_bus(
+            epoch,
+            Some(microphone),
+            AudioProcessingSettings {
+                gain_db: 12.0,
+                muted: false,
+            },
+            SessionAudioOptions::default(),
+        )
+        .await;
+        bus.wait_for_frames(24_000).await;
+        let observation = bus.session.system_audio().observation();
+        let (bytes, _) = bus.finish();
+        let samples = decode(&bytes);
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.abs() <= LIMITER_CEILING + 1.0e-6),
+            "the limiter holds the -1 dBFS ceiling"
+        );
+        assert!(samples.iter().any(|sample| sample.abs() > 0.85));
+        assert!(!observation.attached);
+        assert!(observation.mix_clipped_samples > 0, "{observation:?}");
+    }
+
+    /// Amplitude of `hz` in one channel of interleaved stereo: Goertzel over
+    /// a whole number of cycles, so a pure tone reads its peak and a tone at
+    /// another whole-cycle frequency reads zero.
+    fn tone_amplitude(samples: &[f32], channel: usize, hz: f64) -> f64 {
+        let coefficient =
+            2.0 * (std::f64::consts::TAU * hz / f64::from(NATIVE_AUDIO_SAMPLE_RATE)).cos();
+        let (mut previous, mut before) = (0.0_f64, 0.0_f64);
+        for frame in samples.chunks_exact(2) {
+            let current = f64::from(frame[channel]) + coefficient * previous - before;
+            before = previous;
+            previous = current;
+        }
+        let power = previous * previous + before * before - coefficient * previous * before;
+        2.0 * power.max(0.0).sqrt() / (samples.len() / 2) as f64
+    }
+
+    #[test]
+    fn source_iso_fixture_gate_coordinates_unequal_packets_before_render() {
+        let gate = Arc::new(MixFixtureGate::default());
+        gate.arm();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = mpsc::channel();
+        let workers = [
+            (SourceRole::Microphone, 512_u64),
+            (SourceRole::System, 960_u64),
+        ]
+        .map(|(role, packet)| {
+            let gate = gate.clone();
+            let stop = stop.clone();
+            let done = done_tx.clone();
+            thread::spawn(move || {
+                let result: io::Result<()> = (|| {
+                    for end in (1..=48_000_u64.div_ceil(packet)).map(|index| index * packet) {
+                        if !gate.permit_packet(end, &stop)? {
+                            break;
+                        }
+                        gate.delivered(role, end);
+                    }
+                    Ok(())
+                })();
+                let _ = done.send(result);
+            })
+        });
+        let mut result = Ok(());
+        let draining = AtomicBool::new(false);
+        for cursor in (0..48_000).step_by(CHUNK_FRAMES) {
+            result = gate.before_ingest(cursor, &stop, &draining);
+            if result.is_err() {
+                break;
+            }
+            let state = gate.state.lock().unwrap_or_else(|p| p.into_inner());
+            if !state
+                .delivered
+                .iter()
+                .all(|end| *end >= cursor + CHUNK_FRAMES as u64 && *end <= cursor + 4096)
+            {
+                result = Err(io::Error::other(
+                    "fixture readiness or producer bound violated",
+                ));
+                break;
+            }
+        }
+        stop.store(true, Ordering::Release);
+        gate.changed.notify_all();
+        let completed = (0..2)
+            .map(|_| done_rx.recv_timeout(Duration::from_secs(3)))
+            .collect::<Vec<_>>();
+        // Readiness waits observe Stop and have their own absolute deadline;
+        // finish both owned workers before reporting any assertion failure.
+        for worker in workers {
+            worker.join().expect("fixture producer reaped");
+        }
+        result.unwrap();
+        for completion in completed {
+            completion.unwrap().unwrap();
+        }
+    }
+
+    /// Plan 157. Also consumed by smoke:separate-source-fixture. The real bus
+    /// mixes a 440 Hz microphone with a 1 kHz system source while the
+    /// production tap wiring (`prepare_source_audio_taps`, `role_audio_fifo`)
+    /// feeds the ISO muxer inputs. Read where each muxer reads, the Camera
+    /// input is the processed microphone alone, the Screen input is the
+    /// system contribution alone (stereo kept), and the two sum to the
+    /// Combined mix sample for sample on the Combined timeline. A swap at any
+    /// junction (bus offer, tap assignment, muxer input) fails here, with no
+    /// track title to hide behind. The smoke encodes the dumped PCM per role.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_iso_audio_artifact_fixture() {
+        use crate::source_iso::{
+            RecordingRole, SourceIsoPlan, prepare_source_audio_taps, role_audio_fifo,
+        };
+        // Mirrored in scripts/smoke-separate-source-fixture.mjs.
+        const MICROPHONE_HZ: f64 = 440.0;
+        const SYSTEM_HZ: f64 = 1_000.0;
+        const MICROPHONE_AMPLITUDE: f64 = 0.5;
+        const SYSTEM_AMPLITUDE: f64 = 0.3;
+        // The smoke's video legs are 3 s; the extra half second covers
+        // `-shortest`. The sources run a second longer so neither stalls.
+        const FRAMES: usize = 168_000;
+        // One steady second: whole cycles of both tones, past the attach ramp.
+        const WINDOW: std::ops::Range<usize> = 48_000..96_000;
+        let tone = |hz: f64, amplitude: f64, position: usize| {
+            let phase = (position % 48_000) as f64 / 48_000.0;
+            (amplitude * (std::f64::consts::TAU * hz * phase).sin()) as f32
+        };
+        let epoch = Instant::now() + Duration::from_millis(500);
+        let mut observation = MixTestObservation::new(epoch, system_options().playout_delay);
+        observation.trace = Some(MixWindowTrace::new(WINDOW.start as u64, WINDOW.end as u64));
+        observation.window = Some((WINDOW.start as u64, WINDOW.end as u64));
+        observation.fixture_gate = Some(Arc::new(MixFixtureGate::default()));
+        let evidence = Arc::new(std::sync::Mutex::new(observation));
+        let bus = start_bus_observed(
+            epoch,
+            Some(signal_packets(epoch, 0, FRAMES + 48_000, 512, |position| {
+                let sample = tone(MICROPHONE_HZ, MICROPHONE_AMPLITUDE, position);
+                (sample, sample)
+            })),
+            AudioProcessingSettings::default(),
+            system_options(),
+            None,
+            Some(evidence.clone()),
+        )
+        .await;
+        let plan =
+            SourceIsoPlan::from_settings(&crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            })
+            .unwrap();
+        let session_id = format!("audio-fixture-{}", uuid::Uuid::new_v4());
+        let taps = Arc::new(prepare_source_audio_taps(&session_id, &plan).unwrap());
+        assert_eq!(
+            role_audio_fifo(&taps, RecordingRole::Combined),
+            None,
+            "the Combined muxer reads the bus FIFO, never a tap"
+        );
+        // Read exactly where each ISO muxer reads.
+        let readers = [RecordingRole::Screen, RecordingRole::Camera].map(|role| {
+            let path = role_audio_fifo(&taps, role)
+                .unwrap_or_else(|| panic!("the {role:?} muxer has no audio input"));
+            (path.clone(), spawn_fifo_reader(path).0)
+        });
+        // Armed before the epoch, as the start path does: the taps see every
+        // chunk the bus writes.
+        bus.session.set_source_taps(taps.clone());
+        let system = bus.session.system_audio();
+        let producer = prepare_system(
+            &system,
+            signal_packets(epoch, 0, FRAMES + 48_000, 960, |position| {
+                let sample = tone(SYSTEM_HZ, SYSTEM_AMPLITUDE, position);
+                (sample, sample * 0.5)
+            }),
+            quiet_failure(),
+        )
+        .await;
+        bus.session.attach_system(producer).await.unwrap();
+        bus.wait_for_frames(FRAMES).await;
+        let (combined, status) = bus.finish();
+        let (microphone_report, system_report) = taps.close_all();
+        let [(screen_path, screen), (camera_path, camera)] =
+            readers.map(|(path, reader)| (path, reader.join().unwrap()));
+        let _ = crate::fifo::cleanup(&screen_path);
+        let _ = crate::fifo::cleanup(&camera_path);
+        if let Some(directory) =
+            std::env::var_os("VIDEORC_SOURCE_ISO_ARTIFACT_DIR").map(PathBuf::from)
+        {
+            std::fs::create_dir_all(&directory).unwrap();
+            for (role, bytes) in [
+                ("combined", &combined),
+                ("screen", &screen),
+                ("camera", &camera),
+            ] {
+                std::fs::write(directory.join(format!("audio-{role}.f32le")), bytes).unwrap();
+            }
+        }
+        let (combined, screen, camera) = (decode(&combined), decode(&screen), decode(&camera));
+        struct FailureTrace<'a> {
+            observation: &'a Arc<std::sync::Mutex<MixTestObservation>>,
+            combined: &'a [f32],
+        }
+        impl Drop for FailureTrace<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    let observation = self.observation.lock().unwrap_or_else(|p| p.into_inner());
+                    eprintln!(
+                        "source-iso-audio-failure-trace: {}",
+                        serde_json::json!({
+                            "observation": observation.value(),
+                            "windowTrace": observation.trace.as_ref().map(|trace| trace.value(self.combined))
+                        })
+                    );
+                }
+            }
+        }
+        let _failure_trace = FailureTrace {
+            observation: &evidence,
+            combined: &combined,
+        };
+        {
+            let observation = evidence.lock().unwrap();
+            let summary = observation.value();
+            eprintln!("source-iso-audio-status: {status:?}");
+            eprintln!(
+                "source-iso-audio-summary: {}",
+                serde_json::json!({
+                    "delivery": summary["delivery"],
+                    "windowLossDelta": summary["windowLossDelta"],
+                    "completeWindowWriteCoverage": summary["completeWindowWriteCoverage"],
+                })
+            );
+            if let Some(directory) =
+                std::env::var_os("VIDEORC_SOURCE_ISO_ARTIFACT_DIR").map(PathBuf::from)
+            {
+                std::fs::write(directory.join("audio-observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                    "observation": summary,
+                    "windowTrace": observation.trace.as_ref().map(|trace| trace.value(&combined))
+                })).unwrap()).unwrap();
+            }
+        }
+        assert_eq!(
+            microphone_report.map(|report| report.dropped_chunks),
+            Some(0)
+        );
+        assert_eq!(system_report.map(|report| report.dropped_chunks), Some(0));
+        assert!(
+            combined.len() >= FRAMES * 2,
+            "the bus wrote {}",
+            combined.len()
+        );
+        for (role, tap) in [("screen", &screen), ("camera", &camera)] {
+            // A stop may cut the last chunk after the bus wrote part of it;
+            // the tap then ends on the chunk before.
+            assert!(
+                tap.len() <= combined.len() && combined.len() - tap.len() <= CHUNK_FRAMES * 2,
+                "the {role} tap carried {} samples for {} written",
+                tap.len(),
+                combined.len()
+            );
+        }
+        let range = WINDOW.start * 2..WINDOW.end * 2;
+        let (combined, screen, camera) = (
+            &combined[range.clone()],
+            &screen[range.clone()],
+            &camera[range],
+        );
+        // Same bus positions: the two ingredients ARE the written mix (0.8
+        // peak, so the limiter never touches a sample).
+        let misaligned = combined
+            .iter()
+            .zip(screen.iter().zip(camera))
+            .position(|(mix, (system, microphone))| microphone + system != *mix);
+        assert_eq!(
+            misaligned, None,
+            "the taps must carry the Combined sum's ingredients sample for sample"
+        );
+        let camera_tones = (
+            tone_amplitude(camera, 0, MICROPHONE_HZ),
+            tone_amplitude(camera, 0, SYSTEM_HZ),
+        );
+        let screen_tones = (
+            tone_amplitude(screen, 0, MICROPHONE_HZ),
+            tone_amplitude(screen, 0, SYSTEM_HZ),
+        );
+        assert!(
+            (camera_tones.0 - MICROPHONE_AMPLITUDE).abs() < 0.01 && camera_tones.1 < 1.0e-3,
+            "the Camera input must be the microphone alone (440 Hz {:.4}, 1 kHz {:.4})",
+            camera_tones.0,
+            camera_tones.1
+        );
+        assert!(
+            (screen_tones.1 - SYSTEM_AMPLITUDE).abs() < 0.01 && screen_tones.0 < 1.0e-3,
+            "the Screen input must be system audio alone (440 Hz {:.4}, 1 kHz {:.4})",
+            screen_tones.0,
+            screen_tones.1
+        );
+        assert!(
+            camera.chunks_exact(2).all(|frame| frame[0] == frame[1]),
+            "the microphone is folded to both channels"
+        );
+        assert!(
+            screen
+                .chunks_exact(2)
+                .all(|frame| (frame[1] - frame[0] * 0.5).abs() <= 1.0e-6),
+            "system audio keeps its stereo image"
+        );
+    }
+
+    // ---- Plan 189 S3: the soundboard --------------------------------------
+
+    /// A bus with the soundboard armed (its handle held, the board level
+    /// set) and no press writes the mic-only bytes, byte for byte: the
+    /// idle board renders nothing and the chunk takes the unchanged path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn armed_soundboard_without_a_press_writes_the_mic_only_bytes() {
+        let mut attempts = Vec::new();
+        for _ in 0..4 {
+            let epoch = Instant::now() + Duration::from_millis(300);
+            let packets = (0..FIXTURE_FRAMES.div_ceil(FIXTURE_PACKET))
+                .map(|index| fixture_packet(index, epoch))
+                .collect::<Vec<_>>();
+            let bus = start_bus(
+                epoch,
+                Some(packets),
+                fixture_settings(),
+                SessionAudioOptions::default(),
+            )
+            .await;
+            let soundboard = bus.session.soundboard();
+            soundboard.set_volume_db(-6.0);
+            bus.wait_for_frames(FIXTURE_FRAMES).await;
+            let status = bus.session.status();
+            let (bytes, _) = bus.finish();
+            let run = BusRun { bytes, status };
+            if clean(&run) {
+                assert_matches_reference(&run.bytes);
+                return;
+            }
+            attempts.push(run.status.counters);
+        }
+        panic!("every attempt lost PCM to scheduling: {attempts:?}");
+    }
+
+    /// The 1 kHz fixture sound: one second at 0.5, stereo s16.
+    fn fixture_sound() -> Arc<[i16]> {
+        (0..48_000)
+            .flat_map(|frame| {
+                let value = (0.5
+                    * (std::f64::consts::TAU * 1_000.0 * frame as f64 / 48_000.0).sin()
+                    * 32_767.0)
+                    .round() as i16;
+                [value, value]
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    /// Plan 189 S8, the fixture half of `pnpm smoke:soundboard-fixture`: the
+    /// real bus with a silent microphone, the plan 157 taps armed, and the
+    /// 1 kHz fixture sound pressed one second in through the production
+    /// `SoundboardHandle`, as the RPC does (the press instant is the moment
+    /// it arrived). The Combined write carries the tone from exactly the
+    /// press sample; the microphone tap, the system tap and the caption
+    /// observer never see it; a press before the epoch or after the stop is
+    /// monitor only. The smoke encodes the dumped PCM.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn soundboard_artifact_fixture() {
+        let mut attempts = Vec::new();
+        for _ in 0..3 {
+            match run_soundboard_fixture().await {
+                Ok(()) => return,
+                Err(late) => attempts.push(late),
+            }
+        }
+        panic!("every attempt placed the press late (a stalled host): {attempts:?}");
+    }
+
+    /// `Err` only when the host stalled the press past its sample; every
+    /// product rule is an assertion.
+    async fn run_soundboard_fixture() -> Result<(), String> {
+        use crate::source_iso::{
+            RecordingRole, SourceIsoPlan, prepare_source_audio_taps, role_audio_fifo,
+        };
+        // Mirrored in scripts/smoke-soundboard-fixture.mjs.
+        const TONE_HZ: f64 = 1_000.0;
+        const TONE_AMPLITUDE: f64 = 0.5;
+        const TONE_FRAMES: usize = 48_000;
+        const PRESS_AT: Duration = Duration::from_millis(1_000);
+        // Three seconds: a silent second, the tone, a silent second.
+        const FRAMES: usize = 144_000;
+        let epoch = Instant::now() + Duration::from_millis(500);
+        // No fixture gate: it coordinates two unequal packet streams, and a
+        // silent microphone has nothing to line up. A packet discarded at the
+        // start is silence either way.
+        let bus = start_bus(
+            epoch,
+            Some(signal_packets(epoch, 0, FRAMES + 48_000, 512, |_| {
+                (0.0, 0.0)
+            })),
+            AudioProcessingSettings::default(),
+            system_options(),
+        )
+        .await;
+        let plan =
+            SourceIsoPlan::from_settings(&crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            })
+            .unwrap();
+        let session_id = format!("soundboard-fixture-{}", uuid::Uuid::new_v4());
+        let taps = Arc::new(prepare_source_audio_taps(&session_id, &plan).unwrap());
+        let readers = [RecordingRole::Screen, RecordingRole::Camera].map(|role| {
+            let path = role_audio_fifo(&taps, role)
+                .unwrap_or_else(|| panic!("the {role:?} muxer has no audio input"));
+            (path.clone(), spawn_fifo_reader(path).0)
+        });
+        bus.session.set_source_taps(taps.clone());
+        // The caption tap's loudest sample: must stay at digital silence.
+        let caption_peak = Arc::new(std::sync::Mutex::new(0.0_f32));
+        {
+            let peak = caption_peak.clone();
+            bus.session.handle.shared.lock().unwrap().caption_observer =
+                Some(Arc::new(move |frame: &AudioFrame| {
+                    let mut peak = peak.lock().unwrap();
+                    for sample in &frame.samples {
+                        *peak = peak.max(sample.abs());
+                    }
+                }));
+        }
+        let soundboard = bus.session.soundboard();
+        soundboard.set_volume_db(0.0);
+        // Before the epoch: monitor only.
+        assert_eq!(
+            soundboard
+                .start(
+                    SoundVoiceStart {
+                        key: 9,
+                        pcm: fixture_sound(),
+                        gain: 1.0,
+                        looping: false,
+                    },
+                    epoch - Duration::from_millis(1),
+                )
+                .await,
+            SoundPlacement::MonitorOnly
+        );
+        // The press, a second in, at the instant it arrives.
+        tokio::time::sleep_until(tokio::time::Instant::from_std(epoch + PRESS_AT)).await;
+        let received_at = Instant::now();
+        let expected = (received_at.duration_since(epoch).as_nanos()
+            * u128::from(NATIVE_AUDIO_SAMPLE_RATE)
+            / 1_000_000_000) as u64;
+        let placement = soundboard
+            .start(
+                SoundVoiceStart {
+                    key: 1,
+                    pcm: fixture_sound(),
+                    gain: 1.0,
+                    looping: false,
+                },
+                received_at,
+            )
+            .await;
+        let SoundPlacement::OnAir { sample, late } = placement else {
+            panic!("the press must go on air: {placement:?}");
+        };
+        bus.wait_for_frames(FRAMES).await;
+        let (combined, status) = bus.finish();
+        // After the stop: monitor only.
+        assert_eq!(
+            soundboard
+                .start(
+                    SoundVoiceStart {
+                        key: 2,
+                        pcm: fixture_sound(),
+                        gain: 1.0,
+                        looping: false,
+                    },
+                    Instant::now(),
+                )
+                .await,
+            SoundPlacement::MonitorOnly
+        );
+        let (microphone_report, system_report) = taps.close_all();
+        let [(screen_path, screen), (camera_path, camera)] =
+            readers.map(|(path, reader)| (path, reader.join().unwrap()));
+        let _ = crate::fifo::cleanup(&screen_path);
+        let _ = crate::fifo::cleanup(&camera_path);
+        eprintln!("soundboard-fixture-status: {status:?} placed={sample} expected={expected}");
+        if late {
+            return Err(format!("placed at {sample}, pressed at {expected}"));
+        }
+        assert_eq!(sample, expected, "the voice starts at the press sample");
+        if let Some(directory) =
+            std::env::var_os("VIDEORC_SOUNDBOARD_ARTIFACT_DIR").map(PathBuf::from)
+        {
+            std::fs::create_dir_all(&directory).unwrap();
+            for (role, bytes) in [
+                ("combined", &combined),
+                ("microphone", &camera),
+                ("system", &screen),
+            ] {
+                std::fs::write(directory.join(format!("audio-{role}.f32le")), bytes).unwrap();
+            }
+            std::fs::write(
+                directory.join("sound-press.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "sampleRate": NATIVE_AUDIO_SAMPLE_RATE,
+                    "expectedSample": expected,
+                    "placedSample": sample,
+                    "toneHz": TONE_HZ,
+                    "amplitude": TONE_AMPLITUDE,
+                    "toneFrames": TONE_FRAMES,
+                    "playoutDelayMs": system_options().playout_delay.as_millis() as u64,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            microphone_report.map(|report| report.dropped_chunks),
+            Some(0)
+        );
+        assert_eq!(system_report.map(|report| report.dropped_chunks), Some(0));
+        let (combined, screen, camera) = (decode(&combined), decode(&screen), decode(&camera));
+        assert!(
+            combined.len() >= FRAMES * 2,
+            "the bus wrote {}",
+            combined.len()
+        );
+        let sample = sample as usize;
+        // Silent before the press: the microphone is digital silence and
+        // nothing else plays.
+        assert!(
+            combined[..sample * 2].iter().all(|value| *value == 0.0),
+            "the Combined write must be silent before the press"
+        );
+        // Sample-exact placement: frame 12 of a 1 kHz tone at 48 kHz is its
+        // first peak (0.5 at unity gain); frame 0 is its zero crossing.
+        assert_eq!(combined[sample * 2], 0.0);
+        assert_eq!(combined[sample * 2 + 1], 0.0);
+        assert!(
+            (combined[(sample + 12) * 2] - 0.5).abs() < 1.0e-6,
+            "frame 12 after the press is the tone's first peak, got {}",
+            combined[(sample + 12) * 2]
+        );
+        assert!(
+            (combined[(sample + 11) * 2] - 0.4957).abs() < 1.0e-3,
+            "frame 11 after the press approaches the peak, got {}",
+            combined[(sample + 11) * 2]
+        );
+        // The steady tone, whole cycles, at its amplitude on both channels.
+        let steady = &combined[(sample + 480) * 2..(sample + TONE_FRAMES - 480) * 2];
+        for channel in 0..2 {
+            let amplitude = tone_amplitude(steady, channel, TONE_HZ);
+            assert!(
+                (amplitude - TONE_AMPLITUDE).abs() < 0.01,
+                "channel {channel} tone amplitude {amplitude:.4}"
+            );
+        }
+        // Silent again after the sound ends.
+        assert!(
+            combined[(sample + TONE_FRAMES + 480) * 2..]
+                .iter()
+                .all(|value| *value == 0.0),
+            "the Combined write must be silent after the sound ends"
+        );
+        // The sound reaches neither ISO tap nor the caption tap.
+        assert!(
+            camera.iter().all(|value| *value == 0.0),
+            "the microphone tap must never carry a sound"
+        );
+        assert!(
+            screen.iter().all(|value| *value == 0.0),
+            "the system tap must never carry a sound"
+        );
+        assert_eq!(
+            *caption_peak.lock().unwrap(),
+            0.0,
+            "the caption tap must never hear a sound"
+        );
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn silent_system_producer_is_never_retired_for_stalling() {
         let epoch = Instant::now() + Duration::from_millis(100);
@@ -9633,6 +11813,51 @@ mod mix_tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_iso_stop_flushes_delayed_system_without_future_microphone() {
+        let epoch = Instant::now() + Duration::from_millis(100);
+        let bus = start_bus(
+            epoch,
+            Some(signal_packets(epoch, 0, 480_000, 480, |_| (0.2, 0.2))),
+            AudioProcessingSettings::default(),
+            SessionAudioOptions {
+                system_delay_frames: 48_000,
+                system_gain_db: 0.0,
+                echo_guard: false,
+                ..system_options()
+            },
+        )
+        .await;
+        bus.session
+            .set_source_taps(Arc::new(crate::source_audio_tap::SourceAudioTaps::default()));
+        let system = bus.session.system_audio();
+        let source = prepare_system(
+            &system,
+            signal_packets(epoch, 0, 480_000, 480, |_| (0.3, 0.3)),
+            quiet_failure(),
+        )
+        .await;
+        bus.session.attach_system(source).await.unwrap();
+        bus.wait_for_frames(72_000).await;
+        let stopped = Instant::now();
+        let source_end = (stopped.duration_since(epoch).as_secs_f64() * 48_000.0) as usize;
+        let (bytes, _) = bus.finish();
+        assert!(
+            stopped.elapsed() < Duration::from_millis(500),
+            "buffered tail flush must not await one second of future capture"
+        );
+        let samples = decode(&bytes);
+        assert!(
+            samples.len() / 2 >= source_end + 48_000,
+            "residual trim requires another second of raw bus samples"
+        );
+        let tail = &samples[(source_end + 960) * 2..(source_end + 48_000 - 960) * 2];
+        assert!(
+            tail.iter().all(|sample| (*sample - 0.3).abs() < 0.0001),
+            "already captured delayed system survives, post-Stop microphone stays silent"
+        );
+    }
+
     #[test]
     fn a_stop_drain_targets_the_stop_instant_and_is_bounded() {
         let epoch = Instant::now();
@@ -9759,6 +11984,7 @@ mod mix_tests {
                     receiver: pcm_rx,
                     stats: Arc::new(AudioCaptureStats::default()),
                     failure: None,
+                    stderr_tail: None,
                     _owner: Box::new(HeldOwner {
                         closing: Some(mic_closing_tx),
                         release: mic_release_rx,
@@ -9916,18 +12142,20 @@ mod mix_tests {
                 gain_db: -6.0,
                 muted: false,
             },
+            FoldPlan::one_shot(&stereo(0.2, 0.1, 480), 2),
             &stereo(0.3, -0.1, 480),
             AudioProcessingSettings {
                 gain_db: 6.0,
                 muted: false,
             },
+            None,
             PeakLimiter::default(),
         );
         let microphone = (0.15 * crate::audio::db_to_gain(-6.0)).clamp(-1.0, 1.0);
         let system = crate::audio::db_to_gain(6.0);
         assert_eq!(
             mixed.microphone,
-            process_interleaved_f32(
+            crate::audio::process_interleaved_f32(
                 &stereo(0.2, 0.1, 480),
                 2,
                 AudioProcessingSettings {
@@ -9955,8 +12183,10 @@ mod mix_tests {
                 gain_db: 0.0,
                 muted: true,
             },
+            FoldPlan::one_shot(&stereo(0.4, 0.4, 480), 2),
             &stereo(0.3, 0.2, 480),
             AudioProcessingSettings::default(),
+            None,
             PeakLimiter::default(),
         );
         assert!(muted_mic.microphone.iter().all(|sample| *sample == 0.0));
@@ -9964,11 +12194,13 @@ mod mix_tests {
         let silent_system = mix_chunk(
             &stereo(0.4, 0.4, 480),
             AudioProcessingSettings::default(),
+            FoldPlan::one_shot(&stereo(0.4, 0.4, 480), 2),
             &stereo(0.3, 0.2, 480),
             AudioProcessingSettings {
                 gain_db: 0.0,
                 muted: true,
             },
+            None,
             PeakLimiter::default(),
         );
         assert_eq!(silent_system.output[..2], [0.4, 0.4]);
@@ -10005,6 +12237,167 @@ mod mix_tests {
         let mut unity = stereo(0.25, -0.5, 480);
         limiter.process(&mut unity, &mut vec![false; 960]);
         assert_eq!(unity, stereo(0.25, -0.5, 480), "an idle limiter is a no-op");
+    }
+
+    // ---- Plan 200 A2: the microphone-only path is limited too -----------------
+
+    /// Writes `raw` chunk by chunk through the microphone-only path with one
+    /// fold and one limiter across the stream, as the bus does.
+    fn write_mic_only(
+        raw: &[f32],
+        settings: AudioProcessingSettings,
+    ) -> (Vec<u8>, u64, PeakLimiter) {
+        let settings = AudioProcessingSettingsHandle::new(settings);
+        let mut fold = VoiceFold::default();
+        let mut limiter = PeakLimiter::default();
+        let mut bytes = Vec::new();
+        let mut clipped = 0;
+        let now = Instant::now();
+        for chunk in raw.chunks(CHUNK_FRAMES * 2) {
+            let write = write_chunk_with_clock(
+                &mut bytes,
+                chunk,
+                &settings,
+                fold.plan(chunk, 2),
+                limiter,
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+                || now,
+                || {},
+            )
+            .unwrap();
+            assert_eq!(write.written.stale_from, None);
+            limiter = write.limiter;
+            clipped += write.clipped_samples;
+        }
+        (bytes, clipped, limiter)
+    }
+
+    /// A 440 Hz tone at `amplitude` on both channels, `frames` long.
+    fn mic_tone(frames: usize, amplitude: f32) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|position| {
+                let sample =
+                    amplitude * (std::f32::consts::TAU * 440.0 * position as f32 / 48_000.0).sin();
+                [sample, sample]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mic_under_the_ceiling_writes_exactly_the_unlimited_bytes() {
+        // +3 dB on a 0.6 tone peaks at 0.85, under the 0.891 ceiling.
+        let settings = AudioProcessingSettings {
+            gain_db: 3.0,
+            muted: false,
+        };
+        let raw = mic_tone(48_000, 0.6);
+        let (bytes, clipped, limiter) = write_mic_only(&raw, settings);
+        let mut fold = VoiceFold::default();
+        let unlimited = raw
+            .chunks(CHUNK_FRAMES * 2)
+            .flat_map(|chunk| {
+                crate::audio::fold_interleaved_f32(chunk, 2, settings, fold.plan(chunk, 2), true)
+            })
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, unlimited, "unity gain is exact");
+        assert_eq!(clipped, 0);
+        assert!(limiter.idle());
+        // A muted microphone keeps its signed zeros too.
+        let (muted, _, _) = write_mic_only(
+            &raw,
+            AudioProcessingSettings {
+                gain_db: 3.0,
+                muted: true,
+            },
+        );
+        let mut fold = VoiceFold::default();
+        let unlimited_muted = raw
+            .chunks(CHUNK_FRAMES * 2)
+            .flat_map(|chunk| {
+                crate::audio::fold_interleaved_f32(
+                    chunk,
+                    2,
+                    AudioProcessingSettings {
+                        gain_db: 3.0,
+                        muted: true,
+                    },
+                    fold.plan(chunk, 2),
+                    true,
+                )
+            })
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(muted, unlimited_muted);
+    }
+
+    #[test]
+    fn a_hot_mic_is_limited_under_the_ceiling_and_counted_not_clamped() {
+        // +12 dB on a 0.5 tone peaks near 2.0: the old path clamped it at
+        // full scale, flat-topping every peak.
+        let settings = AudioProcessingSettings {
+            gain_db: 12.0,
+            muted: false,
+        };
+        let raw = mic_tone(48_000, 0.5);
+        let (bytes, clipped, _) = write_mic_only(&raw, settings);
+        let samples = bytes
+            .chunks_exact(4)
+            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.abs() <= LIMITER_CEILING + 1.0e-6),
+            "the limiter holds the -1 dBFS ceiling"
+        );
+        assert!(samples.iter().any(|sample| sample.abs() > 0.85));
+        assert!(clipped > 0, "the clipped counter rises");
+    }
+
+    #[test]
+    fn the_mic_only_ingredient_matches_the_mixed_paths() {
+        // Plan 157 / plan 200 A2: the Microphone file and meter get the same
+        // signal whether or not anything is mixed: the clamped ingredient,
+        // not the limited output.
+        let settings = AudioProcessingSettings {
+            gain_db: 12.0,
+            muted: false,
+        };
+        let raw = mic_tone(CHUNK_FRAMES, 0.5);
+        let handle = AudioProcessingSettingsHandle::new(settings);
+        let now = Instant::now();
+        let write = write_chunk_with_clock(
+            &mut Vec::new(),
+            &raw,
+            &handle,
+            FoldPlan::one_shot(&raw, 2),
+            PeakLimiter::default(),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            || now,
+            || {},
+        )
+        .unwrap();
+        let mixed = mix_chunk(
+            &raw,
+            settings,
+            FoldPlan::one_shot(&raw, 2),
+            &vec![0.0; raw.len()],
+            AudioProcessingSettings::default(),
+            None,
+            PeakLimiter::default(),
+        );
+        assert_eq!(write.microphone, mixed.microphone);
+        assert!(write.microphone.iter().any(|sample| *sample == 1.0));
+        assert!(
+            write
+                .written
+                .samples
+                .iter()
+                .all(|sample| sample.abs() <= LIMITER_CEILING + 1.0e-6)
+        );
     }
 
     #[test]

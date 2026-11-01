@@ -115,6 +115,13 @@ try {
   for (const asset of ['/app.js', '/remote-client.js', '/hmac.js', '/app.css', '/icon.svg']) {
     if ((await fetch(`${origin}${asset}`)).status !== 200) fail(`${asset} not served`)
   }
+  // Plan 208 S6: the chrome ground under the page, as WebP.
+  for (const ground of ['/chrome-ground-dark.webp', '/chrome-ground-light.webp']) {
+    const response = await fetch(`${origin}${ground}`)
+    if (response.status !== 200 || response.headers.get('content-type') !== 'image/webp') {
+      fail(`${ground} not served as image/webp (status ${response.status})`)
+    }
+  }
   // Main-backend routes, probed WITHOUT credentials on purpose: they must not
   // exist here at all. (Segments, not literals — smoke-command-callers.test
   // statically requires a bearer next to any smoke-command-server path.)
@@ -212,7 +219,7 @@ try {
     await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
     const back = await device.intent({ kind: 'systemAudioToggle' })
     if (!back.ok) fail(`systemAudioToggle back was refused: ${back.message}`)
-  } else if (systemAudio.ok || systemAudio.message !== 'System audio is not available.') {
+  } else if (systemAudio.ok || systemAudio.message !== "System audio isn't available.") {
     fail(`systemAudioToggle without the device: ${JSON.stringify(systemAudio)}`)
   }
   console.log(

@@ -127,6 +127,36 @@ describe('gesture geometry ownership', () => {
     for (let i = 1; i < positions.length; i++)
       expect(Math.abs(positions[i] - positions[i - 1]) * 500).toBeLessThanOrEqual(1.001)
   })
+  it('never lets two magnets beside each other trade the box back and forth', () => {
+    // A box centred on the canvas (the centre magnet) whose right edge sits
+    // 1 px short of another item's left edge (a second magnet 1 px left of
+    // the first), as the default banner sits beside the Buddy: the magnet
+    // letting go must not hand the box straight to the other, and back.
+    const box = { ...rect, x: 0.2, width: 0.6 }
+    const pixels = { width: 500, height: 500 }
+    const gesture = new StageGesture(
+      'banner:sponsor',
+      1,
+      'move',
+      box,
+      { x: 0, y: 0 },
+      pixels,
+      { x: [0.5, 0.798], y: [] },
+      true,
+      true,
+      true
+    )
+    const positions = Array.from(
+      { length: 81 },
+      (_, i) => gesture.sample({ x: i / pixels.width, y: 0 }, modifiers).rect.x
+    )
+    for (let i = 1; i < positions.length; i++) {
+      expect(positions[i]).toBeGreaterThanOrEqual(positions[i - 1]! - 1e-9)
+      expect((positions[i]! - positions[i - 1]!) * pixels.width).toBeLessThanOrEqual(1.001)
+    }
+    // Held for the release distance, then 1:1 with the pointer.
+    expect((positions.at(-1)! - box.x) * pixels.width).toBeCloseTo(80 - 10, 3)
+  })
   it('rebases Alt when releasing the magnet', () => {
     const gesture = new StageGesture(
       'screen',

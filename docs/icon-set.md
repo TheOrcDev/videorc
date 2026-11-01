@@ -21,12 +21,31 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the glyphs sit outside the Nucleo count: six platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; the other five come from Phosphor) and `OrcleIcon`, Orcle's own mark, hand-drawn from the app logo (plan 119). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
+Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the glyphs sit outside the Nucleo count: six platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; the other three come from Phosphor) and `BuddyIcon`, Buddy's own mark (the owner's Buddy artwork since plan 164; plan 119 added the slot). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
 
-Plan 119 retired two slots and added two. `OrcleIcon` replaced both
+Plan 206 (2026-10-27) added `FacebookIcon`, Phosphor's `FacebookLogo`: a
+seventh platform brand mark, outside the Nucleo count like the others.
+
+Plan 210 S8b (2026-10-29) added `HiddenIcon` (EyeSlash) for Hide screen: the
+screen is hidden from viewers, a meaning no slot had (`PreviewIcon`'s eye opens
+the Preview window). It is one more glyph inside the Nucleo count.
+
+The Buddy page's zoom (2026-10-09) added `ZoomInIcon` (MagnifyingGlassPlus):
+a small picture opened larger to look at it, a meaning no slot had
+(`SearchIcon` finds, `PreviewIcon` opens the Preview window, `FrameIcon` is
+the output frame). That made **92 slots over 88 glyphs**.
+
+Plan 174 S3.12 (J1-22) split markers from cuts. Scissors (`ClipIcon`) had
+meant Clean cut, clip marks _and_ markers; a marker is a point on the
+timeline to find again (`CONTEXT.md`), so it got its own slot, `MarkerIcon`
+(BookmarkSimple), and scissors now mean cutting only. The same pass freed
+three glyphs no call site used: `VerifiedIcon` (ShieldCheck), `BrainIcon`
+(Brain) and `FastIcon` (Lightning). That makes **90 slots over 86 glyphs**.
+
+Plan 119 retired two slots and added two. `BuddyIcon` replaced both
 `PublishIcon` (Sparkle, a glyph `SparkleIcon` keeps) and `CohostIcon` (Robot,
 freed), and the in-app player added `PauseIcon` (Pause).
 
@@ -39,6 +58,10 @@ headings carry no icons any more.
 Check whether a slot already means what you need and reuse it. Add a slot only
 for a genuinely new meaning, and never add a second variant of an existing one
 — that is how the set reached 100.
+
+Copy names what an icon shows, never its slot: "Trash", not `DeleteIcon`.
+`renderer-copy-guards.test.ts` fails on a slot name in readable text (plan 174
+S2.1).
 
 ## Licence: the 100-icon ceiling
 
@@ -59,7 +82,7 @@ lands**:
 
 1. **Count.** 100 is the hard ceiling. `pnpm icons:build` refuses to build a
    larger export rather than leaving the count to whoever last added a glyph.
-   At 87 glyphs the app has ~13 of headroom; the audit's divergences would
+   At 86 glyphs the app has ~14 of headroom; the audit's divergences would
    spend about 3 of it.
 
 2. **Where the SVGs may live.** Videorc's repository is public and AGPL, which
@@ -125,30 +148,43 @@ The registry preserved today's glyph for every slot: the migration was
 deliberately behaviour-free. These are the slots where the inherited glyph is
 **wrong or weak**, to settle before or during the export.
 
-| Slot                                         | Glyph today               | Verdict                                                                                                                                                                                        |
-| -------------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SourcesIcon`                                | Monitor                   | **Change.** The Sources page owns screen, window, camera _and_ microphone; a monitor names one of four. Prefer a plug/input or layered-devices glyph.                                          |
-| `OutputIcon`                                 | Record (dot)              | **Change.** The Output page configures destinations and encoding; the record dot is the Record _action_ and must not be diluted. Prefer export/arrow-out or sliders. Splits from `RecordIcon`. |
-| `SourcesIcon`/`DisplayIcon`                  | Monitor (shared)          | **Split** once Sources gets its own glyph; `DisplayIcon` keeps the monitor.                                                                                                                    |
-| `AssetsIcon`/`ImageIcon`                     | ImageSquare (shared)      | **Consider splitting.** Assets is a library of media, not one image — a stack/collection glyph would separate them.                                                                            |
-| `StudioIcon`/`CameraIcon`                    | VideoCamera (shared)      | **Keep shared** unless the export offers a distinct "studio/stage" glyph worth the extra count.                                                                                                |
-| `ClapperboardIcon` vs `LibraryIcon`          | FilmSlate / FilmReel      | **Review together.** Two film metaphors for "recordings" and "library"; one may be redundant.                                                                                                  |
-| `SaveIcon`                                   | FloppyDisk                | **Owner call.** Dated metaphor, universally understood. Keep unless the export has a better save affordance.                                                                                   |
-| `AlertIcon` vs `WarningIcon`                 | WarningCircle / Warning   | **Keep both, enforce the split**: triangle warns, circle alerts. This pairing already absorbed three previous variants.                                                                        |
-| `HealthIcon` / `HeartbeatIcon` / `GaugeIcon` | Pulse / Heartbeat / Gauge | **Review.** Three vitals metaphors across Health and streaming; probably two are enough.                                                                                                       |
+| Slot                                         | Glyph today               | Verdict                                                                                                                                                                                                                                          |
+| -------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SourcesIcon`                                | Monitor                   | **Change.** The Sources page owns screens, windows, cameras, microphones _and_ system audio; a monitor names one of them. Prefer a plug/input or layered-devices glyph.                                                                          |
+| `OutputIcon`                                 | Record (dot)              | **Change.** The Output page sets up the local file (where recordings go, quality; destinations live on Livestream); the record dot is the Record _action_ and must not be diluted. Prefer export/arrow-out or sliders. Splits from `RecordIcon`. |
+| `SourcesIcon`/`DisplayIcon`                  | Monitor (shared)          | **Split** once Sources gets its own glyph; `DisplayIcon` keeps the monitor.                                                                                                                                                                      |
+| `AssetsIcon`/`ImageIcon`                     | ImageSquare (shared)      | **Consider splitting.** Assets is a library of media, not one image — a stack/collection glyph would separate them.                                                                                                                              |
+| `StudioIcon`/`CameraIcon`                    | VideoCamera (shared)      | **Keep shared** unless the export offers a distinct "studio/stage" glyph worth the extra count.                                                                                                                                                  |
+| `ClapperboardIcon` vs `LibraryIcon`          | FilmSlate / FilmReel      | **Review together.** Two film metaphors for "recordings" and "library"; one may be redundant.                                                                                                                                                    |
+| `SaveIcon`                                   | FloppyDisk                | **Owner call.** Dated metaphor, universally understood. Keep unless the export has a better save affordance.                                                                                                                                     |
+| `AlertIcon` vs `WarningIcon`                 | WarningCircle / Warning   | **Keep both, enforce the split**: triangle warns, circle alerts. This pairing already absorbed three previous variants.                                                                                                                          |
+| `HealthIcon` / `HeartbeatIcon` / `GaugeIcon` | Pulse / Heartbeat / Gauge | **Review.** Three vitals metaphors across Health and streaming; probably two are enough.                                                                                                                                                         |
 
 Everything not listed keeps its meaning as-is; the export just needs a
 like-for-like glyph.
 
 ### Export shopping list
 
-The 91 slots are the authoritative list — read them straight out of
+The 90 slots are the authoritative list — read them straight out of
 `components/icons.tsx`, where each is grouped and documented. Export one SVG
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.
 
-Seven slots are **not** part of any icon-set migration. `OrcleIcon` is
-Videorc's own mark. `TwitchIcon`, `TiktokIcon`, `InstagramIcon`, `KickIcon`,
+Eight slots are **not** part of any icon-set migration. `BuddyIcon` is
+Videorc's own mark. `TwitchIcon`, `TiktokIcon`, `InstagramIcon`,
+`FacebookIcon` (Phosphor's `FacebookLogo`, plan 206), `KickIcon`,
 `XPlatformIcon` and `YoutubeIcon` are third-party brand marks with their own
 trademark rules, and the design language keeps app/source marks as the only
 full-colour icons on screen.
+
+`XPlatformIcon` is the X mark from X's partner icon kit
+(`assets/brand/x/`, plan 167): the kit's path drawn inline, pure black in
+light mode and pure white in dark, never a tint. The destination tile is the
+kit's rounded-square lockup, and X's verified checks are the kit's files.
+
+`YoutubeIcon` is YouTube's official icon file
+(`assets/brand/youtube/youtube-icon-red.svg`, plan 165, Google's YouTube API
+ToS report III.F.2a). It is never a glyph and never tinted, and it clamps to a
+20 px minimum height whatever class a caller passes. A surface that cannot fit
+20 px writes "YouTube" as text instead of shrinking the mark. The other
+platform marks render at the same 20 px height beside it.

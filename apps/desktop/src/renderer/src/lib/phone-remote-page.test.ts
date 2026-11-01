@@ -3,6 +3,7 @@ import { Window, type HTMLButtonElement, type Node } from 'happy-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type State = {
+  screenHidden?: boolean
   sessionState: string
   sessionActive: boolean
   streamEnabled: boolean
@@ -10,6 +11,8 @@ type State = {
   micMuted: boolean
   systemAudioAvailable: boolean
   systemAudioOn: boolean
+  savedScenes?: Array<{ id: string; name: string }>
+  activeSavedSceneId?: string | null
   layoutPreset: string
 }
 type FakeClient = {
@@ -20,7 +23,13 @@ type FakeClient = {
   setStatus: (status: string) => void
 }
 
-const remote = vi.hoisted(() => ({ client: null as FakeClient | null, state: {} as State }))
+const remote = vi.hoisted(() => ({
+  client: null as FakeClient | null,
+  state: {} as State,
+  banners: [] as Array<{ id: string; name: string; shown: boolean }>,
+  sounds: [] as Array<{ id: string; name: string; playing: boolean }>,
+  describeCalls: 0
+}))
 
 // Load the shipping app module unchanged, replacing only its transport. Fragment
 // parsing remains real; no renderer, socket, backend session or media is started.
@@ -35,6 +44,7 @@ vi.mock(
         listeners = new Map<string, Set<(payload: unknown) => void>>()
         intent = vi.fn(async () => ({ ok: true }))
         reconnectNow = vi.fn()
+        close = vi.fn(() => this.setStatus('idle'))
 
         constructor() {
           remote.client = this
@@ -59,7 +69,17 @@ vi.mock(
         }
 
         async describe(): Promise<unknown> {
-          return { describe: { layoutPresets: [], takeovers: [] }, state: remote.state }
+          remote.describeCalls += 1
+          return {
+            describe: {
+              layoutPresets: ['screen-only', 'vertical-split'],
+              layoutLabels: { 'screen-only': 'Screen only', 'vertical-split': 'Vertical split' },
+              takeovers: [],
+              banners: remote.banners,
+              sounds: remote.sounds
+            },
+            state: remote.state
+          }
         }
 
         async chatSnapshot(): Promise<void> {}
@@ -81,7 +101,7 @@ function client(): FakeClient {
 
 function sessionButton(): HTMLButtonElement {
   const button = page.document.querySelector<HTMLButtonElement>('#deck-main button')!
-  expect(button.querySelector('.name')!.textContent).toMatch(/Stop recording|End stream/)
+  expect(button.querySelector('.name')!.textContent).toMatch(/Stop recording|End livestream/)
   return button
 }
 
@@ -106,6 +126,9 @@ beforeEach(async () => {
   vi.resetModules()
   vi.useFakeTimers()
   remote.client = null
+  remote.banners = []
+  remote.sounds = []
+  remote.describeCalls = 0
   remote.state = {
     sessionState: 'recording',
     sessionActive: true,
@@ -236,7 +259,7 @@ describe('shipping phone remote stop gestures', () => {
     pointer(stop, 'pointerup')
   })
 
-  it('retires an old recording hold when the action changes to End stream', () => {
+  it('retires an old recording hold when the action changes to End livestream', () => {
     const oldStop = sessionButton()
     pointer(oldStop, 'pointerdown')
     vi.advanceTimersByTime(100)
@@ -293,7 +316,8 @@ describe('shipping phone remote stop gestures', () => {
     vi.advanceTimersByTime(100)
     client().setStatus(status)
     expect(stop.dataset.holding).toBe('false')
-    expect(vi.getTimerCount()).toBe(0)
+    // The one timer left while reconnecting is the 10 s "Can't reach" clock.
+    expect(vi.getTimerCount()).toBe(status === 'reconnecting' ? 1 : 0)
     vi.advanceTimersByTime(1000)
     expect(client().intent).not.toHaveBeenCalled()
   })
@@ -361,4 +385,244 @@ describe('shipping phone remote stop gestures', () => {
     expect(page.document.getElementById('snack')!.textContent).toBe('Session already stopping.')
     expect(sessionButton().querySelector('.name')!.textContent).toBe('Stop recording')
   })
+})
+
+describe('shipping phone remote words (plan 174 I-14)', () => {
+  it('says what the desktop says: Chat, Controls, ON AIR, Take off stream, real layout names', () => {
+    const tabs = [...page.document.querySelectorAll('#tabs button')].map((tab) =>
+      tab.textContent?.trim()
+    )
+    expect(tabs).toEqual(['Chat', 'Controls'])
+    expect(page.document.getElementById('live')!.textContent).toBe('ON AIR')
+    expect(page.document.getElementById('comments-empty')!.textContent).toBe(
+      'Chat appears here when you go live.'
+    )
+    const keys = [...page.document.querySelectorAll('#deck-main .name')].map(
+      (name) => name.textContent
+    )
+    expect(keys).toContain('Take off stream')
+    expect(keys).not.toContain('Clear comment')
+    const scenes = [...page.document.querySelectorAll('#deck-scenes .name')].map(
+      (name) => name.textContent
+    )
+    expect(scenes).toEqual(['Screen only', 'Vertical split'])
+    stateUpdate({ streamEnabled: true, sessionState: 'streaming' })
+    expect(sessionButton().querySelector('.name')!.textContent).toBe('End livestream')
+  })
+})
+
+describe('shipping phone remote states and semantics (plan 174 S3.20)', () => {
+  const $ = (id: string) => page.document.getElementById(id) as unknown as HTMLElement
+  const deckKeys = () => [...page.document.querySelectorAll<HTMLButtonElement>('#view-deck .key')]
+  const keyNamed = (name: string) =>
+    deckKeys().find((key) => key.querySelector('.name')!.textContent === name)!
+
+  it('names the microphone state and never lights the key when muted (I-13)', () => {
+    expect(keyNamed('Mic on').querySelector('.hint')!.textContent).toBe('Tap to mute')
+    stateUpdate({ micMuted: true })
+    const mic = keyNamed('Mic muted')
+    expect(mic.dataset.on).toBe('false')
+    expect(mic.dataset.accent).toBeUndefined()
+    expect(mic.dataset.lit).toBeUndefined()
+    expect(mic.querySelector('.hint')!.textContent).toBe('Tap to unmute')
+  })
+
+  it('wears the desktop chrome: Record an LED, Go Live the primary, stop the lit LED (plan 208 D8)', () => {
+    const lit = (key: HTMLButtonElement) => key.dataset.lit !== undefined
+    expect(sessionButton().dataset.accent).toBe('record')
+    expect(lit(sessionButton())).toBe(true)
+    stateUpdate({ sessionActive: false, sessionState: 'idle' })
+    expect(keyNamed('Record').dataset.accent).toBe('record')
+    expect(lit(keyNamed('Record'))).toBe(false)
+    stateUpdate({ streamEnabled: true })
+    expect(keyNamed('Go Live').dataset.accent).toBe('primary')
+    expect(lit(keyNamed('Go Live'))).toBe(false)
+    stateUpdate({ sessionActive: true, sessionState: 'streaming' })
+    expect(sessionButton().dataset.accent).toBe('record')
+    expect(lit(sessionButton())).toBe(true)
+    // Nothing else is ever an LED: a scene that is on wears the plate.
+    expect(keyNamed('Screen only').dataset.accent).toBeUndefined()
+    expect(lit(keyNamed('Screen only'))).toBe(false)
+  })
+
+  it('marks keys that stay on with aria-pressed (I-12)', () => {
+    expect(keyNamed('Screen only').getAttribute('aria-pressed')).toBe('true')
+    expect(keyNamed('Vertical split').getAttribute('aria-pressed')).toBe('false')
+    expect(keyNamed('System audio').getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('puts chat in a real list of buttons that say whether they are on stream (I-12)', () => {
+    client().emit('chat.reset', [
+      { id: 'comment', platform: 'twitch', authorName: 'Ada', messageText: 'hi' }
+    ])
+    highlightUpdate()
+    const list = $('comments')
+    expect(list.tagName).toBe('UL')
+    const row = list.querySelector('li > button.comment')!
+    expect(row.getAttribute('role')).toBeNull()
+    expect(row.getAttribute('aria-pressed')).toBe('true')
+    const viewport = page.document.querySelector('meta[name="viewport"]')!.getAttribute('content')
+    expect(viewport).not.toContain('user-scalable=no')
+  })
+
+  it('disables every control while offline and says so after 10 s (I-11)', () => {
+    client().emit('chat.reset', [
+      { id: 'm1', platform: 'twitch', authorName: 'Ada', messageText: 'hi' }
+    ])
+    client().setStatus('reconnecting')
+    expect(deckKeys().every((key) => key.disabled)).toBe(true)
+    expect(page.document.querySelector<HTMLButtonElement>('.comment')!.disabled).toBe(true)
+    expect($('status').textContent).toBe('Reconnecting…')
+    expect($('offline').hidden).toBe(true)
+    vi.advanceTimersByTime(10_000)
+    expect($('status').textContent).toBe('Can’t reach Videorc…')
+    expect($('offline').hidden).toBe(false)
+    page.document.querySelector<HTMLButtonElement>('#offline [data-action="retry"]')!.click()
+    expect(client().reconnectNow).toHaveBeenCalledOnce()
+    expect($('status').textContent).toBe('Reconnecting…')
+    client().setStatus('connected')
+    expect(keyNamed('Mic on').disabled).toBe(false)
+    expect(sessionButton().disabled).toBe(false)
+    expect($('offline').hidden).toBe(true)
+  })
+
+  it('shows REC while recording and ON AIR while live (I-34)', () => {
+    expect($('rec').hidden).toBe(false)
+    expect($('live').hidden).toBe(true)
+    stateUpdate({ streamEnabled: true, sessionState: 'streaming' })
+    expect($('rec').hidden).toBe(true)
+    expect($('live').hidden).toBe(false)
+  })
+
+  it('forgets this computer only after the streamer confirms (I-34)', () => {
+    const confirm = vi.fn(() => false)
+    Object.assign(page, { confirm })
+    const forget = page.document.querySelector<HTMLButtonElement>(
+      '.deck-footer [data-action="forget"]'
+    )!
+    expect(forget.textContent).toBe('Forget this computer…')
+    forget.click()
+    expect(confirm).toHaveBeenCalledOnce()
+    expect($('view-gate').hidden).toBe(true)
+    confirm.mockReturnValue(true)
+    forget.click()
+    expect($('view-gate').hidden).toBe(false)
+    expect($('gate-title').textContent).toBe('Pair this phone')
+    expect(page.location.hash).toBe('')
+  })
+})
+
+describe('shipping phone remote banners (plan 186 S7)', () => {
+  const bannerKeys = () =>
+    [...page.document.querySelectorAll<HTMLButtonElement>('#deck-banners .key')].map((key) => ({
+      name: key.querySelector('.name')!.textContent,
+      hint: key.querySelector('.hint')?.textContent ?? null,
+      pressed: key.getAttribute('aria-pressed')
+    }))
+  // Let the describe re-read that follows a state event land.
+  const settle = async () => {
+    for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  }
+
+  it('lists banners by name, shows or hides each by id, and follows describe after state', async () => {
+    expect((page.document.getElementById('banners-label') as unknown as HTMLElement).hidden).toBe(
+      true
+    )
+    remote.banners = [
+      { id: 'sponsor', name: 'Sponsor', shown: true },
+      { id: 'follow', name: 'Follow me', shown: false }
+    ]
+    // A banner change on the desktop arrives as remote.state; the page re-reads describe.
+    const before = remote.describeCalls
+    stateUpdate({})
+    await settle()
+    expect(remote.describeCalls).toBeGreaterThan(before)
+    expect((page.document.getElementById('banners-label') as unknown as HTMLElement).hidden).toBe(
+      false
+    )
+    expect(bannerKeys()).toEqual([
+      { name: 'Sponsor', hint: 'Showing. Tap to hide', pressed: 'true' },
+      { name: 'Follow me', hint: null, pressed: 'false' }
+    ])
+    const keys = page.document.querySelectorAll<HTMLButtonElement>('#deck-banners .key')
+    keys[0].click()
+    keys[1].click()
+    expect(client().intent.mock.calls.map(([intent]) => intent)).toEqual([
+      { kind: 'bannerHide', bannerId: 'sponsor' },
+      { kind: 'bannerShow', bannerId: 'follow' }
+    ])
+    // Names only: no image or path ever reaches the page.
+    expect(page.document.querySelector('#deck-banners img')).toBeNull()
+  })
+})
+
+describe('shipping phone remote sounds (plan 189 S10)', () => {
+  const soundKeys = () =>
+    [...page.document.querySelectorAll<HTMLButtonElement>('#deck-sounds .key')].map((key) => ({
+      name: key.querySelector('.name')!.textContent,
+      hint: key.querySelector('.hint')?.textContent ?? null,
+      disabled: key.disabled
+    }))
+  const settle = async () => {
+    for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  }
+
+  it('lists sounds by name, presses each by id, and stops them all', async () => {
+    expect((page.document.getElementById('sounds-label') as unknown as HTMLElement).hidden).toBe(
+      true
+    )
+    remote.sounds = [
+      { id: 'airhorn', name: 'Airhorn', playing: false },
+      { id: 'applause', name: 'Applause', playing: true }
+    ]
+    stateUpdate({})
+    await settle()
+    expect((page.document.getElementById('sounds-label') as unknown as HTMLElement).hidden).toBe(
+      false
+    )
+    expect(soundKeys()).toEqual([
+      { name: 'Airhorn', hint: null, disabled: false },
+      { name: 'Applause', hint: 'Playing', disabled: false },
+      { name: 'Stop all sounds', hint: null, disabled: false }
+    ])
+    const keys = page.document.querySelectorAll<HTMLButtonElement>('#deck-sounds .key')
+    keys[0].click()
+    keys[2].click()
+    expect(client().intent.mock.calls.map(([intent]) => intent)).toEqual([
+      { kind: 'soundPlay', soundId: 'airhorn' },
+      { kind: 'soundStop' }
+    ])
+    // Names only: no file or path ever reaches the page.
+    expect(page.document.querySelector('#deck-sounds')?.innerHTML).not.toMatch(/\.wav|src=|href=/)
+
+    // Nothing plays: Stop all sounds waits.
+    remote.sounds = [{ id: 'airhorn', name: 'Airhorn', playing: false }]
+    stateUpdate({})
+    await settle()
+    expect(soundKeys().at(-1)).toEqual({ name: 'Stop all sounds', hint: null, disabled: true })
+  })
+})
+
+it('shows saved scenes above layouts and sends their ids, marking confirmed state', () => {
+  stateUpdate({
+    savedScenes: [{ id: 'figma', name: 'Figma <script>' }],
+    activeSavedSceneId: 'figma'
+  })
+  const keys = [...page.document.querySelectorAll<HTMLButtonElement>('#deck-scenes .key')]
+  expect(keys[0].querySelector('.name')!.textContent).toBe('Figma <script>')
+  expect(keys[0].getAttribute('aria-pressed')).toBe('true')
+  expect(keys[1].getAttribute('aria-pressed')).toBe('false')
+  keys[0].click()
+  expect(client().intent).toHaveBeenCalledWith({ kind: 'sceneApply', sceneId: 'figma' })
+})
+
+it('the phone privacy key toggles and follows confirmed hidden state', () => {
+  const button = () => page.document.querySelector<HTMLButtonElement>('#deck-takeovers button')!
+  expect(button().textContent).toContain('Hide screen')
+  button().click()
+  expect(client().intent).toHaveBeenLastCalledWith({ kind: 'screenHideToggle' })
+  remote.state.screenHidden = true
+  client().emit('state', remote.state)
+  expect(button().textContent).toContain('Screen hidden')
+  expect(button().getAttribute('aria-pressed')).toBe('true')
 })

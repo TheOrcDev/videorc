@@ -450,28 +450,58 @@ pub fn rounded_rect_geometry(rect: PixelRect, radius_pct: u32) -> RoundedRectGeo
     }
 }
 
+/// The single-pixel mask test. Per-pixel loops build a `SceneMaskTester` once
+/// instead (plan 191); this is the same tester, so there is one rule.
+#[cfg(test)]
 pub fn scene_mask_allows(mask: SceneMask, rect: PixelRect, x: usize, y: usize) -> bool {
-    match mask {
-        SceneMask::None => true,
-        SceneMask::Circle => {
-            let geometry = circle_geometry(rect);
-            if geometry.radius <= 0.0 {
-                return false;
+    SceneMaskTester::new(mask, rect).allows(x, y)
+}
+
+/// A `SceneMask` resolved against one destination rect (plan 191): the circle
+/// or rounded-rect geometry, f64 divisions included, is derived once in `new`
+/// instead of for every pixel. `allows` runs the same f64 operations in the
+/// same order as the per-pixel rule always did, so results are bit-identical.
+#[derive(Debug, Clone, Copy)]
+pub enum SceneMaskTester {
+    None,
+    Circle(CircleGeometry),
+    Rounded(RoundedRectGeometry),
+}
+
+impl SceneMaskTester {
+    pub fn new(mask: SceneMask, rect: PixelRect) -> Self {
+        match mask {
+            SceneMask::None => Self::None,
+            SceneMask::Circle => Self::Circle(circle_geometry(rect)),
+            SceneMask::Rounded { radius_pct } => {
+                Self::Rounded(rounded_rect_geometry(rect, radius_pct))
             }
-            let dx = x as f64 + 0.5 - geometry.center_x;
-            let dy = y as f64 + 0.5 - geometry.center_y;
-            dx * dx + dy * dy <= geometry.radius * geometry.radius
         }
-        SceneMask::Rounded { radius_pct } => {
-            let geometry = rounded_rect_geometry(rect, radius_pct);
-            if geometry.radius <= 0.0 {
-                return true;
+    }
+
+    /// Whether the pixel at canvas `(x, y)` survives; its centre is tested.
+    #[inline]
+    pub fn allows(&self, x: usize, y: usize) -> bool {
+        match *self {
+            Self::None => true,
+            Self::Circle(geometry) => {
+                if geometry.radius <= 0.0 {
+                    return false;
+                }
+                let dx = x as f64 + 0.5 - geometry.center_x;
+                let dy = y as f64 + 0.5 - geometry.center_y;
+                dx * dx + dy * dy <= geometry.radius * geometry.radius
             }
-            let qx =
-                ((x as f64 + 0.5 - geometry.center_x).abs() - geometry.inner_half_width).max(0.0);
-            let qy =
-                ((y as f64 + 0.5 - geometry.center_y).abs() - geometry.inner_half_height).max(0.0);
-            qx * qx + qy * qy <= geometry.radius * geometry.radius
+            Self::Rounded(geometry) => {
+                if geometry.radius <= 0.0 {
+                    return true;
+                }
+                let qx = ((x as f64 + 0.5 - geometry.center_x).abs() - geometry.inner_half_width)
+                    .max(0.0);
+                let qy = ((y as f64 + 0.5 - geometry.center_y).abs() - geometry.inner_half_height)
+                    .max(0.0);
+                qx * qx + qy * qy <= geometry.radius * geometry.radius
+            }
         }
     }
 }
@@ -1177,6 +1207,61 @@ mod tests {
         }
     }
 
+    /// The Scene stage shows this box while a camera is dragged into a corner
+    /// of a preset scene (its drop target): pinned with the renderer's twin,
+    /// `presetCameraCornerRect` in `components/scene/stage-corner.test.ts`.
+    #[test]
+    fn preset_camera_corner_boxes_match_the_stage_drop_target() {
+        let cases = [
+            (
+                CameraSize::Medium,
+                CameraShape::Rectangle,
+                CameraAspect::Source,
+                32,
+                CameraCorner::BottomRight,
+                (1920, 1080),
+                (1332, 727, 540, 305),
+            ),
+            (
+                CameraSize::Small,
+                CameraShape::Circle,
+                CameraAspect::Source,
+                32,
+                CameraCorner::TopLeft,
+                (1080, 1920),
+                (27, 27, 219, 219),
+            ),
+            (
+                CameraSize::Large,
+                CameraShape::Rounded,
+                CameraAspect::Portrait,
+                500,
+                CameraCorner::TopRight,
+                (1280, 720),
+                (640, 160, 480, 640),
+            ),
+        ];
+        for (size, shape, aspect, margin, corner, (width, height), (x, y, w, h)) in cases {
+            let mut layout = layout();
+            layout.camera_size = size;
+            layout.camera_shape = shape;
+            layout.camera_aspect = aspect;
+            layout.camera_margin = margin;
+            layout.camera_corner = corner;
+            let transform = preset_camera_transform(&layout, width, height);
+            let (width, height) = (f64::from(width), f64::from(height));
+            assert_eq!(
+                (transform.x, transform.y, transform.width, transform.height),
+                (
+                    f64::from(x) / width,
+                    f64::from(y) / height,
+                    f64::from(w) / width,
+                    f64::from(h) / height
+                )
+            );
+        }
+    }
+
     #[test]
     fn custom_transform_and_zoom_crop_table_matches_1080p_and_4k() {
         let mut layout = layout();
@@ -1295,5 +1380,114 @@ mod tests {
             100,
             0
         ));
+    }
+
+    /// The pre-plan-191 body of `scene_mask_allows`, verbatim: geometry
+    /// rebuilt on every call. The frozen oracle for `SceneMaskTester`.
+    fn scene_mask_allows_before_plan_191(
+        mask: SceneMask,
+        rect: PixelRect,
+        x: usize,
+        y: usize,
+    ) -> bool {
+        match mask {
+            SceneMask::None => true,
+            SceneMask::Circle => {
+                let geometry = circle_geometry(rect);
+                if geometry.radius <= 0.0 {
+                    return false;
+                }
+                let dx = x as f64 + 0.5 - geometry.center_x;
+                let dy = y as f64 + 0.5 - geometry.center_y;
+                dx * dx + dy * dy <= geometry.radius * geometry.radius
+            }
+            SceneMask::Rounded { radius_pct } => {
+                let geometry = rounded_rect_geometry(rect, radius_pct);
+                if geometry.radius <= 0.0 {
+                    return true;
+                }
+                let qx = ((x as f64 + 0.5 - geometry.center_x).abs() - geometry.inner_half_width)
+                    .max(0.0);
+                let qy = ((y as f64 + 0.5 - geometry.center_y).abs() - geometry.inner_half_height)
+                    .max(0.0);
+                qx * qx + qy * qy <= geometry.radius * geometry.radius
+            }
+        }
+    }
+
+    #[test]
+    fn scene_mask_tester_matches_the_per_pixel_rule_at_every_pixel_around_the_rect() {
+        let pixel_rect = |x, y, width, height| PixelRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        let rects = [
+            pixel_rect(0, 0, 1, 1),
+            pixel_rect(3, 2, 1, 1),
+            pixel_rect(0, 0, 2, 2),
+            pixel_rect(5, 7, 3, 3),
+            pixel_rect(4, 9, 2, 5),
+            pixel_rect(10, 4, 17, 9),
+            pixel_rect(2, 3, 9, 31),
+            pixel_rect(6, 6, 64, 64),
+            pixel_rect(0, 0, 200, 100),
+            pixel_rect(37, 21, 101, 57),
+            // An odd camera bubble at a 1080p canvas offset.
+            pixel_rect(1617, 853, 261, 147),
+            // Degenerate rects: zero radius on both mask kinds.
+            pixel_rect(4, 4, 0, 5),
+            pixel_rect(4, 4, 6, 0),
+        ];
+        let masks = [
+            SceneMask::None,
+            SceneMask::Circle,
+            SceneMask::Rounded { radius_pct: 0 },
+            SceneMask::Rounded { radius_pct: 1 },
+            SceneMask::Rounded { radius_pct: 12 },
+            SceneMask::Rounded { radius_pct: 20 },
+            SceneMask::Rounded { radius_pct: 33 },
+            SceneMask::Rounded { radius_pct: 50 },
+            // Clamped to 50.
+            SceneMask::Rounded { radius_pct: 80 },
+        ];
+        let (mut allowed, mut rejected) = (0_usize, 0_usize);
+        for rect in rects {
+            for mask in masks {
+                let tester = SceneMaskTester::new(mask, rect);
+                // The rect's bounding box plus a 2-pixel margin on every side
+                // (clamped at the canvas origin).
+                let xs =
+                    (rect.x as usize).saturating_sub(2)..rect.x as usize + rect.width as usize + 2;
+                let ys =
+                    (rect.y as usize).saturating_sub(2)..rect.y as usize + rect.height as usize + 2;
+                for y in ys {
+                    for x in xs.clone() {
+                        let expected = scene_mask_allows_before_plan_191(mask, rect, x, y);
+                        assert_eq!(
+                            tester.allows(x, y),
+                            expected,
+                            "{mask:?} on {rect:?} at ({x}, {y})"
+                        );
+                        assert_eq!(
+                            scene_mask_allows(mask, rect, x, y),
+                            expected,
+                            "scene_mask_allows: {mask:?} on {rect:?} at ({x}, {y})"
+                        );
+                        if expected {
+                            allowed += 1;
+                        } else {
+                            rejected += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Both outcomes were exercised, not only one side of the edge.
+        assert!(
+            allowed > 0 && rejected > 0,
+            "{allowed} allowed, {rejected} rejected"
+        );
     }
 }

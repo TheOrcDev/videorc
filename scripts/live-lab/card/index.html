@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Videorc Live Lab</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="card.css" />
+    <script type="module" src="card.js"></script>
+  </head>
+  <body>
+    <main class="card">
+      <header class="top">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Videorc</span>
+          <span class="brand-sub">Live lab</span>
+          <span class="pill"><span class="pill-dot"></span>Automated test</span>
+        </div>
+        <div id="run-meta" class="run-meta"></div>
+      </header>
+
+      <section class="left">
+        <div class="status-row">
+          <span class="session"
+            ><span class="session-dot"></span><span id="session">idle</span></span
+          >
+          <span id="step" class="step"></span>
+          <span id="link" class="link-state" hidden>metrics paused</span>
+        </div>
+
+        <div class="clock-block">
+          <div class="clock-label">UTC</div>
+          <div id="clock" class="clock">00:00:00.000</div>
+          <div class="uptime-row">
+            <span class="uptime-label">Uptime</span><span id="uptime" class="uptime">0:00:00</span>
+          </div>
+        </div>
+
+        <div class="motion">
+          <div class="track"><span id="runner" class="runner"></span></div>
+          <div class="sync">
+            <svg class="sync-ring" viewBox="0 0 40 40" aria-hidden="true">
+              <circle cx="20" cy="20" r="16" class="sync-bg" />
+              <circle id="sync-arc" cx="20" cy="20" r="16" class="sync-arc" />
+            </svg>
+            <span class="sync-text">Sync pulse in <span id="sync-in">10.0</span> s</span>
+          </div>
+        </div>
+
+        <div class="lower">
+          <section class="panel">
+            <header><h2>Health events</h2></header>
+            <div id="events"></div>
+          </section>
+          <section class="panel incidents-panel">
+            <header><h2>Incidents</h2></header>
+            <div id="incidents" class="incidents"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="charts" class="charts"></section>
+
+      <footer class="rail">
+        <span id="marker-step" class="marker-label marker-step">Step 0000</span>
+        <span id="marker-scene" class="marker-label marker-scene">Scene 0</span>
+        <span class="rail-note"
+          >Flash and click every 10 s for A/V sync · machine-readable markers in the corners and
+          here</span
+        >
+      </footer>
+    </main>
+    <div id="flash" class="flash" aria-hidden="true"></div>
+    <canvas id="markers" class="markers" aria-hidden="true"></canvas>
+  </body>
+</html>

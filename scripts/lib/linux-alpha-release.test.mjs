@@ -127,10 +127,7 @@ describe('Linux AppImage and updater names', () => {
         'utf8'
       )
     )
-    assert.equal(
-      builderConfig.linux.artifactName,
-      '${productName}-${version}-${os}-x64.${ext}'
-    )
+    assert.equal(builderConfig.linux.artifactName, '${productName}-${version}-${os}-x64.${ext}')
     assert.equal(
       assertLinuxAppImageArtifactNameTemplate(builderConfig.linux.artifactName),
       builderConfig.linux.artifactName
@@ -138,17 +135,13 @@ describe('Linux AppImage and updater names', () => {
     assert.equal(linuxAlphaAppImageFilename('0.10.0'), 'Videorc-0.10.0-linux-x64.AppImage')
     assert.throws(
       () =>
-        assertLinuxAppImageArtifactNameTemplate(
-          '${productName}-${version}-${os}-${arch}.${ext}'
-        ),
+        assertLinuxAppImageArtifactNameTemplate('${productName}-${version}-${os}-${arch}.${ext}'),
       (error) =>
         error instanceof LinuxAlphaReleaseError && error.code === 'linux-artifact-name-uses-arch'
     )
     assert.throws(
       () =>
-        assertLinuxAppImageArtifactNameTemplate(
-          '${productName}-${version}-${os}-x86_64.${ext}'
-        ),
+        assertLinuxAppImageArtifactNameTemplate('${productName}-${version}-${os}-x86_64.${ext}'),
       (error) =>
         error instanceof LinuxAlphaReleaseError && error.code === 'linux-artifact-name-mismatch'
     )
@@ -212,6 +205,38 @@ describe('Linux AppImage and updater names', () => {
     assert.equal(updateFeedSha512FromYml(yml), sha512)
     assert.match(yml, /latest-linux\.yml|Videorc-0\.10\.0-linux-x64\.AppImage/)
     assert.doesNotMatch(yml, /latest\.yml|latest-mac\.yml/)
+  })
+
+  it('keeps Linux Alpha packaging, validation, and hash-bound upload after faster source gates', async () => {
+    const workflow = loadYaml(
+      await readFile(
+        new URL('../../.github/workflows/release-linux-alpha.yml', import.meta.url),
+        'utf8'
+      )
+    )
+    const steps = workflow.jobs.candidate.steps.map((step) => step.name)
+    assert.equal(workflow.permissions.actions, 'read')
+    assert.ok(steps.includes('Cache cargo build'))
+    assert.ok(steps.includes('Cache pinned Linux FFmpeg'))
+    assert.ok(steps.includes('Reuse same-commit Linux CI rust gates when they already passed'))
+    assert.ok(steps.includes('Run Linux clippy gate'))
+    assert.ok(steps.includes('Run Linux unit gate'))
+    assert.ok(steps.includes('Run script tests'))
+    assert.ok(steps.includes('Build unsigned Linux AppImage'))
+    assert.ok(steps.includes('Validate AppImage, sha256, feed, and bundled LGPL FFmpeg'))
+    assert.ok(steps.includes('Store immutable private Linux Alpha candidate'))
+    const clippy = workflow.jobs.candidate.steps.find((step) => step.name === 'Run Linux clippy gate')
+    const unit = workflow.jobs.candidate.steps.find((step) => step.name === 'Run Linux unit gate')
+    assert.equal(clippy.if, "${{ steps.reuse.outputs.reused != 'true' }}")
+    assert.equal(unit.if, "${{ steps.reuse.outputs.reused != 'true' }}")
+    assert.equal(clippy.env.CARGO_BUILD_JOBS, '2')
+    assert.equal(unit.env.CARGO_BUILD_JOBS, '2')
+    assert.match(clippy.run, /cargo clippy -p videorc-backend/)
+    assert.match(unit.run, /cargo test -p videorc-backend/)
+    assert.match(clippy.run, /143/)
+    assert.match(unit.run, /143/)
+    assert.doesNotMatch(clippy.run, /pnpm test:scripts/)
+    assert.doesNotMatch(unit.run, /pnpm test:scripts/)
   })
 
   it('rejects object keys that would mutate another platform lane', () => {

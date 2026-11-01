@@ -10,28 +10,26 @@ import {
 } from '@/components/icons'
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 
-import { acceleratorDisplayKeys } from '../../../../shared/accelerator'
+import {
+  FADER_THUMB,
+  gainReset,
+  MicrophoneGainFader,
+  SystemAudioGainFader
+} from '@/components/audio/gain-faders'
+import { DevicePicker } from '@/components/device-picker'
+import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
-import { SourceSelect } from '@/components/source-select'
+import { SourceControlRow, SourceFacts, SourceItem } from '@/components/sources/source-item'
+import { StudioLookContext } from '@/components/lcd-panel'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  ChannelStrip,
-  ChannelStripControls,
-  ChannelStripDescription,
-  ChannelStripFader,
-  ChannelStripHeader,
-  ChannelStripMeter,
-  ChannelStripText,
-  ChannelStripTitle,
-  ChannelStripValue
-} from '@/components/ui/channel-strip'
 import { MuteToggle } from '@/components/ui/channel-toggle'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { SettingsRow } from '@/components/ui/field'
 import { Fader, FaderRange, FaderThumb, FaderTrack } from '@/components/ui/fader'
-import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import {
   ParameterSlider,
@@ -44,8 +42,10 @@ import {
   type ParameterChangeReason
 } from '@/components/ui/parameter-slider'
 import { Switch } from '@/components/ui/switch'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav } from '@/components/workspace-nav'
+import { AudioConfigProvider } from '@/hooks/use-audio-config'
+import { useSoundboard } from '@/hooks/use-soundboard'
 import { useStudioCore } from '@/hooks/use-studio'
 import {
   backendLevelSources,
@@ -54,9 +54,8 @@ import {
 } from '@/hooks/use-studio-mic-sources'
 import { formatDb } from '@/lib/audio/decibels'
 import {
-  SYSTEM_AUDIO_GAIN_DB_DEFAULT,
-  SYSTEM_AUDIO_GAIN_DB_MAX,
-  SYSTEM_AUDIO_GAIN_DB_MIN,
+  SOUNDBOARD_VOLUME_DB_MAX,
+  SOUNDBOARD_VOLUME_DB_MIN,
   type AudioSettings
 } from '@/lib/backend'
 import {
@@ -74,36 +73,44 @@ import {
 import {
   meterHasNoReading,
   micLevelUnavailableCopy,
+  soundsMeterInput,
   systemAudioMeterInput,
   type MeterInput
 } from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
-import type { AudioMixerMonitorLabel } from '@/lib/mic-visual-gate'
+import { microphoneIndicatorCopy, platformCopy } from '@/lib/platform-copy'
+import { isCoreAudioMicrophoneId } from '@/lib/warm-microphone-gate'
+import type { MicMonitorState } from '@/lib/state-labels'
 import {
-  systemAudioDevice,
+  microphoneStatus,
+  selectedDeviceStatus,
+  systemAudioStatus,
+  type SourceStatus
+} from '@/lib/source-status'
+import {
+  SYSTEM_AUDIO_IDLE_LINE,
+  systemAudioRowDevice,
   requestSystemAudioResume,
   systemAudioIssueCopy,
   systemAudioSwitchView,
   type SystemAudioSwitchView
 } from '@/lib/system-audio'
 
-// Plan 093: the Sources Audio mixer, one audiocn channel strip per source. The
-// strips are flush rows split by hairlines (design v2: lists, not card
-// stacks); Videorc styles the vendored parts from outside, never by editing
-// them (docs/audiocn.md).
+// Plan 173: the Sources page's Audio column. Microphone, System audio and the
+// soundboard's Sounds (plan 189) are SourceItems (the shape every Sources row
+// takes) inside one grouped list.
+// The audiocn controls stay what plan 093 chose (Fader, MuteToggle,
+// ParameterSlider, the level meter); Videorc styles the vendored parts from
+// outside, never by editing them (docs/audiocn.md). The audiocn Mixer stays
+// around the rows for its meter range and its Cmd+Up/Down move between rows.
 
-/** Videorc's slider knob on audiocn's thumbs (they paint the translucent coat). */
-const FADER_THUMB = 'bg-knob ring-knob-ring'
+/** Videorc's slider knob on audiocn's parameter slider thumb (`FADER_THUMB` is the fader's). */
 const PARAMETER_THUMB =
   '[&_[data-slot=parameter-slider-thumb]]:bg-knob [&_[data-slot=parameter-slider-thumb]]:ring-knob-ring'
 
-/** The renderer stores whole numbers (`clampNumber`), so faders step whole dB. */
-const MICROPHONE_GAIN_DETENTS = [0]
-const SYSTEM_AUDIO_GAIN_DETENTS = [SYSTEM_AUDIO_GAIN_DB_DEFAULT, 0]
-
 /**
- * A Sync change from the parameter slider. A reset restores the structural
- * default and clears the user-set flag, exactly as the old Reset button did;
+ * A Sync change from the parameter slider. A reset restores the default
+ * (0 ms) and clears the user-set flag, exactly as the old Reset button did;
  * anything else is a manual trim.
  */
 export function applySyncChange(
@@ -121,40 +128,32 @@ export function applySyncChange(
 }
 
 /**
- * A control's tooltip with its global shortcut, when one is bound
- * (keyboard-first, quietly). The trigger is a wrapper: Radix's TooltipTrigger
- * writes `data-state` onto its child, which would replace a Switch's
- * checked/unchecked, the hook its track styles use.
+ * The Microphone header's tag while Sync is not the default, so a setting
+ * folded into More is never a surprise. Null at the default.
  */
-function ShortcutTooltip({
-  label,
-  keys,
-  children
-}: {
-  label: string
-  keys: readonly string[]
-  children: ReactElement
-}): ReactElement {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex">{children}</span>
-      </TooltipTrigger>
-      <TooltipContent>
-        {label}
-        {keys.length > 0 ? (
-          <KbdGroup>
-            {keys.map((glyph, index) => (
-              <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-            ))}
-          </KbdGroup>
-        ) : null}
-      </TooltipContent>
-    </Tooltip>
-  )
+export function syncOffsetTag(offsetMs: number, userSet: boolean): string | null {
+  if (!userSet || offsetMs === 0) return null
+  return `Sync ${offsetMs > 0 ? '+' : '−'}${Math.abs(offsetMs)} ms`
 }
 
-/** The Sources "Audio mixer" panel: the microphone picker, then one strip per source. */
+/**
+ * One row of the audiocn Mixer's keyboard map: the Mixer moves focus between
+ * `[data-slot=channel-strip]` elements on Cmd+Up/Down (plan 093's VoiceOver
+ * checklist), so each SourceItem sits in one.
+ */
+function MixerRow({ children }: { children: ReactNode }): ReactElement {
+  return <div data-slot="channel-strip">{children}</div>
+}
+
+/**
+ * "Keep microphone ready"'s line (plan 174 S3.6, D5: it moved here from
+ * Settings → Recording). Who shows the open microphone is the platform's.
+ */
+export function keepMicrophoneReadyHint(platform: string | undefined): string {
+  return `Opens the microphone while Studio is on screen, so Record starts at once. ${microphoneIndicatorCopy(platform)} while it's open; hiding the window releases it.`
+}
+
+/** The Sources "Audio" column: the Microphone, System audio, then the soundboard's Sounds. */
 export function SourcesAudioMixer(): ReactElement {
   const {
     deviceList,
@@ -162,12 +161,16 @@ export function SourcesAudioMixer(): ReactElement {
     setCaptureConfig,
     selectedMicrophone,
     isSessionActive,
+    audioBusActive,
+    sourceDeviceSwitchPending,
     sourceSwitchReason,
     switchSourceDeviceLive,
     settings,
+    setSettings,
     runtimeInfo,
     wsStatus,
     systemAudioConfirmed,
+    systemAudioJoining,
     systemAudioIssue
   } = useStudioCore()
   const { openSettings } = useWorkspaceNav()
@@ -178,191 +181,208 @@ export function SourcesAudioMixer(): ReactElement {
   const microphones = microphonePickerDevices(deviceList.devices)
   const audio = captureConfig.audio
   const platform = runtimeInfo?.platform
+  const microphoneId = captureConfig.sources.microphoneId
   const setAudio = (update: (current: AudioSettings) => AudioSettings): void =>
     setCaptureConfig((current) => ({ ...current, audio: update(current.audio) }))
   const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
+    device: systemAudioRowDevice(deviceList, platform),
     requested: audio.systemAudioEnabled,
     sessionActive: isSessionActive,
+    audioBusActive,
     confirmed: systemAudioConfirmed,
+    joining: systemAudioJoining,
     issue: systemAudioIssue
   })
 
   return (
-    <PanelSection
-      description="What your recording and stream hear, after gain. Nothing is processed automatically."
-      icon={WaveformIcon}
-      title="Audio mixer"
-    >
-      <SourceSelect
-        allowNone
-        devices={microphones}
-        disabled={Boolean(sourceSwitchReason('microphone'))}
-        description={<SourceSwitchStatus kind="microphone" />}
-        selectedName={captureConfig.sources.microphoneName}
-        discoveryPending={wsStatus !== 'connected'}
-        label="Microphone"
-        value={captureConfig.sources.microphoneId}
-        onChange={(microphoneId) =>
-          void switchSourceDeviceLive(
-            'microphone',
-            buildMicrophoneSources(captureConfig.sources, microphones, microphoneId)
-          )
-        }
-      />
-      {/* gap-0: only the channels area is used; the empty header, separator
-          and master rows would each add the grid's gap. No MixerTitle: the
-          section's own heading names it, and a second one would announce
-          "Audio mixer" twice. */}
-      <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
-        <MixerChannels className="gap-0 divide-y divide-border" scrollable={false}>
-          <MicrophoneChannel
-            calibration={
-              <SyncCalibration
-                audio={audio}
-                message={syncMessage}
-                setAudio={setAudio}
-                setMessage={setSyncMessage}
-              />
-            }
-            gainDb={audio.microphoneGainDb}
-            meter={microphone.meter}
-            microphoneSelected={Boolean(selectedMicrophone)}
-            monitorLabel={microphone.monitorLabel}
-            muteShortcut={acceleratorDisplayKeys(settings.globalShortcuts?.micToggle, platform)}
-            muted={audio.microphoneMuted}
-            sessionActive={isSessionActive}
-            syncOffsetMs={audio.microphoneSyncOffsetMs}
-            unavailableReason={microphone.unavailableReason}
-            onGainChange={(microphoneGainDb) =>
-              setAudio((current) => ({ ...current, microphoneGainDb }))
-            }
-            onMutedChange={(microphoneMuted) =>
-              setAudio((current) => ({ ...current, microphoneMuted }))
-            }
-            onSyncChange={(offsetMs, reason) => {
-              setAudio((current) => applySyncChange(current, offsetMs, reason))
-              if (reason === 'reset') setSyncMessage('Reset microphone sync to structural default.')
-            }}
-          />
-          {systemAudio.visible ? (
-            <SystemAudioSettings
-              echoGuard={audio.systemAudioEchoGuard !== false}
-              gainDb={audio.systemAudioGainDb}
-              macOS={platform === 'darwin'}
-              meter={systemAudioMeterInput({
-                sessionActive: isSessionActive,
-                mixed: systemAudio.meter,
-                backendLevelsLive,
-                source: backendLevelSources.systemAudio
-              })}
-              toggleShortcut={acceleratorDisplayKeys(
-                settings.globalShortcuts?.systemAudioToggle,
-                platform
-              )}
-              view={systemAudio}
-              onEchoGuardChange={(systemAudioEchoGuard) =>
-                setAudio((current) => ({ ...current, systemAudioEchoGuard }))
-              }
-              onEnabledChange={(systemAudioEnabled) =>
-                setAudio((current) => ({ ...current, systemAudioEnabled }))
-              }
-              onGainChange={(systemAudioGainDb) =>
-                setAudio((current) => ({ ...current, systemAudioGainDb }))
-              }
-              onOpenPermissions={() => openSettings('permissions')}
-              onResume={requestSystemAudioResume}
-            />
-          ) : null}
-        </MixerChannels>
-      </Mixer>
-    </PanelSection>
+    // Retro LCD (plan 197) draws every level here on the LCD screen.
+    <StudioLookContext.Provider value={settings.retroLcdStudio === true ? 'lcd' : 'default'}>
+      <PanelSection
+        description="What your recording and stream hear, after gain. Nothing is processed automatically."
+        title="Audio"
+      >
+        {/* No MixerTitle: the section's own heading names it, and a second one
+          would announce it twice. */}
+        <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
+          <MixerChannels className="gap-0" scrollable={false}>
+            <GroupedList>
+              <MixerRow>
+                <MicrophoneChannel
+                  calibration={
+                    import.meta.env.DEV ? (
+                      <SyncCalibration
+                        audio={audio}
+                        message={syncMessage}
+                        setAudio={setAudio}
+                        setMessage={setSyncMessage}
+                      />
+                    ) : null
+                  }
+                  gainDb={audio.microphoneGainDb}
+                  // Only a CoreAudio input can be kept warm (warm-microphone-gate):
+                  // on Linux and Windows the switch did nothing (Linux plan 0019).
+                  keepReady={
+                    isCoreAudioMicrophoneId(captureConfig.sources.microphoneId)
+                      ? {
+                          checked: settings.keepMicrophoneWarm !== false,
+                          description: keepMicrophoneReadyHint(platform),
+                          onCheckedChange: (keepMicrophoneWarm) =>
+                            setSettings((current) => ({ ...current, keepMicrophoneWarm }))
+                        }
+                      : undefined
+                  }
+                  meter={microphone.meter}
+                  microphoneSelected={Boolean(selectedMicrophone)}
+                  monitorState={microphone.monitorState}
+                  muteShortcut={settings.globalShortcuts?.micToggle}
+                  platform={platform}
+                  muted={audio.microphoneMuted}
+                  picker={
+                    <DevicePicker
+                      description={<SourceSwitchStatus kind="microphone" />}
+                      devices={microphones}
+                      disabled={Boolean(sourceSwitchReason('microphone'))}
+                      discoveryPending={wsStatus !== 'connected'}
+                      kind="microphone"
+                      label="Microphone"
+                      labelHidden
+                      noneLabel="Off"
+                      selectedDevice={selectedMicrophone}
+                      selectedName={captureConfig.sources.microphoneName}
+                      statusInTrigger={false}
+                      value={microphoneId}
+                      onChange={(nextId) =>
+                        void switchSourceDeviceLive(
+                          'microphone',
+                          buildMicrophoneSources(captureConfig.sources, microphones, nextId)
+                        )
+                      }
+                    />
+                  }
+                  sessionActive={isSessionActive}
+                  status={microphoneStatus({
+                    selected: Boolean(microphoneId),
+                    switching: sourceDeviceSwitchPending === 'microphone',
+                    device: selectedDeviceStatus(deviceList.devices, microphoneId),
+                    muted: audio.microphoneMuted,
+                    sessionActive: isSessionActive
+                  })}
+                  syncOffsetMs={audio.microphoneSyncOffsetMs}
+                  syncUserSet={audio.microphoneSyncOffsetUserSet === true}
+                  unavailableReason={microphone.unavailableReason}
+                  onGainChange={(microphoneGainDb) =>
+                    setAudio((current) => ({ ...current, microphoneGainDb }))
+                  }
+                  onMutedChange={(microphoneMuted) =>
+                    setAudio((current) => ({ ...current, microphoneMuted }))
+                  }
+                  onSyncChange={(offsetMs, reason) => {
+                    setAudio((current) => applySyncChange(current, offsetMs, reason))
+                    if (reason === 'reset') setSyncMessage('Microphone sync is back to 0 ms.')
+                  }}
+                />
+              </MixerRow>
+              {systemAudio.visible ? (
+                <MixerRow>
+                  <SystemAudioSettings
+                    echoGuard={audio.systemAudioEchoGuard !== false}
+                    gainDb={audio.systemAudioGainDb}
+                    macOS={platform === 'darwin'}
+                    meter={systemAudioMeterInput({
+                      audioBusActive,
+                      mixed: systemAudio.meter,
+                      backendLevelsLive,
+                      source: backendLevelSources.systemAudio
+                    })}
+                    sessionActive={isSessionActive}
+                    platform={platform}
+                    toggleShortcut={settings.globalShortcuts?.systemAudioToggle}
+                    view={systemAudio}
+                    onEchoGuardChange={(systemAudioEchoGuard) =>
+                      setAudio((current) => ({ ...current, systemAudioEchoGuard }))
+                    }
+                    onEnabledChange={(systemAudioEnabled) =>
+                      setAudio((current) => ({ ...current, systemAudioEnabled }))
+                    }
+                    onGainChange={(systemAudioGainDb) =>
+                      setAudio((current) => ({ ...current, systemAudioGainDb }))
+                    }
+                    onOpenPermissions={() => openSettings('permissions')}
+                    onResume={requestSystemAudioResume}
+                  />
+                </MixerRow>
+              ) : null}
+              <MixerRow>
+                <SoundsSourceRow
+                  backendLevelsLive={backendLevelsLive}
+                  sessionActive={isSessionActive}
+                />
+              </MixerRow>
+            </GroupedList>
+          </MixerChannels>
+        </Mixer>
+      </PanelSection>
+    </StudioLookContext.Provider>
   )
 }
 
 /**
- * The microphone's group: its channel strip (state, level, Gain, Mute), then
- * Sync and its calibration tools. Markup from props, so the tests render it.
+ * The Microphone row: Mute in the header; the picker, its level and Gain in
+ * the body; Sync, Keep microphone ready (and, in development builds,
+ * Calibrate) folded into More.
+ * Markup from props, so the tests render it.
  */
 export function MicrophoneChannel({
+  picker,
   microphoneSelected,
+  status,
   meter,
-  monitorLabel,
+  monitorState,
   unavailableReason,
   gainDb,
   muted,
   muteShortcut,
+  platform,
   syncOffsetMs,
+  syncUserSet,
   sessionActive,
   calibration,
+  keepReady,
+  defaultMoreOpen,
   onGainChange,
   onMutedChange,
   onSyncChange
 }: {
+  /** The microphone picker (the page passes `DevicePicker`). */
+  picker?: ReactNode
   microphoneSelected: boolean
+  status: SourceStatus | null
   meter: MeterInput
-  monitorLabel: AudioMixerMonitorLabel
+  monitorState: MicMonitorState
   unavailableReason: MicStreamFailureReason | undefined
   gainDb: number
   muted: boolean
-  /** Key chips of the bound global mute shortcut; empty when none is bound. */
-  muteShortcut: readonly string[]
+  /** The bound global mute shortcut (an accelerator); absent when none is bound. */
+  muteShortcut?: string
+  platform?: string
   syncOffsetMs: number
+  syncUserSet: boolean
   sessionActive: boolean
+  /** Calibrate, in development builds only (plan 173, D3); null otherwise. */
   calibration: ReactNode
+  /** Keep the microphone open while Studio is on screen (plan 174 S3.6, D5). */
+  keepReady?: { checked: boolean; description: string; onCheckedChange: (checked: boolean) => void }
+  defaultMoreOpen?: boolean
   onGainChange: (gainDb: number) => void
   onMutedChange: (muted: boolean) => void
   onSyncChange: (offsetMs: number, reason: ParameterChangeReason) => void
 }): ReactElement {
+  const tag = syncOffsetTag(syncOffsetMs, syncUserSet)
   return (
-    <div className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0" data-videorc-mic-channel="">
-      <ChannelStrip className="p-0" dimmed={!microphoneSelected} muted={muted} variant="ghost">
-        <ChannelStripHeader>
-          <MicrophoneIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-          <ChannelStripText>
-            <ChannelStripTitle>Microphone</ChannelStripTitle>
-            <ChannelStripDescription
-              data-videorc-mic-monitor-state={
-                microphoneSelected ? monitorLabel.toLowerCase() : 'none'
-              }
-            >
-              {microphoneSelected ? monitorLabel : 'No microphone'}
-            </ChannelStripDescription>
-          </ChannelStripText>
-        </ChannelStripHeader>
-        {/* data-videorc-mic-preview: perf-idle-probe opens Sources on it. */}
-        <ChannelStripMeter data-videorc-mic-preview="">
-          <MicLevelMeter
-            aria-label="Microphone level"
-            className="min-w-0 flex-1"
-            meter={meter}
-            orientation="horizontal"
-            variant="segmented"
-          />
-        </ChannelStripMeter>
-        <ChannelStripFader>
-          <Fader
-            aria-label="Microphone gain"
-            detents={MICROPHONE_GAIN_DETENTS}
-            fineStep={1}
-            largeStep={6}
-            max={24}
-            min={-24}
-            origin={0}
-            resetValue={0}
-            step={1}
-            value={gainDb}
-            onValueChange={onGainChange}
-          >
-            <FaderTrack>
-              <FaderRange />
-              <FaderThumb className={FADER_THUMB} />
-            </FaderTrack>
-          </Fader>
-        </ChannelStripFader>
-        <ChannelStripValue>{formatDb(gainDb)}</ChannelStripValue>
-        <ChannelStripControls>
-          <ShortcutTooltip keys={muteShortcut} label="Mute microphone">
+    <AudioConfigProvider value={{ dimmed: muted || !microphoneSelected }}>
+      <SourceItem
+        control={
+          <ShortcutTooltip accelerator={muteShortcut} label="Mute microphone" platform={platform}>
             <MuteToggle
               aria-label="Mute microphone"
               className="rounded-chip"
@@ -377,47 +397,81 @@ export function MicrophoneChannel({
               )}
             </MuteToggle>
           </ShortcutTooltip>
-        </ChannelStripControls>
-      </ChannelStrip>
-      {unavailableReason ? (
-        <p
-          className="text-xs text-muted-foreground"
-          data-videorc-mic-level-reason={unavailableReason}
-        >
-          {micLevelUnavailableCopy(unavailableReason)}
-        </p>
-      ) : null}
-      <ParameterSlider
-        className={PARAMETER_THUMB}
-        largeStep={5}
-        max={MICROPHONE_SYNC_OFFSET_MAX_MS}
-        min={MICROPHONE_SYNC_OFFSET_MIN_MS}
-        origin={0}
-        resetValue={0}
-        step={1}
-        unit="ms"
-        value={syncOffsetMs}
-        onValueChange={(offsetMs, details) => onSyncChange(offsetMs, details.reason)}
+        }
+        data-muted={muted ? '' : undefined}
+        data-videorc-mic-channel=""
+        data-videorc-mic-monitor-state={microphoneSelected ? monitorState : 'none'}
+        defaultMoreOpen={defaultMoreOpen}
+        icon={MicrophoneIcon}
+        id="microphone"
+        more={
+          <>
+            <ParameterSlider
+              className={PARAMETER_THUMB}
+              largeStep={5}
+              max={MICROPHONE_SYNC_OFFSET_MAX_MS}
+              min={MICROPHONE_SYNC_OFFSET_MIN_MS}
+              origin={0}
+              resetValue={0}
+              step={1}
+              unit="ms"
+              value={syncOffsetMs}
+              onValueChange={(offsetMs, details) => onSyncChange(offsetMs, details.reason)}
+            >
+              <ParameterSliderHeader>
+                <ParameterSliderLabel>Microphone sync</ParameterSliderLabel>
+                <ParameterSliderReset />
+                <ParameterSliderInput />
+              </ParameterSliderHeader>
+              <ParameterSliderControl />
+              {/* The offset is split once at session start (recording.rs). */}
+              <ParameterSliderDescription>
+                Moves your voice later (+) or earlier (−) to line up with the video.
+                {sessionActive ? ' Applies from the next recording or stream.' : null}
+              </ParameterSliderDescription>
+            </ParameterSlider>
+            {keepReady ? (
+              <SettingsRow
+                data-videorc-mic-keep-ready=""
+                description={keepReady.description}
+                label="Keep microphone ready"
+              >
+                <Switch
+                  checked={keepReady.checked}
+                  size="sm"
+                  onCheckedChange={keepReady.onCheckedChange}
+                />
+              </SettingsRow>
+            ) : null}
+            {calibration}
+          </>
+        }
+        moreLabel="More microphone settings"
+        status={status}
+        tag={tag ? <Badge variant="outline">{tag}</Badge> : undefined}
+        title="Microphone"
       >
-        <ParameterSliderHeader>
-          <ParameterSliderLabel>Sync</ParameterSliderLabel>
-          <ParameterSliderReset />
-          <ParameterSliderInput />
-        </ParameterSliderHeader>
-        <ParameterSliderControl />
-        {/* The offset is split once at session start (recording.rs). */}
-        {sessionActive ? (
-          <ParameterSliderDescription>
-            Applies from the next recording or stream.
-          </ParameterSliderDescription>
+        {picker}
+        {microphoneSelected ? null : <SourceFacts>No microphone selected.</SourceFacts>}
+        {/* data-videorc-mic-preview: perf-idle-probe opens Sources on it. */}
+        <div className="flex min-w-0" data-videorc-mic-preview="">
+          <MicLevelMeter aria-label="Microphone level" className="min-w-0 flex-1" meter={meter} />
+        </div>
+        <MicrophoneGainFader gainDb={gainDb} onGainChange={onGainChange} />
+        {unavailableReason ? (
+          <p
+            className="text-xs text-muted-foreground"
+            data-videorc-mic-level-reason={unavailableReason}
+          >
+            {micLevelUnavailableCopy(unavailableReason)}
+          </p>
         ) : null}
-      </ParameterSlider>
-      {calibration}
-    </div>
+      </SourceItem>
+    </AudioConfigProvider>
   )
 }
 
-/** The flash/click measurement tools for Sync, folded away (plan 093, D3). */
+/** The flash-and-click measurement tools for Sync, folded away (plan 093, D3). */
 function SyncCalibration({
   audio,
   setAudio,
@@ -443,7 +497,7 @@ function SyncCalibration({
         if (!recommendation) return
         setAudio((current) => applyAudioSyncRecommendation(current, recommendation))
         if (state.recommendedOffsetMs != null) {
-          setMessage(`Applied ${state.recommendedOffsetMs} ms sync offset.`)
+          setMessage(`Microphone sync set to ${state.recommendedOffsetMs} ms.`)
         }
       }}
       onImport={async (file) => {
@@ -487,14 +541,14 @@ export function SyncCalibrationView({
 
   return (
     <Collapsible className="group/calibrate" defaultOpen={defaultOpen}>
-      <CollapsibleTrigger asChild>
-        <Button className="-ml-2 self-start" size="xs" type="button" variant="ghost">
-          <ChevronRightIcon
-            className="transition-transform duration-150 group-data-[state=open]/calibrate:rotate-90"
-            data-icon="inline-start"
-          />
-          Calibrate
-        </Button>
+      <CollapsibleTrigger
+        render={<Button className="-ml-2 self-start" size="xs" type="button" variant="ghost" />}
+      >
+        <ChevronRightIcon
+          className="transition-transform duration-150 group-data-open/calibrate:rotate-90"
+          data-icon="inline-start"
+        />
+        Calibrate
       </CollapsibleTrigger>
       <CollapsibleContent className="grid gap-2 pt-2" data-videorc-sync-calibration="">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -504,7 +558,7 @@ export function SyncCalibrationView({
                 ? 'warning'
                 : status === 'unavailable'
                   ? 'outline'
-                  : 'secondary'
+                  : 'default'
             }
           >
             {measuredLagLabel}
@@ -528,7 +582,7 @@ export function SyncCalibrationView({
               onClick={() => fileInputRef.current?.click()}
             >
               <UploadIcon data-icon="inline-start" />
-              Import JSON
+              Import JSON…
             </Button>
             <Button
               disabled={!canApply}
@@ -566,9 +620,9 @@ export function SyncCalibrationView({
 }
 
 /**
- * System audio (plan 069) as the mixer's second strip (plan 093): its state,
- * a level that moves while a session mixes it, the Level fader and the On
- * switch; then the one fact people need, the echo guard and any issue.
+ * The System audio row (plan 069): the On switch in the header; one line on
+ * what it captures; while On, its level and the Gain fader; then any issue.
+ * The echo guard (plan 076) and the three facts people need sit in More.
  */
 export function SystemAudioSettings({
   view,
@@ -576,7 +630,10 @@ export function SystemAudioSettings({
   macOS,
   echoGuard,
   meter,
+  sessionActive,
   toggleShortcut,
+  platform,
+  defaultMoreOpen,
   onEnabledChange,
   onGainChange,
   onEchoGuardChange,
@@ -590,64 +647,40 @@ export function SystemAudioSettings({
   echoGuard: boolean
   /** The bus level while a session mixes System audio; no reading otherwise. */
   meter: MeterInput
-  /** Key chips of the bound global System audio shortcut; empty when none is bound. */
-  toggleShortcut: readonly string[]
+  sessionActive: boolean
+  /** The bound global System audio shortcut (an accelerator); absent when none is bound. */
+  toggleShortcut?: string
+  platform?: string
+  defaultMoreOpen?: boolean
   onEnabledChange: (enabled: boolean) => void
   onGainChange: (gainDb: number) => void
   onEchoGuardChange: (enabled: boolean) => void
   onOpenPermissions: () => void
   onResume: () => void
 }): ReactElement {
+  // Without Screen Recording the chip's line says so and the page's alert
+  // has the fix (plan 174 C-8): no second recovery here.
+  const issueCopy = view.permissionRequired
+    ? null
+    : view.issue
+      ? systemAudioIssueCopy(view.issue, platform ?? (macOS ? 'darwin' : undefined))
+      : null
+  const issueAction = view.permissionRequired ? null : view.issue === 'unavailable' && macOS ? (
+    <Button className="-ml-2" size="xs" variant="ghost" onClick={onOpenPermissions}>
+      Open Permissions
+    </Button>
+  ) : view.issue === 'echo' ? (
+    <Button className="-ml-2" size="xs" variant="ghost" onClick={onResume}>
+      Resume
+    </Button>
+  ) : null
+  const computer = platformCopy(platform ?? (macOS ? 'darwin' : undefined)).deviceNoun
+
   return (
-    <div
-      className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0"
-      data-videorc-system-audio-settings=""
-    >
-      <ChannelStrip className="p-0" disabled={view.permissionRequired} variant="ghost">
-        <ChannelStripHeader>
-          <DesktopIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-          <ChannelStripText>
-            <ChannelStripTitle>System audio</ChannelStripTitle>
-            {view.permissionRequired ? null : (
-              <ChannelStripDescription>{view.stateLabel}</ChannelStripDescription>
-            )}
-          </ChannelStripText>
-        </ChannelStripHeader>
-        <ChannelStripMeter
-          data-videorc-system-audio-visualizer=""
-          title={meterHasNoReading(meter) ? 'Shows while recording or live' : undefined}
-        >
-          <MicLevelMeter
-            aria-label="System audio level"
-            className="min-w-0 flex-1"
-            meter={meter}
-            orientation="horizontal"
-            variant="segmented"
-          />
-        </ChannelStripMeter>
-        <ChannelStripFader>
-          <Fader
-            aria-label="System audio gain"
-            detents={SYSTEM_AUDIO_GAIN_DETENTS}
-            disabled={view.permissionRequired}
-            fineStep={1}
-            largeStep={6}
-            max={SYSTEM_AUDIO_GAIN_DB_MAX}
-            min={SYSTEM_AUDIO_GAIN_DB_MIN}
-            resetValue={SYSTEM_AUDIO_GAIN_DB_DEFAULT}
-            step={1}
-            value={gainDb}
-            onValueChange={onGainChange}
-          >
-            <FaderTrack>
-              <FaderRange />
-              <FaderThumb className={FADER_THUMB} />
-            </FaderTrack>
-          </Fader>
-        </ChannelStripFader>
-        <ChannelStripValue>{formatDb(gainDb)}</ChannelStripValue>
-        <ChannelStripControls>
-          <ShortcutTooltip keys={toggleShortcut} label="System audio">
+    <AudioConfigProvider value={{ disabled: view.permissionRequired }}>
+      <SourceItem
+        control={
+          <ShortcutTooltip accelerator={toggleShortcut} label="System audio" platform={platform}>
             <Switch
               aria-label="System audio"
               checked={view.checked}
@@ -656,47 +689,205 @@ export function SystemAudioSettings({
               onCheckedChange={onEnabledChange}
             />
           </ShortcutTooltip>
-        </ChannelStripControls>
-      </ChannelStrip>
-      <p className="text-xs text-muted-foreground">
-        Everything your computer plays, except Videorc, including your own stream if it is open in a
-        browser tab: mute that tab, because headphones don't stop it. Use headphones so your mic
-        doesn't pick up your speakers.
-        {macOS ? " Your Mac's volume and mute don't change what's recorded." : null}
-      </p>
-      <div className="flex items-center justify-between gap-3">
-        <span className="min-w-0 text-xs text-muted-foreground">
-          Pause System audio if your stream echoes back
-        </span>
-        <Switch
-          aria-label="Pause System audio if your stream echoes back"
-          checked={echoGuard}
-          disabled={view.permissionRequired}
-          size="sm"
-          onCheckedChange={onEchoGuardChange}
-        />
-      </div>
-      {view.permissionRequired || (view.issue === 'unavailable' && macOS) ? (
-        <div className="flex items-center justify-between gap-2 text-xs text-warning">
-          <span className="min-w-0">
-            {view.permissionRequired
-              ? 'Needs Screen Recording permission'
-              : systemAudioIssueCopy('unavailable')}
-          </span>
-          <Button className="shrink-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
-            Open Settings
-          </Button>
-        </div>
-      ) : view.issue === 'echo' ? (
-        <div className="flex items-center justify-between gap-2 text-xs text-warning">
-          <span className="min-w-0">{systemAudioIssueCopy('echo')}</span>
-          <Button className="shrink-0" size="xs" variant="ghost" onClick={onResume}>
-            Resume
-          </Button>
-        </div>
-      ) : view.issue ? (
-        <span className="text-xs text-warning">{systemAudioIssueCopy(view.issue)}</span>
-      ) : null}
-    </div>
+        }
+        data-videorc-system-audio-settings=""
+        defaultMoreOpen={defaultMoreOpen}
+        disabled={view.permissionRequired}
+        icon={DesktopIcon}
+        id="system-audio"
+        more={
+          <>
+            {/* The echo guard is a labelled row (plan 174 C-38): the label
+                names the switch and the description describes it. */}
+            <SettingsRow
+              data-videorc-echo-guard=""
+              description={`Stops System audio when your own stream plays on this ${computer}.`}
+              label="Pause if your stream echoes back"
+            >
+              <Switch
+                checked={echoGuard}
+                disabled={view.permissionRequired}
+                size="sm"
+                onCheckedChange={onEchoGuardChange}
+              />
+            </SettingsRow>
+            <ul className="flex list-disc flex-col gap-1 pl-4 text-xs text-muted-foreground">
+              <li>
+                Your own stream open in a browser tab is captured too. Mute that tab: headphones
+                don&apos;t stop it.
+              </li>
+              <li>Use headphones so your microphone doesn&apos;t pick up your speakers.</li>
+              {macOS ? (
+                <li>
+                  Your {computer}&apos;s volume and mute don&apos;t change what&apos;s recorded.
+                </li>
+              ) : null}
+            </ul>
+          </>
+        }
+        moreLabel="More System audio settings"
+        status={systemAudioStatus(view, sessionActive)}
+        title="System audio"
+      >
+        <SourceFacts>Everything your {computer} plays, except Videorc.</SourceFacts>
+        {view.checked ? (
+          <>
+            {meterHasNoReading(meter) ? (
+              // No dead meter. The level exists while a recording, livestream
+              // or Clips ring mixes System audio; otherwise say when it moves.
+              <p className="text-xs text-muted-foreground" data-videorc-system-audio-idle="">
+                {SYSTEM_AUDIO_IDLE_LINE}
+              </p>
+            ) : (
+              <div className="flex min-w-0" data-videorc-system-audio-visualizer="">
+                <MicLevelMeter
+                  aria-label="System audio level"
+                  className="min-w-0 flex-1"
+                  meter={meter}
+                />
+              </div>
+            )}
+            <SystemAudioGainFader
+              disabled={view.permissionRequired}
+              gainDb={gainDb}
+              onGainChange={onGainChange}
+            />
+          </>
+        ) : null}
+        {issueCopy ? (
+          <Alert data-videorc-system-audio-issue={view.issue ?? undefined} variant="warning">
+            <AlertTitle>{issueCopy}</AlertTitle>
+            {issueAction ? (
+              <AlertDescription className="pt-1">{issueAction}</AlertDescription>
+            ) : null}
+          </Alert>
+        ) : null}
+      </SourceItem>
+    </AudioConfigProvider>
+  )
+}
+
+/** The board's Level default, and where its reset goes. */
+const SOUNDBOARD_VOLUME_DB_DEFAULT = 0
+const SOUNDBOARD_VOLUME_DETENTS = [SOUNDBOARD_VOLUME_DB_DEFAULT]
+
+/** Sources → Sounds, on the soundboard's own state (plan 189 S7). */
+function SoundsSourceRow({
+  sessionActive,
+  backendLevelsLive
+}: {
+  sessionActive: boolean
+  backendLevelsLive: boolean
+}): ReactElement {
+  const board = useSoundboard()
+  return (
+    <SoundsSettings
+      disabled={board.offline || !board.loaded}
+      meter={soundsMeterInput({
+        sessionActive,
+        backendLevelsLive,
+        source: backendLevelSources.sounds
+      })}
+      monitor={board.monitor}
+      volumeDb={board.volumeDb}
+      onMonitorChange={(monitor) => void board.changeSettings({ monitor })}
+      onVolumeChange={(volumeDb) => void board.changeSettings({ volumeDb })}
+    />
+  )
+}
+
+/**
+ * The Sounds row (plan 189): the soundboard's level beside the other audio
+ * sources (the owner's 2026-10-02 call: audio controls live on Sources). Its
+ * meter reads the sounds as mixed while recording or live; Level trims every
+ * sound at once; Hear sounds yourself is the monitor, on by default (D2).
+ * Markup from props, so the tests render it.
+ */
+export function SoundsSettings({
+  volumeDb,
+  monitor,
+  meter,
+  disabled,
+  onVolumeChange,
+  onMonitorChange
+}: {
+  volumeDb: number
+  monitor: boolean
+  /** The sounds as mixed while a session runs; no reading otherwise. */
+  meter: MeterInput
+  /** Videorc is reconnecting, or the board hasn't loaded. */
+  disabled: boolean
+  /** Fires once per change: when a drag lets go, a key or a reset. */
+  onVolumeChange: (volumeDb: number) => void
+  onMonitorChange: (monitor: boolean) => void
+}): ReactElement {
+  // The fader follows the drag here and saves once, when it lets go.
+  const [draft, setDraft] = useState<number | null>(null)
+  const level = draft ?? volumeDb
+  return (
+    <AudioConfigProvider value={{ disabled }}>
+      <SourceItem
+        data-videorc-sounds-source-row=""
+        disabled={disabled}
+        icon={SpeakerOnIcon}
+        id="sounds"
+        title="Sounds"
+      >
+        {/* No dead meter (plan 173): the level only exists while a session
+            mixes sounds, so outside one the row says when it moves. */}
+        {meterHasNoReading(meter) ? (
+          <p className="text-xs text-muted-foreground" data-videorc-sounds-idle="">
+            Level shows while recording or live.
+          </p>
+        ) : (
+          <div className="flex min-w-0" data-videorc-sounds-visualizer="">
+            <MicLevelMeter aria-label="Sounds level" className="min-w-0 flex-1" meter={meter} />
+          </div>
+        )}
+        <SourceControlRow
+          label="Level"
+          reset={disabled ? null : gainReset(level, SOUNDBOARD_VOLUME_DB_DEFAULT, onVolumeChange)}
+          value={formatDb(level)}
+        >
+          <Fader
+            aria-label="Sounds level"
+            className="w-full"
+            detents={SOUNDBOARD_VOLUME_DETENTS}
+            disabled={disabled}
+            fineStep={1}
+            largeStep={6}
+            max={SOUNDBOARD_VOLUME_DB_MAX}
+            min={SOUNDBOARD_VOLUME_DB_MIN}
+            origin={0}
+            resetValue={SOUNDBOARD_VOLUME_DB_DEFAULT}
+            step={1}
+            value={level}
+            onValueChange={(value) => setDraft(Math.round(value))}
+            onValueCommitted={(value) => {
+              const next = Math.round(value)
+              setDraft(null)
+              if (next !== volumeDb) onVolumeChange(next)
+            }}
+          >
+            <FaderTrack>
+              <FaderRange />
+              <FaderThumb className={FADER_THUMB} />
+            </FaderTrack>
+          </Fader>
+        </SourceControlRow>
+        <SettingsRow
+          data-videorc-sounds-monitor=""
+          description="Use headphones, or your microphone may pick the sound up again."
+          label="Hear sounds yourself"
+        >
+          <Switch
+            checked={monitor}
+            disabled={disabled}
+            size="sm"
+            onCheckedChange={onMonitorChange}
+          />
+        </SettingsRow>
+      </SourceItem>
+    </AudioConfigProvider>
   )
 }

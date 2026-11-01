@@ -9,6 +9,10 @@ import { dirname, join } from 'node:path'
 //   • Automatic: repeated GPU-process crashes in one launch persist a flag in
 //     userData, and the NEXT launch disables hardware acceleration before
 //     app.ready. VIDEORC_FORCE_GPU=1 overrides and clears the persisted flag.
+//   • Once per app version (plan 195 S5): a fallback another version recorded
+//     gets one accelerated launch on the first launch of a new version, armed
+//     like Settings' "Retry on next launch". A crash in it restores the
+//     fallback for this version, so a broken GPU never loops.
 //
 // Everything here is pure/injected so the policy is unit-testable; index.ts
 // wires it to app.disableHardwareAcceleration() and child-process-gone.
@@ -30,6 +34,9 @@ export interface GpuFallbackState {
   retryRequestedAt?: string
   retryStartedAt?: string
   retryAttempts?: number
+  /** The app version whose launch recorded this state: the crash, or the
+   * accelerated retry it tried. Missing in files written before plan 195. */
+  appVersion?: string
 }
 
 export function gpuFallbackStatePath(userDataDir: string): string {
@@ -103,11 +110,80 @@ export function scheduleGpuFallbackRetry(
   }
 }
 
+/** The accelerated launch begins: it belongs to this app version (plan 195 S5),
+ * so a crash or an unfinished retry is never retried again on this version. */
 export function startGpuFallbackRetry(
   state: GpuFallbackState,
-  startedAt: string
+  startedAt: string,
+  appVersion: string
 ): GpuFallbackState {
-  return { ...state, retryStartedAt: startedAt }
+  return { ...state, retryStartedAt: startedAt, appVersion }
+}
+
+/**
+ * Plan 195 S5: one accelerated launch per app version. A crash fallback
+ * recorded under another version (or before versions were recorded) is armed
+ * exactly like Settings' "Retry on next launch", so the same two-crash guard
+ * and stability window apply. Null when nothing is to retry: no fallback, a
+ * retry already pending, this version already decided, or an explicit launch
+ * setting (VIDEORC_DISABLE_GPU, VIDEORC_FORCE_GPU, the smokes' GPU switch),
+ * which always wins.
+ */
+export function armGpuFallbackVersionRetry({
+  env,
+  persisted,
+  appVersion,
+  requestedAt
+}: {
+  env: Partial<
+    Pick<
+      NodeJS.ProcessEnv,
+      'VIDEORC_DISABLE_GPU' | 'VIDEORC_FORCE_GPU' | 'VIDEORC_SMOKE_DISABLE_ELECTRON_GPU'
+    >
+  >
+  persisted: GpuFallbackState | null
+  appVersion: string
+  requestedAt: string
+}): GpuFallbackState | null {
+  if (
+    env.VIDEORC_FORCE_GPU === '1' ||
+    env.VIDEORC_DISABLE_GPU === '1' ||
+    env.VIDEORC_SMOKE_DISABLE_ELECTRON_GPU === '1'
+  ) {
+    return null
+  }
+  if (!persisted?.disableHardwareAcceleration || !appVersion) return null
+  if (persisted.appVersion === appVersion) return null
+  return scheduleGpuFallbackRetry(persisted, requestedAt)
+}
+
+/**
+ * The fallback a launch persists after repeated GPU-process crashes. It keeps
+ * the retry evidence and records the version, so the next launch of this
+ * version stays in software rendering and only a new version retries.
+ */
+export function gpuCrashFallbackState({
+  previous,
+  crashCount,
+  duringRetry,
+  appVersion,
+  updatedAt
+}: {
+  previous: GpuFallbackState | null
+  crashCount: number
+  duringRetry: boolean
+  appVersion: string
+  updatedAt: string
+}): GpuFallbackState {
+  return {
+    disableHardwareAcceleration: true,
+    reason: duringRetry ? 'gpu-retry-failed' : 'gpu-process-crashes',
+    crashCount,
+    updatedAt,
+    ...(previous?.retryRequestedAt ? { retryRequestedAt: previous.retryRequestedAt } : {}),
+    ...(previous?.retryAttempts !== undefined ? { retryAttempts: previous.retryAttempts } : {}),
+    appVersion
+  }
 }
 
 export interface GpuFallbackStore {
@@ -142,6 +218,9 @@ export function readGpuFallbackState(
           : {}),
         ...(typeof state.retryAttempts === 'number' && Number.isInteger(state.retryAttempts)
           ? { retryAttempts: Math.max(0, state.retryAttempts) }
+          : {}),
+        ...(typeof state.appVersion === 'string' && state.appVersion
+          ? { appVersion: state.appVersion }
           : {})
       }
     }

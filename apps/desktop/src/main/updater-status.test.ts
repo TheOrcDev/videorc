@@ -4,8 +4,10 @@ import {
   BACKGROUND_RECHECK_INTERVAL_MS,
   clampPercent,
   isMissingUpdateFeedError,
+  settleStatusAfterCheck,
   shouldAutoDownload,
   shouldBackgroundRecheck,
+  updateReadyNotification,
   updateStatusFromEvent
 } from './updater-status'
 
@@ -86,8 +88,23 @@ describe('updater status mapping', () => {
     expect(
       shouldBackgroundRecheck({ phase: 'unsupported', reason: 'windows-feed-unpublished' })
     ).toBe(true)
+    // Linux keeps asking videorc.com: after an offline launch, and for the
+    // release after the one it already announces.
+    expect(shouldBackgroundRecheck({ phase: 'unsupported', reason: 'linux-version-unknown' })).toBe(
+      true
+    )
+    expect(shouldBackgroundRecheck({ phase: 'download-available', version: '1.2.3' })).toBe(true)
 
     expect(BACKGROUND_RECHECK_INTERVAL_MS).toBe(30 * 60 * 1000)
+  })
+
+  it('maps a Linux notice to its own phase, never a download', () => {
+    expect(
+      updateStatusFromEvent({ type: 'download-available', version: '0.15.0-alpha.1' })
+    ).toEqual({ phase: 'download-available', version: '0.15.0-alpha.1' })
+    expect(shouldAutoDownload({ phase: 'download-available', version: '0.15.0-alpha.1' })).toBe(
+      false
+    )
   })
 
   it('auto-downloads only when an update is available', () => {
@@ -95,5 +112,39 @@ describe('updater status mapping', () => {
     expect(shouldAutoDownload({ phase: 'not-available', currentVersion: '1.0.0' })).toBe(false)
     expect(shouldAutoDownload({ phase: 'idle' })).toBe(false)
     expect(shouldAutoDownload({ phase: 'downloaded', version: '1.2.3' })).toBe(false)
+  })
+})
+
+describe('updateReadyNotification (plan 174 I-20)', () => {
+  it('says the update is ready and that quitting installs it', () => {
+    expect(updateReadyNotification('0.9.141', false)).toEqual({
+      title: 'Videorc 0.9.141 is ready',
+      body: 'Restart Videorc to finish updating, or it installs the next time you quit.'
+    })
+  })
+
+  it('never shows an OS banner while a recording or a livestream runs', () => {
+    expect(updateReadyNotification('0.9.141', true)).toBeNull()
+  })
+})
+
+describe('settleStatusAfterCheck', () => {
+  it('settles a check that resolved without an updater event as unsupported', () => {
+    // electron-updater resolves null with no event for an AppImage run without APPIMAGE.
+    expect(settleStatusAfterCheck({ phase: 'checking' })).toEqual({ phase: 'unsupported' })
+  })
+
+  it('keeps every status an updater event already set', () => {
+    for (const status of [
+      { phase: 'idle' },
+      { phase: 'available', version: '1.2.3' },
+      { phase: 'not-available', currentVersion: '1.2.2' },
+      { phase: 'downloading', percent: 40 },
+      { phase: 'downloaded', version: '1.2.3' },
+      { phase: 'error', message: 'offline' },
+      { phase: 'unsupported', reason: 'windows-feed-unpublished' }
+    ] as const) {
+      expect(settleStatusAfterCheck(status)).toBe(status)
+    }
   })
 })

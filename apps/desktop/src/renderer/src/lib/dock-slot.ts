@@ -14,20 +14,46 @@ export interface SlotRect {
 }
 
 // Rect + visible fraction from one getBoundingClientRect measurement. The
-// fraction is the slot area inside the viewport: docked previews hide (with a
-// stated reason) instead of clipping when the slot scrolls away.
+// fraction is the slot area inside the viewport AND inside every scroll
+// container that clips the slot: docked previews hide (with a stated reason)
+// instead of clipping when the slot scrolls away. The viewport alone is not
+// enough: the pane that scrolls starts under a 40 px toolbar, so a slot that
+// has scrolled a little under it is still inside the window while the native
+// surface, which no DOM clips, paints over the toolbar.
 export function measureDockSlot(
   rect: SlotRect,
-  viewport: { width: number; height: number }
+  viewport: { width: number; height: number },
+  clip: SlotRect | null = null
 ): { rect: SlotRect; visibleFraction: number } {
   const area = rect.width * rect.height
   if (area <= 0) {
     return { rect, visibleFraction: 0 }
   }
-  const visibleWidth = Math.min(rect.x + rect.width, viewport.width) - Math.max(rect.x, 0)
-  const visibleHeight = Math.min(rect.y + rect.height, viewport.height) - Math.max(rect.y, 0)
-  const visibleArea = Math.max(0, visibleWidth) * Math.max(0, visibleHeight)
+  const window: SlotRect = { x: 0, y: 0, width: viewport.width, height: viewport.height }
+  const visible = clipRectOf([rect, window, ...(clip ? [clip] : [])])
+  const visibleArea = visible ? visible.width * visible.height : 0
   return { rect, visibleFraction: Math.min(1, visibleArea / area) }
+}
+
+/** The intersection of the rects (a slot and its clipping ancestors), or null
+ * when they share no area or there are none. */
+export function clipRectOf(rects: SlotRect[]): SlotRect | null {
+  let clip: SlotRect | null = null
+  for (const rect of rects) {
+    if (!clip) {
+      clip = { ...rect }
+      continue
+    }
+    const x = Math.max(clip.x, rect.x)
+    const y = Math.max(clip.y, rect.y)
+    const right = Math.min(clip.x + clip.width, rect.x + rect.width)
+    const bottom = Math.min(clip.y + clip.height, rect.y + rect.height)
+    clip = { x, y, width: right - x, height: bottom - y }
+  }
+  if (!clip) {
+    return null
+  }
+  return clip.width > 0 && clip.height > 0 ? clip : null
 }
 
 export function buildDockSlotReport(
@@ -72,16 +98,50 @@ export function dockSlotReportChanged(
 
 // In-app overlays paint inside the main window's web contents, UNDER a native
 // surface floating above the window — so the docked preview yields while one
-// is up. Scrimmed overlays (dialogs) always block; popper content (popovers,
-// menus, selects) blocks only when it geometrically overlaps the slot.
-// Tooltips are deliberately exempt: they are transient and everywhere.
-export const DOCK_BLOCKING_SCRIM_SELECTOR = '[data-slot="dialog-overlay"][data-state="open"]'
+// is up. Nothing may open behind the preview (owner, 2026-10-21: the End
+// livestream question opened under it mid-stream, because only the plain
+// dialog's scrim was listed). Scrimmed overlays (dialogs, alert dialogs)
+// always block; floating content (popovers, menus, selects, hover cards,
+// toasts) blocks only when it geometrically overlaps the slot. Tooltips are
+// deliberately exempt: they are transient and everywhere, and hovering a
+// control beside the preview must not blink it. dock-slot.test.ts fails for
+// any portalled ui slot that is in none of these lists.
+export const DOCK_BLOCKING_SCRIM_SLOTS = ['dialog-overlay', 'alert-dialog-overlay'] as const
+
+export const DOCK_BLOCKING_POPPER_SLOTS = [
+  'popover-content',
+  'dropdown-menu-content',
+  'dropdown-menu-sub-content',
+  'select-content',
+  'context-menu-content',
+  'context-menu-sub-content',
+  'hover-card-content'
+] as const
+
+/** Portalled ui slots that never block the docked preview, and why. */
+export const DOCK_NON_BLOCKING_SLOTS: Readonly<Record<string, string>> = {
+  'tooltip-content': 'transient hint beside its trigger',
+  'dialog-content': 'its scrim blocks',
+  'alert-dialog-content': 'its scrim blocks',
+  'lcd-display-content': "the LCD's own screen: inline, never portalled",
+  'lcd-display-select-content':
+    'the LCD select, which Videorc never renders (plan 196); make it a popper before using it'
+}
+
+function openSlotSelector(slots: readonly string[]): string {
+  return slots.map((slot) => `[data-slot="${slot}"][data-open]`).join(', ')
+}
+
+export const DOCK_BLOCKING_SCRIM_SELECTOR = openSlotSelector(DOCK_BLOCKING_SCRIM_SLOTS)
+
+// Toasts (sonner) carry no data-slot. Stacked toasts past the visible count
+// are transparent, and a leaving toast is marked removed before it unmounts.
+export const DOCK_BLOCKING_TOAST_SELECTOR =
+  '[data-sonner-toast][data-visible="true"]:not([data-removed="true"])'
 
 export const DOCK_BLOCKING_POPPER_SELECTOR = [
-  '[data-slot="popover-content"][data-state="open"]',
-  '[data-slot="dropdown-menu-content"][data-state="open"]',
-  '[data-slot="dropdown-menu-sub-content"][data-state="open"]',
-  '[data-slot="select-content"][data-state="open"]'
+  openSlotSelector(DOCK_BLOCKING_POPPER_SLOTS),
+  DOCK_BLOCKING_TOAST_SELECTOR
 ].join(', ')
 
 export function rectsIntersect(a: SlotRect, b: SlotRect): boolean {

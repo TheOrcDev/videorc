@@ -6,11 +6,30 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
 mod account;
+mod agent_call;
+mod agent_chat;
+mod agent_library;
+mod agent_look;
+mod agent_mcp;
+mod agent_prepare;
+mod agent_prompts;
+mod agent_registry;
+mod agent_tools;
 mod atomic_file;
 mod audience;
 mod audio;
 mod audio_capture_adapter;
 mod backend_authority;
+mod banner_prepare;
+mod banner_timers;
+mod banners;
+mod buddy_act;
+mod buddy_animator;
+mod buddy_motion;
+mod buddy_overlay;
+mod buddy_pet;
+mod buddy_pet_store;
+mod buddy_sprite;
 mod camera_capture;
 mod captions;
 mod capture_health;
@@ -21,13 +40,20 @@ mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
+mod cohost_auto_chat;
+mod cohost_avatar;
 mod cohost_command;
+mod cohost_greetings;
+mod cohost_library;
+mod cohost_throttle;
 mod color;
 mod comment_highlight;
 mod compositor;
 mod compositor_synthetic;
 mod devices;
 mod diagnostics;
+mod discord_announce;
+mod disk_space;
 mod echo_guard;
 mod editor_chrome;
 mod encoder_bridge;
@@ -36,6 +62,10 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+mod preview_debug_sample;
+// Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
+mod buddy_pet_build;
+mod buddy_pet_create;
 mod h264_profile;
 mod host_pressure;
 mod kick;
@@ -46,8 +76,9 @@ mod linux_portal_capture;
 mod linux_portal_session;
 mod linux_pulse_audio;
 mod linux_v4l2_camera;
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", feature = "live-background-gl-check"))]
 mod linux_vaapi;
+mod live_background;
 mod live_chat;
 mod live_chat_moderation;
 mod live_chat_persistence;
@@ -58,18 +89,22 @@ mod live_scene;
 mod live_source_switch;
 mod marker_voice;
 mod metal_compositor;
+mod metrics_journal;
 mod moments;
 mod mpeg_ts;
 mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
 mod oauth_callback_page;
+mod overlay_layout;
 mod panic_hook;
 mod performance_check;
 mod pipeline;
+mod platform_stream_watch;
 mod posters;
 mod preflight;
 mod preview_bmp;
+mod preview_buddy_layer;
 mod preview_camera;
 mod preview_screen;
 mod preview_surface;
@@ -83,6 +118,7 @@ mod remote_lan;
 mod remote_lan_server;
 mod repair;
 mod repair_service;
+mod replay_buffer;
 mod resource_authority;
 mod scene;
 mod scene_geometry;
@@ -91,13 +127,22 @@ mod scheduled_streams_service;
 mod scheduled_x;
 mod scheduled_youtube;
 mod screen_capture;
+mod screen_privacy;
 mod secrets;
+#[cfg(test)]
+mod served_page_palette;
 mod service_flags;
 mod session_audio;
 mod session_markers;
 mod session_ops;
 mod session_token;
 mod seventv;
+mod sound_loudness;
+mod sound_mix;
+mod sound_player;
+mod sound_store;
+mod source_audio_tap;
+mod source_iso;
 mod source_mask;
 mod source_registry;
 mod source_status;
@@ -115,6 +160,7 @@ mod system_audio_session;
 mod transcript;
 mod twitch;
 mod twitch_chat;
+mod usage_stats;
 #[cfg(target_os = "macos")]
 mod video_toolbox_encoder;
 mod videorc_api;
@@ -122,6 +168,10 @@ mod viewer_stats;
 mod warm_microphone;
 #[allow(dead_code)]
 mod windows_capture_owner;
+#[cfg(target_os = "windows")]
+mod windows_com_lifetime;
+#[cfg(target_os = "windows")]
+mod windows_crash_dump;
 #[allow(dead_code)]
 mod windows_d3d11_capture;
 #[allow(dead_code)]
@@ -141,6 +191,8 @@ mod windows_graphics_capture;
 #[cfg(target_os = "windows")]
 mod windows_media_foundation_encoder;
 mod windows_mf_probe;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_mf_rejections;
 mod x_chat;
 mod x_live;
 mod x_oauth1;
@@ -158,7 +210,7 @@ use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Html;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -298,6 +350,8 @@ fn main() -> Result<()> {
     if windows_mf_probe::run_cli(&std::env::args().skip(1).collect::<Vec<_>>())? {
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
+    mark_inherited_descriptors_close_on_exec();
     publish_backend_process_ownership()?;
     // Live-control handlers are third-party/platform integration boundaries.
     // Keep at least one runtime worker available for the process-owned shutdown
@@ -314,6 +368,31 @@ fn main() -> Result<()> {
     // owner ignores its cooperative shutdown signal.
     runtime.shutdown_timeout(PROCESS_RUNTIME_BLOCKING_TASK_SHUTDOWN_GRACE);
     result
+}
+
+/// Electron hands the backend dozens of descriptors it never needed (ICU
+/// data, resource packs, sockets, pipes) without close-on-exec, and every
+/// FFmpeg child inherited them too. An inherited write end is how a dead
+/// session's FIFO stayed open in a camera FFmpeg (Linux plans 0017/0026).
+/// Nothing in the backend passes descriptors by inheritance (children get
+/// theirs through stdio), so mark everything above stderr close-on-exec.
+/// `close_range` needs Linux 5.11; an older kernel keeps today's behaviour.
+#[cfg(target_os = "linux")]
+fn mark_inherited_descriptors_close_on_exec() {
+    mark_descriptors_close_on_exec_from(3);
+}
+
+#[cfg(target_os = "linux")]
+fn mark_descriptors_close_on_exec_from(first: libc::c_uint) -> bool {
+    // SAFETY: CLOSE_RANGE_CLOEXEC only sets FD_CLOEXEC; no descriptor closes.
+    unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            first,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        ) == 0
+    }
 }
 
 /// The backend runs on its own thread so the process main thread can service
@@ -391,6 +470,16 @@ async fn run_backend() -> Result<()> {
         // mid-recording. Logging must never be load-bearing.
         .with_writer(|| FailSilentStderr)
         .init();
+    // Must run before any capture/encoder/audio thread joins the MTA: keeps
+    // COM from unloading GraphicsCapture.dll (and the rest of the WinRT
+    // stack) under a live capture-internal thread when the last worker
+    // leaves the MTA. See windows_com_lifetime.rs.
+    #[cfg(target_os = "windows")]
+    windows_com_lifetime::install();
+    // Native faults never reach the panic hook; write our own minidump so a
+    // crash record always has a stack. See windows_crash_dump.rs.
+    #[cfg(target_os = "windows")]
+    windows_crash_dump::install();
     // F-021 root cause: SkyLight ASSERTS (SIGABRT, "CGS_REQUIRE_INIT
     // did_initialize") if a window-server call runs before this process's
     // CoreGraphics connection initializes — SCContentFilter's window init
@@ -513,6 +602,14 @@ async fn run_backend() -> Result<()> {
     }
     let mut state = AppState::new(token.clone(), port, events, database);
     state.oauth_callback_port = oauth_callback_port;
+    // Plan 181: a crash leaves replay rings behind; nothing can reuse them.
+    replay_buffer::clean_leftovers(&state);
+    // Plan 186 D3: a banner that was showing is showing again after a relaunch.
+    if let Err(error) = compositor::install_banner_set(&state).await {
+        tracing::warn!("Could not install the stored banners into the compositor: {error:#}");
+    }
+    // Plan 186 S10: "Hide after" and "Show every" for the whole process.
+    tokio::spawn(banner_timers::run_banner_timers(state.clone()));
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -521,6 +618,11 @@ async fn run_backend() -> Result<()> {
         .route("/preview/screen/live.png", get(live_screen_frame_handler))
         .route("/preview/camera/latest.bmp", get(live_camera_bmp_handler))
         .route("/preview/screen/latest.bmp", get(live_screen_bmp_handler))
+        // Plan 205 S9: the Buddy's layer for the Electron proof surface.
+        .route(
+            "/preview/buddy/latest.bmp",
+            get(preview_buddy_layer::latest_bmp_handler),
+        )
         .route("/preview/{id}", get(preview_handler))
         .route("/sessions/{id}/poster", get(session_poster_handler))
         .route("/compositor/status", get(compositor_status_handler))
@@ -542,7 +644,8 @@ async fn run_backend() -> Result<()> {
         )
         .route("/oauth/callback", get(oauth_callback_handler))
         .route("/ws", get(ws_handler))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .layer(axum::middleware::map_response(default_no_store));
 
     // READY is a private bootstrap message consumed by Electron main. Main
     // must strip `adminToken` before any log, smoke marker, preload response,
@@ -560,6 +663,31 @@ async fn run_backend() -> Result<()> {
         Ok(None) => {}
         Err(error) => tracing::warn!("Could not load the saved encoder preference: {error}"),
     }
+    // Plan 195 S5: Media Foundation rejections remembered from earlier runs,
+    // loaded once so the first record start of this run skips probes that
+    // this driver already failed.
+    #[cfg(target_os = "windows")]
+    recording::load_windows_mf_rejection_store(&state.database);
+    // After the rejection store, so the prewarm skips probes this driver
+    // already failed: the launch replay ring's encoder probes, off the lane.
+    #[cfg(target_os = "windows")]
+    recording::spawn_windows_replay_ring_prewarm(&state);
+    // Plan 166 S1: the metrics journal, off unless the setting or
+    // VIDEORC_METRICS_JOURNAL=1 turns it on. Nothing is running yet, so there
+    // is no state to seed.
+    let metrics_journal_setting = state
+        .database
+        .load_setting::<bool>(metrics_journal::SETTING_KEY)
+        .unwrap_or_else(|error| {
+            tracing::warn!("Could not load the metrics journal setting: {error}");
+            None
+        })
+        .unwrap_or(false);
+    metrics_journal::configure(
+        metrics_journal_setting,
+        state.events.subscribe(),
+        Vec::new(),
+    );
     state.emit_log("info", "Videorc backend ready.");
     if let Err(error) = sync_remote_discovery_file(&state) {
         state.emit_log(
@@ -568,6 +696,15 @@ async fn run_backend() -> Result<()> {
         );
     }
     crate::remote_lan_server::start_if_enabled(&state).await;
+    // Plan 209: the Agents listener (only while Agents is on) and its
+    // discovery file (always, so the bridge can say "Turn on Agents").
+    crate::agent_mcp::start_if_enabled(&state).await;
+    if let Err(error) = crate::agent_mcp::sync_discovery_file(&state) {
+        state.emit_log(
+            "warn",
+            format!("Agents discovery file could not be written: {error:#}"),
+        );
+    }
     // Restore the signed-in account's verified entitlement at boot so a
     // premium user's cloud AI, co-host, and streaming-quality limits survive
     // an app restart without touching the AI tab first (fail-closed: no
@@ -589,11 +726,17 @@ async fn run_backend() -> Result<()> {
     // Plan 094 (S7): remote service flags at startup and every 30 minutes;
     // fails open to compiled defaults.
     tokio::spawn(service_flags::run_service_flags_refresher(state.clone()));
+    // Anonymous usage stats: one event per session start and stop, off the
+    // recording path; on unless Settings → General → Privacy turned it off.
+    usage_stats::spawn(&state);
+    // Plan 187: the Discord go-live announcement (free, off until a webhook is set).
+    discord_announce::spawn(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
                 .route("/oauth/callback", get(oauth_callback_handler))
-                .with_state(state.clone());
+                .with_state(state.clone())
+                .layer(axum::middleware::map_response(default_no_store));
             state.emit_log(
                 "info",
                 format!("OAuth callback listener bound on 127.0.0.1:{oauth_port}."),
@@ -616,11 +759,21 @@ async fn run_backend() -> Result<()> {
         }
     }
     tokio::spawn(resume_pending_oauth_completions(state.clone()));
-    // Resume interrupted repair jobs through the idle-only maintenance queue.
-    tokio::spawn(resume_pending_repair_jobs(state.clone()));
+    // Resume interrupted repair jobs through the idle-only maintenance queue,
+    // after the leftover repair temps are swept (plan 200 C6).
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            repair_service::sweep_leftover_repair_temps(&state).await;
+            resume_pending_repair_jobs(state).await;
+        }
+    });
     noise_cleanup::resume_interrupted(&state);
     clean_cut::resume_interrupted(&state);
     recording::resume_pending_recording_finalizations(&state);
+    // A take the previous run stopped in the middle of (crash, killed
+    // backend, power loss) becomes an MP4 marked recovered.
+    recording::recover_interrupted_takes(&state, None);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.clone()))
         .await?;
@@ -629,6 +782,9 @@ async fn run_backend() -> Result<()> {
 
 async fn prepare_capture_finalization_for_process_shutdown(state: &AppState) -> Result<()> {
     state.request_process_shutdown();
+    // Plan 200 C6: a running repair or quality check is cancelled (its
+    // FFmpeg killed, its temp removed) instead of outliving the backend.
+    state.ffmpeg_work.cancel_maintenance_for_shutdown();
     // A start which reached admission before the latch either fails its final
     // pre-publication check or finishes publishing every process owner before
     // this guard is acquired. Recovery and native source-transition waits use
@@ -697,11 +853,29 @@ where
     )
 }
 
+/// A cancelled repair polls its FFmpeg every 50 ms; this only bounds a wedge.
+const PROCESS_SHUTDOWN_MAINTENANCE_JOIN: Duration = Duration::from_secs(5);
+
 async fn cleanup_process_owners_after_finalization(state: AppState) {
+    // Quit and quit-and-update wait for the cancelled repair to exit.
+    state.ffmpeg_work.cancel_maintenance_for_shutdown();
+    if tokio::time::timeout(
+        PROCESS_SHUTDOWN_MAINTENANCE_JOIN,
+        state.ffmpeg_work.wait_for_maintenance_workers(),
+    )
+    .await
+    .is_err()
+    {
+        state.emit_log(
+            "warn",
+            "A cancelled recording repair did not exit within the shutdown grace.",
+        );
+    }
     if let Some(path) = crate::remote_control::discovery_path(state.database.path()) {
         crate::remote_control::remove_discovery(&path);
     }
     crate::remote_lan_server::stop(&state);
+    crate::agent_mcp::shutdown(&state);
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     state.clean_cut.interrupt_all_for_shutdown();
@@ -903,6 +1077,17 @@ fn backend_bootstrap(state: &AppState) -> BackendBootstrap {
         admin_token: state.admin_token.clone(),
         pid: std::process::id(),
         parent_pid: current_parent_pid(),
+        managed_asset_roots: managed_asset_roots(&state.database),
+    }
+}
+
+/// The folders behind `videorc-asset://screen|banner|sound/<file>` (release
+/// test 146 plan 0005, release test 147 plan 0002).
+fn managed_asset_roots(database: &Database) -> backend_authority::ManagedAssetRoots {
+    backend_authority::ManagedAssetRoots {
+        screens: database.screen_assets_dir().to_string_lossy().into_owned(),
+        banners: database.banner_assets_dir().to_string_lossy().into_owned(),
+        sounds: database.sound_assets_dir().to_string_lossy().into_owned(),
     }
 }
 
@@ -1125,20 +1310,28 @@ async fn acquire_interruption_lease_handler(
         )
             .into_response();
     }
-    match state
-        .capture_interruption
-        .try_acquire_interruption(&query.owner_id, &query.action)
-    {
+    // Plan 181: the Clips buffer-only session yields to the interruption. The
+    // handover stops a session, so it runs detached: a dropped request never
+    // cancels that stop halfway.
+    let admission_state = state.clone();
+    let owner_id = query.owner_id.clone();
+    let action = query.action.clone();
+    let admission = tokio::spawn(async move {
+        recording::admit_interruption_over_replay_buffer(&admission_state, &owner_id, &action).await
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("Interruption admission stopped: {error}")));
+    match admission {
         Ok(grant) => (
             StatusCode::CREATED,
             Json(interruption_lease_response(grant)),
         )
             .into_response(),
-        Err(blocker) => (
+        Err(message) => (
             StatusCode::CONFLICT,
             Json(InterruptionLeaseErrorResponse {
                 code: "capture-not-idle",
-                message: blocker.to_string(),
+                message,
             }),
         )
             .into_response(),
@@ -1204,6 +1397,21 @@ async fn release_interruption_lease_handler(
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
+}
+
+/// Plan 191: Chromium's HTTP cache stores any response without a
+/// Cache-Control header. The handlers mark their successes `no-store`, but
+/// their bare 401/400/403/404/500s carried no header, and builds from
+/// June–July 2026 that polled `/preview/{camera,screen}/live.png` with a fresh
+/// `t=` left ~472K cached 404s (~2 GB) that Chromium never evicts. So every
+/// response from the backend's routers is `no-store` unless its handler
+/// already chose a Cache-Control, which is kept exactly as it is.
+async fn default_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn preview_handler(
@@ -3213,6 +3421,16 @@ async fn twitch_chat_config(
             .scopes
             .iter()
             .any(|scope| scope == oauth::TWITCH_FOLLOWERS_SCOPE),
+        bits_events: credential
+            .account
+            .scopes
+            .iter()
+            .any(|scope| scope == oauth::TWITCH_BITS_SCOPE),
+        redemption_events: credential
+            .account
+            .scopes
+            .iter()
+            .any(|scope| scope == oauth::TWITCH_REDEMPTIONS_SCOPE),
     })
 }
 
@@ -3387,7 +3605,10 @@ async fn prepare_session_live_chat(
                     }
                 }
             }
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {}
+            StreamPlatform::Facebook
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => {}
         }
     }
     params.audience = session_audience_sources(streaming, &enabled);
@@ -3978,6 +4199,17 @@ async fn prepare_x_native_live(
     Ok(prepared)
 }
 
+/// Plan 187: maps a Discord RPC outcome to the wire, refusals by their code.
+fn discord_rpc<T: serde::Serialize>(
+    id: String,
+    result: Result<T, discord_announce::RpcError>,
+) -> ServerResponse {
+    match result {
+        Ok(value) => ServerResponse::ok(id, value),
+        Err(error) => ServerResponse::error(id, error.code, error.message),
+    }
+}
+
 async fn publish_x_native_live(
     state: &AppState,
     params: XPublishParams,
@@ -4394,16 +4626,86 @@ fn token_expires_soon(expires_at: Option<&str>) -> bool {
 struct ConnectionEventFilter {
     excluded: std::collections::HashSet<String>,
     included: Option<std::collections::HashSet<String>>,
+    /// Plan 209: only the Studio window's socket receives the Agents events.
+    /// Set from the role at connection setup; `events.setExcluded` and
+    /// `events.setIncluded` cannot change it.
+    renderer: bool,
+    /// Plan 209: this socket runs agent intents (the Studio's, after
+    /// `agent.intent.listen`). `agent.intent` reaches these sockets and no
+    /// other, whatever their event lists say, so the sockets the relay
+    /// counts (`studio_sockets`) are exactly the ones it reaches.
+    agent_intents: bool,
+}
+
+/// Plan 209 S2/S3: the Agents section's status and activity, and the Studio
+/// tool intents, reach renderer sockets only. Main (admin) never executes an
+/// intent, and remote and phone sockets are locked to their own lanes anyway.
+fn renderer_only_event(event: &str) -> bool {
+    matches!(
+        event,
+        "agents.status" | "agents.activity" | "agent.intent" | "agent.intent.cancel"
+    )
 }
 
 impl ConnectionEventFilter {
+    fn for_role(role: BackendRole) -> Self {
+        Self {
+            renderer: role == BackendRole::Renderer,
+            ..Self::default()
+        }
+    }
+
     fn allows(&self, event: &str) -> bool {
-        !self.excluded.contains(event)
+        // Review fix 1: the cancel goes where the intents went.
+        if event == "agent.intent" || event == "agent.intent.cancel" {
+            return self.renderer && self.agent_intents;
+        }
+        (self.renderer || !renderer_only_event(event))
+            && !self.excluded.contains(event)
             && self
                 .included
                 .as_ref()
                 .is_none_or(|included| included.contains(event))
     }
+}
+
+/// Plan 209 S3: `agent.intent.listen` (renderer-only). The Studio's socket
+/// says it runs agent intents; from then on it receives `agent.intent` and
+/// counts as "the Studio is open" until it closes. Every other socket,
+/// including the Agents store's own and any Settings row's client, neither
+/// receives intents nor counts, so a Studio tool answers "Videorc's Studio
+/// isn't open." at once instead of waiting on a socket that never acks.
+/// Connection-scoped like `events.setIncluded`; never reaches the shared
+/// dispatcher.
+fn handle_agent_intent_listen(
+    state: &AppState,
+    role: BackendRole,
+    event_filter: &std::sync::Arc<std::sync::Mutex<ConnectionEventFilter>>,
+    listening: &mut Option<crate::agent_mcp::StudioSocketGuard>,
+    text: &str,
+) -> Option<ServerResponse> {
+    let command: serde_json::Value = serde_json::from_str(text).ok()?;
+    if command.get("method").and_then(|method| method.as_str()) != Some("agent.intent.listen") {
+        return None;
+    }
+    let id = command
+        .get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if let Err(error) =
+        crate::backend_authority::authorize_backend_method(role, "agent.intent.listen", false)
+    {
+        return Some(ServerResponse::error(id, error.code(), error.message()));
+    }
+    event_filter
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .agent_intents = true;
+    if listening.is_none() {
+        *listening = Some(crate::agent_mcp::StudioSocketGuard::attach(state));
+    }
+    Some(ServerResponse::ok(id, serde_json::json!({ "ok": true })))
 }
 
 /// Remote sockets must not widen their locked event filter: the
@@ -5338,10 +5640,44 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.recap.draft"
         | "cohost.author.greeted"
         | "cohost.settings.set"
+        | "overlays.layout.set"
+        | "overlays.layout.migrate_highlight_anchor"
+        // Plan 169 D9: create and redo answer at once; the web call runs on
+        // its own task and reports by event. Discard removes one folder.
+        | "cohost.avatar.create"
+        | "cohost.avatar.redo"
+        | "cohost.avatar.discard"
+        // Plan 170 D12, D13: the library mutations answer at once; the web
+        // calls run on their own task and report `cohost.library.changed`.
+        | "cohost.library.sync"
+        | "cohost.library.use"
+        | "cohost.library.update"
+        | "cohost.library.delete"
+        | "cohost.library.saveToLibrary"
+        | "buddy.overlay.set"
+        | "buddy.overlay.clear"
+        | "cohost.pet.import"
+        | "cohost.pet.remove"
+        | "cohost.pet.react"
+        // Plan 168 S-F4: each answers at once; the web calls and the build
+        // run on their own task and report by event.
+        | "cohost.pet.identity"
+        | "cohost.pet.sheet.generate"
+        | "cohost.pet.build"
+        | "cohost.pet.creation.cancel"
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
+        // Plan 209 S20: answers at once; the planner and the tool calls run
+        // on their own task and report `cohost.act.result`.
+        | "cohost.act"
+        | "cohost.utterance.approve"
+        | "cohost.utterance.dismiss"
+        | "cohost.utterance.say"
         | "clip.mark"
+        // Plan 181 S3: answers at once; the save runs on its own task and
+        // reports through replay.saved / replay.saveFailed.
+        | "replay.save"
         | "session.marker.voice.configure"
         | "session.marker.create"
         | "session.marker.rename"
@@ -5360,6 +5696,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.control.enable"
         | "remote.control.disable"
         | "remote.control.regenerate"
+        | "agents.enable"
+        | "agents.disable"
+        | "agents.stop"
+        | "agents.create"
+        | "agents.remove"
         | "remote.lan.enable"
         | "remote.lan.disable"
         | "remote.lan.pairing.begin"
@@ -5368,6 +5709,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.lan.devices.rename"
         | "remote.surface.publish"
         | "remote.intent.ack"
+        | "agent.surface.publish"
+        | "agent.intent.ack"
         | "remote.intent"
         | "compositor.scene.update"
         | "preview.camera.start"
@@ -5420,8 +5763,22 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screens.reorder"
         | "screens.activate"
         | "screens.clear"
+        | "banners.update"
+        | "banners.reorder"
+        | "banners.delete"
+        | "banners.show"
+        | "banners.hide"
+        | "sounds.update"
+        | "sounds.reorder"
+        | "sounds.delete"
+        | "sounds.settings"
+        | "sounds.play"
+        | "sounds.press"
+        | "sounds.stop"
         | "preview.live.start"
-        | "preview.live.stop" => Some(DEFAULT_MUTATION_POLICY),
+        | "preview.live.stop"
+        | "screen.hide"
+        | "screen.show" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.source.switch" => Some(Mutation {
             max_execution_age: live_source_switch::SOURCE_SWITCH_EXECUTION_TIMEOUT,
@@ -5433,8 +5790,27 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             })
         }
 
-        "sessions.delete" | "sessions.delete.complete" | "screens.importImage" => Some(Mutation {
+        "sessions.delete"
+        | "sessions.delete.complete"
+        | "screens.importImage"
+        | "banners.importImage"
+        | "sounds.import" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        // Plan 169 D8: a keep moves the draft's pictures and saves the persona.
+        "cohost.avatar.keep" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        // Plan 168 S-F4: a save decodes the built atlas once and moves the pack.
+        "cohost.pet.save" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        // Plan 168 S-F4: opening a build session waits on the web (15 s).
+        "cohost.pet.creation.start" => Some(Mutation {
+            max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
         }),
 
         "account.complete_sign_in"
@@ -5485,7 +5861,13 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cleanCut.render"
         | "performance.check.run"
         | "performance.check.cancel"
-        | "encoder.preference.set" => Some(DEFAULT_MUTATION_POLICY),
+        | "encoder.preference.set"
+        | "diagnostics.metricsJournal.set"
+        | "usageStats.set"
+        | "discord.announce.update"
+        | "discord.webhook.save"
+        | "discord.webhook.remove"
+        | "discord.webhook.sendTest" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -5511,13 +5893,21 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "captions.test.snapshot"
         | "comments.highlight.status"
         | "comments.highlight.canvases"
+        | "overlays.layout.get"
         | "cohost.status"
         | "cohost.settings.get"
+        | "cohost.buddy.status"
+        | "cohost.pet.list"
+        | "cohost.pet.creation.status"
+        | "cohost.avatar.draft.get"
+        | "cohost.library.get"
         | "cohost.report.get"
         | "cohost.report.latest"
         | "ai.capabilities.get"
         | "ai.quota.get"
         | "devices.list"
+        | "sources.resolve_app_window"
+        | "sources.app_previews"
         | "diagnostics.stats"
         | "capture.recovery.status"
         | "preview.surface.status"
@@ -5525,7 +5915,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.lan.status"
         | "remote.chat.snapshot"
         | "remote.describe"
+        | "agents.status"
+        | "agents.activity.list"
         | "compositor.status"
+        | "preview.debug.sample"
         | "preview.camera.status"
         | "preview.screen.status"
         | "audio.meter.probeNative"
@@ -5533,6 +5926,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "stream.output.topology.probe"
         | "performance.check.get"
         | "encoder.preference.get"
+        | "diagnostics.metricsJournal.get"
         | "sessions.list"
         | "sessions.healthEvents.list"
         | "sessions.logs.list"
@@ -5554,6 +5948,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.moderationOperations.list"
         | "liveChat.xCommentsReadiness"
         | "liveChat.emotes.get"
+        | "usageStats.get"
+        | "discord.announce.get"
+        | "discord.links.preview"
         | "streamTargets.metadata.get"
         | "streamTargets.metadata.validate"
         | "streamTargets.manualKey.inspect"
@@ -5564,17 +5961,21 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.kick.searchCategories"
         | "streamTargets.x.capability"
         | "screens.list"
+        | "banners.list"
+        | "sounds.list"
         | "repair.assess_file"
         | "noiseCleanup.list"
         | "cleanCut.get"
         | "cleanCut.list"
         | "cleanCut.transcript"
         | "clip.marks.list"
+        | "replay.status"
         | "session.markers.list"
         | "session.marker.get"
         | "preview.live.status"
         | "session.sources.get"
         | "recording.status"
+        | "screen.privacy.get"
         | "stream.targets.snapshot" => Some(Observation),
 
         "screens.active" => Some(DEFAULT_MUTATION_POLICY),
@@ -5595,6 +5996,7 @@ fn websocket_command_mutation_max_execution_age(text: &str) -> Option<Duration> 
 enum WebSocketIsolatedCommandLaneKind {
     Observation,
     AccountMaintenance,
+    AssetImport,
     DurableChat,
     LiveControl,
     Stop,
@@ -5603,6 +6005,11 @@ enum WebSocketIsolatedCommandLaneKind {
 fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
     let command = serde_json::from_str::<ClientCommand>(text).ok()?;
     match command.method.as_str() {
+        // Plan 186: one image import process-wide, takeovers and banners
+        // alike; plan 189: a sound decode shares the lane.
+        "screens.importImage" | "banners.importImage" | "sounds.import" => {
+            Some(WebSocketIsolatedCommandLaneKind::AssetImport)
+        }
         "account.refresh"
         | "account.windows_pilot_update_token"
         | "entitlements.refresh"
@@ -5619,6 +6026,11 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "screens.activate"
         | "screens.clear"
         | "screens.delete"
+        | "banners.show"
+        | "banners.hide"
+        | "sounds.play"
+        | "sounds.press"
+        | "sounds.stop"
         | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD
         | "capture.recovery.retry"
         | CAPTURE_RECOVERY_SMOKE_INJECT_METHOD
@@ -5627,7 +6039,9 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "captions.stop"
         | "captions.style.set"
         | "comments.highlight.set"
-        | "comments.highlight.clear" => Some(WebSocketIsolatedCommandLaneKind::LiveControl),
+        | "comments.highlight.clear"
+        | "screen.hide"
+        | "screen.show" => Some(WebSocketIsolatedCommandLaneKind::LiveControl),
         "session.stop" | COMMAND_LANE_SMOKE_RELEASE_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::Stop)
         }
@@ -5670,6 +6084,11 @@ impl WebSocketIsolatedCommandLane {
 
     fn full_error(&self, command_id: String) -> ServerResponse {
         match self.kind {
+            WebSocketIsolatedCommandLaneKind::AssetImport => ServerResponse::error(
+                command_id,
+                "screen-import-busy",
+                "An image is already being imported. Wait for it to finish, then try again.",
+            ),
             WebSocketIsolatedCommandLaneKind::Observation => ServerResponse::error(
                 command_id,
                 "observation-lane-full",
@@ -5759,7 +6178,9 @@ fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAccepted
             Some(WebSocketIsolatedCommandLaneKind::Observation) => {
                 WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE
             }
-            None => WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
+            Some(WebSocketIsolatedCommandLaneKind::AssetImport) | None => {
+                WEBSOCKET_ORDERED_MAX_QUEUE_AGE
+            }
         }
     };
     // One short process-global critical section establishes receipt order and
@@ -5823,6 +6244,7 @@ struct WebSocketOrderedCommand {
 struct WebSocketIsolatedCommandLanes {
     observation: WebSocketIsolatedCommandLane,
     account: WebSocketIsolatedCommandLane,
+    asset_import: WebSocketIsolatedCommandLane,
     durable_chat: WebSocketIsolatedCommandLane,
     live_control: WebSocketIsolatedCommandLane,
     stop: WebSocketIsolatedCommandLane,
@@ -5831,13 +6253,24 @@ struct WebSocketIsolatedCommandLanes {
 struct WebSocketIsolatedCommandLaneReceivers {
     observation: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     account: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    asset_import: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     durable_chat: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     live_control: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     stop: mpsc::Receiver<WebSocketQueuedLaneCommand>,
 }
 
 impl WebSocketIsolatedCommandLanes {
-    fn new(transport: &WebSocketTransportMetrics) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
+    fn new(
+        transport: &WebSocketTransportMetrics,
+        import_capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
+        let (mut asset_import, asset_import_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::AssetImport,
+            1,
+            WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
+            transport.register_command_lane("assetImport"),
+        );
+        asset_import.capacity = import_capacity;
         let (observation, observation_rx) = WebSocketIsolatedCommandLane::new(
             WebSocketIsolatedCommandLaneKind::Observation,
             WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY,
@@ -5872,6 +6305,7 @@ impl WebSocketIsolatedCommandLanes {
             Self {
                 observation,
                 account,
+                asset_import,
                 durable_chat,
                 live_control,
                 stop,
@@ -5879,6 +6313,7 @@ impl WebSocketIsolatedCommandLanes {
             WebSocketIsolatedCommandLaneReceivers {
                 observation: observation_rx,
                 account: account_rx,
+                asset_import: asset_import_rx,
                 durable_chat: durable_chat_rx,
                 live_control: live_control_rx,
                 stop: stop_rx,
@@ -5890,6 +6325,7 @@ impl WebSocketIsolatedCommandLanes {
         match kind {
             WebSocketIsolatedCommandLaneKind::Observation => self.observation.clone(),
             WebSocketIsolatedCommandLaneKind::AccountMaintenance => self.account.clone(),
+            WebSocketIsolatedCommandLaneKind::AssetImport => self.asset_import.clone(),
             WebSocketIsolatedCommandLaneKind::DurableChat => self.durable_chat.clone(),
             WebSocketIsolatedCommandLaneKind::LiveControl => self.live_control.clone(),
             WebSocketIsolatedCommandLaneKind::Stop => self.stop.clone(),
@@ -5907,6 +6343,56 @@ fn websocket_command_method(text: &str) -> String {
     serde_json::from_str::<ClientCommand>(text)
         .map(|command| command.method)
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+impl WebSocketIsolatedCommandLaneKind {
+    /// The lane's name as the transport diagnostics report it.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Observation => "observation",
+            Self::AccountMaintenance => "account",
+            Self::AssetImport => "assetImport",
+            Self::DurableChat => "durableChat",
+            Self::LiveControl => "liveControl",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+/// The isolated lane a queued command belongs to, by its method.
+fn websocket_lane_label(text: &str) -> &'static str {
+    websocket_isolated_command_lane(text)
+        .map_or("isolated", WebSocketIsolatedCommandLaneKind::label)
+}
+
+/// Plan 195 S1 (F4): a command that expired in a lane used to leave only a
+/// counter behind, so a support bundle could not say which feature "Videorc
+/// was busy" for. One line names the lane, the method, the queue age and the
+/// cause. Never the params: they carry chat text, file paths and keys.
+fn expired_before_dispatch_log_line(
+    lane: &str,
+    text: &str,
+    queued_for: Option<Duration>,
+    cause: &str,
+) -> String {
+    let queued =
+        queued_for.map_or_else(|| "unknown".to_string(), |age| age.as_millis().to_string());
+    format!(
+        "Command expired before dispatch: lane={lane} method={} queuedMs={queued} cause={cause}",
+        websocket_command_method(text)
+    )
+}
+
+fn warn_command_expired_before_dispatch(
+    lane: &str,
+    text: &str,
+    queued_for: Option<Duration>,
+    cause: &str,
+) {
+    tracing::warn!(
+        "{}",
+        expired_before_dispatch_log_line(lane, text, queued_for, cause)
+    );
 }
 
 /// A stateful mutation that outlives this budget gets named in the log — the
@@ -6378,12 +6864,19 @@ async fn run_websocket_command_lane_worker(
                 let rejected = pending.pop_front().expect("lane front exists");
                 let WebSocketQueuedLaneCommand {
                     command_id,
+                    text,
                     queue_ticket,
                     _admission,
                     ..
                 } = rejected;
                 metrics.record_dispatch(queue_ticket);
                 metrics.record_expired_before_dispatch();
+                warn_command_expired_before_dispatch(
+                    websocket_lane_label(&text),
+                    &text,
+                    Some(queue_ticket.queued_for(std::time::Instant::now())),
+                    "backend shutdown",
+                );
                 let response = ServerResponse::error(
                     command_id,
                     "command-expired-before-dispatch",
@@ -6403,12 +6896,19 @@ async fn run_websocket_command_lane_worker(
                 let expired = pending.pop_front().expect("lane front exists");
                 let WebSocketQueuedLaneCommand {
                     command_id,
+                    text,
                     queue_ticket,
                     _admission,
                     ..
                 } = expired;
                 metrics.record_dispatch(queue_ticket);
                 metrics.record_expired_before_dispatch();
+                warn_command_expired_before_dispatch(
+                    websocket_lane_label(&text),
+                    &text,
+                    Some(queue_ticket.queued_for(std::time::Instant::now())),
+                    "lane queue deadline",
+                );
                 let response = ServerResponse::error(
                     command_id,
                     "command-expired-before-dispatch",
@@ -6439,6 +6939,7 @@ async fn run_websocket_command_lane_worker(
                     command_id,
                     text,
                     dispatch_deadline,
+                    queue_ticket,
                     dispatch_fence,
                     _admission,
                     ..
@@ -6458,6 +6959,16 @@ async fn run_websocket_command_lane_worker(
                 };
                 if !fence_ready {
                     lane_metrics.record_expired_before_dispatch();
+                    warn_command_expired_before_dispatch(
+                        websocket_lane_label(&text),
+                        &text,
+                        Some(queue_ticket.queued_for(std::time::Instant::now())),
+                        if order_ready {
+                            "reconciliation fence"
+                        } else {
+                            "live-control order"
+                        },
+                    );
                     let response = ServerResponse::error(
                         command_id,
                         "command-expired-before-dispatch",
@@ -6478,6 +6989,12 @@ async fn run_websocket_command_lane_worker(
                 // accepted work cannot start inside the recycling generation.
                 if command_state.process_shutdown_requested() {
                     lane_metrics.record_expired_before_dispatch();
+                    warn_command_expired_before_dispatch(
+                        websocket_lane_label(&text),
+                        &text,
+                        Some(queue_ticket.queued_for(std::time::Instant::now())),
+                        "backend shutdown at dispatch",
+                    );
                     let response = ServerResponse::error(
                         command_id,
                         "command-expired-before-dispatch",
@@ -6666,12 +7183,19 @@ async fn run_websocket_command_lane_worker(
                     let expired = pending.pop_front().expect("expired lane front exists");
                     let WebSocketQueuedLaneCommand {
                         command_id,
+                        text,
                         queue_ticket,
                         _admission,
                         ..
                     } = expired;
                     metrics.record_dispatch(queue_ticket);
                     metrics.record_expired_before_dispatch();
+                    warn_command_expired_before_dispatch(
+                        websocket_lane_label(&text),
+                        &text,
+                        Some(queue_ticket.queued_for(std::time::Instant::now())),
+                        "lane queue deadline",
+                    );
                     let response = ServerResponse::error(
                         command_id,
                         "command-expired-before-dispatch",
@@ -6748,8 +7272,10 @@ async fn run_websocket_command_dispatcher(
         command_handler.clone(),
         running_stateful.clone(),
     ));
-    let (lanes, lane_receivers) =
-        WebSocketIsolatedCommandLanes::new(&state.websocket_transport_metrics);
+    let (lanes, lane_receivers) = WebSocketIsolatedCommandLanes::new(
+        &state.websocket_transport_metrics,
+        state.screen_import_capacity.clone(),
+    );
     let mut lane_workers = tokio::task::JoinSet::new();
     let lane_worker_context = WebSocketCommandLaneWorkerContext {
         state: state.clone(),
@@ -6794,10 +7320,19 @@ async fn run_websocket_command_dispatcher(
         &lane_worker_context,
     );
 
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.asset_import,
+        1,
+        lanes.asset_import.metrics.clone(),
+        &lane_worker_context,
+    );
+
     while let Some(accepted) = commands.recv().await {
         command_metrics.record_dequeue_oldest();
         let WebSocketAcceptedCommand {
             text,
+            _accepted_at,
             dispatch_deadline,
             operator_mutation,
             live_control_order,
@@ -6806,6 +7341,12 @@ async fn run_websocket_command_dispatcher(
             ..
         } = accepted;
         if dispatch_deadline <= tokio::time::Instant::now() {
+            warn_command_expired_before_dispatch(
+                "connection",
+                &text,
+                Some(tokio::time::Instant::now().saturating_duration_since(_accepted_at)),
+                "connection queue deadline",
+            );
             let response = ServerResponse::error(
                 websocket_command_id(text.as_str()),
                 "command-expired-before-dispatch",
@@ -6968,6 +7509,7 @@ async fn run_websocket_ordered_command_dispatcher_with_mutation_executor(
             _session_start,
         } = command;
         if dispatch_deadline <= tokio::time::Instant::now() {
+            warn_command_expired_before_dispatch("ordered", &text, None, "ordered queue deadline");
             let response = ServerResponse::error(
                 websocket_command_id(text.as_str()),
                 "command-expired-before-dispatch",
@@ -6983,6 +7525,7 @@ async fn run_websocket_ordered_command_dispatcher_with_mutation_executor(
             continue;
         }
         if !wait_for_websocket_dispatch_fence(dispatch_fence, dispatch_deadline).await {
+            warn_command_expired_before_dispatch("ordered", &text, None, "reconciliation fence");
             let response = ServerResponse::error(
                 websocket_command_id(text.as_str()),
                 "command-expired-before-dispatch",
@@ -6998,6 +7541,7 @@ async fn run_websocket_ordered_command_dispatcher_with_mutation_executor(
             continue;
         }
         if state.process_shutdown_requested() {
+            warn_command_expired_before_dispatch("ordered", &text, None, "backend shutdown");
             let response = ServerResponse::error(
                 websocket_command_id(text.as_str()),
                 "command-expired-before-dispatch",
@@ -7694,9 +8238,11 @@ async fn websocket_session_with_handler_role_and_redaction(
                     "remote.ack".to_string(),
                 ])
             }),
+            renderer: false,
+            agent_intents: false,
         }
     } else {
-        ConnectionEventFilter::default()
+        ConnectionEventFilter::for_role(role)
     }));
     let event_filter_for_events = event_filter.clone();
     // Count Remote clients with a Drop guard: every exit path (early return on
@@ -7722,6 +8268,10 @@ async fn websocket_session_with_handler_role_and_redaction(
         state.emit_event("remote.control.status", remote_control_status(&state));
         RemoteClientCountGuard(state.clone())
     });
+    // Plan 209 S3: a Studio tool needs the Studio's socket to run in. It
+    // counts once it sends `agent.intent.listen`, with a Drop guard for the
+    // same reason as remote clients.
+    let mut studio_socket_guard: Option<crate::agent_mcp::StudioSocketGuard> = None;
 
     let writer_task = tokio::spawn(run_websocket_writer(
         sender,
@@ -7906,6 +8456,25 @@ async fn websocket_session_with_handler_role_and_redaction(
                     }
                     continue;
                 }
+                if let Some(response) = handle_agent_intent_listen(
+                    &state,
+                    role,
+                    &event_filter,
+                    &mut studio_socket_guard,
+                    text.as_str(),
+                ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
 
                 if let Some(response) = handle_preview_frame_lease_control(
                     &state,
@@ -7959,6 +8528,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // accepted queue so native/source mutations are never canceled halfway.
     // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
     drop(preview_frame_lease);
+    drop(studio_socket_guard);
     drop(command_tx);
     drop(command_dispatcher_task);
     event_task.abort();
@@ -8241,6 +8811,27 @@ fn resolve_screen_import_resource(
     )
 }
 
+/// Plan 186: `banners.importImage` takes the same `sourceCapability` exchange
+/// as `screens.importImage` (main's picker issues an `input-file` capability;
+/// a raw `path` is accepted from the admin role only).
+fn resolve_banner_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    resolve_screen_import_resource(state, params, role)
+}
+
+/// Plan 189: `sounds.import` makes the same exchange; main's picker (and the
+/// starter seed) issue one single-use `input-file` capability per file.
+fn resolve_sound_import_resource(
+    state: &AppState,
+    params: &mut serde_json::Value,
+    role: BackendRole,
+) -> Result<()> {
+    resolve_screen_import_resource(state, params, role)
+}
+
 fn session_deletion_handle(
     operation: &storage::PendingSessionDeletion,
 ) -> protocol::SessionDeletionHandle {
@@ -8374,6 +8965,19 @@ fn resolve_renderer_managed_backgrounds(
 
 fn rpc_params_are_empty(params: &serde_json::Value) -> bool {
     params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+// Imports and idle management can now finish on different lanes. Keep each
+// authoritative list read and publication together so an older snapshot cannot
+// be emitted after a newer one. No optimizer or native transition holds this lock.
+fn publish_stream_screen_list(state: &AppState) -> anyhow::Result<Vec<protocol::StreamScreen>> {
+    let _publication = state
+        .screen_list_publication
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let screens = state.database.list_stream_screens()?;
+    state.emit_event("screens.changed", screens.clone());
+    Ok(screens)
 }
 
 // Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
@@ -8890,7 +9494,7 @@ async fn handle_text_message_with_role(
                             tokio::spawn(async move {
                                 refresh_account_entitlements(&entitlement_state).await
                             });
-                            // Orcle stopped listening at sign-out; a session
+                            // Buddy stopped listening at sign-out; a session
                             // still running with listening on resumes now.
                             let listen_state = state.clone();
                             tokio::spawn(async move {
@@ -9119,6 +9723,44 @@ async fn handle_text_message_with_role(
             command.id,
             comment_highlight::comment_highlight_canvases(state).await,
         ),
+        "overlays.layout.get" => ServerResponse::ok(
+            command.id,
+            overlay_layout::load_overlay_layout(&state.database),
+        ),
+        "overlays.layout.set" => {
+            match serde_json::from_value::<overlay_layout::OverlayLayout>(command.params) {
+                Ok(layout) => match overlay_layout::set_overlay_layout(state, layout).await {
+                    Ok(saved) => ServerResponse::ok(command.id, saved),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "overlay-layout-invalid",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "overlays.layout.migrate_highlight_anchor" => {
+            match serde_json::from_value::<overlay_layout::MigrateHighlightAnchorParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    match overlay_layout::migrate_highlight_anchor(&state.database, params) {
+                        Ok(layout) => ServerResponse::ok(command.id, layout),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "overlay-layout-storage",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "comments.highlight.set" => {
             match serde_json::from_value::<comment_highlight::SetCommentHighlightParams>(
                 command.params,
@@ -9306,9 +9948,367 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 209 S20: `/buddy <words>` from the Stream Manager. Answers at
+        // once (a gate's sentence, or `working`); the result follows as
+        // `cohost.act.result`. Never routed by the LAN listener.
+        "cohost.act" => {
+            match serde_json::from_value::<buddy_act::CohostActParams>(command.params) {
+                Ok(params) => match cohost::act_typed(state, params).await {
+                    Ok(answer) => ServerResponse::ok(command.id, answer),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 164 Phase D: the Stream Manager's answers to the Buddy's
+        // proposed cards, and the Say box. Never routed by the LAN listener.
+        "cohost.utterance.approve" => {
+            match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
+                Ok(params) => match cohost::approve_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.utterance.dismiss" => {
+            match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
+                Ok(params) => match cohost::dismiss_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.utterance.say" => {
+            match serde_json::from_value::<protocol::CohostSayParams>(command.params) {
+                Ok(params) => match cohost::say_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
         }
+        // --- Buddy overlay (plan 164 Phase C) ---
+        "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
+        "buddy.overlay.set" => {
+            match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
+                Ok(params) => {
+                    match buddy_overlay::set_buddy_overlay(&state.buddy_overlay, params).await {
+                        Ok(info) => ServerResponse::ok(command.id, info),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "buddy-overlay-invalid",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- Buddy pets (plan 168, Phase B) ---
+        "buddy.overlay.clear" => {
+            match serde_json::from_value::<buddy_overlay::ClearBuddyOverlayParams>(command.params) {
+                Ok(params) => {
+                    match buddy_overlay::clear_buddy_overlay(&state.buddy_overlay, params) {
+                        Ok(info) => ServerResponse::ok(command.id, info),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "buddy-overlay-invalid",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Buddy pets (plan 168, Phase B) ---
+        // --- end Buddy overlay ---
+        // --- Buddy look (plan 169 Phase B) ---
+        "cohost.avatar.create" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarCreateParams>(command.params)
+            {
+                Ok(params) => match cohost_avatar::create(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.redo" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRedoParams>(command.params) {
+                Ok(params) => match cohost_avatar::redo(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.keep" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRequestIdParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_avatar::keep(state, params).await {
+                    Ok(settings) => ServerResponse::ok(command.id, settings),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.discard" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRequestIdParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_avatar::discard(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.draft.get" => match cohost_avatar::draft_status(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
+        },
+        // --- end Buddy look (plan 169 Phase B) ---
+        // --- Buddy library (plan 170 D12, D13) ---
+        "cohost.library.get" => {
+            if rpc_params_are_empty(&command.params) {
+                ServerResponse::ok(command.id, cohost_library::get(state).await)
+            } else {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "cohost.library.get does not accept parameters.",
+                )
+            }
+        }
+        "cohost.library.sync" => {
+            match serde_json::from_value::<cohost_library::CohostLibrarySyncParams>(command.params)
+            {
+                Ok(params) => match cohost_library::sync(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.use" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryAvatarParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::use_avatar(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.update" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryUpdateParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::update(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.delete" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryAvatarParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::delete(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 172 D10: a Buddy made only here joins the library.
+        "cohost.library.saveToLibrary" => {
+            if rpc_params_are_empty(&command.params) {
+                match cohost_library::save_to_library(state).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                }
+            } else {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "cohost.library.saveToLibrary does not accept parameters.",
+                )
+            }
+        }
+        // --- end Buddy library (plan 170) ---
+        // --- Buddy pets (plan 168, Phase A) ---
+        "cohost.pet.list" => match buddy_pet_store::list(state).await {
+            Ok(packs) => ServerResponse::ok(command.id, packs),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.import" => {
+            match serde_json::from_value::<buddy_pet_store::CohostPetImportParams>(command.params) {
+                Ok(params) => match buddy_pet_store::import(state, params).await {
+                    Ok(summary) => ServerResponse::ok(command.id, summary),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.remove" => {
+            match serde_json::from_value::<buddy_pet_store::CohostPetRemoveParams>(command.params) {
+                Ok(params) => match buddy_pet_store::remove(state, params).await {
+                    Ok(removed) => ServerResponse::ok(command.id, removed),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.react" => {
+            match serde_json::from_value::<buddy_pet_store::CohostPetReactParams>(command.params) {
+                Ok(params) => {
+                    match buddy_pet_store::request_reaction(state, &params.reaction).await {
+                        Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                        Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Buddy pets (plan 168, Phase A) ---
+        // --- Buddy pets (plan 168, Phase F) ---
+        "cohost.pet.creation.start" => match buddy_pet_create::start(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.creation.status" => match buddy_pet_create::status(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.creation.cancel" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetBuildIdParams>(command.params)
+            {
+                Ok(params) => match buddy_pet_create::cancel(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.identity" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetIdentityParams>(
+                command.params,
+            ) {
+                Ok(params) => match buddy_pet_create::identity(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.sheet.generate" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetSheetGenerateParams>(
+                command.params,
+            ) {
+                Ok(params) => match buddy_pet_create::generate_sheet(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.build" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetBuildIdParams>(command.params)
+            {
+                Ok(params) => match buddy_pet_create::build(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.save" => {
+            match serde_json::from_value::<buddy_pet_create::CohostPetSaveParams>(command.params) {
+                Ok(params) => match buddy_pet_create::save(state, params).await {
+                    Ok(saved) => ServerResponse::ok(command.id, saved),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Buddy pets (plan 168, Phase F) ---
         "cohost.settings.set" => {
             match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
                 Ok(patch) => match cohost::set_cohost_settings(state, patch).await {
@@ -9401,6 +10401,61 @@ async fn handle_text_message_with_role(
             Ok(quota) => ServerResponse::ok(command.id, quota),
             Err(error) => ServerResponse::error(command.id, "ai-quota-failed", error.to_string()),
         },
+        "sources.app_previews" => {
+            let params = if command.params.is_null() {
+                Ok(screen_capture::AppPreviewsParams::default())
+            } else {
+                serde_json::from_value(command.params)
+            };
+            match params {
+                Ok(params) => {
+                    match tokio::task::spawn_blocking(move || screen_capture::app_previews(params))
+                        .await
+                    {
+                        Ok(Ok(apps)) => {
+                            ServerResponse::ok(command.id, serde_json::json!({"apps": apps}))
+                        }
+                        Ok(Err(error)) => {
+                            ServerResponse::error(command.id, "app-previews-failed", error)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "app-previews-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sources.resolve_app_window" => {
+            match serde_json::from_value::<protocol::ResolveAppWindowParams>(command.params) {
+                Ok(params) if !params.bundle_id.trim().is_empty() => {
+                    match tokio::task::spawn_blocking(move || {
+                        screen_capture::resolve_app_window(&params)
+                    })
+                    .await
+                    {
+                        Ok(Ok(result)) => ServerResponse::ok(command.id, result),
+                        Ok(Err(error)) => {
+                            ServerResponse::error(command.id, "app-window-resolution-failed", error)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "app-window-resolution-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                _ => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected a non-empty bundleId and optional window id and minimum dimensions.",
+                ),
+            }
+        }
         "devices.list" => {
             let ffmpeg_path = resolve_trusted_ffmpeg_path(
                 command
@@ -9457,6 +10512,37 @@ async fn handle_text_message_with_role(
         }
         "diagnostics.stats" => {
             ServerResponse::ok(command.id, current_diagnostics_stats(state).await)
+        }
+        "diagnostics.metricsJournal.get" => {
+            ServerResponse::ok(command.id, metrics_journal::current_state())
+        }
+        "diagnostics.metricsJournal.set" => {
+            match serde_json::from_value::<metrics_journal::MetricsJournalSetParams>(command.params)
+            {
+                Ok(params) => match state
+                    .database
+                    .save_setting(metrics_journal::SETTING_KEY, &params.enabled)
+                {
+                    Ok(()) => {
+                        // Subscribe before reading the seed so nothing falls
+                        // between the snapshot and the first bus event.
+                        let events = state.events.subscribe();
+                        let seed = metrics_journal_seed(state).await;
+                        ServerResponse::ok(
+                            command.id,
+                            metrics_journal::configure(params.enabled, events, seed),
+                        )
+                    }
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "metrics-journal-not-saved",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "capture.recovery.status" => ServerResponse::ok(
             command.id,
@@ -9587,6 +10673,84 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 209 S2: the Agents section's RPCs (renderer and admin).
+        "agents.status" => ServerResponse::ok(command.id, crate::agent_mcp::status(state)),
+        "agents.enable" => match crate::agent_mcp::enable(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+        },
+        // Stop (D12) is Off: every agent is cut and the port closes.
+        "agents.disable" | "agents.stop" => match crate::agent_mcp::disable(state) {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+        },
+        "agents.create" => {
+            match serde_json::from_value::<crate::agent_mcp::CreateAgentParams>(command.params) {
+                Ok(params) => match crate::agent_mcp::create_agent(state, params) {
+                    Ok(created) => ServerResponse::ok(command.id, created),
+                    Err(message) => ServerResponse::error(command.id, "agents", message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "agents.remove" => {
+            match serde_json::from_value::<crate::agent_mcp::AgentIdParams>(command.params) {
+                Ok(params) => match crate::agent_mcp::remove_agent(state, params) {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "agents.activity.list" => {
+            match serde_json::from_value::<crate::agent_mcp::ActivityListParams>(
+                if command.params.is_null() {
+                    serde_json::json!({})
+                } else {
+                    command.params
+                },
+            ) {
+                Ok(params) => match crate::agent_mcp::activity(state, params) {
+                    Ok(page) => ServerResponse::ok(command.id, page),
+                    Err(error) => ServerResponse::error(command.id, "agents", error.to_string()),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 209 S3 (renderer-only, `backend_authority`): the Studio's
+        // answer to an `agent.intent`. A late or unknown id is still `ok`:
+        // the agent's call already ended with its timeout sentence.
+        "agent.intent.ack" => {
+            match serde_json::from_value::<crate::agent_mcp::AgentIntentAck>(command.params) {
+                Ok(ack) => {
+                    crate::agent_call::ack_studio_intent(state, ack);
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 209 S3 (renderer-only): the Studio's projection for
+        // `get_status` and the `list_*` tools. Stored, deduped, never relayed
+        // to any socket.
+        "agent.surface.publish" => match command.params.get("surface") {
+            Some(surface) if surface.is_object() => {
+                crate::agent_call::publish_surface(state, surface.clone());
+                ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+            }
+            _ => ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "agent.surface.publish needs a surface object.".to_string(),
+            ),
+        },
         "remote.control.status" => ServerResponse::ok(command.id, remote_control_status(state)),
         "remote.control.enable" => match enable_remote_control(state) {
             Ok(status) => ServerResponse::ok(command.id, status),
@@ -9739,6 +10903,22 @@ async fn handle_text_message_with_role(
                 }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-intent", error.to_string())
+                }
+            }
+        }
+        "preview.debug.sample" => {
+            if !cfg!(debug_assertions) {
+                ServerResponse::error(
+                    command.id,
+                    "preview-debug-disabled",
+                    "Preview sampling is refused in packaged builds.",
+                )
+            } else {
+                match preview_debug_sample::sample(state, command.params).await {
+                    Ok(value) => ServerResponse::ok(command.id, value),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "preview-debug-sample-failed", error)
+                    }
                 }
             }
         }
@@ -10337,6 +11517,12 @@ async fn handle_text_message_with_role(
                     let attach_live_chat = session_attaches_live_chat(&params);
                     match start_session(state.clone(), params).await {
                         Ok(status) => {
+                            // Plan 187: a fact for the announcer; never waits.
+                            discord_announce::on_session_started(
+                                state,
+                                &status,
+                                streaming.as_ref(),
+                            );
                             if attach_live_chat
                                 && let Some(streaming) = streaming.as_ref()
                                 && let Some(session_id) = status.session_id.as_deref()
@@ -10345,11 +11531,26 @@ async fn handle_text_message_with_role(
                             }
                             ServerResponse::ok(command.id, status)
                         }
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "session-start-failed",
-                            error.to_string(),
-                        ),
+                        Err(error) => {
+                            // Plan 181 (owner redesign, guard): an automatic
+                            // buffer-only start on a software encoder is a
+                            // typed refusal, so the renderer keeps the switch
+                            // off and says why instead of retrying.
+                            let code = if error
+                                .downcast_ref::<replay_buffer::AutoStartRefused>()
+                                .is_some()
+                            {
+                                replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE
+                            } else if error
+                                .downcast_ref::<replay_buffer::AutoStartSourcesNotReady>()
+                                .is_some()
+                            {
+                                replay_buffer::SOURCES_NOT_READY_CODE
+                            } else {
+                                "session-start-failed"
+                            };
+                            ServerResponse::error(command.id, code, error.to_string())
+                        }
                     }
                 }
                 Err(error) => {
@@ -10358,7 +11559,7 @@ async fn handle_text_message_with_role(
             }
         }
         "session.stop" => {
-            // Orcle's listen task drains with this capture (plan 068 review).
+            // Buddy's listen task drains with this capture (plan 068 review).
             live_chat::stop_live_chat_for_capture_end(state).await;
             // Older renderers send no params; the click timestamp is telemetry
             // only, so a malformed payload degrades to "no timestamp".
@@ -10876,6 +12077,82 @@ async fn handle_text_message_with_role(
         "liveChat.diagnostics" => {
             ServerResponse::ok(command.id, live_chat::current_diagnostics(state).await)
         }
+        // Settings → General → Privacy → "Share anonymous usage stats".
+        // Plan 187: the Discord go-live announcement. The webhook URL goes in
+        // through `discord.webhook.save` and never comes back out.
+        "discord.announce.get" => {
+            ServerResponse::ok(command.id, discord_announce::snapshot(state).await)
+        }
+        "discord.announce.update" => {
+            match serde_json::from_value::<discord_announce::UpdateParams>(command.params) {
+                Ok(params) => {
+                    discord_rpc(command.id, discord_announce::update(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "discord.webhook.save" => {
+            match serde_json::from_value::<discord_announce::SaveWebhookParams>(command.params) {
+                Ok(params) => discord_rpc(
+                    command.id,
+                    discord_announce::save_webhook(state, params).await,
+                ),
+                // Never echo the params: they hold the webhook URL.
+                Err(_) => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected { url }.".to_string(),
+                ),
+            }
+        }
+        "discord.webhook.remove" => {
+            match serde_json::from_value::<discord_announce::RemoveWebhookParams>(command.params) {
+                Ok(params) => discord_rpc(
+                    command.id,
+                    discord_announce::remove_webhook(state, params).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "discord.webhook.sendTest" => {
+            match serde_json::from_value::<discord_announce::TestParams>(command.params) {
+                Ok(params) => {
+                    discord_rpc(command.id, discord_announce::send_test(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "discord.links.preview" => {
+            match serde_json::from_value::<discord_announce::TargetsParams>(command.params) {
+                Ok(params) => discord_rpc(
+                    command.id,
+                    discord_announce::preview_links(state, params).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "usageStats.get" => ServerResponse::ok(command.id, usage_stats::current_state(state)),
+        "usageStats.set" => {
+            match serde_json::from_value::<usage_stats::UsageStatsSetParams>(command.params) {
+                Ok(params) => match usage_stats::set_enabled(state, params.enabled).await {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "settings-unavailable", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "liveChat.send" => {
             match serde_json::from_value::<live_chat::CommentsSendParams>(command.params) {
                 Ok(params) => match live_chat::send_live_chat_message(state, params).await {
@@ -10931,6 +12208,14 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<live_chat_moderation::ModerationRequestParams>(
                 command.params,
             ) {
+                // Plan 209 S12: only the Agents endpoint makes agent removals.
+                Ok(params) if params.source == live_chat_moderation::ModerationSource::Agent => {
+                    ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "Agent removals come from the Agents endpoint only.",
+                    )
+                }
                 Ok(params) => match live_chat_moderation::request(state, params.into()).await {
                     Ok(operation) => ServerResponse::ok(command.id, operation),
                     Err(refusal) => {
@@ -11456,7 +12741,18 @@ async fn handle_text_message_with_role(
                         _ => youtube::YouTubeFailureStep::TransitionLive,
                     };
                     match transition_youtube_stream_target(state, params).await {
-                        Ok(result) => ServerResponse::ok(command.id, result),
+                        Ok(result) => {
+                            if result.requested_status
+                                == youtube::YouTubeBroadcastTransitionStatus::Live
+                            {
+                                discord_announce::on_youtube_live(
+                                    state,
+                                    &result.broadcast_id,
+                                    result.privacy_status,
+                                );
+                            }
+                            ServerResponse::ok(command.id, result)
+                        }
                         Err(error) => {
                             tracing::warn!("[youtube-transition] failed: {error:#}");
                             let (code, message) = youtube::youtube_failure_response(&error, step);
@@ -11638,8 +12934,15 @@ async fn handle_text_message_with_role(
         }
         "streamTargets.x.publish" => {
             match serde_json::from_value::<XPublishParams>(command.params) {
-                Ok(params) => match publish_x_native_live(state, params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
+                Ok(params) => match publish_x_native_live(state, params.clone()).await {
+                    Ok(result) => {
+                        discord_announce::on_x_published(
+                            state,
+                            params.session_id.as_deref(),
+                            &result.share_url,
+                        );
+                        ServerResponse::ok(command.id, result)
+                    }
                     Err(error) => {
                         ServerResponse::error(command.id, "x-publish-failed", error.to_string())
                     }
@@ -11656,6 +12959,377 @@ async fn handle_text_message_with_role(
             },
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
+        // Plan 186: banners. Every mutation ends in `banners::on_banners_changed`,
+        // which republishes the list (and, from S3, installs the compositor set).
+        // Refusals come back as the verbatim sentences from the plan.
+        "banners.list" => match state.database.list_banners() {
+            Ok(banners) => ServerResponse::ok(command.id, banners),
+            Err(error) => {
+                ServerResponse::error(command.id, "banners-list-failed", error.to_string())
+            }
+        },
+        "banners.importImage" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_banner_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<protocol::ImportBannerImageParams>(params_value) {
+                Ok(params) => {
+                    let database = state.database.clone();
+                    // Decode, scale and encode off the async workers; the
+                    // AssetImport lane keeps admission until this finishes.
+                    let result = tokio::task::spawn_blocking(move || {
+                        banners::import_banner(&database, std::path::Path::new(&params.path))
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!("Image import worker failed: {error}"))
+                    });
+                    match result {
+                        Ok(banner) => {
+                            // Plan 205 D3: a banner you add shows, under the
+                            // same gates as `banners.show`; refused, it stays
+                            // hidden and the reply is still the row.
+                            let banner = banners::show_imported_banner(state, banner).await;
+                            let _ = banners::on_banners_changed(state).await;
+                            ServerResponse::ok(command.id, banner)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-import-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.update" => {
+            match serde_json::from_value::<protocol::UpdateBannerParams>(command.params) {
+                Ok(params) => {
+                    let update = match banners::BannerUpdate::from_params(&params) {
+                        Ok(update) => update,
+                        Err(error) => {
+                            return ServerResponse::error(
+                                command.id,
+                                "banner-update-failed",
+                                error.to_string(),
+                            );
+                        }
+                    };
+                    match state.database.update_banner(&params.id, update) {
+                        Ok(banner) => {
+                            let _ = banners::on_banners_changed(state).await;
+                            ServerResponse::ok(command.id, banner)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-update-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.reorder" => {
+            match serde_json::from_value::<protocol::ReorderBannersParams>(command.params) {
+                Ok(params) => match state.database.reorder_banners(&params.ids) {
+                    Ok(banners) => {
+                        let _ = banners::on_banners_changed(state).await;
+                        ServerResponse::ok(command.id, banners)
+                    }
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "banner-reorder-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.delete" => {
+            match serde_json::from_value::<protocol::BannerIdParams>(command.params) {
+                Ok(params) => {
+                    // D9: a showing banner is burned into the running session;
+                    // deleting it is refused until it is hidden.
+                    let session_active = state.recording.lock().await.is_some();
+                    match banners::delete_banner(&state.database, &params.id, session_active) {
+                        Ok(()) => match banners::on_banners_changed(state).await {
+                            Ok(banners) => ServerResponse::ok(command.id, banners),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "banners-list-failed",
+                                error.to_string(),
+                            ),
+                        },
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-delete-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.show" => {
+            match serde_json::from_value::<protocol::BannerIdParams>(command.params) {
+                Ok(params) => match banners::show_banner(
+                    &state.database,
+                    &params.id,
+                    // The 160 MB prepared-bitmap budget is judged against the
+                    // canvases the compositor draws right now.
+                    &compositor::banner_prepare_canvases(state).await,
+                    // A session that cannot draw a banner added after its
+                    // start refuses a new one (plan 186 S4).
+                    recording::active_session_accepts_banners(state).await,
+                ) {
+                    Ok(banner) => {
+                        let _ = banners::on_banners_changed(state).await;
+                        ServerResponse::ok(command.id, banner)
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "banner-show-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "banners.hide" => {
+            match serde_json::from_value::<protocol::HideBannerParams>(command.params) {
+                Ok(params) => {
+                    let hidden = match params.id.as_deref() {
+                        Some(id) => state.database.hide_banner(id).map(|_| ()),
+                        None => state.database.hide_all_banners(),
+                    };
+                    match hidden {
+                        Ok(()) => match banners::on_banners_changed(state).await {
+                            Ok(banners) => ServerResponse::ok(command.id, banners),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "banners-list-failed",
+                                error.to_string(),
+                            ),
+                        },
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "banner-hide-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 189: the soundboard. Every store mutation ends in
+        // `sound_store::on_sounds_changed`, which republishes the board;
+        // every playback change ends in `sounds.playback` from the player.
+        // Refusals come back as the verbatim sentences from the plan.
+        "sounds.list" => match state.database.soundboard_state() {
+            Ok(board) => ServerResponse::ok(command.id, board),
+            Err(error) => {
+                ServerResponse::error(command.id, "sounds-list-failed", error.to_string())
+            }
+        },
+        "sounds.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_sound_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<protocol::ImportSoundParams>(params_value) {
+                Ok(params) => {
+                    let database = state.database.clone();
+                    // The import never takes a caller's binary: the bundled
+                    // FFmpeg, or the default, decodes every sound.
+                    let ffmpeg_path = ffmpeg::resolve_ffmpeg_path(None);
+                    // Decode, trim and measure off the async workers; the
+                    // AssetImport lane keeps admission until this finishes.
+                    let result = tokio::task::spawn_blocking(move || {
+                        sound_store::import_sound(
+                            &database,
+                            std::path::Path::new(&params.path),
+                            params.starter,
+                            &ffmpeg_path,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!("Sound import worker failed: {error}"))
+                    });
+                    match result {
+                        Ok(sound) => {
+                            let _ = sound_store::on_sounds_changed(state);
+                            ServerResponse::ok(command.id, sound)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-import-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.update" => {
+            match serde_json::from_value::<protocol::UpdateSoundParams>(command.params) {
+                Ok(params) => {
+                    let update = match sound_store::SoundUpdate::from_params(&params) {
+                        Ok(update) => update,
+                        Err(error) => {
+                            return ServerResponse::error(
+                                command.id,
+                                "sound-update-failed",
+                                error.to_string(),
+                            );
+                        }
+                    };
+                    match state.database.update_sound(&params.id, update) {
+                        Ok(sound) => {
+                            let _ = sound_store::on_sounds_changed(state);
+                            ServerResponse::ok(command.id, sound)
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-update-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.reorder" => {
+            match serde_json::from_value::<protocol::ReorderSoundsParams>(command.params) {
+                Ok(params) => match state.database.reorder_sounds(&params.ids) {
+                    Ok(sounds) => {
+                        let _ = sound_store::on_sounds_changed(state);
+                        ServerResponse::ok(command.id, sounds)
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "sound-reorder-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.delete" => {
+            match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+                Ok(params) => {
+                    // Its voices stop first, so a deleted sound never plays on.
+                    state.soundboard.evict(state, &params.id);
+                    match sound_store::delete_sound(&state.database, &params.id) {
+                        Ok(()) => match sound_store::on_sounds_changed(state) {
+                            Ok(board) => ServerResponse::ok(command.id, board.sounds),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "sounds-list-failed",
+                                error.to_string(),
+                            ),
+                        },
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-delete-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.settings" => {
+            match serde_json::from_value::<protocol::SoundboardSettingsParams>(command.params) {
+                Ok(params) => {
+                    if let Err(error) = sound_store::validate_soundboard_settings(&params) {
+                        return ServerResponse::error(
+                            command.id,
+                            "sound-settings-failed",
+                            error.to_string(),
+                        );
+                    }
+                    match state.database.update_sound_settings(&params) {
+                        Ok(settings) => {
+                            // The running bus follows the fader at once.
+                            state.soundboard.set_board_volume_db(settings.volume_db);
+                            match sound_store::on_sounds_changed(state) {
+                                Ok(board) => ServerResponse::ok(command.id, board),
+                                Err(error) => ServerResponse::error(
+                                    command.id,
+                                    "sounds-list-failed",
+                                    error.to_string(),
+                                ),
+                            }
+                        }
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "sound-settings-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sounds.play" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+            Ok(params) => match state.soundboard.play(state, &params.id).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "sounds.press" => match serde_json::from_value::<protocol::SoundIdParams>(command.params) {
+            Ok(params) => match state.soundboard.press(state, &params.id).await {
+                Ok(result) => ServerResponse::ok(command.id, result),
+                Err(error) => {
+                    ServerResponse::error(command.id, "sound-play-failed", error.to_string())
+                }
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "sounds.stop" => {
+            match serde_json::from_value::<protocol::StopSoundParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    state.soundboard.stop(state, params.id.as_deref()),
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "screens.list" => match state.database.list_stream_screens() {
             Ok(screens) => ServerResponse::ok(command.id, screens),
             Err(error) => {
@@ -11680,14 +13354,20 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::ImportScreenImageParams>(params_value) {
                 Ok(params) => {
                     let ffmpeg_path = resolve_ffmpeg_path_ref(params.ffmpeg_path.as_deref());
-                    match state
-                        .database
-                        .import_screen_image(&params.path, &ffmpeg_path)
-                    {
+                    let database = state.database.clone();
+                    // Keep image decoding/FFmpeg waits off async mutation workers.
+                    // The watched handler retains lane admission until this owned
+                    // blocking job completes, even if its caller disconnects.
+                    let result = tokio::task::spawn_blocking(move || {
+                        database.import_screen_image(&params.path, &ffmpeg_path)
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(anyhow::anyhow!("Image import worker failed: {error}"))
+                    });
+                    match result {
                         Ok(screen) => {
-                            if let Ok(screens) = state.database.list_stream_screens() {
-                                state.emit_event("screens.changed", screens);
-                            }
+                            let _ = publish_stream_screen_list(state);
                             ServerResponse::ok(command.id, screen)
                         }
                         Err(error) => ServerResponse::error(
@@ -11709,9 +13389,7 @@ async fn handle_text_message_with_role(
                     .rename_stream_screen(&params.screen_id, &params.name)
                 {
                     Ok(screen) => {
-                        if let Ok(screens) = state.database.list_stream_screens() {
-                            state.emit_event("screens.changed", screens);
-                        }
+                        let _ = publish_stream_screen_list(state);
                         if let Ok(active) = state.database.active_stream_screen()
                             && active.as_ref().map(|active| &active.id) == Some(&screen.id)
                         {
@@ -11734,9 +13412,8 @@ async fn handle_text_message_with_role(
                     let delete_result =
                         delete_stream_screen_transition(state, &params.screen_id).await;
                     match delete_result {
-                        Ok(()) => match state.database.list_stream_screens() {
+                        Ok(()) => match publish_stream_screen_list(state) {
                             Ok(screens) => {
-                                state.emit_event("screens.changed", screens.clone());
                                 if let Ok(active) = state.database.active_stream_screen() {
                                     state.emit_event("screens.active.changed", active);
                                 }
@@ -11764,7 +13441,7 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::ReorderScreensParams>(command.params) {
                 Ok(params) => match state.database.reorder_stream_screens(&params.screen_ids) {
                     Ok(screens) => {
-                        state.emit_event("screens.changed", screens.clone());
+                        let _ = publish_stream_screen_list(state);
                         ServerResponse::ok(command.id, screens)
                     }
                     Err(error) => ServerResponse::error(
@@ -11837,6 +13514,70 @@ async fn handle_text_message_with_role(
                 Err(error) => {
                     ServerResponse::error(command.id, "screen-clear-failed", error.to_string())
                 }
+            }
+        }
+        // Plan 210 S7: Hide screen. Renderer and admin sockets only (the
+        // remote and agent roles never reach these methods); the LiveControl
+        // lane, so a hide never queues behind a scene commit.
+        "screen.hide" => match serde_json::from_value::<protocol::ScreenHideParams>(command.params)
+        {
+            Ok(params) => {
+                if recording::active_session_reads_display_directly(state)
+                    .await
+                    .is_some()
+                {
+                    // The legacy FFmpeg graph grabs the display itself and
+                    // never reads the gated store: refuse, never succeed
+                    // uncovered.
+                    ServerResponse::error(
+                        command.id,
+                        "screen-hide-unavailable",
+                        screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY,
+                    )
+                } else {
+                    let privacy = state
+                        .screen_privacy
+                        .hide(params.reason, chrono::Utc::now().to_rfc3339());
+                    // The gate is hidden before this runs, so a frame landing
+                    // in between frosts itself; this covers a static screen.
+                    preview_screen::hold_screen_now(state).await;
+                    state.emit_event("screen.privacy.changed", privacy.clone());
+                    ServerResponse::ok(command.id, privacy)
+                }
+            }
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "screen.show" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "screen.show does not accept parameters",
+                )
+            } else {
+                let privacy = state.screen_privacy.show();
+                preview_screen::release_screen_now(state).await;
+                state.emit_event("screen.privacy.changed", privacy.clone());
+                ServerResponse::ok(command.id, privacy)
+            }
+        }
+        "screen.privacy.get" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "screen.privacy.get does not accept parameters",
+                )
+            } else {
+                let mut privacy = state.screen_privacy.snapshot();
+                if recording::active_session_reads_display_directly(state)
+                    .await
+                    .is_some()
+                {
+                    privacy.unavailable =
+                        Some(screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY.to_string());
+                }
+                ServerResponse::ok(command.id, privacy)
             }
         }
         "session.remux_mp4" => {
@@ -12170,9 +13911,38 @@ async fn handle_text_message_with_role(
                 Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
             }
         }
-        "clip.mark" => match clip_marks::mark_manual(state).await {
-            Ok(event) => ServerResponse::ok(command.id, event),
-            Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
+        // Plan 199: both take an optional `{ seconds?: 30 | 60 }`. Older
+        // callers send no params (or null): that is `{}`, today's 30 s.
+        "clip.mark" => {
+            match serde_json::from_value::<protocol::ClipMarkParams>(if command.params.is_null() {
+                serde_json::json!({})
+            } else {
+                command.params
+            }) {
+                Ok(params) => match clip_marks::mark_manual(state, params.seconds).await {
+                    Ok(event) => ServerResponse::ok(command.id, event),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "replay.status" => ServerResponse::ok(command.id, replay_buffer::snapshot(state)),
+        "replay.save" => match serde_json::from_value::<protocol::ReplaySaveParams>(
+            if command.params.is_null() {
+                serde_json::json!({})
+            } else {
+                command.params
+            },
+        ) {
+            Ok(params) => match replay_buffer::request_save(state, None, params.seconds) {
+                Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "clip.marks.list" => {
             match serde_json::from_value::<protocol::ClipMarksListParams>(command.params) {
@@ -12460,10 +14230,21 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Phase 3: compare+hydrate+persist atomically with sign-in/sign-out. A
     // newer refresh generation also wins for the same token/account.
     let transition = state.account_auth_transition.lock().await;
-    // Plan 140 S8: the same read turns Orcle's cloud command parser on or
+    // Plan 140 S8: the same read turns Buddy's cloud command parser on or
     // off (applied below, outside this lock). Signed out reads as off; a
     // failed read keeps the last answer.
     let mut command_parser = None;
+    // Plan 164 S-D3: the same read tells the Buddy which tick contract the
+    // web speaks (4 adds the persona). Signed out reads as unknown.
+    let mut tick_version: Option<Option<u32>> = None;
+    // Plan 192 D4: and whether the greet route is on (the AI writes the
+    // greetings). Signed out reads as unknown; absent reads as off.
+    let mut greet_version: Option<Option<u32>> = None;
+    // Plan 170 D9: the same read turns the account Buddy library on or off.
+    let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
+    // Plan 209 S19: and whether Buddy's tool planner may be asked
+    // (`buddy.act`). Signed out or absent reads as off.
+    let mut buddy_act: Option<bool> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -12472,6 +14253,37 @@ async fn refresh_account_entitlements(state: &AppState) {
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
                         Some(capabilities.features.cohost_command_enabled)
                     }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                tick_version = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.tick))
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                greet_version = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.greet))
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                buddy_act = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(false),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.buddy_act_enabled())
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                buddy_library = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => Some(
+                        capabilities
+                            .cohost
+                            .as_ref()
+                            .and_then(|cohost| cohost.buddy_library.clone()),
+                    ),
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
                 apply_prepared_account_entitlement_refresh(prepared.outcome)
@@ -12493,10 +14305,22 @@ async fn refresh_account_entitlements(state: &AppState) {
     if let Some(enabled) = command_parser {
         cohost::set_command_parser_capability(state, enabled).await;
     }
+    if let Some(tick) = tick_version {
+        cohost::set_tick_capability(state, tick).await;
+    }
+    if let Some(greet) = greet_version {
+        cohost::set_greet_capability(state, greet).await;
+    }
+    if let Some(library) = buddy_library {
+        cohost_library::set_capability(state, library).await;
+    }
+    if let Some(enabled) = buddy_act {
+        cohost::set_buddy_act_capability(state, enabled).await;
+    }
 }
 
 /// Every `entitlements.updated` goes out through here (plan 140 S1): publish
-/// the effective snapshot, then let Orcle react to it. A session running
+/// the effective snapshot, then let Buddy react to it. A session running
 /// without `LiveCohost` stops through its normal stop path, with its report
 /// saved. The stop runs on its own task: two of the three emitters call from a
 /// synchronous closure under `account_auth_transition`, and the stop takes the
@@ -12507,7 +14331,7 @@ fn publish_entitlements_updated(state: &AppState) {
     state.emit_event("entitlements.updated", entitlements::current_entitlements());
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(
-            "Entitlements changed outside the runtime; Orcle re-checks on its next start."
+            "Entitlements changed outside the runtime; Buddy re-checks on its next start."
         );
         return;
     };
@@ -12532,6 +14356,18 @@ async fn backend_health(state: &AppState, ffmpeg_path: &str) -> BackendHealth {
         database_path: state.database.path().display().to_string(),
         secret_store_backend: secrets::secret_store_backend_kind().to_string(),
     }
+}
+
+/// Current session state for a metrics journal switched on mid-session.
+async fn metrics_journal_seed(state: &AppState) -> Vec<protocol::ServerEvent> {
+    let mut seed = vec![
+        protocol::ServerEvent::new("recording.status", current_recording_status(state).await),
+        protocol::ServerEvent::new("diagnostics.stats", current_diagnostics_stats(state).await),
+    ];
+    if let Ok(snapshot) = recording::current_stream_targets_snapshot(state).await {
+        seed.push(protocol::ServerEvent::new("stream.targets", snapshot));
+    }
+    seed
 }
 
 async fn current_diagnostics_stats(state: &AppState) -> protocol::DiagnosticStats {
@@ -12575,6 +14411,7 @@ async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus
             pipeline: None,
             duration_ms: None,
             message: Some("Finalizing recording output.".to_string()),
+            replay_only: false,
         };
     }
     idle_status()
@@ -12600,6 +14437,7 @@ async fn export_support_bundle_for_state(
         logs: state.recent_logs(200),
         sessions,
         performance_check: performance_check::current_state(state).await.result,
+        metrics_journal: metrics_journal::support_bundle_lines(),
     })
 }
 
@@ -12646,9 +14484,59 @@ async fn ffmpeg_status(ffmpeg_path: &str) -> ToolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_names_the_screens_banners_and_sounds_folders_beside_the_database() {
+        // Release test 146, plan 0005: main serves videorc-asset://screen and
+        // ://banner from these roots, so they must be the backend's own.
+        let directory =
+            std::env::temp_dir().join(format!("videorc-asset-roots-{}", Uuid::new_v4()));
+        let database = Database::open_file_for_tests(&directory.join("videorc.sqlite3"));
+        let roots = managed_asset_roots(&database);
+        assert_eq!(
+            std::path::PathBuf::from(&roots.screens),
+            directory.join("Screens")
+        );
+        assert_eq!(
+            std::path::PathBuf::from(&roots.banners),
+            directory.join("Banners")
+        );
+        // Release test 147, plan 0002: the monitor's sounds too.
+        assert_eq!(
+            std::path::PathBuf::from(&roots.sounds),
+            directory.join("Sounds")
+        );
+        assert_eq!(
+            std::path::PathBuf::from(&roots.sounds),
+            database.sound_assets_dir()
+        );
+        assert_eq!(
+            serde_json::to_value(&roots).unwrap(),
+            json!({ "screens": roots.screens, "banners": roots.banners, "sounds": roots.sounds })
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
     use serde_json::json;
     use std::time::Instant;
     use tokio::sync::broadcast;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_descriptors_become_close_on_exec() {
+        // An fd opened without O_CLOEXEC stands in for one Electron handed us.
+        let path = std::ffi::CString::new("/dev/null").unwrap();
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
+        assert!(fd > 2, "open /dev/null");
+        let cloexec = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0;
+        assert!(!cloexec(fd));
+        // From this descriptor up only, so the harness's own stdio is untouched.
+        assert!(mark_descriptors_close_on_exec_from(fd as libc::c_uint));
+        assert!(
+            cloexec(fd),
+            "the inherited descriptor must not reach FFmpeg"
+        );
+        unsafe { libc::close(fd) };
+    }
 
     const HARD_EXIT_CHILD_ENV: &str = "VIDEORC_TEST_ZERO_IO_HARD_EXIT";
 
@@ -13120,6 +15008,38 @@ mod tests {
         assert!(
             state.process_shutdown_requested(),
             "losing the terminal-outcome owner must remain fail closed"
+        );
+    }
+
+    #[test]
+    fn expired_before_dispatch_log_names_lane_method_and_age_never_params() {
+        // Plan 195 S1 (F4): the bundle can say which feature "Videorc was
+        // busy" for. Params never reach the log.
+        let text = r#"{"id":"c-1","method":"banners.show","params":{"text":"SECRET-BANNER"}}"#;
+        let line = expired_before_dispatch_log_line(
+            websocket_lane_label(text),
+            text,
+            Some(Duration::from_millis(2_345)),
+            "lane queue deadline",
+        );
+        assert_eq!(
+            line,
+            "Command expired before dispatch: lane=liveControl method=banners.show queuedMs=2345 cause=lane queue deadline"
+        );
+        assert!(!line.contains("SECRET"), "{line}");
+        let line =
+            expired_before_dispatch_log_line("ordered", "not json", None, "backend shutdown");
+        assert_eq!(
+            line,
+            "Command expired before dispatch: lane=ordered method=unknown queuedMs=unknown cause=backend shutdown"
+        );
+        assert_eq!(
+            websocket_lane_label(r#"{"id":"c-2","method":"liveChat.send","params":{}}"#),
+            "durableChat"
+        );
+        assert_eq!(
+            websocket_lane_label(r#"{"id":"c-3","method":"session.start","params":{}}"#),
+            "isolated"
         );
     }
 
@@ -14775,6 +16695,8 @@ mod tests {
             "liveChat.moderationOperations.list",
             "sessions.comments.totals",
             "screens.list",
+            "banners.list",
+            "sounds.list",
             "recording.status",
             "capture.recovery.status",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
@@ -14805,6 +16727,118 @@ mod tests {
         }
     }
 
+    /// Plan 210 S7: hide and show through the renderer socket, with the event
+    /// and the exact wire shapes (absent fields omitted, never null).
+    #[tokio::test]
+    async fn screen_hide_and_show_round_trip_with_the_event() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let get = json!({ "id": "get", "method": "screen.privacy.get", "params": {} }).to_string();
+        let response = handle_text_message_with_role(&state, &get, BackendRole::Renderer).await;
+        assert!(response.ok);
+        assert_eq!(response.payload.unwrap(), json!({ "hidden": false }));
+
+        let hide = json!({ "id": "hide", "method": "screen.hide", "params": { "reason": "you" } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &hide, BackendRole::Renderer).await;
+        assert!(response.ok, "{:?}", response.error);
+        let payload = response.payload.unwrap();
+        assert_eq!(payload["hidden"], json!(true));
+        assert_eq!(payload["reason"], json!("you"));
+        assert!(payload["since"].is_string());
+        assert!(payload.get("unavailable").is_none());
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.event, "screen.privacy.changed");
+        assert_eq!(event.payload, payload);
+        assert!(state.screen_privacy.view().hidden);
+
+        // A password-manager hide while hidden by you keeps "you".
+        let hide_again = json!({
+            "id": "hide2", "method": "screen.hide", "params": { "reason": "password-manager" }
+        })
+        .to_string();
+        let response =
+            handle_text_message_with_role(&state, &hide_again, BackendRole::Renderer).await;
+        assert_eq!(response.payload.unwrap()["reason"], json!("you"));
+        let _ = events.recv().await.unwrap();
+
+        let bad = json!({ "id": "bad", "method": "screen.hide", "params": { "reason": "agent" } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &bad, BackendRole::Renderer).await;
+        assert_eq!(response.error.unwrap().code, "invalid-params");
+
+        let show = json!({ "id": "show", "method": "screen.show", "params": {} }).to_string();
+        let response = handle_text_message_with_role(&state, &show, BackendRole::Admin).await;
+        assert!(response.ok);
+        assert_eq!(response.payload.unwrap(), json!({ "hidden": false }));
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.event, "screen.privacy.changed");
+        assert_eq!(event.payload, json!({ "hidden": false }));
+        assert!(!state.screen_privacy.view().hidden);
+
+        // Never the remote role.
+        let response = handle_text_message_with_role(&state, &hide, BackendRole::Remote).await;
+        assert_eq!(response.error.unwrap().code, "forbidden-method");
+        assert!(!state.screen_privacy.view().hidden);
+    }
+
+    /// Plan 210 S7.5: a legacy FFmpeg session grabs the display itself, so a
+    /// hide is refused with the exact copy and the status says why. It never
+    /// succeeds uncovered.
+    #[tokio::test]
+    async fn screen_hide_is_refused_while_a_legacy_ffmpeg_session_runs() {
+        let state = test_state();
+        *state.recording.lock().await = Some(recording::test_active_recording_stub("legacy"));
+        let hide = json!({ "id": "hide", "method": "screen.hide", "params": { "reason": "you" } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &hide, BackendRole::Renderer).await;
+        let error = response.error.expect("refused");
+        assert_eq!(error.code, "screen-hide-unavailable");
+        assert_eq!(
+            error.message,
+            "Hide screen isn't available on this recording. Stop and record again."
+        );
+        assert!(
+            !state.screen_privacy.view().hidden,
+            "a refusal changes nothing"
+        );
+        let get = json!({ "id": "get", "method": "screen.privacy.get", "params": {} }).to_string();
+        let response = handle_text_message_with_role(&state, &get, BackendRole::Renderer).await;
+        assert_eq!(
+            response.payload.unwrap(),
+            json!({
+                "hidden": false,
+                "unavailable": "Hide screen isn't available on this recording. Stop and record again."
+            })
+        );
+        *state.recording.lock().await = None;
+        let response = handle_text_message_with_role(&state, &hide, BackendRole::Renderer).await;
+        assert!(response.ok, "{:?}", response.error);
+    }
+
+    #[test]
+    fn camera_start_replies_inside_its_mutation_execution_contract() {
+        // A slow camera must get a Starting reply, never a backend restart.
+        let command =
+            json!({ "id": "camera", "method": "preview.camera.start", "params": {} }).to_string();
+        let contract = websocket_command_mutation_max_execution_age(command.as_str())
+            .expect("preview.camera.start runs under a mutation execution contract");
+        assert!(
+            preview_camera::CAMERA_COMMAND_RESPONSE_BUDGET < contract,
+            "camera start replies after {:?}, past its {contract:?} execution contract",
+            preview_camera::CAMERA_COMMAND_RESPONSE_BUDGET
+        );
+    }
+
+    #[test]
+    fn preview_debug_sample_is_read_only_without_a_mutation_lane() {
+        let text = json!({"id":"sample", "method":"preview.debug.sample", "params":{"rects":[]}})
+            .to_string();
+        assert!(websocket_command_is_read_only(&text));
+        assert!(!websocket_observation_requires_operator_fence(&text));
+        assert_eq!(websocket_command_mutation_max_execution_age(&text), None);
+    }
+
     #[test]
     fn websocket_handler_execution_policy_inventory_is_exhaustive() {
         for method in [
@@ -14812,11 +16846,18 @@ mod tests {
             "screens.activate",
             "screens.clear",
             "screens.delete",
+            "banners.show",
+            "banners.hide",
+            "sounds.play",
+            "sounds.press",
+            "sounds.stop",
             "captions.start",
             "captions.stop",
             "captions.style.set",
             "comments.highlight.set",
             "comments.highlight.clear",
+            "screen.hide",
+            "screen.show",
             "capture.recovery.retry",
             CAPTURE_RECOVERY_SMOKE_INJECT_METHOD,
             CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD,
@@ -14863,6 +16904,9 @@ mod tests {
             "cohost.command.choose",
             "cohost.command.confirm",
             "cohost.command.cancel",
+            // Plan 209 S20: `/buddy` answers at once; the calls run on their
+            // own task and report `cohost.act.result`.
+            "cohost.act",
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert_eq!(
@@ -14881,6 +16925,7 @@ mod tests {
             );
         }
         assert!(!crate::remote_lan::LAN_EVENTS.contains(&cohost::COHOST_STATE_EVENT));
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&buddy_act::ACT_RESULT_EVENT));
 
         for method in ["scene.layout.apply_live", "scene.layout.apply_preview"] {
             let command = json!({
@@ -14986,6 +17031,8 @@ mod tests {
 
         for method in [
             "screens.importImage",
+            "banners.importImage",
+            "sounds.import",
             "sessions.delete",
             "sessions.delete.complete",
         ] {
@@ -15592,6 +17639,523 @@ mod tests {
         release_account.add_permits(1);
         drop(command_tx);
         dispatcher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_asset_import_is_single_flight_without_blocking_live_commands() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let entered = entered.clone();
+            let release = release.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let entered = entered.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "screens.importImage" {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let mut clients = Vec::new();
+        let mut dispatchers = Vec::new();
+        for _ in 0..2 {
+            let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+            let connection = transport.register_connection();
+            let (tx, rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+            let (out_tx, out_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+            let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+            dispatchers.push(tokio::spawn(run_websocket_command_dispatcher(
+                state.clone(),
+                rx,
+                connection.incoming_command_queue.clone(),
+                out_tx,
+                connection.reliable_response_queue.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler.clone(),
+            )));
+            clients.push((tx, out_rx, connection));
+        }
+        send_test_websocket_command(
+            &state,
+            &clients[0].0,
+            &clients[0].2.incoming_command_queue,
+            json!({"id":"import", "method":"screens.importImage", "params":{}}).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(2), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        // Every request below must reply BEFORE the optimizer is released.
+        // Includes the same socket's ordered controls and another socket.
+        let result = async {
+            for (tx, rx, metrics) in &mut clients {
+                for method in [
+                    "screens.importImage",
+                    "health.ping",
+                    "screens.activate",
+                    "screens.clear",
+                    "audio.processing.update",
+                    "scene.layout.apply_live",
+                    "session.start",
+                    "session.stop",
+                ] {
+                    send_test_websocket_command(
+                        &state,
+                        tx,
+                        &metrics.incoming_command_queue,
+                        json!({"id":method, "method":method, "params":{}}).to_string(),
+                    )
+                    .await;
+                    let Message::Text(text) = timeout(Duration::from_secs(2), rx.recv())
+                        .await
+                        .map_err(|_| format!("{method} waited for import"))?
+                        .unwrap()
+                    else {
+                        panic!("response")
+                    };
+                    metrics.reliable_response_queue.record_dequeue_oldest();
+                    let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(response["id"], method);
+                    if method == "screens.importImage" {
+                        assert_eq!(response["error"]["code"], "screen-import-busy");
+                    } else {
+                        assert_eq!(response["ok"], true, "{response}");
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        release.add_permits(1);
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        result.unwrap();
+        assert_eq!(
+            entered.available_permits(),
+            0,
+            "duplicate import never entered handler"
+        );
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    /// Plan 186 S1 (the plan 182 rule): a banner import decoding on the
+    /// AssetImport lane never blocks `banners.show`/`banners.hide` on the
+    /// LiveControl lane, nor Stop, on the same socket or another one.
+    #[tokio::test]
+    async fn websocket_banner_import_is_single_flight_without_blocking_banner_show() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let entered = entered.clone();
+            let release = release.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let entered = entered.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "banners.importImage" {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let mut clients = Vec::new();
+        let mut dispatchers = Vec::new();
+        for _ in 0..2 {
+            let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+            let connection = transport.register_connection();
+            let (tx, rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+            let (out_tx, out_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+            let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+            dispatchers.push(tokio::spawn(run_websocket_command_dispatcher(
+                state.clone(),
+                rx,
+                connection.incoming_command_queue.clone(),
+                out_tx,
+                connection.reliable_response_queue.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler.clone(),
+            )));
+            clients.push((tx, out_rx, connection));
+        }
+        send_test_websocket_command(
+            &state,
+            &clients[0].0,
+            &clients[0].2.incoming_command_queue,
+            json!({"id":"import", "method":"banners.importImage", "params":{}}).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(2), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        // Every request below must reply BEFORE the decode is released. A
+        // second import of either kind shares the one import slot and is
+        // refused at once instead of queueing behind it.
+        let result = async {
+            for (tx, rx, metrics) in &mut clients {
+                for method in [
+                    "banners.importImage",
+                    "screens.importImage",
+                    "health.ping",
+                    "banners.show",
+                    "banners.hide",
+                    "banners.update",
+                    "screens.activate",
+                    "session.stop",
+                ] {
+                    send_test_websocket_command(
+                        &state,
+                        tx,
+                        &metrics.incoming_command_queue,
+                        json!({"id":method, "method":method, "params":{}}).to_string(),
+                    )
+                    .await;
+                    let Message::Text(text) = timeout(Duration::from_secs(2), rx.recv())
+                        .await
+                        .map_err(|_| format!("{method} waited for the banner import"))?
+                        .unwrap()
+                    else {
+                        panic!("response")
+                    };
+                    metrics.reliable_response_queue.record_dequeue_oldest();
+                    let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(response["id"], method);
+                    if method.ends_with(".importImage") {
+                        assert_eq!(response["error"]["code"], "screen-import-busy");
+                    } else {
+                        assert_eq!(response["ok"], true, "{response}");
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        release.add_permits(1);
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        result.unwrap();
+        assert_eq!(entered.available_permits(), 0);
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    fn banner_test_state() -> (
+        AppState,
+        broadcast::Receiver<ServerEvent>,
+        std::path::PathBuf,
+    ) {
+        let dir = std::env::temp_dir().join(format!("videorc-banner-rpc-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, receiver) = broadcast::channel(256);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
+        );
+        (state, receiver, dir)
+    }
+
+    fn write_banner_png(dir: &std::path::Path, name: &str) -> String {
+        let path = dir.join(name);
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 40, 40, 255]))
+            .save(&path)
+            .unwrap();
+        path.display().to_string()
+    }
+
+    async fn banner_rpc(
+        state: &AppState,
+        method: &str,
+        params: serde_json::Value,
+    ) -> ServerResponse {
+        handle_text_message(
+            state,
+            &json!({ "id": method, "method": method, "params": params }).to_string(),
+        )
+        .await
+    }
+
+    fn rpc_error_message(response: &ServerResponse) -> String {
+        assert!(!response.ok, "{response:?}");
+        response
+            .error
+            .as_ref()
+            .map(|error| error.message.clone())
+            .unwrap_or_default()
+    }
+
+    /// Plan 186 S1: the RPC surface end to end against a real file-backed
+    /// database. The business rules live in the backend, not only in the UI.
+    #[tokio::test]
+    async fn banners_rpcs_enforce_the_showing_cap_and_the_session_delete_refusal() {
+        let (state, mut events, dir) = banner_test_state();
+        let mut ids = Vec::new();
+        for index in 0..5 {
+            let path = write_banner_png(&dir, &format!("sponsor-{index}.png"));
+            let response = banner_rpc(&state, "banners.importImage", json!({ "path": path })).await;
+            assert!(response.ok, "{response:?}");
+            let banner: protocol::Banner =
+                serde_json::from_value(response.payload.clone().unwrap()).unwrap();
+            assert_eq!(banner.name, format!("sponsor-{index}"));
+            // Plan 205 D3: a banner you add shows, until four do.
+            assert_eq!(banner.shown, index < 4, "import {index}: {banner:?}");
+            ids.push(banner.id);
+        }
+        // Every import republished the full list, with no null anywhere.
+        let mut changed = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "banners.changed" {
+                changed += 1;
+                let text = serde_json::to_string(&event.payload).unwrap();
+                assert!(!text.contains("null"), "{text}");
+                assert!(event.payload.as_array().is_some());
+            }
+        }
+        assert_eq!(changed, 5);
+
+        let listed = banner_rpc(&state, "banners.list", json!({})).await;
+        assert!(listed.ok);
+        assert_eq!(listed.payload.unwrap().as_array().unwrap().len(), 5);
+
+        for id in &ids[..4] {
+            let response = banner_rpc(&state, "banners.show", json!({ "id": id })).await;
+            assert!(response.ok, "{response:?}");
+        }
+        let fifth = banner_rpc(&state, "banners.show", json!({ "id": ids[4] })).await;
+        assert_eq!(
+            fifth.error.as_ref().map(|error| error.code.as_str()),
+            Some("banner-show-failed")
+        );
+        assert_eq!(
+            rpc_error_message(&fifth),
+            "Four banners are showing. Hide one first."
+        );
+
+        let hidden = banner_rpc(&state, "banners.hide", json!({ "id": ids[0] })).await;
+        assert!(hidden.ok);
+        let shown_now = banners::shown_banners_for_compositor(&state.database).unwrap();
+        assert_eq!(shown_now.len(), 3);
+        assert!(
+            banner_rpc(&state, "banners.show", json!({ "id": ids[4] }))
+                .await
+                .ok
+        );
+
+        // A recording is running: a showing banner cannot be deleted.
+        *state.recording.lock().await = Some(recording::test_active_recording_stub(
+            "banner-delete-session",
+        ));
+        let refused = banner_rpc(&state, "banners.delete", json!({ "id": ids[4] })).await;
+        assert_eq!(
+            rpc_error_message(&refused),
+            "Hide this banner before you delete it."
+        );
+        assert_eq!(state.database.list_banners().unwrap().len(), 5);
+        // Hidden, it goes, even mid-session; the reply is the remaining list.
+        assert!(
+            banner_rpc(&state, "banners.hide", json!({ "id": ids[4] }))
+                .await
+                .ok
+        );
+        let deleted = banner_rpc(&state, "banners.delete", json!({ "id": ids[4] })).await;
+        assert!(deleted.ok, "{deleted:?}");
+        assert_eq!(deleted.payload.unwrap().as_array().unwrap().len(), 4);
+        drop(state.recording.lock().await.take());
+
+        // Update validates in the backend; a good update returns the banner.
+        let bad = banner_rpc(
+            &state,
+            "banners.update",
+            json!({ "id": ids[1], "opacity": 2.0 }),
+        )
+        .await;
+        assert_eq!(
+            rpc_error_message(&bad),
+            "Banner opacity must be between 0.2 and 1.0."
+        );
+        let good = banner_rpc(
+            &state,
+            "banners.update",
+            json!({
+                "id": ids[1],
+                "name": " Sponsor ",
+                "opacity": 0.5,
+                "showInRecording": false,
+                "horizontal": { "x": 0.1, "y": 0.1, "w": 0.4, "h": 0.1 },
+                "hideAfterSec": 30,
+                "repeatEveryMin": 0
+            }),
+        )
+        .await;
+        assert!(good.ok, "{good:?}");
+        let banner: protocol::Banner = serde_json::from_value(good.payload.unwrap()).unwrap();
+        assert_eq!(banner.name, "Sponsor");
+        assert_eq!(banner.opacity, 0.5);
+        assert!(!banner.show_in_recording);
+        assert_eq!(banner.hide_after_sec, Some(30));
+        assert_eq!(banner.repeat_every_min, None);
+
+        // Reorder is the drawing order and must name every banner once.
+        let partial = banner_rpc(&state, "banners.reorder", json!({ "ids": [ids[0]] })).await;
+        assert!(!partial.ok);
+        let reordered = banner_rpc(
+            &state,
+            "banners.reorder",
+            json!({ "ids": [ids[3], ids[2], ids[1], ids[0]] }),
+        )
+        .await;
+        assert!(reordered.ok, "{reordered:?}");
+        let order: Vec<protocol::Banner> =
+            serde_json::from_value(reordered.payload.unwrap()).unwrap();
+        assert_eq!(order[0].id, ids[3]);
+        assert_eq!(order[0].sort_order, 0);
+
+        // `banners.hide` with no id hides them all.
+        let all = banner_rpc(&state, "banners.hide", json!({})).await;
+        assert!(all.ok);
+        assert!(
+            banners::shown_banners_for_compositor(&state.database)
+                .unwrap()
+                .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Plan 205 D3 (owner): an import while nothing runs answers a shown
+    /// banner; with four showing, or under a session that cannot draw a new
+    /// banner, it answers `ok` with a hidden one (the import itself never
+    /// fails for the show), and each import republishes the list once.
+    #[tokio::test]
+    async fn banners_import_shows_the_new_banner_unless_the_show_gates_refuse() {
+        let (state, mut events, dir) = banner_test_state();
+        let import = |name: String| {
+            let path = write_banner_png(&dir, &name);
+            let state = &state;
+            async move {
+                let response =
+                    banner_rpc(state, "banners.importImage", json!({ "path": path })).await;
+                assert!(response.ok, "{response:?}");
+                let banner: protocol::Banner =
+                    serde_json::from_value(response.payload.unwrap()).unwrap();
+                banner
+            }
+        };
+        // Idle: shown at once, and the store agrees.
+        let first = import("first.png".to_string()).await;
+        assert!(first.shown, "{first:?}");
+        assert_eq!(
+            banners::shown_banners_for_compositor(&state.database)
+                .unwrap()
+                .iter()
+                .map(|banner| banner.id.as_str())
+                .collect::<Vec<_>>(),
+            [first.id.as_str()]
+        );
+        for index in 1..4 {
+            assert!(import(format!("shown-{index}.png")).await.shown);
+        }
+        // Four showing: the fifth is added hidden, and `banners.show` says
+        // why in the one sentence.
+        let fifth = import("fifth.png".to_string()).await;
+        assert!(!fifth.shown, "{fifth:?}");
+        assert_eq!(
+            banners::shown_banners_for_compositor(&state.database)
+                .unwrap()
+                .len(),
+            4
+        );
+        let refused = banner_rpc(&state, "banners.show", json!({ "id": fifth.id })).await;
+        assert_eq!(
+            rpc_error_message(&refused),
+            "Four banners are showing. Hide one first."
+        );
+        // A session that cannot draw a banner added after its start: hidden,
+        // even with room under the cap.
+        assert!(
+            banner_rpc(&state, "banners.hide", json!({ "id": first.id }))
+                .await
+                .ok
+        );
+        let mut session = recording::test_active_recording_stub("banner-import-session");
+        session.set_accepts_banners_for_test(false);
+        *state.recording.lock().await = Some(session);
+        let under_session = import("under-session.png".to_string()).await;
+        assert!(!under_session.shown, "{under_session:?}");
+        drop(state.recording.lock().await.take());
+        // The same import under a session that draws new banners shows.
+        *state.recording.lock().await = Some(recording::test_active_recording_stub(
+            "banner-import-session",
+        ));
+        let under_drawing_session = import("under-drawing-session.png".to_string()).await;
+        assert!(under_drawing_session.shown, "{under_drawing_session:?}");
+        drop(state.recording.lock().await.take());
+
+        // One `banners.changed` per mutation (7 imports + 1 hide), each the
+        // full list: the import and its show republish once together.
+        let mut changed = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "banners.changed" {
+                changed += 1;
+                assert!(event.payload.as_array().is_some());
+            }
+        }
+        assert_eq!(changed, 8);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn banners_import_refusals_are_the_verbatim_sentences() {
+        let (state, _events, dir) = banner_test_state();
+        let text = dir.join("notes.png");
+        std::fs::write(&text, b"just some text").unwrap();
+        let refused = banner_rpc(
+            &state,
+            "banners.importImage",
+            json!({ "path": text.display().to_string() }),
+        )
+        .await;
+        assert_eq!(
+            refused.error.as_ref().map(|error| error.code.as_str()),
+            Some("banner-import-failed")
+        );
+        assert_eq!(
+            rpc_error_message(&refused),
+            "This file isn't a PNG, JPEG or WebP image."
+        );
+        assert!(state.database.list_banners().unwrap().is_empty());
+        assert!(
+            !state.database.banner_assets_dir().exists()
+                || std::fs::read_dir(state.database.banner_assets_dir())
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "a refused import publishes nothing"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -17600,6 +20164,8 @@ mod tests {
         let event_filter = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter {
             excluded: std::collections::HashSet::from(["events.lagged".to_string()]),
             included: None,
+            renderer: false,
+            agent_intents: false,
         }));
         let relay = tokio::spawn(relay_websocket_events(
             relay_state.clone(),
@@ -18345,6 +20911,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_no_store_marks_a_bare_error_response_no_store() {
+        // Plan 191: a bare error carried no Cache-Control, so Chromium cached it.
+        let response = default_no_store(StatusCode::NOT_FOUND.into_response()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+    }
+
+    #[tokio::test]
+    async fn default_no_store_keeps_an_explicit_cache_control() {
+        // The poster's stronger header is its handler's choice: kept, never doubled.
+        let response = default_no_store(
+            (
+                [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")],
+                "poster",
+            )
+                .into_response(),
+        )
+        .await;
+        let values: Vec<_> = response
+            .headers()
+            .get_all(header::CACHE_CONTROL)
+            .iter()
+            .collect();
+        assert_eq!(
+            values,
+            [&HeaderValue::from_static(
+                "no-store, no-cache, must-revalidate"
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_no_store_layer_marks_a_routed_404_no_store() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
+            .layer(axum::middleware::map_response(default_no_store));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // The handler's own 404, then the router's fallback 404 for a path
+        // that has no route: both leave the server marked no-store.
+        for path in ["/missing", "/no-such-route"] {
+            let response = timeout(
+                Duration::from_secs(2),
+                reqwest::Client::new()
+                    .get(format!("http://{address}{path}"))
+                    .send(),
+            )
+            .await
+            .expect("no-store HTTP response")
+            .expect("no-store HTTP request");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(reqwest::header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{path}"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn shutdown_prepare_waits_for_recording_finalization_before_safe_receipt() {
         let state = test_state();
         let finalizing = state.ffmpeg_work.begin_finalizing();
@@ -18579,6 +21216,48 @@ mod tests {
         let error = response.error.expect("idle snapshot error");
         assert_eq!(error.code, "stream-targets-unavailable");
         assert!(error.message.contains("No active capture session"));
+    }
+
+    #[tokio::test]
+    async fn agent_surface_publish_carries_a_live_background_past_the_managed_background_walk() {
+        // Plan 209 S16: every `background` object in a renderer's params is
+        // resolved as a managed picture and refused without an `assetId`, so
+        // the surface names its background `sceneBackground` (a live one, or
+        // only that a picture is on). With `background` the publish failed and
+        // the agents' view froze while any background was on.
+        let state = test_state();
+        for scene_background in [
+            json!({ "liveId": "silk", "look": "satin" }),
+            json!({ "picture": true }),
+        ] {
+            let publish = json!({
+                "id": "publish",
+                "method": "agent.surface.publish",
+                "params": { "surface": { "version": 1, "sceneBackground": scene_background } }
+            });
+            let response =
+                handle_text_message_with_role(&state, &publish.to_string(), BackendRole::Renderer)
+                    .await;
+            assert!(response.ok, "{:?}", response.error);
+            assert_eq!(
+                state
+                    .agents
+                    .lock()
+                    .surface
+                    .as_ref()
+                    .map(|surface| surface["sceneBackground"].clone()),
+                Some(scene_background)
+            );
+        }
+        let old_shape = json!({
+            "id": "publish",
+            "method": "agent.surface.publish",
+            "params": { "surface": { "version": 1, "background": { "liveId": "silk" } } }
+        });
+        let response =
+            handle_text_message_with_role(&state, &old_shape.to_string(), BackendRole::Renderer)
+                .await;
+        assert!(!response.ok);
     }
 
     #[tokio::test]
@@ -19038,15 +21717,22 @@ mod tests {
         let status = compositor::start_synthetic_compositor(
             state.clone(),
             compositor::CompositorStartParams {
+                benchmark: false,
                 target_fps: 60,
                 width: 64,
                 height: 36,
                 frame_consumer: compositor::CompositorFrameConsumer::NativePreview,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
+                replay_only: false,
+                highlight_overlay_on_program: false,
+                buddy_overlay_on_program: false,
             },
         )
         .await;
@@ -20815,5 +23501,225 @@ mod tests {
         );
         let only_twitch: std::collections::HashSet<&str> = ["twitch"].into_iter().collect();
         assert_eq!(session_audience_sources(&streaming, &only_twitch).len(), 1);
+    }
+}
+
+/// Plan 209 (S2): the Agent role is a new door, never a wider old one.
+#[cfg(test)]
+mod agent_role_tests {
+    use super::*;
+    use crate::agent_mcp::test_support;
+
+    /// D19: Phone remote's event list and the remote intent surface are
+    /// pinned. A change here needs its own plan and a leak argument, never a
+    /// ride on the Agents work. The event list is still `dc1309cb`'s; the
+    /// RemoteIntent enum was re-pinned at `9028bec9` (#935), where plan 210 S6
+    /// and S7 added `sceneApply.sceneId` and ScreenHide / ScreenShow /
+    /// ScreenHideToggle with their own leak argument
+    /// (plans/210-scenes-for-your-apps-and-hide-screen.md).
+    #[test]
+    fn remote_surface_is_pinned_to_dc1309cb() {
+        assert_eq!(
+            crate::remote_lan::LAN_EVENTS,
+            &[
+                "remote.state",
+                "remote.ack",
+                "remote.chat.message",
+                "remote.chat.reset",
+                "remote.highlight",
+            ]
+        );
+        let source = include_str!("remote_control.rs");
+        let start = source
+            .find("pub enum RemoteIntent {")
+            .expect("RemoteIntent enum");
+        let end = source[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset + 3)
+            .expect("RemoteIntent enum end");
+        let block = &source[start..end];
+        let mut digest = <sha2::Sha256 as sha2::Digest>::new();
+        sha2::Digest::update(&mut digest, block.as_bytes());
+        let hash = sha2::Digest::finalize(digest)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            hash, "b68d8ae70b3a142f2b45be1ed66959360bd9104a78048461c280dfcfca605fa8",
+            "RemoteIntent is not byte-identical to its plan 210 pin (9028bec9)"
+        );
+    }
+
+    /// S2/S3: the Agents events reach renderer sockets only, and an admin
+    /// socket cannot widen its filter into them. `agent.intent` reaches only
+    /// the socket that listens for it (the Studio's), whatever the event
+    /// lists say.
+    #[test]
+    fn agents_events_reach_renderer_sockets_only() {
+        let renderer = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::for_role(
+            BackendRole::Renderer,
+        )));
+        let admin = std::sync::Arc::new(std::sync::Mutex::new(ConnectionEventFilter::for_role(
+            BackendRole::Admin,
+        )));
+        for event in ["agents.status", "agents.activity"] {
+            assert!(renderer.lock().unwrap().allows(event), "{event}");
+            assert!(!admin.lock().unwrap().allows(event), "{event}");
+        }
+        for event in ["agent.intent", "agent.intent.cancel"] {
+            assert!(!renderer.lock().unwrap().allows(event), "{event}");
+            assert!(!admin.lock().unwrap().allows(event), "{event}");
+        }
+        assert!(admin.lock().unwrap().allows("remote.control.status"));
+        for filter in [&renderer, &admin] {
+            handle_connection_control(
+                filter,
+                r#"{"id":"i","method":"events.setIncluded","params":{"events":["agent.intent","agent.intent.cancel"]}}"#,
+            )
+            .expect("connection control");
+            assert!(!filter.lock().unwrap().allows("agent.intent"));
+            assert!(!filter.lock().unwrap().allows("agent.intent.cancel"));
+        }
+
+        // Only the renderer can listen; once it does, its event lists no
+        // longer decide `agent.intent` either way.
+        let state = test_support::test_state();
+        let listen = r#"{"id":"l","method":"agent.intent.listen"}"#;
+        let mut admin_guard = None;
+        let refused = handle_agent_intent_listen(
+            &state,
+            BackendRole::Admin,
+            &admin,
+            &mut admin_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(
+            serde_json::to_value(&refused).unwrap()["error"]["code"],
+            "forbidden-method"
+        );
+        assert!(admin_guard.is_none());
+        assert!(!admin.lock().unwrap().allows("agent.intent"));
+        assert!(!state.agents.studio_open());
+        let mut renderer_guard = None;
+        let answer = handle_agent_intent_listen(
+            &state,
+            BackendRole::Renderer,
+            &renderer,
+            &mut renderer_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(serde_json::to_value(&answer).unwrap()["ok"], true);
+        assert!(renderer.lock().unwrap().allows("agent.intent"));
+        // Review fix 1: the cancel reaches the socket the intents reach.
+        assert!(renderer.lock().unwrap().allows("agent.intent.cancel"));
+        assert!(!admin.lock().unwrap().allows("agent.intent.cancel"));
+        assert!(state.agents.studio_open());
+        // A second listen on the same socket counts it once.
+        handle_agent_intent_listen(
+            &state,
+            BackendRole::Renderer,
+            &renderer,
+            &mut renderer_guard,
+            listen,
+        )
+        .expect("handled");
+        assert_eq!(
+            state
+                .agents
+                .studio_sockets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        handle_connection_control(
+            &renderer,
+            r#"{"id":"x","method":"events.setExcluded","params":{"events":["agent.intent"]}}"#,
+        )
+        .expect("connection control");
+        assert!(renderer.lock().unwrap().allows("agent.intent"));
+        drop(renderer_guard);
+        assert!(!state.agents.studio_open());
+        assert!(
+            handle_agent_intent_listen(
+                &state,
+                BackendRole::Renderer,
+                &renderer,
+                &mut None,
+                r#"{"id":"o","method":"agents.status"}"#,
+            )
+            .is_none()
+        );
+        assert!(
+            crate::remote_lan::LAN_EVENTS
+                .iter()
+                .all(|event| !renderer_only_event(event))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_refuses_agent_tokens_and_the_agents_rpcs_are_renderer_and_admin() {
+        let state = test_support::test_state();
+        let (_, token) = test_support::connect_agent(&state, "Claude Code");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={token}"))
+                .await
+                .is_err(),
+            "an agent token must never open the websocket"
+        );
+        // The renderer and admin sockets still open, and the agents RPCs
+        // answer on them; a remote socket never reaches them.
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={}", state.token))
+                .await
+                .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"id":"s","method":"agents.status"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let answer = loop {
+            let message = timeout(Duration::from_secs(5), socket.next())
+                .await
+                .expect("answer in time")
+                .expect("socket open")
+                .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if value["id"] == "s" {
+                break value;
+            }
+        };
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["payload"]["agents"][0]["name"], "Claude Code");
+        assert!(answer["payload"]["agents"][0].get("tokenHash").is_none());
+        assert_eq!(
+            authorize_backend_method(BackendRole::Remote, "agents.status", false),
+            Err(crate::backend_authority::MethodAdmissionError::AdminOnly)
+        );
+        // Every agents RPC arm has an execution policy, like the rest.
+        for method in [
+            "agents.status",
+            "agents.enable",
+            "agents.disable",
+            "agents.stop",
+            "agents.create",
+            "agents.remove",
+            "agents.activity.list",
+        ] {
+            assert!(
+                websocket_method_execution_policy(method).is_some(),
+                "{method} has no execution policy"
+            );
+        }
     }
 }

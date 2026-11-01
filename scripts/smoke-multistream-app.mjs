@@ -33,12 +33,22 @@ const targetCount = Math.min(
   Math.max(1, Number(process.env.VIDEORC_SMOKE_TARGETS ?? Math.min(3, maxDestinations)))
 )
 const basePort = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 11935)
-const streamMs = Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 5000)
+// Plan 181 S7: with VIDEORC_SMOKE_REPLAY_SECONDS=N the replay ring rides the
+// record + stream session, a replay saves mid-stream, and the recording and
+// every leg must pass the same gates they pass without it.
+const replaySeconds = Math.max(0, Number(process.env.VIDEORC_SMOKE_REPLAY_SECONDS ?? 0))
+const streamMs = Math.max(
+  Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 5000),
+  replaySeconds > 0 ? (replaySeconds + 6) * 1000 : 0
+)
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 2500)
 
+// Facebook sits third so the default three-target run streams to it (plan
+// 206): the backend must parse the platform and fan the leg out like any key.
 const PLATFORMS = [
   { id: 'youtube', label: 'YouTube' },
   { id: 'twitch', label: 'Twitch' },
+  { id: 'facebook', label: 'Facebook' },
   { id: 'kick', label: 'Kick' },
   { id: 'x', label: 'X / Twitter' },
   { id: 'custom', label: 'Custom RTMP' }
@@ -48,7 +58,7 @@ const targets = Array.from({ length: targetCount }, (_, index) => {
   const port = basePort + index
   const platform = PLATFORMS[index % PLATFORMS.length]
   const streamKey = `smoke${index}`
-  // Beyond the five built-in platforms the cap is filled with extra rows of
+  // Beyond the built-in platforms the cap is filled with extra rows of
   // the same platforms; target ids must stay unique per session.
   const round = Math.floor(index / PLATFORMS.length)
   return {
@@ -164,6 +174,7 @@ try {
   // the offline destination is reported failed while the healthy ones stay live.
   const targetSnapshots = []
   const diagnosticSamples = []
+  const replayOutcomes = []
   ws.addEventListener('message', (event) => {
     let message
     try {
@@ -176,6 +187,9 @@ try {
     }
     if (message?.event === 'diagnostics.stats') {
       diagnosticSamples.push(message.payload)
+    }
+    if (message?.event === 'replay.saved' || message?.event === 'replay.saveFailed') {
+      replayOutcomes.push({ event: message.event, payload: message.payload })
     }
   })
   try {
@@ -206,10 +220,48 @@ try {
     )
     console.log(`  stream targets: ${started.streamUrl ?? 'n/a'}`)
 
+    if (replaySeconds > 0) {
+      // The ring rides this session: on, not buffer-only, this session's.
+      const ring = await waitForReplayRing(
+        ws,
+        (state) =>
+          state?.state === 'on' && state?.replayOnly !== true && state?.sessionId === started.sessionId,
+        'the ring riding the record + stream session'
+      )
+      console.log(`Replay ring riding session ${ring.sessionId} (${ring.seconds} s)`)
+    }
+
     await sleep(streamMs)
+
+    let replay = null
+    if (replaySeconds > 0) {
+      const accepted = await request(ws, timeoutMs, 'replay.save')
+      console.log(`Save replay mid-stream accepted (${accepted.saveId})`)
+      const deadline = Date.now() + 45_000
+      while (!replayOutcomes.some((outcome) => outcome.payload?.saveId === accepted.saveId)) {
+        if (Date.now() > deadline) throw new Error('No replay.saved or replay.saveFailed within 45 s.')
+        await sleep(200)
+      }
+      replay = replayOutcomes.find((outcome) => outcome.payload?.saveId === accepted.saveId)
+      if (replay.event !== 'replay.saved') {
+        throw new Error(`Save replay mid-stream failed: ${JSON.stringify(replay.payload)}`)
+      }
+    }
 
     const stopped = await request(ws, timeoutMs, 'session.stop')
     await sleep(2000) // let listeners flush + finalize their FLV after the publisher disconnects
+
+    if (replaySeconds > 0) {
+      await verifyReplay(replay.payload)
+      // The ring ends with the session; the renderer then re-arms its own
+      // buffer-only ring (on by default, redesign R2), so what is proven is
+      // that this session's ring is gone, not that no ring runs.
+      await waitForReplayRing(
+        ws,
+        (state) => state?.sessionId !== started.sessionId,
+        'the ring leaving the stream session after Stop'
+      )
+    }
 
     await verifyResults(
       stopped.outputPath ?? started.outputPath,
@@ -225,6 +277,56 @@ try {
     await stopListener(listener)
   }
   await stopApp()
+}
+
+async function waitForReplayRing(ws, predicate, label) {
+  const deadline = Date.now() + 20_000
+  let last = null
+  while (Date.now() < deadline) {
+    last = await request(ws, timeoutMs, 'replay.status')
+    if (predicate(last)) return last
+    await sleep(250)
+  }
+  throw new Error(`Timed out waiting for ${label}; last replay.status: ${JSON.stringify(last)}`)
+}
+
+/** Plan 181 S7: the replay saved mid-stream is a real MP4 of the program. */
+async function verifyReplay(saved) {
+  if (!saved?.path || !existsSync(saved.path)) {
+    throw new Error(`Replay missing on disk: ${saved?.path}`)
+  }
+  if (saved.seconds !== replaySeconds) {
+    throw new Error(`Replay event seconds ${saved.seconds} != ${replaySeconds}`)
+  }
+  const quality = await analyzeRecording(saved.path, {
+    ffmpegPath,
+    ffprobePath: process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
+    intendedFps: 30,
+    expectAudio: true,
+    gates: {
+      requireMotion: false,
+      keyframeMaxIntervalSeconds: 2.5,
+      requireKeyframeEvidence: true,
+      avSyncTargetMs: Number.POSITIVE_INFINITY,
+      avSyncHardFailMs: Number.POSITIVE_INFINITY,
+      frameCountTolerance: Number.POSITIVE_INFINITY,
+      maxDurationStretchRatio: Number.POSITIVE_INFINITY
+    }
+  })
+  if (!quality.verdict.pass) {
+    throw new Error(`Replay failed quality gates: ${quality.verdict.failures.join('; ')}`)
+  }
+  const { durationSeconds, hasAudio } = quality.metrics
+  const expected = saved.complete ? replaySeconds : saved.coveredSeconds
+  if (!hasAudio) throw new Error(`Replay ${saved.path} has no audio stream`)
+  if (durationSeconds < expected - 0.75 || durationSeconds > expected + 2.5) {
+    throw new Error(
+      `Replay runs ${durationSeconds.toFixed(2)} s, expected ${expected} to ${expected + 2.5} s`
+    )
+  }
+  console.log(
+    `  ✓ replay ${saved.path} · ${durationSeconds.toFixed(2)} s · complete=${saved.complete} · row ${saved.replaySessionId}`
+  )
 }
 
 async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
@@ -343,8 +445,10 @@ async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
     console.log('  ✓ Record+stream bridge reported no duplicate capture diagnostics')
   }
 
-  // M5 failure-handling: the offline leg must be reported failed while the healthy
-  // legs report live in the latest per-target snapshot.
+  // M5 failure-handling: the offline leg must be reported down while the healthy
+  // legs report live in the latest per-target snapshot. Since plan 161 the fifo
+  // keeps retrying an unreachable leg, which is `reconnecting`; `failed` is
+  // still an honest answer for a leg that cannot come back.
   if (badTarget) {
     const latest = targetSnapshots.at(-1)
     if (!latest) {
@@ -352,15 +456,15 @@ async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
       failures.push('no stream.targets snapshot emitted')
     } else {
       const badRuntime = latest.find((entry) => entry.targetId === badTarget.id)
-      if (badRuntime?.state === 'failed') {
+      if (badRuntime?.state === 'reconnecting' || badRuntime?.state === 'failed') {
         console.log(
-          `  ✓ ${badTarget.label} reported "failed" — dead leg dropped, others kept streaming`
+          `  ✓ ${badTarget.label} reported "${badRuntime.state}" — dead leg isolated, others kept streaming`
         )
       } else {
         console.log(
-          `  ✗ ${badTarget.label} should report failed, got ${badRuntime?.state ?? 'absent'}`
+          `  ✗ ${badTarget.label} should report reconnecting, got ${badRuntime?.state ?? 'absent'}`
         )
-        failures.push(`offline target not reported failed (${badRuntime?.state ?? 'absent'})`)
+        failures.push(`offline target not reported down (${badRuntime?.state ?? 'absent'})`)
       }
       for (const good of targets) {
         const runtime = latest.find((entry) => entry.targetId === good.id)
@@ -447,11 +551,12 @@ function multistreamBaseParams(outputDirectoryCapability, timestamp) {
       recordEnabled: true,
       streamEnabled: true,
       outputDirectoryCapability,
-      video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
+      video: recordingVideo(),
       // Legacy single-RTMP bridge fields. Ignored when `streaming` is present, but
       // kept valid so the fallback path never chokes on empty credentials.
       rtmp: { preset: 'custom', serverUrl: targets[0].serverUrl, streamKey: targets[0].streamKey }
     },
+    ...(replaySeconds > 0 ? { replay: { seconds: replaySeconds } } : {}),
     streaming: {
       enabled: true,
       mode: allTargets.length > 1 ? 'multi' : 'single',
@@ -474,6 +579,17 @@ function multistreamBaseParams(outputDirectoryCapability, timestamp) {
       enabledTargetIds: allTargets.map((target) => target.id)
     }
   }
+}
+
+// Linux's raw bridge runs one encode for the recording and every horizontal
+// destination, and refuses a recording below them instead of capping the
+// stream to it (plan 0016). There the recording takes the destinations'
+// profile; a vertical simulcast leg keeps the small program it checks.
+function recordingVideo() {
+  if (process.platform === 'linux' && !verticalTarget) {
+    return { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+  }
+  return { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 }
 }
 
 function spawnListener(target) {

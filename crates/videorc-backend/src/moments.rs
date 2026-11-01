@@ -4,7 +4,7 @@
 //! pressing Mark clip (plan 068 D6), or one of the top chat-activity peaks,
 //! each snapped to the live-captions `.srt` cues with an excerpt. Everything
 //! is ranked LOCALLY from data the app already has, computed when a report is
-//! read and never stored: the Orcle report shows them, and Clean cut review
+//! read and never stored: the Buddy report shows them, and Clean cut review
 //! pins them.
 
 use std::path::PathBuf;
@@ -24,8 +24,18 @@ const CLIP_MAX_LENGTH_MS: u64 = 90_000;
 /// At most this many chat peaks per session.
 const MAX_CHAT_PEAKS: usize = 3;
 /// A mark points at the moment that just happened: the clip is what led up
-/// to it (plan 068 D6).
+/// to it (plan 068 D6). This is the lookback of a mark that stores none
+/// (every mark made before plan 199); a newer mark carries its press's
+/// length, 30 or 60 s.
 const CLIP_MARK_LOOKBACK_MS: u64 = 30_000;
+
+/// How far back a mark's moment reaches: its press's length (plan 199 D8),
+/// 30 s for a mark that stores none, never past the longest moment.
+fn mark_lookback_ms(mark: &ClipMark) -> u64 {
+    mark.lookback_seconds
+        .map_or(CLIP_MARK_LOOKBACK_MS, |seconds| u64::from(seconds) * 1000)
+        .min(CLIP_MAX_LENGTH_MS)
+}
 /// Chat rows read for the peak ranking (newest first in storage).
 const CHAT_ROWS_FOR_PEAKS: usize = 5_000;
 
@@ -105,8 +115,9 @@ pub async fn captions_cues_for_session(state: &AppState, session_id: &str) -> Ve
     Vec::new()
 }
 
-/// Clip marks become moments first: `[mark - 30 s, mark]`, snapped to cues,
-/// labelled by who placed them. Pure.
+/// Clip marks become moments first: `[mark - lookback, mark]` (30 s, or the
+/// minute for a 1-min press since plan 199), snapped to cues, labelled by
+/// who placed them. Pure.
 pub fn mark_moments(
     marks: &[ClipMark],
     cues: &[CaptionCue],
@@ -116,7 +127,7 @@ pub fn mark_moments(
         .iter()
         .filter_map(|mark| {
             let at_ms = (mark.at_seconds.max(0.0) * 1000.0).round() as u64;
-            let mut start_ms = at_ms.saturating_sub(CLIP_MARK_LOOKBACK_MS);
+            let mut start_ms = at_ms.saturating_sub(mark_lookback_ms(mark));
             let mut end_ms = at_ms.max(start_ms + CLIP_MIN_LENGTH_MS);
             if let Some(duration) = duration_ms {
                 end_ms = end_ms.min(duration);
@@ -358,7 +369,47 @@ mod tests {
             source,
             phrase: phrase.map(str::to_string),
             created_at: "2026-09-27T10:00:00Z".to_string(),
+            lookback_seconds: None,
         }
+    }
+
+    /// Plan 199 D8: a 1-min press reaches back the minute; a mark that
+    /// stores no length (every mark made before plan 199) keeps 30 s.
+    #[test]
+    fn a_mark_reaches_back_its_press_length() {
+        let long = ClipMark {
+            lookback_seconds: Some(60),
+            ..mark(200.0, ClipMarkSource::Manual, None)
+        };
+        let moments = mark_moments(&[long], &[], Some(900_000));
+        assert_eq!((moments[0].start_ms, moments[0].end_ms), (140_000, 200_000));
+
+        let legacy = mark(200.0, ClipMarkSource::Manual, None);
+        let moments = mark_moments(&[legacy], &[], Some(900_000));
+        assert_eq!((moments[0].start_ms, moments[0].end_ms), (170_000, 200_000));
+
+        let short = ClipMark {
+            lookback_seconds: Some(30),
+            ..mark(200.0, ClipMarkSource::Voice, Some("clip that"))
+        };
+        let moments = mark_moments(&[short], &[], Some(900_000));
+        assert_eq!((moments[0].start_ms, moments[0].end_ms), (170_000, 200_000));
+
+        // A 1-min press 20 s in starts at the recording's start.
+        let early = ClipMark {
+            lookback_seconds: Some(60),
+            ..mark(20.0, ClipMarkSource::Voice, Some("long clip"))
+        };
+        let moments = mark_moments(&[early], &[], Some(900_000));
+        assert_eq!((moments[0].start_ms, moments[0].end_ms), (0, 20_000));
+        assert_eq!(moments[0].reason, "You said 'long clip'");
+
+        // The lookback never runs past the longest moment.
+        let absurd = ClipMark {
+            lookback_seconds: Some(600),
+            ..mark(1_000.0, ClipMarkSource::Manual, None)
+        };
+        assert_eq!(mark_lookback_ms(&absurd), CLIP_MAX_LENGTH_MS);
     }
 
     #[test]

@@ -206,6 +206,21 @@ fn lookup(conn: &Connection, session: &str, id: &str) -> Result<MarkerLookup> {
 }
 
 impl Database {
+    /// Plan 200 C3: every live marker of a session, in time order, as
+    /// `(at_seconds, label)` for MP4 chapters. A snapshot at export time.
+    pub(crate) fn markers_for_export(&self, session: &str) -> Result<Vec<(f64, Option<String>)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT at_seconds, label FROM clip_marks
+             WHERE session_id=?1 AND mark_kind='marker' AND deleted_at IS NULL
+             ORDER BY at_seconds, id",
+        )?;
+        let markers = stmt
+            .query_map(params![session], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(markers)
+    }
+
     pub(crate) fn marker_lookup(&self, session: &str, id: &str) -> Result<MarkerLookup> {
         lookup(&*self.lock()?, session, id)
     }

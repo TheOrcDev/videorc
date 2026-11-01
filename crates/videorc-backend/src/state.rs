@@ -375,6 +375,14 @@ pub struct WebSocketQueueTicket {
     sequence: u64,
 }
 
+impl WebSocketQueueTicket {
+    /// How long the command has waited in its lane (plan 195 S1: the expiry
+    /// log names the queue age).
+    pub fn queued_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.enqueued_at)
+    }
+}
+
 #[derive(Debug, Default)]
 struct WebSocketQueueTotals {
     current_depth: AtomicU64,
@@ -993,6 +1001,9 @@ pub struct AppState {
     pub preview_metrics: Arc<tokio::sync::Mutex<PreviewMetricsState>>,
     pub preview_camera: PreviewCameraSlot,
     pub preview_screen: PreviewScreenSlot,
+    /// Hide screen (plan 210 S7): the gate every screen capture publishes
+    /// through. In memory only; a launch starts visible.
+    pub screen_privacy: Arc<crate::screen_privacy::ScreenPrivacyGate>,
     pub preview_surface: PreviewSurfaceSlot,
     /// Serializes preview-surface create/update/destroy transactions. The
     /// compositor lifecycle lock only protects worker ownership; it does not
@@ -1058,6 +1069,21 @@ pub struct AppState {
     /// Defines one process-wide intake order while global fence/order metadata
     /// is attached to a command before it enters a per-socket queue.
     pub websocket_command_admission: Arc<StdMutex<()>>,
+    /// One import across all renderer connections, including queued work.
+    pub screen_import_capacity: Arc<tokio::sync::Semaphore>,
+    /// Serialize list snapshots with their events, never image preparation.
+    pub screen_list_publication: Arc<StdMutex<()>>,
+    /// The same for banners (plan 186): `banners.changed` snapshots leave in
+    /// order, never behind an import's decode.
+    pub banner_list_publication: Arc<StdMutex<()>>,
+    /// Wakes the banner timer task (plan 186 S10) after any banner change.
+    pub banner_timer_wake: Arc<tokio::sync::Notify>,
+    /// The same for sounds (plan 189): `sounds.changed` snapshots leave in
+    /// order, never behind an import's decode.
+    pub sound_list_publication: Arc<StdMutex<()>>,
+    /// The soundboard player (plan 189): the decoded library, the playing
+    /// voices and the session bus they go into.
+    pub soundboard: Arc<crate::sound_player::SoundPlayer>,
     /// Completion truth for layout/live-control mutations across reconnects.
     pub operator_command_fence: Arc<CommandCompletionFence>,
     /// Physical camera/screen transition completion, independent from the
@@ -1084,6 +1110,12 @@ pub struct AppState {
     /// listener's shutdown handle, and the client count that gates chat
     /// projection in `emit_event`.
     pub remote_lan: crate::remote_lan::RemoteLanSlot,
+    /// Plan 209: the agents a streamer connected (tokens hashed), the Agents
+    /// switch and the persisted port.
+    pub agent_registry: Arc<StdMutex<crate::agent_registry::AgentRegistry>>,
+    /// Plan 209: the Agents listener's bound port, rate limiter, pending
+    /// Studio intents, the Studio's projection and the renderer socket count.
+    pub agents: crate::agent_mcp::AgentMcpSlot,
     pub resource_authority: ResourceAuthority,
     pub oauth: Arc<OAuthSessions>,
     /// Pending 3-legged OAuth 1.0a authorizations for X Live (keyed by
@@ -1105,6 +1137,11 @@ pub struct AppState {
     /// Library, the quit path and the updater gate.
     pub recording_finalization: Arc<crate::recording_finalization::RecordingFinalizationRegistry>,
     pub performance_check: Arc<crate::performance_check::PerformanceCheckRuntime>,
+    /// Anonymous usage stats (Settings → General → Privacy): the switch and
+    /// the delivery queue's lock. Off until boot reads the setting.
+    pub usage_stats: Arc<crate::usage_stats::UsageStatsRuntime>,
+    /// Plan 187: the Discord go-live announcer's fact channel and settings lock.
+    pub discord_announce: Arc<crate::discord_announce::DiscordAnnounceRuntime>,
     /// Microphone kept open while Studio is visible (instant-record P5);
     /// `session.start` takes it instead of opening the device.
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
@@ -1147,6 +1184,17 @@ pub struct AppState {
     /// The same card rasterized for the vertical simulcast leg's portrait
     /// canvas. Installed and cleared together with `highlight_overlay`.
     pub simulcast_highlight_overlay: crate::captions::CaptionOverlaySlot,
+    /// The Buddy avatar overlay (plan 164 Phase C): one raster per output
+    /// target, pushed by the renderer through `buddy.overlay.set`.
+    pub buddy_overlay: crate::captions::CaptionOverlaySlots,
+    /// Which avatar state shows and the bubble that is up (`cohost.buddy.state`).
+    pub buddy_overlay_state: crate::buddy_overlay::BuddyOverlayStateSlot,
+    /// The Buddy's pet on stream (plan 168 Phase B): pre-scaled atlases per
+    /// leg and the per-frame draw (std mutex: read from the render threads).
+    pub buddy_sprite: crate::buddy_sprite::BuddySpriteSlot,
+    /// Prepared banner bitmaps and their off-lock worker (plan 186 S3; std
+    /// mutexes, read from the render threads).
+    pub banner_prepare: crate::banner_prepare::BannerPrepareService,
     /// Backend-owned acknowledgement/lifetime for the viewer-facing comment
     /// card. The image slot above and this state are mutated under this
     /// state-machine lock so stale expiry tasks cannot clear newer cards.
@@ -1171,9 +1219,14 @@ pub struct AppState {
     /// Clip-that phrase matcher state (plan 068 D6). Std mutex: the caption
     /// task matches and returns.
     pub clip_marks: crate::clip_marks::ClipMarkDetectorSlot,
-    /// Orcle voice-command detector and the engine session it serves (plan
+    /// The replay buffer (plan 181): the ring of the session that owns it.
+    pub replay: crate::replay_buffer::ReplaySlot,
+    /// Buddy voice-command detector and the engine session it serves (plan
     /// 140 S2). Std mutex: the caption task observes a final and returns.
     pub cohost_commands: crate::cohost_command::CommandDetectorSlot,
+    /// Plan 170 D12: the account Buddy library (its cache, job queue, sync
+    /// clock and pending edits).
+    pub buddy_library: Arc<crate::cohost_library::LibraryShared>,
 }
 
 /// Masks the path of every `rtmp://` / `rtmps://` URL in a log line. FFmpeg
@@ -1252,7 +1305,24 @@ impl AppState {
     ) -> Self {
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
-        let cohost_settings = crate::cohost::load_cohost_settings(&database);
+        // Plan 172 D5: the default Buddy wears its bundled pack when it ships.
+        let cohost_settings = crate::cohost_library::alive::default_buddy_alive(
+            &database,
+            crate::cohost::load_cohost_settings(&database),
+            crate::resource_authority::configured_managed_buddy_roots()
+                .get(1)
+                .map(std::path::PathBuf::as_path),
+        );
+        let buddy_sprite = crate::buddy_sprite::BuddySpriteSlot::new(
+            &cohost_settings.persona,
+            crate::overlay_layout::load_overlay_layout(&database).buddy,
+            Some(events.clone()),
+        );
+        // Plan 168 Phase C: the animator draws the pet (gaze, talk, blink,
+        // sleep, reactions, motion) instead of Phase B's static cell.
+        buddy_sprite.set_source(Box::new(
+            crate::buddy_animator::BuddyAnimatorSource::for_persona(&cohost_settings.persona),
+        ));
         Self {
             process_runtime: tokio::runtime::Handle::try_current().ok(),
             process_shutdown_requested: Arc::new(AtomicBool::new(false)),
@@ -1279,6 +1349,7 @@ impl AppState {
             preview_metrics: Arc::new(tokio::sync::Mutex::new(PreviewMetricsState::default())),
             preview_camera: Arc::new(tokio::sync::Mutex::new(initial_preview_camera_state())),
             preview_screen: Arc::new(tokio::sync::Mutex::new(initial_preview_screen_state())),
+            screen_privacy: Arc::new(crate::screen_privacy::ScreenPrivacyGate::default()),
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
             preview_surface_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             windows_d3d11_media: Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new())),
@@ -1306,6 +1377,12 @@ impl AppState {
             capture_recovery_smoke_fault: new_capture_recovery_smoke_fault_slot(),
             websocket_transport_metrics: Arc::new(WebSocketTransportMetrics::default()),
             websocket_command_admission: Arc::new(StdMutex::new(())),
+            screen_import_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
+            screen_list_publication: Arc::new(StdMutex::new(())),
+            banner_list_publication: Arc::new(StdMutex::new(())),
+            banner_timer_wake: Arc::new(tokio::sync::Notify::new()),
+            sound_list_publication: Arc::new(StdMutex::new(())),
+            soundboard: Arc::new(crate::sound_player::SoundPlayer::default()),
             operator_command_fence: Arc::new(CommandCompletionFence::default()),
             source_transition_fence: Arc::new(CommandCompletionFence::default()),
             live_control_command_order: Arc::new(CommandCompletionFence::default()),
@@ -1327,6 +1404,10 @@ impl AppState {
             remote_lan: crate::remote_lan::new_remote_lan_slot(
                 crate::remote_lan::LanRuntime::load_from_secrets(),
             ),
+            agent_registry: Arc::new(StdMutex::new(
+                crate::agent_registry::AgentRegistry::load_from_secrets(),
+            )),
+            agents: crate::agent_mcp::new_agent_mcp_slot(),
             resource_authority: ResourceAuthority::default(),
             oauth: Arc::new(OAuthSessions::new_with_secret_store(
                 oauth_store_path,
@@ -1343,6 +1424,8 @@ impl AppState {
                 crate::recording_finalization::RecordingFinalizationRegistry::default(),
             ),
             performance_check: Arc::default(),
+            usage_stats: Arc::default(),
+            discord_announce: Arc::default(),
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),
@@ -1356,6 +1439,12 @@ impl AppState {
             caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             simulcast_highlight_overlay: crate::captions::new_caption_overlay_slot(),
+            buddy_overlay: crate::captions::new_caption_overlay_slots(),
+            buddy_overlay_state: crate::buddy_overlay::new_buddy_overlay_state_slot(
+                cohost_settings.persona.id.clone(),
+            ),
+            buddy_sprite,
+            banner_prepare: crate::banner_prepare::BannerPrepareService::new(),
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
             comment_highlight_commit: Arc::new(tokio::sync::Mutex::new(())),
             cohost: crate::cohost::new_cohost_slot(cohost_settings),
@@ -1363,7 +1452,9 @@ impl AppState {
             cohost_recent_speech: crate::cohost::new_cohost_recent_speech_slot(),
             cohost_voice: crate::cohost::new_cohost_voice_slot(),
             clip_marks: crate::clip_marks::new_clip_mark_detector_slot(),
+            replay: crate::replay_buffer::new_replay_slot(),
             cohost_commands: crate::cohost_command::new_command_detector_slot(),
+            buddy_library: Arc::new(crate::cohost_library::LibraryShared::new()),
         }
     }
 

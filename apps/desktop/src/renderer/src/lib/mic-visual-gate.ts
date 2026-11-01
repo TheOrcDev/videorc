@@ -1,3 +1,6 @@
+import type { MicMonitorState } from '@/lib/state-labels'
+import type { MediaAccessStatus } from '@/lib/backend'
+
 // Live feedback batch 3, B2 — the one place that decides whether the
 // renderer's visual-only microphone analyser may run. The owner's complaint
 // ("it's reacting while I'm not recording") was a meter that opened the mic
@@ -40,25 +43,35 @@ export function micVisualAnalyserEnabled(input: MicVisualGateInput): boolean {
   return true
 }
 
-export type AudioMixerMonitorLabel = 'Live' | 'Monitoring' | 'Muted' | 'Idle'
-
 /**
- * Chip copy beside the bars. "Live" = a session is running and the signal
- * path is up; "Monitoring" = idle, the user asked for input monitoring, and
- * the analyser is actually delivering; "Muted" = the microphone is muted, so
- * flat bars are the mute and not a dead microphone; "Idle" = off or
- * unavailable, the honest state when nothing is being read.
+ * The meter's state beside the bars, for its data attribute and the probes.
+ * `live` = a session is running and the signal path is up; `monitoring` =
+ * idle and the analyser is actually delivering; `muted` = the microphone is
+ * muted, so flat bars are the mute and not a dead microphone; `idle` = off
+ * or unavailable, the honest state when nothing is being read. The words a
+ * streamer hears come from `micSignalLabel` (plan 174 C-38: "Receiving",
+ * never "Live" or "Monitoring").
  */
-export function audioMixerMonitorLabel(input: {
+export function audioMixerMonitorState(input: {
   sessionActive: boolean
   signalLive: boolean
   muted?: boolean
-}): AudioMixerMonitorLabel {
+}): MicMonitorState {
   if (input.muted) {
-    return 'Muted'
+    return 'muted'
   }
   if (!input.signalLive) {
-    return 'Idle'
+    return 'idle'
   }
-  return input.sessionActive ? 'Live' : 'Monitoring'
+  return input.sessionActive ? 'live' : 'monitoring'
+}
+
+/**
+ * No OS gate stands between the renderer and the microphone: macOS/Windows
+ * granted it, or Linux has no OS grant at all (`not-applicable`, Linux plan
+ * 0011: the level never showed on Linux). Anything else stays closed so a
+ * meter never becomes an implicit permission prompt.
+ */
+export function microphoneAccessOpen(permissionStatus: MediaAccessStatus | undefined): boolean {
+  return permissionStatus === 'granted' || permissionStatus === 'not-applicable'
 }

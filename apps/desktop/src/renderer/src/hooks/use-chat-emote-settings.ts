@@ -32,7 +32,7 @@ export function useChatEmoteSettings(): ChatEmoteSettingsState {
     void window.videorc
       .getBackendConnection()
       .then(async (connection) => {
-        if (!connection) throw new Error('The backend is offline.')
+        if (!connection) throw new Error('No connection to Videorc yet.')
         if (disposed) return
         active = new BackendClient(connection)
         await active.connect()
@@ -48,7 +48,7 @@ export function useChatEmoteSettings(): ChatEmoteSettingsState {
         if (!disposed) setSettings(current)
       })
       .catch(() => {
-        if (!disposed) setError("Couldn't read this setting. Reopen Settings to try again.")
+        if (!disposed) setError("Couldn't read the chat settings. Reopen Settings to try again.")
       })
     return () => {
       disposed = true
@@ -66,7 +66,7 @@ export function useChatEmoteSettings(): ChatEmoteSettingsState {
       .request<ChatEmotesSettings>('liveChat.emotes.set', change)
       .then(setSettings)
       .catch(() => {
-        setError("Couldn't save this setting. Try again.")
+        setError("Couldn't save the chat settings. Try again.")
         void active
           .request<ChatEmotesSettings>('liveChat.emotes.get')
           .then(setSettings)

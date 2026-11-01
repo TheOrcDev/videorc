@@ -11,11 +11,11 @@ const read = (path: string): string => readFileSync(new URL(path, import.meta.ur
 const shellSource = read('./settings-tab.tsx')
 const pageSource = read('../page.tsx')
 const appShellSource = read('../app-shell.tsx')
+const pageTabsSource = read('../page-tabs.tsx')
 
 /** The panel component each tab renders, and the file it lives in. */
 const PANEL_FILES: Record<string, string> = {
   GeneralSettings: '../settings/general-settings.tsx',
-  RecordingSettings: '../settings/recording-settings.tsx',
   PermissionsSettings: '../settings/permissions-settings.tsx',
   ShortcutsSettings: '../settings/shortcuts-settings.tsx',
   RemoteSettings: '../settings/remote-settings.tsx',
@@ -28,12 +28,15 @@ const panelSources = Object.fromEntries(
 /** Sections rendered by a component that carries its own title prop. */
 const SECTION_COMPONENTS: Record<string, string> = {
   PhoneRemoteSection: 'Phone remote',
-  AboutAndUpdates: 'About & updates'
+  AgentsSection: 'Agents',
+  AboutAndUpdates: 'About & updates',
+  SetupSection: 'Setup'
 }
 
 /** Files rendered only under Settings that carry their own `PanelSection`. */
 const SECTION_FILES: Record<string, string> = {
-  PhoneRemoteSection: '../phone-remote-section.tsx'
+  PhoneRemoteSection: '../phone-remote-section.tsx',
+  AgentsSection: '../settings/agents-section.tsx'
 }
 
 /**
@@ -93,19 +96,19 @@ describe('Settings layout', () => {
     // Plan 050, D4: sections are flush, so the columns stretch (the hairline
     // runs the full height) and no gap separates them.
     const configGrid = pageSource.slice(
-      pageSource.indexOf('export function ConfigGrid'),
-      pageSource.indexOf('export function Gallery')
+      pageSource.indexOf('function ConfigGrid'),
+      pageSource.indexOf('const CONFIG_GRID_PAIR')
     )
     expect(configGrid).toContain("'grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r'")
     expect(configGrid).not.toMatch(/\bgap-\d/)
   })
 
   it('builds the tab strip from SETTINGS_TABS, so the strip and the tab model cannot drift', () => {
-    expect(shellSource).toContain('{SETTINGS_TABS.map(({ id, label }) => (')
-    expect(shellSource).toContain(
-      '<TabsTrigger key={id} data-videorc-settings-tab={id} value={id}>'
-    )
-    expect(shellSource.match(/<TabsTrigger\b/g)).toHaveLength(1)
+    // Plan 174 S1.6b: the shared PageTabs draws the strip from the tab list.
+    expect(shellSource).toContain('tabs={SETTINGS_TABS}')
+    expect(shellSource).toContain('triggerAttribute="data-videorc-settings-tab"')
+    expect(shellSource).not.toMatch(/<TabsTrigger\b/)
+    expect(pageTabsSource).toContain('{tabs.map(({ id, label: tabLabel }) => (')
   })
 
   it('gives every tab exactly one panel, in strip order', () => {
@@ -116,17 +119,17 @@ describe('Settings layout', () => {
     expect(
       Object.fromEntries(tabPanels().map((panel) => [panel.value, sectionTitles(panel.jsx)]))
     ).toEqual({
-      general: ['Appearance & behavior', 'Import'],
-      recording: ['Recording & storage'],
+      general: ['Appearance', 'Chat', 'Setup', 'Import', 'Elsewhere'],
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
-      remote: ['Remote control', 'Phone remote'],
+      remote: ['Remote control', 'Phone remote', 'Agents'],
       about: ['About & updates', 'Support']
     })
   })
 
-  it('has no Orcle panel: Orcle is configured in its own tab (plan 119)', () => {
+  it('has no Buddy panel: Buddy is configured in its own tab (plan 119)', () => {
     expect(shellSource).not.toContain('CohostSettingsSection')
+    // 'orcle' is the old tab id older apps saved (plan 170 D22).
     expect(tabPanels().map((panel) => panel.value)).not.toContain('orcle')
   })
 
@@ -159,11 +162,15 @@ describe('Settings layout', () => {
     const titles = tabPanels().flatMap((panel) => sectionTitles(panel.jsx))
     expect(new Set(titles).size).toBe(titles.length)
 
-    // Plan 064: a studio behavior, not a storage setting.
-    expect(panelSources.GeneralSettings).toContain('id="animate-scene-changes"')
-    expect(panelSources.RecordingSettings).not.toContain('animate-scene-changes')
+    // Plan 064 moved "Animate scene changes" out of Recording; plan 174 D17
+    // moved the switch to the Scene page (it changes what viewers see), and
+    // General keeps one pointer row to it.
+    const layoutTabSource = read('./layout-tab.tsx')
+    expect(layoutTabSource.match(/id="animate-scene-changes"/g)?.length ?? 0).toBe(1)
+    expect(panelSources.GeneralSettings).toContain('label="Animate scene changes"')
+    expect(panelSources.GeneralSettings).toContain("openWorkspaceTab('layouts')")
     for (const source of Object.values(panelSources)) {
-      expect(source.match(/id="animate-scene-changes"/g)?.length ?? 0).toBeLessThanOrEqual(1)
+      expect(source).not.toContain('id="animate-scene-changes"')
     }
 
     // The recorders are the only home of a global binding; the in-app list
@@ -171,19 +178,19 @@ describe('Settings layout', () => {
     expect(panelSources.ShortcutsSettings).not.toContain('Global ·')
   })
 
-  it('pairs two-section tabs side by side and stacks single-section tabs', () => {
+  it('pairs multi-section tabs side by side and stacks single-section tabs', () => {
     // At `lg` the pair fills the visible height with one stretched row, so the
     // column hairline runs the full height; stacked, rows keep content height.
-    expect(shellSource).toContain(
-      "const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'"
-    )
+    // One pair class for every two-section tab (plan 174 S1.6a, I-33).
+    expect(shellSource).toContain('CONFIG_GRID_PAIR')
+    expect(shellSource).not.toContain('SECTION_PAIR')
     expect(shellSource.match(/<TabsContent className="flex flex-col" value="/g)).toHaveLength(
       SETTINGS_TABS.length
     )
     for (const panel of tabPanels()) {
       const wrapper =
-        sectionTitles(panel.jsx).length === 2
-          ? '<ConfigGrid className={SECTION_PAIR}>'
+        sectionTitles(panel.jsx).length >= 2
+          ? '<ConfigGrid className={CONFIG_GRID_PAIR}>'
           : '<PageStack>'
       expect(panel.jsx.trim().startsWith(wrapper), `${panel.value} opens with ${wrapper}`).toBe(
         true
@@ -192,17 +199,25 @@ describe('Settings layout', () => {
   })
 
   it('pins the strip: Settings owns its scroll and only the region under the strip scrolls', () => {
-    expect(appShellSource).toContain(
-      "<PaneBody scroll={active !== 'library' && active !== 'settings' && active !== 'ai'}>"
-    )
-    const strip = shellSource.indexOf('<TabsList')
-    const scroll = shellSource.indexOf('data-slot="settings-scroll"')
+    // Plan 174 S1.6b (A-14): the page says it owns its scroll on its root
+    // (PageTabs), so the shell keeps no list of such pages. #956 keys the
+    // body by the active page so each page opens at its own scroll top; that
+    // key is allowed, but no scroll prop or other per-page list is.
+    expect(appShellSource).toMatch(/<PaneBody(\s+key=\{active\})?>/)
+    expect(appShellSource).not.toMatch(/<PaneBody scroll=/)
+    expect(shellSource).toContain('<PageTabs')
+    expect(pageTabsSource).toContain('{...PANE_OWNS_SCROLL}')
+    const strip = pageTabsSource.indexOf('<TabsList')
+    const scroll = pageTabsSource.indexOf('data-slot="page-tabs-scroll"')
     expect(strip).toBeGreaterThan(-1)
     expect(scroll).toBeGreaterThan(strip)
-    const scrollRegion = shellSource.slice(shellSource.lastIndexOf('<div', scroll), scroll)
-    expect(scrollRegion).toContain('key={tab}')
+    const scrollRegion = pageTabsSource.slice(
+      pageTabsSource.lastIndexOf('<div', scroll),
+      pageTabsSource.indexOf('>', scroll)
+    )
+    expect(scrollRegion).toContain('key={value}')
     expect(scrollRegion).toContain('overflow-y-auto')
-    expect(tabPanels().every((panel) => shellSource.indexOf(panel.jsx) > scroll)).toBe(true)
+    expect(pageTabsSource.indexOf('{children}')).toBeGreaterThan(scroll)
   })
 
   it('never pins a Settings card to a fixed height', () => {
@@ -215,10 +230,48 @@ describe('Settings layout', () => {
     }
   })
 
+  it('splits General into two columns: the pair holds exactly two children', () => {
+    // Plan 174 S3.17 (I-27): Appearance over Stream Manager (Chat since plan
+    // 204), Import over Elsewhere; plan 203 S6 puts Setup under it. Each column is
+    // one PageStack, so the pair keeps its two stretched cells and the column
+    // rule runs the full height.
+    const general = exportedBody(panelSources.GeneralSettings as string, 'GeneralSettings')
+    expect(general.match(/<PageStack\b/g)).toHaveLength(2)
+    const [first, second] = general.split(/<PageStack\b/).slice(1)
+    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Chat', 'Setup'])
+    expect(sectionTitles(second as string)).toEqual(['Import', 'Elsewhere'])
+  })
+
+  it('splits Remote into two columns: remotes, then Agents (plan 209 S7)', () => {
+    const remote = exportedBody(panelSources.RemoteSettings as string, 'RemoteSettings')
+    expect(remote.match(/<PageStack\b/g)).toHaveLength(2)
+    const [first, second] = remote.split(/<PageStack\b/).slice(1)
+    expect(sectionTitles(first as string)).toEqual(['Remote control', 'Phone remote'])
+    expect(sectionTitles(second as string)).toEqual(['Agents'])
+  })
+
+  it('points to the pages that own the rest, with the typed navigation', () => {
+    const general = panelSources.GeneralSettings as string
+    for (const tab of ['ai', 'recording', 'live', 'diagnostics']) {
+      expect(general).toContain(`openWorkspaceTab('${tab}')`)
+    }
+    expect(general).toContain('label="Account and Premium"')
+    expect(general).not.toMatch(/new CustomEvent/)
+  })
+
+  it('has one home for the permission rows: no second "set up" step', () => {
+    expect(shellSource).not.toContain('onOpenPermissionsSetup')
+    expect(panelSources.PermissionsSettings).toContain('<SystemAccessList')
+    expect(panelSources.PermissionsSettings).not.toContain('Set up permissions')
+    expect(read('../first-run/permissions-step.tsx')).toContain('<SystemAccessList')
+  })
+
   it('gives Remote control a one-line body when it is off, so it is never header-only', () => {
+    // Plan 174 V-6: the line says what turning it on does, never "Off" again.
     expect(REMOTE_CONTROL_OFF_HINT).toBe(
-      'Off. Turn on to pair a Stream Deck or the Videorc remote.'
+      'Turning this on makes a pairing token for your remotes. The Stream Deck plugin pairs on its own.'
     )
+    expect(REMOTE_CONTROL_OFF_HINT).not.toMatch(/^Off\b/)
 
     const remoteSource = panelSources.RemoteSettings as string
     const remoteCard = remoteSource.slice(remoteSource.indexOf('title="Remote control"'))

@@ -159,7 +159,7 @@ describe('live source selection authority', () => {
       await instance.select('microphone', 'mic-b', [])
       await vi.advanceTimersByTimeAsync(6000)
       expect(get).toHaveBeenCalledTimes(21)
-      expect(changed.mock.lastCall?.[0].error).toContain('output could not be confirmed')
+      expect(changed.mock.lastCall?.[0].error).toContain("couldn't confirm the output")
       final = terminal(switchSource.mock.calls[0][0])
       await instance.retryStatus()
       expect(changed.mock.lastCall?.[0]).toMatchObject({ error: null, outputPending: false })
@@ -318,7 +318,7 @@ describe('live source selection authority', () => {
     expect(changed.mock.lastCall?.[0]).toMatchObject({
       pending: 'microphone',
       checking: true,
-      error: expect.stringContaining('Retry status')
+      error: expect.stringContaining('Check again')
     })
     const original = switchSource.mock.calls[0][0]
     switchSource.mockImplementationOnce(async (request) => terminal(request))
@@ -337,7 +337,7 @@ describe('live source selection authority', () => {
     await instance.refresh()
     await instance.select('microphone', 'mic-b', [])
     expect(switchSource).toHaveBeenCalledTimes(3)
-    expect(changed.mock.lastCall?.[0].error).toContain('Retry status')
+    expect(changed.mock.lastCall?.[0].error).toContain('Check again')
   })
 
   it('offers recovery after a failed GET and clears connectivity errors after success', async () => {
@@ -346,7 +346,7 @@ describe('live source selection authority', () => {
     await instance.refresh()
     expect(changed.mock.lastCall?.[0]).toMatchObject({
       checking: true,
-      error: expect.stringContaining('Retry status')
+      error: expect.stringContaining('Check again')
     })
     await instance.retryStatus()
     expect(changed.mock.lastCall?.[0]).toMatchObject({ checking: false, error: null })
@@ -431,6 +431,42 @@ describe('live source selection authority', () => {
       confirmedSourceSelection(current, snapshot({ confirmed: { microphoneId: undefined } }), [])
         .microphoneName
     ).toBeUndefined()
+  })
+
+  it('keeps a live microphone None through confirmation (plan 0027)', () => {
+    const off = confirmedSourceSelection(
+      { cameraId: 'cam-a', microphoneOff: true },
+      snapshot({ confirmed: { cameraId: 'cam-a', microphoneId: undefined } }),
+      []
+    )
+    expect(off.microphoneOff).toBe(true)
+    expect(off.microphoneId).toBeUndefined()
+    const on = confirmedSourceSelection(
+      off,
+      snapshot({ confirmed: { cameraId: 'cam-a', microphoneId: 'mic-a' } }),
+      []
+    )
+    expect(on.microphoneId).toBe('mic-a')
+    expect(on.microphoneOff).toBeUndefined()
+  })
+
+  it('ignores mid-session source refusals while only the buffer-only session runs', async () => {
+    const { instance, get } = controller()
+    instance.setSession('session-a', 'recording', true)
+    get.mockResolvedValue(
+      snapshot({
+        capabilities: ['capture', 'camera', 'microphone'].map((kind) => ({
+          kind: kind as 'capture' | 'camera' | 'microphone',
+          supported: false,
+          reason: 'Changing this source during a session is not available on Linux yet.'
+        }))
+      })
+    )
+    await instance.refresh()
+    expect(get).not.toHaveBeenCalled()
+    expect(instance.reason('capture')).toBeNull()
+    expect(instance.reason('camera')).toBeNull()
+    expect(instance.reason('microphone')).toBeNull()
   })
 
   it('keeps a live camera Off through confirmation and ends it once a camera is confirmed', () => {

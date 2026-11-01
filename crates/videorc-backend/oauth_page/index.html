@@ -3,24 +3,42 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
     <title>{{DOC_TITLE}}</title>
     <style>
-      /* The Videorc window palette (videorc-design): black glass, chrome text,
-         hairline edges. Dark always, like the app's Preview and Chat windows:
-         the orb is black glass. Colour is information only: green for
-         connected, the brand red for a failed sign-in. */
+      /* The Videorc window palette (plan 208, D13): the desktop's neutral
+         solids and text tiers (window-palette.ts) on a flat page, no ground:
+         it is a three-second page in someone's browser. It follows the
+         browser's scheme like the desktop, light the crisp invert. Colour is
+         information only: green for connected, the brand red for a failed
+         sign-in. served_page_palette.rs fails when a copy drifts. */
       :root {
-        --bg: #0d0d0f;
-        --panel: #141417;
-        --hairline: rgba(255, 255, 255, 0.1);
-        --text: #f4f4f5;
-        --muted: #a1a1aa;
-        --subtle: #71717a;
-        --shadow: 0 16px 70px rgba(0, 0, 0, 0.55);
+        --bg: #070707;
+        --panel: #0d0d0d;
+        --hairline: oklch(1 0 0 / 10%);
+        --text: #f5f5f5;
+        --muted: #a1a1a1;
+        --subtle: #868686;
+        /* The desktop's dialog drop. */
+        --shadow: 0 14px 44px oklch(0 0 0 / 50%), 0 1px 3px oklch(0 0 0 / 30%);
         --sheen: rgba(255, 255, 255, 0.06);
         --good: #30d158;
-        --bad: #f0444a;
+        --bad: #e23b3f;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #fafafa;
+          --panel: #ffffff;
+          --hairline: oklch(0 0 0 / 12%);
+          --text: #0f0f0f;
+          --muted: #5b5b5b;
+          --subtle: #6f6f6f;
+          --shadow: 0 16px 48px oklch(0 0 0 / 20%), 0 1px 10px oklch(0 0 0 / 14%);
+          --sheen: rgba(0, 0, 0, 0.04);
+          /* The desktop's light --success: the dark green fades on white. */
+          --good: oklch(0.6 0.14 150);
+          --bad: #d02a30;
+        }
       }
       * {
         box-sizing: border-box;
@@ -34,8 +52,7 @@
         display: grid;
         place-items: center;
         padding: 24px 16px;
-        background:
-          radial-gradient(60rem 36rem at 50% -10%, var(--sheen), transparent 70%), var(--bg);
+        background: var(--bg);
         color: var(--text);
         font:
           15px/1.5 -apple-system,

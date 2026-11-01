@@ -4,8 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { Device, SourceSelection } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
-import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system-audio'
-import { QuickSettings, SystemAudioInspectorValue } from './quick-settings'
+import { QuickSettings } from './quick-settings'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
@@ -13,70 +12,7 @@ vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn() })
 }))
 
-const noop = (): void => {}
-
-function render(input: Partial<SystemAudioSwitchInput>): string {
-  const view = systemAudioSwitchView({
-    device: { status: 'available' },
-    requested: false,
-    sessionActive: false,
-    confirmed: null,
-    issue: null,
-    ...input
-  })
-  return renderToStaticMarkup(
-    createElement(SystemAudioInspectorValue, {
-      view,
-      onEnabledChange: noop,
-      onOpenPermissions: noop,
-      onResume: noop
-    })
-  )
-}
-
-describe('Studio inputs System audio row (plan 069)', () => {
-  it('shows Off and On beside a labelled switch', () => {
-    expect(render({})).toContain('>Off<')
-    expect(render({})).toContain('aria-label="System audio"')
-    expect(render({ requested: true })).toContain('>On<')
-    expect(render({ requested: true })).toContain('aria-checked="true"')
-  })
-
-  it('offers the permission route instead of a switch without Screen Recording', () => {
-    const markup = render({ device: { status: 'permission-required' }, requested: true })
-    expect(markup).toContain('Needs permission')
-    expect(markup).not.toContain('role="switch"')
-  })
-
-  it('keeps a lost source On with a short status and the full copy on hover', () => {
-    const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'lost' })
-    expect(markup).toContain('>Stopped<')
-    expect(markup).toContain('title="System audio stopped. The session keeps going."')
-    expect(markup).toContain('aria-checked="true"')
-  })
-
-  it('puts Resume where the status goes when the echo guard paused it (plan 076)', () => {
-    const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'echo' })
-    expect(markup).toContain('>Resume<')
-    expect(markup).toContain('coming back as an echo')
-    expect(markup).toContain('aria-checked="true"')
-  })
-
-  it('says a fallback microphone keeps system audio out of this session', () => {
-    const markup = render({
-      requested: true,
-      sessionActive: true,
-      confirmed: false,
-      issue: 'bypassed'
-    })
-    expect(markup).toContain('>Off for this session<')
-    expect(markup).toContain(
-      'title="System audio is off for this session because the microphone is on a fallback input."'
-    )
-  })
-})
-
-describe('Studio Inputs rows (plan 080 S4)', () => {
+describe('Studio Sources rows (plan 080 S4)', () => {
   const display: Device = { id: 'screen:2', name: 'Display 2', kind: 'screen', status: 'available' }
   const camera: Device = {
     id: 'camera:1',
@@ -98,14 +34,16 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       selectedCaptureDevice: devices.find((device) => device.id === sources.screenId),
       selectedCamera: devices.find((device) => device.id === sources.cameraId),
       selectedMicrophone: undefined,
-      patchVideo: vi.fn(),
       isSessionActive: false,
+      audioBusActive: false,
       entitlements: null,
       captionsStatus: { state: 'idle' },
       captionsCommandPending: false,
       wsStatus: 'connected',
       systemAudioConfirmed: null,
-      systemAudioIssue: null
+      systemAudioIssue: null,
+      settings: {},
+      screenPrivacy: { hidden: false }
     }
     return renderToStaticMarkup(createElement(QuickSettings))
   }
@@ -115,7 +53,7 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       (match) => match[1] as string
     )
 
-  it('gives screen and camera their own rows, in order', () => {
+  it('gives screen and camera their own rows, in order, and leaves audio to the Audio section', () => {
     const systemAudio: Device = {
       id: 'system-audio',
       name: 'System audio',
@@ -127,8 +65,14 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       camera,
       systemAudio
     ])
-    // The microphone has one home, the Microphone section above (plan 092).
-    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio', 'Output', 'Captions'])
+    // The microphone and System audio live in the Audio section above (plans
+    // 092 and 201); Output is the Session row (plan 174 S3.3, B-15).
+    // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
+    expect(rowLabels(markup)).toEqual(['Screen', 'Camera'])
+    expect(markup).not.toContain('System audio')
+    expect(markup).not.toContain('role="switch"')
+    expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
+    expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
     expect(markup).toContain('title="Display 2"')
     expect(markup).toContain('title="MacBook Pro Camera"')
@@ -136,13 +80,26 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
     expect(markup).not.toContain('Display 2 · MacBook Pro Camera')
   })
 
+  it('calls them Sources, with a way home, and keeps Captions out of them (B-15, B-25)', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
+    expect(markup).not.toContain('Inputs')
+    const [sources, captions] = markup.split('data-slot="panel-section"').slice(1)
+    expect(sources).toContain('>Sources</h2>')
+    expect(sources).toContain('>Open Sources</button>')
+    expect(rowLabels(sources ?? '')).toEqual(['Screen', 'Camera'])
+    expect(captions).not.toContain('<h2')
+    // Captions is a door to its page there (plan 174 S3.2, B-13), not a switch row.
+    expect(rowLabels(captions ?? '')).toEqual([])
+    expect(captions).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
+  })
+
   it('opens Screen and Camera with one click: the row control is the dropdown', () => {
     // Owner, 2026-09-30: "for screen we're opening two dropdowns, it should
     // just be one ... same for camera". No popover wraps a second select.
     const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
     for (const label of ['Screen', 'Camera']) {
-      const trigger = new RegExp(`<button[^>]*role="combobox"[^>]*aria-label="${label}"`)
-      expect(markup).toMatch(trigger)
+      const trigger = new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`).exec(markup)?.[0]
+      expect(trigger).toContain('role="combobox"')
     }
     const rows = markup.split('data-slot="inspector-row"')
     for (const row of rows.slice(1, 3)) {
@@ -152,9 +109,27 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
 
   it('shows Off for no camera, and the saved name for a missing one', () => {
     expect(renderInputs({ screenId: 'screen:2', cameraOff: true })).toContain('title="Off"')
-    expect(
-      renderInputs({ screenId: 'screen:2', cameraId: 'camera:gone', cameraName: 'Cam Link 4K' })
-    ).toContain('title="Cam Link 4K"')
+    const missing = renderInputs({
+      screenId: 'screen:2',
+      cameraId: 'camera:gone',
+      cameraName: 'Cam Link 4K'
+    })
+    expect(missing).toContain('title="Cam Link 4K"')
+    // Plan 174 S1.9: the row says it is gone, in words.
+    expect(missing).toContain('>Not found</span>')
+  })
+
+  it('says why a listed camera cannot run, never the raw status (S1.9)', () => {
+    const locked = { ...camera, status: 'permission-required' as const }
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, [display, locked])
+    expect(markup).toContain('>Needs permission</span>')
+    expect(markup).not.toContain('permission-required')
+  })
+
+  it('says no camera was found instead of Off when none is listed (S1.9)', () => {
+    const markup = renderInputs({ screenId: 'screen:2', cameraOff: true }, [display])
+    expect(markup).toContain('title="No cameras found"')
+    expect(markup).not.toContain('title="Off"')
   })
 
   it('names the test pattern and a missing screen instead of going blank', () => {

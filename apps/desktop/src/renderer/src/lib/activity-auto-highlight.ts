@@ -5,7 +5,7 @@ import { commentCanHighlight } from '@/lib/live-chat-view'
 // The Activity auto-show policy (plan 156): one switch makes celebrations pop
 // onto the stream as the existing highlight card. This module is the pure
 // half — what qualifies, what waits, what is too old to still thank — so the
-// engine effect in use-studio stays a thin shell. Manual and Orcle cards
+// engine effect in use-studio stays a thin shell. Manual and Buddy cards
 // always win; the engine only consults this module when the slot is idle.
 
 /** Celebrations the switch auto-shows (plan 156, D2). Announcements are the
@@ -21,7 +21,12 @@ export const AUTO_SHOW_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   'super-chat',
   'super-sticker',
   'raid',
-  'watch-streak'
+  'watch-streak',
+  // Plan 162: Power-ups are bits. Plan 163: channel point redemptions show
+  // too, on the owner's call; AUTO_SHOW_MAX_PENDING keeps a run of them to a
+  // rolling sample.
+  'power-up',
+  'redemption'
 ])
 
 /** A hype train shows a rolling sample, never a backlog (plan 156, D4). */

@@ -1,9 +1,16 @@
+import { readFileSync } from 'node:fs'
+
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
+import { LIVE_BACKGROUND_DEFAULT_LOOKS, LIVE_BACKGROUND_IDS } from './live-background-ids'
+import { STREAM_PLATFORMS } from './stream-platforms'
+
 import type {
+  Banner,
   CompositorStatus,
   DiagnosticStats,
   SceneEditorDraftAck,
+  ScreenSwitchStatus,
   SceneEditorDraftParams,
   OAuthCallbackResult,
   OAuthCompleteParams,
@@ -309,6 +316,42 @@ describe('backend RPC contract', () => {
     ]) {
       expect(() => validateBackendRpcResult('stream.output.topology.probe', malformed)).toThrow()
     }
+
+    // Plan 0015: Linux OpenH264 / VAAPI raw path. The encoder note is
+    // informational in every state; a fallbackReason on a healthy topology is
+    // still a contract violation.
+    const linux: StreamOutputTopologyProbeResult = {
+      capabilityKey: `stream-output-topology-v1:${'b'.repeat(64)}`,
+      streamProfile: params.streamProfile,
+      outputRoles: ['shared'],
+      requestedBridgeOutput: 'raw-yuv420p',
+      effectiveBridgeOutput: 'raw-yuv420p',
+      effectiveEncodeBackend: 'software-open-h264',
+      probeState: 'not-required',
+      encoderSelectionReason: 'OpenH264 software encoding was selected explicitly for this session.'
+    }
+    expect(validateBackendRpcResult('stream.output.topology.probe', linux)).toEqual(linux)
+    const vaapi = { ...linux, effectiveEncodeBackend: 'hardware-vaapi' as const }
+    delete (vaapi as Partial<StreamOutputTopologyProbeResult>).encoderSelectionReason
+    expect(validateBackendRpcResult('stream.output.topology.probe', vaapi)).toEqual(vaapi)
+    expect(
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...result,
+        encoderSelectionReason: 'Intel Quick Sync was selected but its check failed.'
+      })
+    ).toMatchObject({ probeState: 'rejected' })
+    expect(() =>
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...linux,
+        fallbackReason: linux.encoderSelectionReason
+      })
+    ).toThrow('fallbackReason')
+    expect(() =>
+      validateBackendRpcResult('stream.output.topology.probe', {
+        ...linux,
+        encoderSelectionReason: ''
+      })
+    ).toThrow('encoderSelectionReason')
   })
 
   it('types and exactly validates authoritative secret-free stream-target snapshots', () => {
@@ -766,6 +809,25 @@ describe('backend RPC contract', () => {
       })
     ).toThrow()
 
+    // An interrupted take recovered on the next start (plan 0003).
+    const recovered = { ...item, interruptionRecovery: 'recovered' }
+    expect(validateBackendRpcResult('sessions.list', { items: [recovered] })).toEqual({
+      items: [recovered]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.list', {
+        items: [{ ...item, interruptionRecovery: 'pending' }]
+      })
+    ).toThrow()
+    const finalized = {
+      sessionId: 'session-1',
+      state: 'finalized',
+      mp4Path: '/recordings/session-1.mp4',
+      interruptionRecovery: 'recovered',
+      updatedAt: '2026-10-28T00:00:00Z'
+    }
+    expect(validateBackendEventPayload('recording.finalization', finalized)).toEqual(finalized)
+
     const params = { sessionId: 'session-1', cursor: 'created\nid', limit: 120 }
     for (const method of [
       'sessions.healthEvents.list',
@@ -1054,6 +1116,88 @@ describe('backend RPC contract', () => {
     }
   })
 
+  it('reports how the last screen switch changed the capture (plan 210 S3)', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      updatedAt: '2026-10-29T00:00:00Z'
+    } satisfies CompositorStatus
+    const inPlace = {
+      mode: 'in-place',
+      sourceId: 'window:screencapturekit:42',
+      generation: 7,
+      firstFrameMs: 61,
+      updatedAt: '2026-10-29T00:00:01Z'
+    } satisfies ScreenSwitchStatus
+    const restart = {
+      mode: 'restart',
+      reason: 'the canvas changed',
+      sourceId: 'screen:screencapturekit:1',
+      generation: 8,
+      updatedAt: '2026-10-29T00:00:02Z'
+    } satisfies ScreenSwitchStatus
+    expect(validateBackendRpcResult('compositor.status', status)).toEqual(status)
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, screenSwitch: inPlace })
+    ).toEqual({ ...status, screenSwitch: inPlace })
+    expect(
+      validateBackendEventPayload('compositor.status', { ...status, screenSwitch: restart })
+    ).toEqual({ ...status, screenSwitch: restart })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        screenSwitch: { ...inPlace, mode: 'warm' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        screenSwitch: { ...inPlace, pixels: 'no' }
+      })
+    ).toThrow('pixels must be a known field')
+  })
+
+  it('carries the Preview hold of a performance check and nothing else (plan 212)', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      updatedAt: '2026-10-31T00:00:00Z'
+    } satisfies CompositorStatus
+    expect(validateBackendRpcResult('compositor.status', status)).toEqual(status)
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'performance-check' })
+    ).toEqual({ ...status, previewHold: 'performance-check' })
+    expect(
+      validateBackendEventPayload('compositor.status', {
+        ...status,
+        previewHold: 'performance-check'
+      })
+    ).toEqual({ ...status, previewHold: 'performance-check' })
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'synthetic-refused' })
+    ).toEqual({ ...status, previewHold: 'synthetic-refused' })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: 'recording' })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', { ...status, previewHold: null })
+    ).toThrow()
+  })
+
   it('reports the effective editor draft on compositor status and never a forged one', () => {
     const status = {
       state: 'live',
@@ -1112,6 +1256,75 @@ describe('backend RPC contract', () => {
         editorDraft: { sourceId: 'source:camera', transform: { x: 0.1, y: 0.2 } }
       })
     ).toThrow()
+  })
+
+  it('accepts the live background on compositor status (plan 190) and nothing forged', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      framePipeline: {
+        gpuReadbacks: 0,
+        bgraBytesCopied: 0,
+        yuvFramesConverted: 0,
+        immutableTextureUploads: 0,
+        immutableTextureReuses: 0,
+        liveBackgroundPrograms: 2,
+        liveBackgroundScratchBytes: 8_294_400,
+        // Plan 205 S6: the Preview's own picture, inside the bounded
+        // pipeline payload, never a top-level field the strict schema
+        // would reject.
+        previewProgramLeg: true
+      },
+      updatedAt: '2026-10-24T00:00:00Z'
+    } satisfies CompositorStatus
+    const shader = { id: 'silk', look: 'satin', rendering: 'shader', p95Ms: 0.4 } as const
+    const still = {
+      id: 'plasma-wave',
+      look: 'plasma',
+      rendering: 'still',
+      reason: 'gpu-budget',
+      p95Ms: 5.1,
+      requestedLook: 'lava'
+    } as const
+    for (const liveBackground of [shader, still]) {
+      // The event a running compositor publishes, and the status a read returns.
+      expect(
+        validateBackendEventPayload('compositor.status', { ...status, liveBackground })
+      ).toEqual({ ...status, liveBackground })
+      expect(validateBackendRpcResult('compositor.status', { ...status, liveBackground })).toEqual({
+        ...status,
+        liveBackground
+      })
+    }
+    // Every catalogue id passes, the plan 194 five included: the strict
+    // contract once rejected a status by omission (plan 190 S11).
+    expect(LIVE_BACKGROUND_IDS).toHaveLength(10)
+    for (const id of LIVE_BACKGROUND_IDS) {
+      const liveBackground = { ...shader, id, look: LIVE_BACKGROUND_DEFAULT_LOOKS[id] }
+      expect(validateBackendRpcResult('compositor.status', { ...status, liveBackground })).toEqual({
+        ...status,
+        liveBackground
+      })
+    }
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        liveBackground: { ...shader, id: 'lava-lamp' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        liveBackground: { ...shader, shader: 'void main() {}' }
+      })
+    ).toThrow('shader must be a known field')
   })
 
   it('semantically rejects malformed preview state responses and events', () => {
@@ -1774,7 +1987,7 @@ describe('backend RPC contract', () => {
     ).toThrow('clip.marks.list')
   })
 
-  it('validates the Orcle report RPCs and the saved event (plan 119 S1)', () => {
+  it('validates the Buddy report RPCs and the saved event (plan 119 S1)', () => {
     const report = {
       version: 1,
       sessionId: 'session-1',
@@ -1912,6 +2125,227 @@ describe('backend RPC contract', () => {
     ).toThrow('cohost.report.saved')
   })
 
+  it('carries Greetings AI, the welcomes and why greetings were skipped (plan 192)', () => {
+    const oldAutoChat = {
+      mode: 'auto',
+      greetings: { enabled: true, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    }
+    const settings = {
+      enabled: true,
+      tone: 'friendly',
+      notes: '',
+      autoHighlight: false,
+      voiceHighlight: false,
+      rules: [],
+      listen: false,
+      wakeWordRequired: false,
+      removeConfirm: 'confirm',
+      persona: {
+        id: 'default',
+        name: 'Buddy',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default',
+        avatar: { kind: 'still' },
+        motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+        reactions: {}
+      },
+      autoChat: oldAutoChat
+    }
+    // An older backend sends neither field: its settings still load.
+    expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
+    expect(validateBackendRpcParams('cohost.settings.set', { autoChat: oldAutoChat })).toEqual({
+      autoChat: oldAutoChat
+    })
+    // Plan 211 D3: `talk` is the mode (three values, absent never null); the
+    // legacy `mode` rides along.
+    for (const talk of ['off', 'bubble', 'suggest']) {
+      const block = { ...oldAutoChat, mode: 'off', talk }
+      expect(
+        validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat: block })
+      ).toEqual({ ...settings, autoChat: block })
+      expect(validateBackendRpcParams('cohost.settings.set', { autoChat: block })).toEqual({
+        autoChat: block
+      })
+    }
+    for (const talk of ['auto', 'loud', null, 1]) {
+      const block = { ...oldAutoChat, talk }
+      expect(() => validateBackendRpcParams('cohost.settings.set', { autoChat: block })).toThrow(
+        'cohost.settings.set'
+      )
+      expect(() =>
+        validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat: block })
+      ).toThrow('cohost.settings.get')
+    }
+
+    const welcomes = {
+      firstTime: { enabled: true },
+      returning: { enabled: false, text: 'Yo {name}!', state: 'laugh', reaction: 'wave' }
+    }
+    const greetings = { enabled: true, templates: [], ai: true, welcomes }
+    const autoChat = { ...oldAutoChat, greetings, answers: { enabled: true, cooldownSeconds: 20 } }
+    expect(validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat })).toEqual({
+      ...settings,
+      autoChat
+    })
+    expect(validateBackendRpcParams('cohost.settings.set', { autoChat })).toEqual({ autoChat })
+
+    // Absent, never null (the serde-null trap); closed shapes; an empty line
+    // is absent, not ''.
+    for (const broken of [
+      { ...greetings, ai: null },
+      { ...greetings, ai: 'yes' },
+      { ...greetings, welcomes: null },
+      { ...greetings, welcomes: { firstTime: welcomes.firstTime } },
+      { ...greetings, welcomes: { ...welcomes, everyone: { enabled: true } } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: {} } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, text: null } } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, text: '' } } },
+      {
+        ...greetings,
+        welcomes: { ...welcomes, firstTime: { enabled: true, text: 'x'.repeat(201) } }
+      },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, state: 'idle' } } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, reaction: null } } },
+      { ...greetings, welcomes: { ...welcomes, firstTime: { enabled: true, extra: 1 } } },
+      { ...greetings, extra: true }
+    ]) {
+      const broke = { ...autoChat, greetings: broken }
+      expect(() => validateBackendRpcParams('cohost.settings.set', { autoChat: broke })).toThrow(
+        'cohost.settings.set'
+      )
+      expect(() =>
+        validateBackendRpcResult('cohost.settings.get', { ...settings, autoChat: broke })
+      ).toThrow('cohost.settings.get')
+    }
+    // The welcome kinds never ride templates[] (S1.1): an older app would
+    // load defaults and its next save would wipe the persona.
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        autoChat: {
+          ...autoChat,
+          greetings: {
+            ...greetings,
+            templates: [
+              { id: 't', kind: 'first-time', text: 'Hi {name}', state: 'talk', enabled: true }
+            ]
+          }
+        }
+      })
+    ).toThrow('cohost.settings.set')
+
+    const report = {
+      version: 1,
+      sessionId: 'session-1',
+      startedAt: '2026-10-24T16:20:00Z',
+      endedAt: '2026-10-24T17:43:00Z',
+      segments: 1,
+      messagesSeen: 300,
+      shownOnStream: 0,
+      questions: {
+        total: 0,
+        markedAnswered: 0,
+        dismissed: 0,
+        replied: 0,
+        answeredOnAir: 0,
+        restored: 0,
+        shownOnStream: 0
+      },
+      flags: { raised: 0, dismissed: 0 },
+      promises: { heard: 0, kept: 0, dismissed: 0, reminded: 0 },
+      greetings: {
+        firstTimers: 4,
+        firstTimersGreeted: 4,
+        byVoice: 0,
+        byChat: 4,
+        onStream: 0,
+        manual: 0,
+        skipped: { noLine: 3, held: 2 }
+      },
+      recap: { offered: 0, drafted: 0, dismissed: 0 },
+      posts: [
+        {
+          id: 'u-1',
+          at: '2026-10-24T16:21:00Z',
+          trigger: 'greeting',
+          text: 'Hi Ana, welcome to the stream!',
+          destinations: ['twitch'],
+          result: 'sent',
+          source: 'ai'
+        },
+        {
+          id: 'u-2',
+          at: '2026-10-24T16:22:00Z',
+          trigger: 'greeting',
+          text: 'Welcome back, Bo!',
+          destinations: ['youtube'],
+          result: 'sent',
+          source: 'line'
+        },
+        {
+          id: 'u-3',
+          at: '2026-10-24T16:23:00Z',
+          trigger: 'manual',
+          text: 'hello',
+          destinations: ['twitch'],
+          result: 'sent'
+        }
+      ]
+    }
+    const payload = {
+      sessionId: 'session-1',
+      report,
+      moments: [],
+      chat: { messages: 300, byPlatform: [{ platform: 'twitch', messages: 300 }] }
+    }
+    expect(validateBackendRpcResult('cohost.report.get', payload)).toEqual(payload)
+    expect(
+      validateBackendRpcResult('cohost.report.get', {
+        ...payload,
+        report: {
+          ...report,
+          greetings: {
+            ...report.greetings,
+            skipped: {
+              noLine: 1,
+              modeOff: 2,
+              stale: 3,
+              deduped: 4,
+              held: 5,
+              destinationFailed: 6,
+              youtubePaused: 7
+            }
+          }
+        }
+      })
+    ).toBeTruthy()
+    // An older report has neither field.
+    const { skipped: _skipped, ...oldGreetings } = report.greetings
+    const oldReport = {
+      ...report,
+      greetings: oldGreetings,
+      posts: report.posts.map(({ source: _source, ...post }) => post)
+    }
+    expect(
+      validateBackendRpcResult('cohost.report.get', { ...payload, report: oldReport })
+    ).toEqual({ ...payload, report: oldReport })
+    for (const broken of [
+      { ...report, greetings: { ...report.greetings, skipped: null } },
+      { ...report, greetings: { ...report.greetings, skipped: { noLine: null } } },
+      { ...report, greetings: { ...report.greetings, skipped: { noLine: -1 } } },
+      { ...report, greetings: { ...report.greetings, skipped: { muted: 1 } } },
+      { ...report, posts: [{ ...report.posts[0], source: null }] },
+      { ...report, posts: [{ ...report.posts[0], source: 'human' }] }
+    ]) {
+      expect(() =>
+        validateBackendRpcResult('cohost.report.get', { ...payload, report: broken })
+      ).toThrow('cohost.report.get')
+    }
+  })
+
   it('validates the Live Co-host RPCs and state event against the wire contract', () => {
     const state = {
       sessionId: 'session-1',
@@ -1948,14 +2382,47 @@ describe('backend RPC contract', () => {
     expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     expect(validateBackendRpcResult('cohost.status', state)).toEqual(state)
 
-    // One question can gather askers from every platform, Kick included.
-    const everyPlatform = ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom']
+    // One question can gather askers from every platform, Kick included. The
+    // cap is the platform count, never a literal (plan 206: an 8th platform
+    // failed every audience, viewer and co-host event against `maxLength: 7`).
+    const everyPlatform = [...STREAM_PLATFORMS]
+    expect(everyPlatform).toContain('facebook')
     const widest = { ...state, questions: [{ ...state.questions[0], platforms: everyPlatform }] }
     expect(validateBackendEventPayload('cohost.state', widest)).toEqual(widest)
     expect(() =>
       validateBackendEventPayload('cohost.state', {
         ...state,
         questions: [{ ...state.questions[0], platforms: [...everyPlatform, 'kick'] }]
+      })
+    ).toThrow()
+    const audience = {
+      sessionId: 'every-platform',
+      platforms: everyPlatform.map((platform) => ({
+        platform,
+        metric: 'followers',
+        capability: 'unavailable'
+      })),
+      updatedAt: '2026-10-27T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('stream.audience.snapshot', audience)).toEqual(audience)
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...audience,
+        platforms: [...audience.platforms, audience.platforms[0]]
+      })
+    ).toThrow()
+    const viewers = {
+      sessionId: 'every-platform',
+      platforms: everyPlatform.map((platform) => ({ platform, count: 1 })),
+      total: everyPlatform.length,
+      at: '2026-10-27T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('sessions.viewers.list', { samples: [viewers] })).toEqual({
+      samples: [viewers]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', {
+        samples: [{ ...viewers, platforms: [...viewers.platforms, viewers.platforms[0]] }]
       })
     ).toThrow()
 
@@ -2087,7 +2554,7 @@ describe('backend RPC contract', () => {
     // and closed: a bad code/status shape fails the event like any other.
     const detail = {
       code: 'ai-gateway-error',
-      message: 'The Orcle tick failed on every configured model.',
+      message: 'The Buddy tick failed on every configured model.',
       status: 502
     }
     const errored = { ...state, status: 'error', reason: 'gateway-error', detail }
@@ -2144,7 +2611,24 @@ describe('backend RPC contract', () => {
       rules: ['No spoilers'],
       listen: false,
       wakeWordRequired: false,
-      removeConfirm: 'confirm'
+      removeConfirm: 'confirm',
+      persona: {
+        id: 'default',
+        name: 'Buddy',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default',
+        avatar: { kind: 'still' },
+        motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+        reactions: {}
+      },
+      autoChat: {
+        mode: 'off',
+        greetings: { enabled: false, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     expect(validateBackendRpcParams('cohost.settings.set', { listen: true })).toEqual({
@@ -2170,6 +2654,26 @@ describe('backend RPC contract', () => {
       BackendEventMap['cohost.state']
     >()
     expectTypeOf<BackendRpcParams<'cohost.start'>['sessionId']>().toEqualTypeOf<string>()
+  })
+
+  it('validates the anonymous usage stats switch', () => {
+    const on = { enabled: true, envDisabled: false }
+    expect(validateBackendRpcResult('usageStats.get', on)).toEqual(on)
+    const forcedOff = { enabled: false, envDisabled: true }
+    expect(validateBackendRpcResult('usageStats.set', forcedOff)).toEqual(forcedOff)
+    expect(validateBackendRpcParams('usageStats.set', { enabled: false })).toEqual({
+      enabled: false
+    })
+    expect(() => validateBackendRpcParams('usageStats.set', {})).toThrow('usageStats.set')
+    expect(() => validateBackendRpcParams('usageStats.set', { enabled: 'no' })).toThrow(
+      'usageStats.set'
+    )
+    expect(() =>
+      validateBackendRpcParams('usageStats.set', { enabled: true, installId: 'x' })
+    ).toThrow('usageStats.set')
+    expect(() => validateBackendRpcResult('usageStats.get', { enabled: true })).toThrow(
+      'usageStats.get'
+    )
   })
 
   it('validates the 7TV emote switch, its status and its event (plan 089)', () => {
@@ -2326,7 +2830,7 @@ describe('backend RPC contract', () => {
     ).toThrow('liveChat.moderation.request')
   })
 
-  it('types and exactly validates Orcle voice commands, their answers and the kill switches (plan 140 S3)', () => {
+  it('types and exactly validates Buddy voice commands, their answers and the kill switches (plan 140 S3)', () => {
     const base = {
       sessionId: 'session-1',
       status: 'listening',
@@ -2367,7 +2871,7 @@ describe('backend RPC contract', () => {
       ...base,
       command: {
         id: 'cmd-2',
-        heard: 'orcle highlight the comment from coders',
+        heard: 'buddy highlight the comment from coders',
         kind: 'highlight',
         status: 'ambiguous',
         message: "Which comment? Say 'the first one' or press 1 or 2.",
@@ -2392,7 +2896,7 @@ describe('backend RPC contract', () => {
       heard: 'what is the weather',
       kind: 'unknown',
       status: 'not-found',
-      message: "Orcle didn't catch that: 'what is the weather'.",
+      message: "Buddy didn't catch that: 'what is the weather'.",
       at: '2026-10-04T12:00:00Z'
     }
     for (const status of [
@@ -2408,7 +2912,18 @@ describe('backend RPC contract', () => {
       const state = { ...base, command: { ...minimal, status } }
       expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     }
-    for (const kind of ['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']) {
+    for (const kind of [
+      'highlight',
+      'clear',
+      'remove',
+      'confirm',
+      'cancel',
+      'unknown',
+      // Plan 186 S11: banner commands finish at once, without a target.
+      'show-banner',
+      'hide-banner',
+      'hide-banners'
+    ]) {
       const state = { ...base, command: { ...minimal, kind } }
       expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     }
@@ -2502,7 +3017,24 @@ describe('backend RPC contract', () => {
       rules: [],
       listen: true,
       wakeWordRequired: true,
-      removeConfirm: 'countdown'
+      removeConfirm: 'countdown',
+      persona: {
+        id: 'default',
+        name: 'Buddy',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default',
+        avatar: { kind: 'still' },
+        motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+        reactions: {}
+      },
+      autoChat: {
+        mode: 'off',
+        greetings: { enabled: false, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     const withoutWakeWord: Record<string, unknown> = { ...settings }
@@ -2608,5 +3140,464 @@ describe('session source backend wire results', () => {
     expect(() =>
       validateBackendRpcParams('session.start', { sources: { cameraId: null } })
     ).toThrow(/cameraId/)
+  })
+})
+
+describe('banner backend wire contract (plan 186)', () => {
+  const banner = {
+    id: '5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b',
+    name: 'Sponsor',
+    imageFile: '5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.png',
+    thumbnailFile: '5c1e2b8a-7d3f-4e61-9a0b-2f4c6d8e1a3b.thumb.png',
+    width: 2400,
+    height: 400,
+    hasAlpha: true,
+    sortOrder: 0,
+    shown: false,
+    horizontal: { x: 0.2, y: 0.782222, w: 0.6, h: 0.177778 },
+    vertical: { x: 0.071111, y: 0.699583, w: 0.857778, h: 0.080417 },
+    showOnStream: true,
+    showInRecording: true,
+    opacity: 1,
+    createdAt: '2026-10-20T18:00:00Z',
+    updatedAt: '2026-10-20T18:00:00Z'
+  }
+
+  it('registers every banner method and the changed event with a strict schema', () => {
+    expect(runtimeValidatedBackendRpcMethods).toEqual(
+      expect.arrayContaining([
+        'banners.list',
+        'banners.importImage',
+        'banners.update',
+        'banners.reorder',
+        'banners.delete',
+        'banners.show',
+        'banners.hide'
+      ])
+    )
+    expectTypeOf<BackendRpcResult<'banners.list'>>().toEqualTypeOf<Banner[]>()
+    expectTypeOf<BackendRpcResult<'banners.show'>>().toEqualTypeOf<Banner>()
+    expectTypeOf<BackendRpcParams<'banners.hide'>>().toEqualTypeOf<{ id?: string }>()
+    expectTypeOf<BackendEventMap['banners.changed']>().toEqualTypeOf<Banner[]>()
+
+    expect(validateBackendRpcParams('banners.list', undefined)).toBeUndefined()
+    expect(validateBackendRpcResult('banners.list', [banner])).toStrictEqual([banner])
+    expect(validateBackendRpcResult('banners.show', banner)).toStrictEqual(banner)
+    expect(validateBackendRpcResult('banners.importImage', banner)).toStrictEqual(banner)
+    expect(validateBackendRpcResult('banners.update', banner)).toStrictEqual(banner)
+    for (const method of ['banners.reorder', 'banners.delete', 'banners.hide'] as const) {
+      expect(validateBackendRpcResult(method, [])).toStrictEqual([])
+      expect(validateBackendRpcResult(method, [banner])).toStrictEqual([banner])
+    }
+    expect(validateBackendEventPayload('banners.changed', [banner])).toStrictEqual([banner])
+    expect(() => validateBackendEventPayload('banners.changed', banner)).toThrow('banners.changed')
+  })
+
+  it('refuses unknown fields, paths for files, nulls and out-of-range values', () => {
+    expect(() => validateBackendRpcResult('banners.show', { ...banner, extra: 1 })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('banners.show', { ...banner, imageFile: '/tmp/x.png' })
+    ).toThrow('banner file basename')
+    expect(() =>
+      validateBackendRpcResult('banners.show', { ...banner, thumbnailFile: '../x.png' })
+    ).toThrow('banner file basename')
+    expect(() => validateBackendRpcResult('banners.show', { ...banner, id: 'a/b' })).toThrow(
+      'banner id'
+    )
+    expect(() =>
+      validateBackendRpcResult('banners.show', { ...banner, hideAfterSec: null })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('banners.show', { ...banner, repeatEveryMin: null })
+    ).toThrow()
+    expect(() => validateBackendRpcResult('banners.show', { ...banner, opacity: 1.5 })).toThrow()
+    expect(() => validateBackendRpcResult('banners.show', { ...banner, width: 0 })).toThrow()
+    expect(() =>
+      validateBackendRpcResult('banners.show', {
+        ...banner,
+        horizontal: { x: 0, y: 0, w: 1.2, h: 1 }
+      })
+    ).toThrow()
+    const { createdAt: _createdAt, ...withoutCreatedAt } = banner
+    expect(() => validateBackendRpcResult('banners.show', withoutCreatedAt)).toThrow()
+    expect(() =>
+      validateBackendRpcResult(
+        'banners.list',
+        Array.from({ length: 25 }, (_, index) => ({ ...banner, sortOrder: index }))
+      )
+    ).toThrow('at most 24')
+  })
+
+  it('validates params exactly, with 0 turning a timer off', () => {
+    expect(
+      validateBackendRpcParams('banners.importImage', { sourceCapability: 'cap-1' })
+    ).toStrictEqual({ sourceCapability: 'cap-1' })
+    expect(() => validateBackendRpcParams('banners.importImage', { path: '/tmp/x.png' })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('banners.importImage', { sourceCapability: '' })
+    ).toThrow()
+
+    const update = {
+      id: banner.id,
+      name: 'Follow me',
+      horizontal: { x: 0.1, y: 0.1, w: 0.3, h: 0.05 },
+      vertical: { x: 0.1, y: 0.1, w: 0.8, h: 0.05 },
+      showOnStream: true,
+      showInRecording: false,
+      opacity: 0.2,
+      hideAfterSec: 0,
+      repeatEveryMin: 0
+    }
+    expect(validateBackendRpcParams('banners.update', update)).toStrictEqual(update)
+    expect(validateBackendRpcParams('banners.update', { id: banner.id, opacity: 1 })).toStrictEqual(
+      {
+        id: banner.id,
+        opacity: 1
+      }
+    )
+    expect(() => validateBackendRpcParams('banners.update', { ...update, opacity: 0.1 })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('banners.update', { ...update, hideAfterSec: null })
+    ).toThrow()
+    expect(() => validateBackendRpcParams('banners.update', { ...update, shown: true })).toThrow()
+    expect(() => validateBackendRpcParams('banners.update', { name: 'No id' })).toThrow()
+
+    expect(validateBackendRpcParams('banners.reorder', { ids: [banner.id] })).toStrictEqual({
+      ids: [banner.id]
+    })
+    expect(() =>
+      validateBackendRpcParams('banners.reorder', {
+        ids: Array.from({ length: 25 }, (_, index) => `banner-${index}`)
+      })
+    ).toThrow('at most 24')
+    for (const method of ['banners.delete', 'banners.show'] as const) {
+      expect(validateBackendRpcParams(method, { id: banner.id })).toStrictEqual({ id: banner.id })
+      expect(() => validateBackendRpcParams(method, {})).toThrow()
+      expect(() => validateBackendRpcParams(method, { id: banner.id, all: true })).toThrow()
+    }
+    expect(validateBackendRpcParams('banners.hide', {})).toStrictEqual({})
+    expect(validateBackendRpcParams('banners.hide', { id: banner.id })).toStrictEqual({
+      id: banner.id
+    })
+    expect(() => validateBackendRpcParams('banners.hide', { id: null })).toThrow()
+  })
+
+  it('validates the secret-free Discord announcement surface (plan 187)', () => {
+    const webhook = {
+      id: '123456789012345678',
+      name: 'Stream alerts',
+      hint: '…/9xyz',
+      lastPost: {
+        at: '2026-10-22T18:02:00+00:00',
+        messageUrl: 'https://discord.com/channels/1/2/3',
+        state: 'live'
+      },
+      lastError: { code: 'unreachable', at: '2026-10-22T18:03:00+00:00' }
+    }
+    const snapshot = {
+      // Several webhooks, one per server; a bare one has only its id and tail.
+      webhooks: [webhook, { id: '2', hint: '…/a1B2' }],
+      enabled: true,
+      ping: 'everyone',
+      branding: true,
+      postAs: { kind: 'platform', accountId: 'acct-1' },
+      excludedTargetIds: ['youtube-1'],
+      linkOverrides: { tiktok: 'https://www.tiktok.com/@orc/live' },
+      identities: [
+        {
+          postAs: { kind: 'platform', accountId: 'acct-1' },
+          name: 'OrcDev',
+          platform: 'twitch',
+          avatarUrl: 'https://static-cdn.jtvnw.net/a.png'
+        },
+        { postAs: { kind: 'videorc' }, name: 'Orc' }
+      ]
+    }
+    for (const method of [
+      'discord.announce.get',
+      'discord.announce.update',
+      'discord.webhook.save',
+      'discord.webhook.remove'
+    ] as const) {
+      expect(validateBackendRpcResult(method, snapshot)).toStrictEqual(snapshot)
+    }
+    expect(validateBackendEventPayload('discord.announce.changed', snapshot)).toStrictEqual(
+      snapshot
+    )
+    // Rust omits None; a null would mean the serde trap is back.
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, name: null }]
+      })
+    ).toThrow()
+    // A webhook URL never travels back to the renderer, on the snapshot or a row.
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhookUrl: 'https://discord.com/api/webhooks/1/secret'
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, url: 'https://discord.com/api/webhooks/1/secret' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ ...webhook, token: 'secret' }]
+      })
+    ).toThrow()
+    // Ten servers is the cap; the renderer never has to draw more.
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: Array.from({ length: 11 }, (_, index) => ({ id: String(index), hint: '…/a' }))
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('discord.announce.get', {
+        ...snapshot,
+        webhooks: [{ hint: '…/a1B2' }]
+      })
+    ).toThrow()
+    // Remove and the test name one webhook by its id.
+    expect(validateBackendRpcParams('discord.webhook.remove', { webhookId: '2' })).toStrictEqual({
+      webhookId: '2'
+    })
+    expect(() => validateBackendRpcParams('discord.webhook.remove', {})).toThrow()
+    expect(() => validateBackendRpcParams('discord.webhook.remove', undefined)).toThrow()
+    expect(() =>
+      validateBackendRpcParams('discord.announce.update', { url: 'https://discord.com/x' })
+    ).toThrow()
+    expect(
+      validateBackendRpcParams('discord.announce.update', { linkOverride: { targetId: 't' } })
+    ).toStrictEqual({ linkOverride: { targetId: 't' } })
+    expect(() =>
+      validateBackendRpcParams('discord.announce.update', { postAs: { kind: 'someone' } })
+    ).toThrow()
+
+    const targets = {
+      targets: [
+        {
+          id: 'yt',
+          platform: 'youtube',
+          label: 'YouTube',
+          authMode: 'oauth',
+          outputOrientation: 'vertical',
+          platformBroadcastId: 'abc'
+        }
+      ]
+    }
+    expect(validateBackendRpcParams('discord.links.preview', targets)).toStrictEqual(targets)
+    expect(() =>
+      validateBackendRpcParams('discord.links.preview', {
+        targets: [{ ...targets.targets[0], streamKey: 'live_123' }]
+      })
+    ).toThrow()
+    const test = { ...targets, webhookId: '123456789012345678' }
+    expect(validateBackendRpcParams('discord.webhook.sendTest', test)).toStrictEqual(test)
+    expect(() => validateBackendRpcParams('discord.webhook.sendTest', targets)).toThrow()
+    const preview = {
+      links: [
+        { targetId: 'yt', label: 'YouTube · Vertical', linkKind: 'at-go-live', included: true },
+        {
+          targetId: 'tw',
+          label: 'Twitch',
+          linkKind: 'auto',
+          link: 'https://www.twitch.tv/orcdev',
+          included: true
+        }
+      ],
+      sender: { name: 'OrcDev' }
+    }
+    expect(validateBackendRpcResult('discord.links.preview', preview)).toStrictEqual(preview)
+    expect(validateBackendRpcResult('discord.webhook.sendTest', {})).toStrictEqual({})
+  })
+})
+
+describe('app window source contracts (plan 210 S1)', () => {
+  it('accepts legacy and app-aware devices, rejecting null metadata', () => {
+    const device = {
+      id: 'window:screencapturekit:7',
+      name: 'App - Editor',
+      kind: 'window',
+      status: 'available'
+    }
+    for (const extra of [
+      {},
+      { app: { bundleId: 'test.app', name: 'App', pid: 42 }, windowTitle: 'Editor' }
+    ]) {
+      const payload = { devices: [{ ...device, ...extra }], warnings: [] }
+      expect(validateBackendRpcResult('devices.list', payload)).toEqual(payload)
+      expect(validateBackendEventPayload('devices.changed', payload)).toEqual(payload)
+    }
+    for (const extra of [
+      { app: null },
+      { windowTitle: null },
+      { app: { bundleId: 'test.app', name: 'App', pid: 42, secret: true } }
+    ]) {
+      expect(() =>
+        validateBackendRpcResult('devices.list', {
+          devices: [{ ...device, ...extra }],
+          warnings: []
+        })
+      ).toThrow()
+    }
+  })
+
+  it('registers the resolver and validates params and both result variants strictly', () => {
+    expect(runtimeValidatedBackendRpcMethods).toContain('sources.resolve_app_window')
+    const params = {
+      bundleId: 'test.app',
+      preferWindowId: 'window:screencapturekit:7',
+      minWidth: 400,
+      minHeight: 300
+    }
+    expect(validateBackendRpcParams('sources.resolve_app_window', params)).toEqual(params)
+    expect(
+      validateBackendRpcParams('sources.resolve_app_window', { bundleId: 'test.app' })
+    ).toEqual({ bundleId: 'test.app' })
+    for (const bad of [
+      { bundleId: '' },
+      { ...params, minWidth: -1 },
+      { ...params, minHeight: 0.5 },
+      { ...params, minSize: {} }
+    ]) {
+      expect(() => validateBackendRpcParams('sources.resolve_app_window', bad)).toThrow()
+    }
+    const found = {
+      ok: true,
+      windowId: 'window:screencapturekit:7',
+      title: '',
+      width: 800,
+      height: 600
+    }
+    expect(validateBackendRpcResult('sources.resolve_app_window', found)).toEqual(found)
+    for (const reason of ['not-running', 'no-window', 'minimized']) {
+      expect(validateBackendRpcResult('sources.resolve_app_window', { ok: false, reason })).toEqual(
+        { ok: false, reason }
+      )
+    }
+    for (const bad of [
+      { ok: false, reason: 'unsupported' },
+      { ...found, reason: 'no-window' },
+      { ok: true }
+    ]) {
+      expect(() => validateBackendRpcResult('sources.resolve_app_window', bad)).toThrow()
+    }
+  })
+
+  // Plan 210 S4/S5: New scene…'s picker. S5 builds against this shape first.
+  it('registers app previews and validates their pictures strictly', () => {
+    expect(runtimeValidatedBackendRpcMethods).toContain('sources.app_previews')
+    expect(validateBackendRpcParams('sources.app_previews', { maxWidth: 320 })).toEqual({
+      maxWidth: 320
+    })
+    expect(validateBackendRpcParams('sources.app_previews', undefined)).toBeUndefined()
+    for (const bad of [{ maxWidth: 0 }, { maxWidth: 4_000 }, { maxWidth: 320, extra: true }]) {
+      expect(() => validateBackendRpcParams('sources.app_previews', bad)).toThrow()
+    }
+    const figma = {
+      bundleId: 'com.figma.Desktop',
+      name: 'Figma',
+      pid: 42,
+      windowCount: 3,
+      frontWindowId: 'window:screencapturekit:7',
+      frontWindowTitle: 'Untitled',
+      picture: 'data:image/jpeg;base64,/9j/4AAQ',
+      width: 320,
+      height: 200
+    }
+    const iconOnly = { bundleId: 'com.t3.code', name: 'T3 Code', pid: 7, windowCount: 1 }
+    expect(validateBackendRpcResult('sources.app_previews', { apps: [figma, iconOnly] })).toEqual({
+      apps: [figma, iconOnly]
+    })
+    for (const bad of [
+      { ...figma, picture: 'data:image/png;base64,AAAA' },
+      { ...figma, picture: 'https://example.com/a.jpg' },
+      { ...figma, windowCount: -1 },
+      { ...figma, secret: true }
+    ]) {
+      expect(() => validateBackendRpcResult('sources.app_previews', { apps: [bad] })).toThrow()
+    }
+  })
+})
+
+describe('Hide screen wire contract (plan 210 S7)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/screen-privacy.json', import.meta.url),
+      'utf8'
+    )
+  ) as {
+    visible: unknown
+    hiddenByYou: unknown
+    hiddenByPasswordManager: unknown
+    unavailableOnLegacySession: unknown
+    hideParams: unknown
+    rejected: unknown[]
+  }
+
+  it('accepts every fixture state on the RPC results and the event, field for field', () => {
+    for (const state of [
+      fixture.visible,
+      fixture.hiddenByYou,
+      fixture.hiddenByPasswordManager,
+      fixture.unavailableOnLegacySession
+    ]) {
+      expect(validateBackendRpcResult('screen.privacy.get', state)).toEqual(state)
+      expect(validateBackendRpcResult('screen.hide', state)).toEqual(state)
+      expect(validateBackendRpcResult('screen.show', state)).toEqual(state)
+      expect(validateBackendEventPayload('screen.privacy.changed', state)).toEqual(state)
+    }
+    expect(validateBackendRpcParams('screen.hide', fixture.hideParams)).toEqual(fixture.hideParams)
+    expect(validateBackendRpcParams('screen.hide', { reason: 'you' })).toEqual({ reason: 'you' })
+  })
+
+  it('rejects a null field, an unknown reason, a forged field and a missing flag', () => {
+    for (const bad of fixture.rejected) {
+      expect(() => validateBackendRpcResult('screen.privacy.get', bad)).toThrow()
+      expect(() => validateBackendEventPayload('screen.privacy.changed', bad)).toThrow()
+    }
+    expect(() =>
+      validateBackendRpcResult('screen.privacy.get', { hidden: true, reason: 'you', extra: 1 })
+    ).toThrow()
+    for (const bad of [{}, { reason: 'agent' }, { reason: null }, { reason: 'you', extra: true }]) {
+      expect(() => validateBackendRpcParams('screen.hide', bad)).toThrow()
+    }
+  })
+
+  it('types the three methods and the event', () => {
+    expectTypeOf<BackendRpcParams<'screen.hide'>>().toEqualTypeOf<{
+      reason: 'you' | 'password-manager'
+    }>()
+    expectTypeOf<BackendRpcResult<'screen.show'>>().toEqualTypeOf<
+      BackendEventMap['screen.privacy.changed']
+    >()
+    expect(runtimeValidatedBackendRpcMethods).toEqual(
+      expect.arrayContaining(['screen.hide', 'screen.show', 'screen.privacy.get'])
+    )
+  })
+})
+
+describe('performance check non-recorded reason', () => {
+  it('accepts host-busy and rejects unknown reasons', () => {
+    expect(() =>
+      validateBackendEventPayload('performance.check.completed', {
+        running: false,
+        stale: false,
+        lastRunNotRecorded: 'host-busy'
+      })
+    ).not.toThrow()
+    expect(() =>
+      validateBackendEventPayload('performance.check.completed', {
+        running: false,
+        stale: false,
+        lastRunNotRecorded: 'unknown'
+      })
+    ).toThrow()
   })
 })

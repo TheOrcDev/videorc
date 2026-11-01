@@ -36,6 +36,7 @@ import {
   layoutPresetOrientation,
   studioModeTogglePreset,
   verticalOrientationVideoPatch,
+  verticalTwinVideo,
   layoutPresetNeedsScreen,
   loadCaptureConfig,
   normalizeLayoutSettings,
@@ -81,6 +82,55 @@ function captureConfigFixture(): CaptureConfig {
 }
 
 describe('reconcileSourceSelection', () => {
+  describe('screen None (release test 146, plan 0002)', () => {
+    // Linux: the only screen rows are the portal entries, and selecting one
+    // asks the compositor for a share, so None must survive reconcile.
+    const devices = [
+      { id: 'screen:portal:monitor', name: 'Screen (portal)', kind: 'screen', status: 'available' },
+      { id: 'window:portal:window', name: 'Window (portal)', kind: 'window', status: 'available' },
+      { id: 'camera:1', name: 'FaceTime HD Camera', kind: 'camera', status: 'available' }
+    ] as const satisfies Device[]
+
+    it('keeps an explicit None through every device refresh and layout transaction', () => {
+      const none = buildCaptureSources(
+        { screenId: 'screen:portal:monitor', screenName: 'Screen (portal)', cameraId: 'camera:1' },
+        [...devices],
+        undefined
+      )
+      expect(none).toMatchObject({ screenId: undefined, windowId: undefined, captureOff: true })
+      const once = reconcileSourceSelection(none, [...devices])
+      expect(once.screenId).toBeUndefined()
+      expect(once.windowId).toBeUndefined()
+      expect(once.captureOff).toBe(true)
+      expect(reconcileSourceSelection(once, [...devices])).toEqual(once)
+      expect(reconcileSourceSelectionForLayoutTransaction(once, [...devices])).toEqual(once)
+    })
+
+    it('still picks the first screen when none was ever chosen', () => {
+      const next = reconcileSourceSelection({ cameraId: 'camera:1' }, [...devices])
+      expect(next.screenId).toBe('screen:portal:monitor')
+      expect(next.captureOff).toBeUndefined()
+    })
+
+    it('choosing a screen or window clears None, and a stale None never hides a chosen one', () => {
+      const none = buildCaptureSources({ cameraId: 'camera:1' }, [...devices], undefined)
+      expect(buildCaptureSources(none, [...devices], 'window:portal:window')).toMatchObject({
+        windowId: 'window:portal:window',
+        captureOff: undefined
+      })
+      expect(
+        reconcileSourceSelection({ screenId: 'screen:portal:monitor', captureOff: true }, [
+          ...devices
+        ])
+      ).toMatchObject({ screenId: 'screen:portal:monitor', captureOff: undefined })
+    })
+
+    it('leaves the dev test pattern alone', () => {
+      const next = reconcileSourceSelection({ testPattern: true, captureOff: true }, [...devices])
+      expect(next).toMatchObject({ testPattern: true, screenId: undefined, windowId: undefined })
+    })
+  })
+
   describe('camera Off (plan 080 S4)', () => {
     const devices = [
       { id: 'screen:1', name: 'Display 1', kind: 'screen', status: 'available' },
@@ -108,6 +158,43 @@ describe('reconcileSourceSelection', () => {
       expect(
         reconcileSourceSelection({ cameraId: 'camera:gone', cameraOff: true }, [...devices])
       ).toMatchObject({ cameraId: 'camera:1', cameraOff: undefined })
+    })
+  })
+
+  describe('microphone None (plan 0027)', () => {
+    const devices = [
+      { id: 'screen:1', name: 'Display 1', kind: 'screen', status: 'available' },
+      { id: 'mic:1', name: 'Built-in Microphone', kind: 'microphone', status: 'available' },
+      { id: 'mic:2', name: 'USB Microphone', kind: 'microphone', status: 'available' }
+    ] as const satisfies Device[]
+
+    it('keeps an explicit None through every device refresh and layout transaction', () => {
+      const none = buildMicrophoneSources(
+        { screenId: 'screen:1', microphoneId: 'mic:1' },
+        [...devices],
+        undefined
+      )
+      const once = reconcileSourceSelection(none, [...devices])
+      expect(once.microphoneId).toBeUndefined()
+      expect(once.microphoneName).toBeUndefined()
+      expect(once.microphoneOff).toBe(true)
+      expect(reconcileSourceSelection(once, [...devices])).toEqual(once)
+      expect(reconcileSourceSelectionForLayoutTransaction(once, [...devices])).toEqual(once)
+    })
+
+    it('still picks the first microphone when none was ever chosen', () => {
+      const next = reconcileSourceSelection({ screenId: 'screen:1' }, [...devices])
+      expect(next.microphoneId).toBe('mic:1')
+      expect(next.microphoneOff).toBeUndefined()
+    })
+
+    it('drops a stale None once a microphone is set, and falls back if it vanished', () => {
+      expect(
+        reconcileSourceSelection({ microphoneId: 'mic:2', microphoneOff: true }, [...devices])
+      ).toMatchObject({ microphoneId: 'mic:2', microphoneOff: undefined })
+      expect(
+        reconcileSourceSelection({ microphoneId: 'mic:gone', microphoneOff: true }, [...devices])
+      ).toMatchObject({ microphoneId: 'mic:1', microphoneOff: undefined })
     })
   })
 
@@ -1092,7 +1179,7 @@ describe('audio sync calibration helpers', () => {
     expect(parseAudioSyncRecommendationJson('nope')).toMatchObject({ ok: false })
     expect(parseAudioSyncRecommendationJson('{}')).toEqual({
       ok: false,
-      error: 'Measurement JSON must use schemaVersion 1.'
+      error: 'The measurement JSON needs schemaVersion 1.'
     })
   })
 
@@ -1100,7 +1187,7 @@ describe('audio sync calibration helpers', () => {
     expect(formatMeasuredAudioLag(121.4)).toBe('Audio lags video by 121 ms')
     expect(formatMeasuredAudioLag(-80.2)).toBe('Audio leads video by 80 ms')
     expect(formatMeasuredAudioLag(0)).toBe('Audio is aligned at 0 ms')
-    expect(formatMeasuredAudioLag(null)).toBe('No paired flash/click measurement')
+    expect(formatMeasuredAudioLag(null)).toBe('Not measured yet')
   })
 
   it('explains unavailable recommendations without changing audio settings', () => {
@@ -1835,13 +1922,16 @@ describe('buildCaptureSources / buildCameraSources / buildMicrophoneSources', ()
     expect(on.cameraOff).toBeUndefined()
   })
 
-  it('sets microphone id + name and clears it for undefined', () => {
+  it('sets microphone id + name and records an explicit None for undefined', () => {
     const set = buildMicrophoneSources({}, microphones, 'mic:1')
     expect(set.microphoneId).toBe('mic:1')
     expect(set.microphoneName).toBe('MacBook Mic')
+    expect(set.microphoneOff).toBeUndefined()
     const cleared = buildMicrophoneSources({ microphoneId: 'mic:1' }, microphones, undefined)
     expect(cleared.microphoneId).toBeUndefined()
     expect(cleared.microphoneName).toBeUndefined()
+    expect(cleared.microphoneOff).toBe(true)
+    expect(buildMicrophoneSources(cleared, microphones, 'mic:1').microphoneOff).toBeUndefined()
   })
 })
 
@@ -2113,18 +2203,83 @@ describe('camera shape and aspect (2026-07-06)', () => {
   })
 })
 
+describe('verticalTwinVideo', () => {
+  it('maps 1080p30 to the named vertical profile', () => {
+    expect(verticalTwinVideo(videoPresets['tutorial-1080p30'])).toBe(
+      videoPresets['vertical-1080x1920']
+    )
+    expect(verticalTwinVideo(videoPresets['stream-safe-1080p30'])).toBe(
+      videoPresets['vertical-1080x1920']
+    )
+  })
+
+  it('keeps every other chosen size and fps, turned on its side', () => {
+    const twin = (preset: keyof typeof videoPresets) => {
+      const { width, height, fps, bitrateKbps } = verticalTwinVideo(videoPresets[preset])
+      return { width, height, fps, bitrateKbps }
+    }
+    expect(twin('tutorial-540p30')).toEqual({ width: 540, height: 960, fps: 30, bitrateKbps: 2500 })
+    expect(twin('tutorial-720p30')).toEqual({
+      width: 720,
+      height: 1280,
+      fps: 30,
+      bitrateKbps: 4000
+    })
+    expect(twin('tutorial-1440p30')).toEqual({
+      width: 1440,
+      height: 2560,
+      fps: 30,
+      bitrateKbps: 8000
+    })
+    expect(twin('record-4k30')).toEqual({ width: 2160, height: 3840, fps: 30, bitrateKbps: 30000 })
+    expect(twin('stream-safe-1080p60')).toEqual({
+      width: 1080,
+      height: 1920,
+      fps: 60,
+      bitrateKbps: 6000
+    })
+    const floor = { ...videoPresets.custom, width: 640, height: 360, fps: 24 }
+    expect(verticalTwinVideo(floor)).toEqual({ ...floor, width: 360, height: 640 })
+    expect(verticalTwinVideo(videoPresets['tutorial-720p30']).preset).toBe('custom')
+  })
+})
+
 describe('vertical orientation video coupling', () => {
   const landscape = videoPresets['record-4k30']
   const vertical = videoPresets['vertical-1080x1920']
 
-  it('entering vertical mode applies the portrait profile and remembers the landscape canvas', () => {
+  it('entering vertical mode applies the portrait twin and remembers the landscape canvas', () => {
     const patch = verticalOrientationVideoPatch(
       'screen-camera',
       'vertical-camera-top',
       landscape,
       null
     )
-    expect(patch).toEqual({ video: vertical, verticalRestoreVideo: landscape })
+    expect(patch).toEqual({
+      video: { ...landscape, preset: 'custom', width: 2160, height: 3840 },
+      verticalRestoreVideo: landscape
+    })
+  })
+
+  it('720p30 enters vertical mode at 720x1280 and comes back at 1280x720 (retest 152)', () => {
+    const chosen = videoPresets['tutorial-720p30']
+    const entered = verticalOrientationVideoPatch(
+      'screen-camera',
+      'vertical-camera-top',
+      chosen,
+      null
+    )
+    expect(entered).toEqual({
+      video: { ...chosen, preset: 'custom', width: 720, height: 1280 },
+      verticalRestoreVideo: chosen
+    })
+    const left = verticalOrientationVideoPatch(
+      'vertical-camera-top',
+      'screen-camera',
+      entered!.video,
+      entered!.verticalRestoreVideo
+    )
+    expect(left).toEqual({ video: chosen, verticalRestoreVideo: null })
   })
 
   it('entering vertical mode keeps a canvas the user already made portrait', () => {

@@ -8,7 +8,8 @@ import {
   cohostGroupedDeltaFlash,
   cohostNextPassLabel,
   cohostPresenceView,
-  cohostQuestionIds
+  cohostQuestionIds,
+  cohostStatusLabel
 } from '@/lib/cohost-presence'
 
 const NOW = Date.parse('2026-08-24T12:00:00.000Z')
@@ -46,12 +47,12 @@ describe('cohostPresenceView', () => {
   it('renders the off shape as a state, never as nothing', () => {
     const view = cohostPresenceView(offCohostState(), NOW)
     expect(view.kind).toBe('off')
-    expect(view.label).toBe('Orcle off')
+    expect(view.label).toBe('Off')
     expect(view.dotTone).toBe('muted')
     expect(view.dots).toBe(false)
     expect(view.pulse).toBe(false)
     expect(view.openCount).toBe(0)
-    expect(view.tooltipLines[0]).toContain('Orcle is off')
+    expect(view.tooltipLines[0]).toContain('Buddy is off')
   })
 
   it('treats a null state exactly like the off shape', () => {
@@ -63,7 +64,7 @@ describe('cohostPresenceView', () => {
   it('reports starting when the caller asked the engine to come up', () => {
     const view = cohostPresenceView(offCohostState(), NOW, { starting: true })
     expect(view.kind).toBe('starting')
-    expect(view.label).toBe('Orcle starting')
+    expect(view.label).toBe('Starting…')
     expect(view.dotTone).toBe('muted')
     expect(view.pulse).toBe(true)
   })
@@ -74,20 +75,38 @@ describe('cohostPresenceView', () => {
       NOW
     )
     expect(view.kind).toBe('listening')
-    expect(view.label).toBe('Orcle · 3 q')
+    expect(view.label).toBe('3 questions')
     expect(view.dotTone).toBe('live')
     expect(view.dots).toBe(false)
     expect(view.openCount).toBe(3)
   })
 
-  it('says reading chat (not "0 q", never "listening") when the chat has asked nothing yet', () => {
-    expect(cohostPresenceView(listening(), NOW).label).toBe('Orcle is reading chat')
+  it('says reading chat (not "0 questions", never "listening") when the chat has asked nothing yet', () => {
+    expect(cohostPresenceView(listening(), NOW).label).toBe('Reading chat')
+    expect(cohostPresenceView(listening({ questions: [question()] }), NOW).label).toBe('1 question')
+  })
+
+  // Plan 174 F-20: one status vocabulary, the same words on every surface,
+  // and never "Buddy" in front of them.
+  it('gives a surface without a clock the same words', () => {
+    expect(cohostStatusLabel(null)).toBe('Off')
+    expect(cohostStatusLabel(null, { starting: true })).toBe('Starting…')
+    expect(cohostStatusLabel(listening())).toBe('Reading chat')
+    expect(cohostStatusLabel(listening({ status: 'paused', reason: 'quota-exhausted' }))).toBe(
+      'Paused: daily AI allowance used up'
+    )
+    for (const label of [
+      cohostStatusLabel(listening()),
+      cohostStatusLabel(listening({ status: 'error', reason: 'network' }))
+    ]) {
+      expect(label).not.toMatch(/^Buddy/)
+    }
   })
 
   it('counts the queued messages it has seen but not sent', () => {
     const view = cohostPresenceView(listening({ pendingMessages: 4 }), NOW)
     expect(view.kind).toBe('reading')
-    expect(view.label).toBe('Orcle · reading 4 new…')
+    expect(view.label).toBe('Reading 4 new…')
     expect(view.dots).toBe(true)
     expect(view.pulse).toBe(false)
     expect(view.dotTone).toBe('live')
@@ -96,7 +115,7 @@ describe('cohostPresenceView', () => {
   it('lets thinking outrank reading — the tick already carries the backlog', () => {
     const view = cohostPresenceView(listening({ pendingMessages: 4, tickInFlight: true }), NOW)
     expect(view.kind).toBe('thinking')
-    expect(view.label).toBe('Orcle · thinking…')
+    expect(view.label).toBe('Thinking…')
     expect(view.dots).toBe(true)
     expect(view.pulse).toBe(true)
   })
@@ -104,7 +123,7 @@ describe('cohostPresenceView', () => {
   it('names the pause reason and stays monochrome', () => {
     const view = cohostPresenceView(listening({ status: 'paused', reason: 'quota-exhausted' }), NOW)
     expect(view.kind).toBe('paused')
-    expect(view.label).toBe('Orcle paused · quota')
+    expect(view.label).toBe('Paused: daily AI allowance used up')
     expect(view.dotTone).toBe('muted')
   })
 
@@ -118,9 +137,57 @@ describe('cohostPresenceView', () => {
       NOW
     )
     expect(view.kind).toBe('error')
-    expect(view.label).toBe('Orcle error')
+    expect(view.label).toBe('Stopped: Videorc AI error')
     expect(view.dotTone).toBe('destructive')
     expect(view.tooltipLines).toContain('ai-gateway-error (HTTP 502): Every model failed.')
+  })
+
+  it('reads a failed tick with a scheduled retry as calm Retrying, never Stopped', () => {
+    // The 2026-10-21 stream: 22 of 83 ticks answered 502 and the engine
+    // retried each within seconds, yet the header flashed a red "Stopped".
+    const view = cohostPresenceView(
+      listening({
+        status: 'error',
+        reason: 'gateway-error',
+        retryAt: '2026-08-24T12:00:05.000Z',
+        detail: {
+          code: 'ai-gateway-error',
+          message: 'The Buddy tick failed on every configured model.',
+          status: 502
+        }
+      }),
+      NOW
+    )
+    expect(view.kind).toBe('retrying')
+    expect(view.label).toBe("Retrying: Videorc AI didn't answer")
+    expect(view.dotTone).toBe('muted')
+    expect(view.pulse).toBe(true)
+    expect(view.dots).toBe(false)
+    expect(view.tooltipLines).toContain('next try in ~5s')
+    expect(view.tooltipLines).toContain(
+      'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
+    )
+    expect(cohostEmptyStateCopy(view, null)).toContain('trying again')
+  })
+
+  it('still says Stopped once the engine stops promising a retry', () => {
+    const view = cohostPresenceView(
+      listening({ status: 'error', reason: 'gateway-error', retryAt: null }),
+      NOW
+    )
+    expect(view.kind).toBe('error')
+    expect(view.label).toBe('Stopped: Videorc AI error')
+    expect(view.dotTone).toBe('destructive')
+  })
+
+  it('names other retry reasons with the shared vocabulary', () => {
+    const state = listening({
+      status: 'error',
+      reason: 'network',
+      retryAt: '2026-08-24T12:00:10.000Z'
+    })
+    expect(cohostPresenceView(state, NOW).label).toBe('Retrying: no connection')
+    expect(cohostStatusLabel(state)).toBe('Retrying: no connection')
   })
 
   it('builds the tooltip from lastTickAt, messagesSeen and questionsTotal', () => {
@@ -178,7 +245,7 @@ describe('cohostEmptyStateCopy', () => {
     )
     const off = offCohostState()
     expect(cohostEmptyStateCopy(cohostPresenceView(off, NOW), off)).toBe(
-      'Questions from chat will appear here once Orcle is reading chat again.'
+      'Questions from chat will appear here once Buddy is reading chat again.'
     )
   })
 })

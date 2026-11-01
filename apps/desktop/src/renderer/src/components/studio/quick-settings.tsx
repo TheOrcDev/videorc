@@ -1,352 +1,149 @@
-import {
-  type AppIcon,
-  CameraIcon,
-  CaptionsIcon,
-  DesktopIcon,
-  DisplayIcon,
-  RecordIcon
-} from '@/components/icons'
+import { type AppIcon, CameraIcon, CaptionsIcon, DisplayIcon, HiddenIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
+import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
+import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
+import { StatusBadge } from '@/components/status-badge'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
+import { DisabledReason } from '@/components/ui/disabled-reason'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useStudioCore } from '@/hooks/use-studio'
-import { missingSelection, sourceSelectPlaceholder } from '@/lib/source-select-state'
-import { recordingQuality } from '@/lib/studio-session-view'
-import type { CaptionsStatus, Device } from '@/lib/backend'
-import { cloudAiUploadGate } from '@/lib/entitlement-ui'
+import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
 import {
-  buildCameraSources,
-  buildCaptureSources,
-  capturePickerDevices,
-  layoutPresetOrientation,
-  resolutionOptionsForOrientation
-} from '@/lib/capture'
-import {
-  systemAudioDevice,
-  requestSystemAudioResume,
-  systemAudioIssueCopy,
-  systemAudioSwitchView,
-  type SystemAudioSwitchView
-} from '@/lib/system-audio'
-
-function resolutionKey(width: number, height: number): string {
-  return `${width}x${height}`
-}
-
-function compactCaptionsStatus(
-  status: CaptionsStatus,
-  enabled: boolean,
-  sessionActive: boolean,
-  premiumAllowed: boolean
-): string {
-  switch (status.state) {
-    case 'starting':
-      return 'Starting…'
-    case 'listening':
-    case 'live':
-      return sessionActive ? 'Live' : 'Waiting for session'
-    case 'reconnecting':
-      return 'Reconnecting…'
-    case 'degraded':
-      return 'Higher delay'
-    case 'blocked':
-      return 'Blocked'
-    case 'error':
-      return 'Error'
-    case 'ready':
-      return 'Ready'
-    default:
-      return enabled ? 'Armed' : premiumAllowed ? 'Off' : 'Premium'
-  }
-}
+  SCREEN_HIDDEN_LABEL,
+  screenHideAccelerator,
+  screenPrivacyActionLabel,
+  screenPrivacyDisabledReason
+} from '@/lib/screen-privacy-view'
+import { captionsStatusLabel } from '@/lib/state-labels'
+import { toastUserError } from '@/lib/user-error'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { systemAudioRowDevice, systemAudioSwitchView } from '@/lib/system-audio'
 
 /**
- * Inputs (SD2): the Studio inspector's grouped rows mirroring the controls
- * that own their own pages: Screen, Camera, System audio, Output, Captions.
- * They edit the SAME captureConfig via the shared builders / setters (one
- * state). Device and preset source edits use the shared session controller.
- * Scene switching lives in the Scenes gallery; the microphone and its live
- * level live in the Microphone section above (plan 092), so no Mic row here.
+ * The Studio inspector's mirrors of controls that own their own pages (SD2):
+ * Sources (Screen and Camera, with Open Sources as the way home), then
+ * Captions on its own, because captions aren't a source (plan 174 S3.3,
+ * B-15 and B-25). They edit the SAME captureConfig via the shared builders /
+ * setters (one state). Device source edits use the shared session controller.
+ * Output is one row, the Session section's. Scene switching lives in the
+ * Scenes gallery; the microphone and System audio, with their levels and
+ * Gain, live in the Audio section above (plans 092 and 201), so no audio
+ * rows here.
  */
 export function QuickSettings(): ReactElement {
   const {
     captureConfig,
-    setCaptureConfig,
     switchSourceDeviceLive,
     sourceSwitchReason,
     allowCaptureNone,
-    deviceList,
     selectedCaptureDevice,
     selectedCamera,
-    patchVideo,
     isSessionActive,
-    entitlements,
     captionsStatus,
-    captionsCommandPending,
-    wsStatus,
-    systemAudioConfirmed,
-    systemAudioIssue
-  } = useStudioCore()
-  const { openSettings } = useWorkspaceNav()
-  const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
-    requested: captureConfig.audio.systemAudioEnabled,
-    sessionActive: isSessionActive,
-    confirmed: systemAudioConfirmed,
-    issue: systemAudioIssue
-  })
-  // Q6 (plan 022): before the backend reports devices, selects say "Finding
-  // devices…" instead of rendering blank.
-  const discoveryPending = wsStatus !== 'connected'
-  const captionsGate = cloudAiUploadGate(entitlements)
-  const captionsEnabled = captureConfig.captions.enabled
-
-  const captureDevices = capturePickerDevices(deviceList.devices)
-  const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
-  // Resolution options mirror the Output tab (recording-tab.tsx) and follow
-  // the Studio mode — vertical mode offers only portrait canvases (the mode
-  // toggle is the one home for orientation).
-  const resolutions = resolutionOptionsForOrientation(
-    layoutPresetOrientation(captureConfig.layout.layoutPreset)
-  )
-  const currentResolution = resolutionKey(captureConfig.video.width, captureConfig.video.height)
-  const knownResolution = resolutions.some(
-    (resolution) => resolutionKey(resolution.width, resolution.height) === currentResolution
-  )
-
-  // F-015: the synthetic diagnostic source replaces the screen, so say so
-  // instead of claiming "No screen". Plan 080 S4: screen and camera are two
-  // rows, so neither name is truncated to fit beside the other; a saved
-  // device that is missing keeps its saved name.
-  const screenSummary = captureConfig.sources.testPattern
-    ? 'Test pattern'
-    : (selectedCaptureDevice?.name ??
-      captureConfig.sources.screenName ??
-      captureConfig.sources.windowName ??
-      'None')
-  const cameraSummary =
-    selectedCamera?.name ??
-    (captureConfig.sources.cameraId ? captureConfig.sources.cameraName : undefined) ??
-    'Off'
+    openStudioPanel,
+    discoveryPending,
+    captureDevices,
+    cameras,
+    selectedCaptureId,
+    screenPrivacy
+  } = useStudioSources()
 
   return (
-    <PanelSection title="Inputs">
-      <GroupedList>
-        {/* SCREEN: one click straight to the list (owner, 2026-09-30); the
+    <>
+      <PanelSection
+        action={
+          <Button variant="ghost" onClick={() => openWorkspaceTab('sources')}>
+            Open Sources
+          </Button>
+        }
+        title="Sources"
+      >
+        <GroupedList>
+          {/* SCREEN: one click straight to the list (owner, 2026-09-30); the
             searchable picker stays on Sources. */}
-        <InspectorRow
-          icon={DisplayIcon}
-          label="Screen"
-          status={<SourceSwitchStatus kind="capture" />}
-        >
-          <InspectorSourceSelect
-            allowNone={allowCaptureNone}
-            devices={captureDevices}
-            disabled={Boolean(sourceSwitchReason('capture'))}
-            discoveryPending={discoveryPending}
-            groupByKind
+          <InspectorRow
+            footer={<ScreenPrivacyLine control={screenPrivacy} />}
+            icon={DisplayIcon}
             label="Screen"
-            selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
-            summary={screenSummary}
-            value={selectedCaptureId}
-            onChange={(captureId) =>
-              void switchSourceDeviceLive(
-                'capture',
-                buildCaptureSources(captureConfig.sources, captureDevices, captureId)
-              )
-            }
-          />
-        </InspectorRow>
-
-        {/* CAMERA: its own row (plan 080 S4). Off is a choice that sticks. */}
-        <InspectorRow
-          icon={CameraIcon}
-          label="Camera"
-          status={<SourceSwitchStatus kind="camera" />}
-        >
-          <InspectorSourceSelect
-            allowNone
-            devices={cameras}
-            disabled={Boolean(sourceSwitchReason('camera'))}
-            discoveryPending={discoveryPending}
-            label="Camera"
-            noneLabel="Off"
-            selectedName={captureConfig.sources.cameraName}
-            summary={cameraSummary}
-            value={captureConfig.sources.cameraId}
-            onChange={(cameraId) =>
-              void switchSourceDeviceLive(
-                'camera',
-                buildCameraSources(captureConfig.sources, cameras, cameraId)
-              )
-            }
-          />
-        </InspectorRow>
-
-        {/* SYSTEM AUDIO: plan 069 On/Off, live-safe; hidden where unsupported. */}
-        {systemAudio.visible ? (
-          <InspectorRow icon={DesktopIcon} label="System audio">
-            <SystemAudioInspectorValue
-              view={systemAudio}
-              onEnabledChange={(systemAudioEnabled) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  audio: { ...current.audio, systemAudioEnabled }
-                }))
+            status={<SourceSwitchStatus kind="capture" />}
+          >
+            {/* F-015: the synthetic diagnostic source replaces the screen, so the
+              row says so instead of claiming no screen. */}
+            <DevicePicker
+              devices={captureDevices}
+              disabled={Boolean(sourceSwitchReason('capture'))}
+              discoveryPending={discoveryPending}
+              groupByKind
+              kind="capture"
+              label="Screen"
+              noneLabel={allowCaptureNone ? 'None' : undefined}
+              selectedDevice={selectedCaptureDevice}
+              selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
+              selectionLabel={captureConfig.sources.testPattern ? 'Test pattern' : undefined}
+              trigger="inline"
+              value={selectedCaptureId}
+              onChange={(captureId) =>
+                void switchSourceDeviceLive(
+                  'capture',
+                  buildCaptureSources(captureConfig.sources, captureDevices, captureId)
+                )
               }
-              onOpenPermissions={() => openSettings('permissions')}
-              onResume={requestSystemAudioResume}
             />
           </InspectorRow>
-        ) : null}
 
-        {/* OUTPUT — recording resolution, mirroring the Output tab's options. */}
-        <InspectorRow icon={RecordIcon} label="Output">
-          <Select
-            disabled={isSessionActive}
-            value={knownResolution ? currentResolution : ''}
-            onValueChange={(value) => {
-              const match = resolutions.find(
-                (resolution) => resolutionKey(resolution.width, resolution.height) === value
-              )
-              if (match) {
-                patchVideo({ width: match.width, height: match.height })
-              }
-            }}
+          {/* CAMERA: its own row (plan 080 S4). Off is a choice that sticks. */}
+          <InspectorRow
+            icon={CameraIcon}
+            label="Camera"
+            status={<SourceSwitchStatus kind="camera" />}
           >
-            <SelectTrigger className="w-full justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent">
-              {/* Q7 (plan 022): the compact trigger shows the short canonical
-                form ("2K · 1440p30"); the full dimensions live in the items. */}
-              <SelectValue placeholder="Custom">
-                {recordingQuality(captureConfig.video)}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {resolutions.map((resolution) => (
-                <SelectItem
-                  key={resolution.label}
-                  value={resolutionKey(resolution.width, resolution.height)}
-                >
-                  {resolution.label} · {resolution.detail}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </InspectorRow>
-
-        {/* CAPTIONS — live-safe premium toggle mirroring the Streaming tab's
-          Live captions section (the config home, incl. the consent copy). */}
-        <InspectorRow icon={CaptionsIcon} label="Captions">
-          <div className="flex h-control items-center justify-end gap-2.5 px-2">
-            <span className="min-w-0 truncate text-sm font-medium">
-              {compactCaptionsStatus(
-                captionsStatus,
-                captionsEnabled,
-                isSessionActive,
-                captionsGate.allowed
-              )}
-            </span>
-            <Switch
-              aria-label="Enable live captions"
-              checked={captionsEnabled}
-              disabled={captionsCommandPending || (!captionsEnabled && !captionsGate.allowed)}
-              onCheckedChange={(enabled) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  captions: { ...current.captions, enabled }
-                }))
+            <DevicePicker
+              devices={cameras}
+              disabled={Boolean(sourceSwitchReason('camera'))}
+              discoveryPending={discoveryPending}
+              kind="camera"
+              label="Camera"
+              noneLabel="Off"
+              selectedDevice={selectedCamera}
+              selectedName={captureConfig.sources.cameraName}
+              trigger="inline"
+              value={captureConfig.sources.cameraId}
+              onChange={(cameraId) =>
+                void switchSourceDeviceLive(
+                  'camera',
+                  buildCameraSources(captureConfig.sources, cameras, cameraId)
+                )
               }
             />
-          </div>
-        </InspectorRow>
-      </GroupedList>
-    </PanelSection>
-  )
-}
+          </InspectorRow>
+        </GroupedList>
+      </PanelSection>
 
-/** Short state beside the switch; the full health copy lives in its tooltip. */
-export function SystemAudioInspectorValue({
-  view,
-  onEnabledChange,
-  onOpenPermissions,
-  onResume
-}: {
-  view: SystemAudioSwitchView
-  onEnabledChange: (enabled: boolean) => void
-  onOpenPermissions: () => void
-  /** Plan 076: turn System audio on again after the echo guard paused it. */
-  onResume: () => void
-}): ReactElement {
-  const status =
-    view.issue === 'lost'
-      ? 'Stopped'
-      : view.issue === 'bypassed'
-        ? 'Off for this session'
-        : view.issue === 'echo'
-          ? 'Paused'
-          : view.issue
-            ? 'Could not start'
-            : view.stateLabel
-  return (
-    <div className="flex h-control min-w-0 items-center justify-end gap-2.5 px-2">
-      {view.permissionRequired ? (
-        // The row is narrow: the permission route replaces the (disabled)
-        // switch here; the mixer and Sources show both.
-        <Button
-          className="min-w-0"
-          size="xs"
-          title="System audio needs Screen Recording permission."
-          variant="ghost"
-          onClick={onOpenPermissions}
-        >
-          <span className="truncate">Needs permission</span>
-        </Button>
-      ) : (
-        <>
-          {view.issue === 'echo' ? (
-            // The row is narrow: Resume replaces the status; its title says why.
-            <Button
-              className="min-w-0"
-              size="xs"
-              title={systemAudioIssueCopy('echo')}
-              variant="ghost"
-              onClick={onResume}
-            >
-              <span className="truncate">Resume</span>
-            </Button>
-          ) : (
-            <span
-              className="min-w-0 truncate text-sm font-medium"
-              title={view.issue ? systemAudioIssueCopy(view.issue) : undefined}
-            >
-              {status}
-            </span>
-          )}
-          <Switch
-            aria-label="System audio"
-            checked={view.checked}
-            disabled={view.disabled}
-            onCheckedChange={onEnabledChange}
+      {/* Captions, below Sources and under no heading of its own: the row
+        names it, and a captions switch is not a source (B-15). */}
+      <PanelSection>
+        <GroupedList>
+          {/* CAPTIONS — a door to the Captions page (plan 174 S3.2, B-13), where
+            the switch sits beside its upload disclosure. A switch here turned
+            on cloud audio upload with no word about it. */}
+          <NavigableRow
+            icon={CaptionsIcon}
+            label="Captions"
+            value={captionsStatusLabel(captionsStatus, {
+              enabled: captureConfig.captions.enabled,
+              sessionActive: isSessionActive
+            })}
+            onNavigate={() => openStudioPanel('captions')}
           />
-        </>
-      )}
-    </div>
+        </GroupedList>
+      </PanelSection>
+    </>
   )
 }
 
@@ -355,12 +152,15 @@ function InspectorRow({
   icon: RowIcon,
   label,
   status,
+  footer,
   children
 }: {
   icon: AppIcon
   label: string
   /** A live-switch status line under the row; collapses when it renders nothing. */
   status?: ReactNode
+  /** The row's own line under its status (the Screen row's Hide screen). */
+  footer?: ReactNode
   children: ReactNode
 }): ReactElement {
   return (
@@ -373,99 +173,149 @@ function InspectorRow({
       {status ? (
         <div className="px-3 pb-2 pl-9.5 text-xs text-muted-foreground empty:hidden">{status}</div>
       ) : null}
+      {footer}
     </div>
   )
 }
 
-const NONE_VALUE = '__none__'
+/**
+ * Hide screen on the Screen row (plan 210 D9): a 24 px button with its key,
+ * never beside Record and Go Live (owner, 2026-10-12). It stays at the right
+ * edge in both states, so Show screen is where Hide screen was. While hidden
+ * the chip says so; it shows with or without a screen in the scene, because
+ * hiding is allowed either way. No toast: the chip and the Preview say it.
+ */
+function ScreenPrivacyLine({ control }: { control: ScreenPrivacyControl }): ReactElement {
+  const { hidden, accelerator, platform, disabledReason, toggle } = control
+  const label = screenPrivacyActionLabel(hidden)
+  const button = (
+    <Button
+      data-videorc-screen-privacy=""
+      disabled={disabledReason !== null}
+      size="xs"
+      variant="outline"
+      onClick={toggle}
+    >
+      {label}
+    </Button>
+  )
+  return (
+    <div
+      className="flex min-h-8 items-center gap-2 pr-1 pb-2 pl-9.5"
+      data-hidden={hidden || undefined}
+      data-slot="screen-privacy"
+    >
+      {hidden ? <StatusBadge icon={HiddenIcon} tone="warn" value={SCREEN_HIDDEN_LABEL} /> : null}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+        {/* The key teaches itself while there is room; while hidden the chip
+            takes that room, and the tooltip keeps the key. */}
+        {accelerator && !hidden ? (
+          <ShortcutKeys accelerator={accelerator} platform={platform} />
+        ) : null}
+        {disabledReason ? (
+          <DisabledReason reason={disabledReason}>{button}</DisabledReason>
+        ) : (
+          <ShortcutTooltip accelerator={accelerator} label={label} platform={platform}>
+            {button}
+          </ShortcutTooltip>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** What both looks' Hide screen controls show and do (the row and the Retro LCD's). */
+export interface ScreenPrivacyControl {
+  hidden: boolean
+  /** The bound key, absent when the streamer cleared it. */
+  accelerator?: string
+  platform?: string
+  /** Why the action is off (a refused hide, Videorc offline), or null. */
+  disabledReason: string | null
+  toggle: () => void
+}
 
 /**
- * A device picker that IS the row control: one click opens the list, like the
- * Output row. The popover-around-a-select it replaces took two clicks (owner,
- * 2026-09-30: "it should just be one").
+ * What the Studio's Sources rows show and act with: the same state for the
+ * inspector's rows and the Retro LCD screen (plan 197), which keeps its
+ * System audio row until plan 201 S3 moves it to the Audio screen.
  */
-function InspectorSourceSelect({
-  label,
-  devices,
-  value,
-  selectedName,
-  summary,
-  allowNone = false,
-  noneLabel = 'None',
-  groupByKind = false,
-  disabled,
-  discoveryPending,
-  onChange
-}: {
-  label: string
-  devices: Device[]
-  value: string | undefined
-  selectedName?: string
-  summary: string
-  allowNone?: boolean
-  noneLabel?: string
-  /** Screens and windows under their own headings. */
-  groupByKind?: boolean
-  disabled: boolean
-  discoveryPending: boolean
-  onChange: (value: string | undefined) => void
-}): ReactElement {
-  const missing = missingSelection(devices, value, selectedName)
-  const screens = devices.filter((device) => device.kind === 'screen')
-  const windows = devices.filter((device) => device.kind === 'window')
-  const groups =
-    groupByKind && screens.length && windows.length
-      ? [
-          { heading: 'Screens', items: screens },
-          { heading: 'Windows', items: windows }
-        ]
-      : [{ heading: undefined, items: devices }]
-  return (
-    <Select
-      disabled={disabled}
-      value={value ?? (allowNone ? NONE_VALUE : '')}
-      onValueChange={(next) => onChange(next === NONE_VALUE || next === '' ? undefined : next)}
-    >
-      <SelectTrigger
-        aria-label={label}
-        className="w-full min-w-0 justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent"
-        title={summary}
-      >
-        <SelectValue>
-          <span className="min-w-0 truncate text-right">{summary}</span>
-        </SelectValue>
-      </SelectTrigger>
-      <SelectContent align="end" className="max-w-80" position="popper">
-        {allowNone ? <SelectItem value={NONE_VALUE}>{noneLabel}</SelectItem> : null}
-        {missing ? (
-          <SelectItem disabled value={missing.value}>
-            {missing.label}
-          </SelectItem>
-        ) : null}
-        {devices.length === 0 ? (
-          <SelectItem disabled value="__empty__">
-            {sourceSelectPlaceholder(0, discoveryPending)}
-          </SelectItem>
-        ) : null}
-        {groups.map((group, index) => (
-          <SelectGroup key={group.heading ?? 'devices'}>
-            {index > 0 ? <SelectSeparator /> : null}
-            {group.heading ? <SelectLabel>{group.heading}</SelectLabel> : null}
-            {group.items.map((device) => (
-              <SelectItem
-                disabled={device.status !== 'available'}
-                key={device.id}
-                value={device.id}
-              >
-                <span className="truncate">
-                  {device.name}
-                  {device.status !== 'available' ? ` (${device.status})` : ''}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        ))}
-      </SelectContent>
-    </Select>
-  )
+export function useStudioSources() {
+  const {
+    captureConfig,
+    setCaptureConfig,
+    switchSourceDeviceLive,
+    sourceSwitchReason,
+    allowCaptureNone,
+    deviceList,
+    selectedCaptureDevice,
+    selectedCamera,
+    isSessionActive,
+    audioBusActive,
+    captionsStatus,
+    wsStatus,
+    systemAudioConfirmed,
+    systemAudioJoining,
+    systemAudioIssue,
+    runtimeInfo,
+    settings,
+    screenPrivacy: privacy,
+    hideScreen,
+    showScreen
+  } = useStudioCore()
+  const { openSettings, openStudioPanel } = useWorkspaceNav()
+  const systemAudio = systemAudioSwitchView({
+    device: systemAudioRowDevice(deviceList, runtimeInfo?.platform),
+    requested: captureConfig.audio.systemAudioEnabled,
+    sessionActive: isSessionActive,
+    audioBusActive,
+    confirmed: systemAudioConfirmed,
+    joining: systemAudioJoining,
+    issue: systemAudioIssue
+  })
+  // Q6 (plan 022): before the backend reports devices, selects say "Finding
+  // devices…" instead of rendering blank.
+  const discoveryPending = wsStatus !== 'connected'
+
+  const captureDevices = capturePickerDevices(deviceList.devices)
+  const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
+  const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
+  // Plan 210 S8b: the one Studio action, by the state it shows. A failure
+  // says so; a refused hide is the hook's warning, and success is silent.
+  const screenPrivacy: ScreenPrivacyControl = {
+    hidden: privacy.hidden,
+    accelerator: screenHideAccelerator(settings.globalShortcuts?.screenHideToggle),
+    platform: runtimeInfo?.platform,
+    disabledReason: screenPrivacyDisabledReason(privacy, wsStatus === 'connected'),
+    toggle: () => {
+      const hidden = privacy.hidden
+      void (hidden ? showScreen() : hideScreen()).catch((error: unknown) =>
+        toastUserError(
+          error,
+          { action: hidden ? 'show' : 'hide', object: 'your screen' },
+          { id: 'screen-privacy' }
+        )
+      )
+    }
+  }
+  return {
+    captureConfig,
+    setCaptureConfig,
+    switchSourceDeviceLive,
+    sourceSwitchReason,
+    allowCaptureNone,
+    selectedCaptureDevice,
+    selectedCamera,
+    isSessionActive,
+    captionsStatus,
+    runtimeInfo,
+    openSettings,
+    openStudioPanel,
+    systemAudio,
+    discoveryPending,
+    captureDevices,
+    cameras,
+    selectedCaptureId,
+    screenPrivacy
+  }
 }

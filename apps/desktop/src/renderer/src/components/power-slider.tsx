@@ -1,65 +1,95 @@
-import { type AppIcon, ResetIcon } from '@/components/icons'
-import { useId, useState, type ComponentProps, type KeyboardEvent, type ReactElement } from 'react'
+'use client'
 
+import { useId, useState } from 'react'
+import type { CSSProperties, ReactElement } from 'react'
+
+import { ResetIcon } from '@/components/icons'
+import type { AppIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
-import {
-  clampToRange,
-  formatValue,
-  parseNumericInput,
-  stepValue,
-  valuePercent,
-  type SliderRange
-} from '@/lib/power-slider'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { clampToRange, formatValue, parseNumericInput, valuePercent } from '@/lib/power-slider-math'
+import type { SliderRange } from '@/lib/power-slider-math'
 import { cn } from '@/lib/utils'
 
+/** The status chip's tone: the Badge variant of the same name. */
 type PowerSliderStatusTone = 'default' | 'success' | 'warning' | 'destructive'
 
-const STATUS_VARIANT: Record<
-  PowerSliderStatusTone,
-  NonNullable<ComponentProps<typeof Badge>['variant']>
-> = {
-  default: 'secondary',
-  success: 'success',
-  warning: 'warning',
-  destructive: 'destructive'
+interface PowerSliderMark {
+  value: number
+  label?: string
 }
 
-export type PowerSliderMark = { value: number; label?: string }
-
-export type PowerSliderProps = {
+interface PowerSliderProps {
   label: string
   value: number
   min: number
   max: number
-  // Live preview, fired during drag/keyboard. Keep this cheap — write backend or
-  // native-preview updates from onCommit (pointer-up / numeric commit) instead so
-  // a continuous drag can't flood the compositor.
+  /**
+   * The live preview, fired while dragging and on every key. Keep it cheap:
+   * write expensive updates (the engine, a saved setting) from `onCommit`,
+   * so a continuous drag can't flood them.
+   */
   onChange: (value: number) => void
   step?: number
+  /** Fired on release, on a key, on reset and on a typed number. Defaults to `onChange`. */
   onCommit?: (value: number) => void
   icon?: AppIcon
+  /** The unit after the value: "%", " ms", " dB". */
   suffix?: string
+  /** Decimals in the readout; from `step` when unset. */
   decimals?: number
+  /** A value either side of zero: the readout signs positives ("+12"). */
   bipolar?: boolean
+  /** The Shift+arrow and Page Up/Down move; 10 steps when unset. */
   largeStep?: number
-  // Enables reset (button + double-click) once value drifts from this default.
+  /** Enables reset (the button and a double-click) once the value drifts from it. */
   defaultValue?: number
+  /** Labelled points under the track. */
   marks?: PowerSliderMark[]
+  /** The ends (and a bipolar midpoint) under the track, when there are no marks. */
   rangeHints?: boolean
+  /** A typed number in place of the readout. */
   numericInput?: boolean
   disabled?: boolean
+  /** Why it's disabled, in one sentence under the track. */
   disabledReason?: string
+  /** A chip after the label: "Premium", "Not supported". */
   status?: { label: string; tone?: PowerSliderStatusTone }
   className?: string
 }
 
-const ARROW_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'])
+function scalePointsFor({
+  marks,
+  rangeHints,
+  bipolar,
+  min,
+  max
+}: Pick<PowerSliderProps, 'marks' | 'rangeHints' | 'bipolar' | 'min' | 'max'>):
+  | PowerSliderMark[]
+  | null {
+  if (marks && marks.length > 0) {
+    return marks
+  }
+  if (!rangeHints) {
+    return null
+  }
+  return bipolar
+    ? [{ value: min }, { value: min + (max - min) / 2 }, { value: max }]
+    : [{ value: min }, { value: max }]
+}
 
-export function PowerSlider({
+/**
+ * A labelled slider for one engine setting: the label (with an icon and a
+ * status chip), the value or a typed number, a reset to the default, the
+ * track, and optional marks under it. Every value clamps and snaps through
+ * the pure helpers in `lib/power-slider-math`, so what the slider shows is what
+ * the tests check.
+ */
+function PowerSlider({
   label,
   value,
   min,
@@ -82,11 +112,11 @@ export function PowerSlider({
   className
 }: PowerSliderProps): ReactElement {
   const labelId = useId()
-  const range: SliderRange = { min, max, step }
+  const range: SliderRange = { max, min, step }
   const commit = onCommit ?? onChange
   const [draft, setDraft] = useState<string | null>(null)
 
-  const display = formatValue(value, { suffix, decimals, bipolar, step })
+  const display = formatValue(value, { bipolar, decimals, step, suffix })
   const canReset =
     defaultValue !== undefined && clampToRange(value, range) !== clampToRange(defaultValue, range)
 
@@ -104,19 +134,6 @@ export function PowerSlider({
     }
   }
 
-  // Radix moves by `step` on a plain arrow; intercept Shift+arrow in the capture
-  // phase (before the thumb's own handler) so the large step replaces it rather
-  // than stacking on top.
-  const onKeyDownCapture = (event: KeyboardEvent<HTMLSpanElement>): void => {
-    if (disabled || !event.shiftKey || !ARROW_KEYS.has(event.key)) {
-      return
-    }
-    event.preventDefault()
-    event.stopPropagation()
-    const direction = event.key === 'ArrowUp' || event.key === 'ArrowRight' ? 1 : -1
-    emit(stepValue(value, range, direction, { large: true, largeStep }), true)
-  }
-
   const numericText = draft ?? String(value)
   const commitNumeric = (): void => {
     if (draft === null) {
@@ -129,37 +146,31 @@ export function PowerSlider({
     }
   }
 
-  const scalePoints =
-    marks && marks.length > 0
-      ? marks
-      : rangeHints
-        ? bipolar
-          ? [{ value: min }, { value: min + (max - min) / 2 }, { value: max }]
-          : [{ value: min }, { value: max }]
-        : null
+  const scalePoints = scalePointsFor({ bipolar, marks, max, min, rangeHints })
 
   return (
     <div className={cn('flex flex-col gap-1.5', className)} data-slot="power-slider">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5">
           {LeadingIcon ? (
-            <LeadingIcon className="size-3.5 shrink-0 text-muted-foreground" weight="duotone" />
+            <LeadingIcon
+              aria-hidden
+              className="text-muted-foreground size-3.5 shrink-0"
+              weight="duotone"
+            />
           ) : null}
-          <Label id={labelId} className="truncate">
-            {label}
+          <Label className="min-w-0" id={labelId}>
+            <span className="truncate">{label}</span>
           </Label>
-          {status ? (
-            <Badge variant={STATUS_VARIANT[status.tone ?? 'default']}>{status.label}</Badge>
-          ) : null}
+          {status ? <Badge variant={status.tone ?? 'default'}>{status.label}</Badge> : null}
         </div>
         <div className="flex items-center gap-1">
           {numericInput ? (
             <Input
               aria-label={`${label} value`}
-              className="h-7 w-20 text-right font-mono text-xs tabular-nums"
+              className="w-20 text-right"
               disabled={disabled}
               inputMode="decimal"
-              value={numericText}
               onBlur={commitNumeric}
               onChange={(event) => setDraft(event.target.value)}
               onFocus={() => setDraft(numericText)}
@@ -172,62 +183,75 @@ export function PowerSlider({
                   event.currentTarget.blur()
                 }
               }}
+              value={numericText}
             />
           ) : (
-            <span className="min-w-[3ch] text-right text-sm font-medium tabular-nums text-foreground">
+            <span className="text-foreground min-w-[3ch] text-right text-sm font-medium tabular-nums">
               {display}
             </span>
           )}
           {canReset ? (
-            <Button
-              aria-label={`Reset ${label}`}
-              className="size-7 text-muted-foreground"
-              disabled={disabled}
-              size="icon"
-              title="Reset to default"
-              variant="ghost"
-              onClick={reset}
-            >
-              <ResetIcon className="size-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    aria-label={`Reset ${label}`}
+                    disabled={disabled}
+                    onClick={reset}
+                    size="icon"
+                    variant="ghost"
+                  />
+                }
+              >
+                <ResetIcon aria-hidden className="text-muted-foreground size-3.5" />
+              </TooltipTrigger>
+              <TooltipContent>Reset to default</TooltipContent>
+            </Tooltip>
           ) : null}
         </div>
       </div>
 
-      <span
-        className="relative block"
-        onDoubleClick={defaultValue !== undefined ? reset : undefined}
-        onKeyDownCapture={onKeyDownCapture}
-      >
+      {/* Double-click anywhere on the track returns to the default. */}
+      {/* oxlint-disable-next-line jsx-a11y/no-static-element-interactions -- A pointer shortcut; the reset button is the keyboard path. */}
+      <div className="relative" onDoubleClick={defaultValue === undefined ? undefined : reset}>
         <Slider
           aria-labelledby={labelId}
           disabled={disabled}
+          // Base UI moves by largeStep on Shift+arrow and Page Up/Down.
+          largeStep={largeStep ?? step * 10}
           max={max}
           min={min}
+          onValueChange={(next) => emit(next, false)}
+          onValueCommitted={(next) => emit(next, true)}
           step={step}
-          value={[value]}
-          onValueChange={([next]) => emit(next, false)}
-          onValueCommit={([next]) => emit(next, true)}
+          value={value}
         />
-      </span>
+      </div>
 
       {scalePoints ? (
-        <div className="relative h-3.5 text-[10px] text-muted-foreground">
+        <div className="text-muted-foreground text-label relative h-4 font-normal">
           {scalePoints.map((point) => (
             <span
+              className="absolute left-(--mark) -translate-x-1/2 whitespace-nowrap tabular-nums"
               key={point.value}
-              className="absolute -translate-x-1/2 whitespace-nowrap tabular-nums"
-              style={{ left: `${valuePercent(point.value, range)}%` }}
+              style={
+                {
+                  '--mark': `${valuePercent(point.value, range)}%`
+                } as CSSProperties
+              }
             >
-              {point.label ?? formatValue(point.value, { suffix, decimals, bipolar, step })}
+              {point.label ?? formatValue(point.value, { bipolar, decimals, step, suffix })}
             </span>
           ))}
         </div>
       ) : null}
 
       {disabled && disabledReason ? (
-        <p className="text-xs text-muted-foreground">{disabledReason}</p>
+        <p className="text-muted-foreground text-xs">{disabledReason}</p>
       ) : null}
     </div>
   )
 }
+
+export { PowerSlider }
+export type { PowerSliderMark, PowerSliderProps, PowerSliderStatusTone }

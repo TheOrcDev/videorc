@@ -2,18 +2,56 @@ import { describe, expect, it } from 'vitest'
 
 import type { StreamHealth } from '@/lib/backend'
 
-import { durationMsLabel, formatBytes, mergeStreamHealth } from './format'
+import {
+  NO_VALUE,
+  durationMsLabel,
+  formatBytes,
+  formatDroppedFrames,
+  formatMetric,
+  mergeStreamHealth,
+  missingValue,
+  plural
+} from './format'
 
-describe('format', () => {
-  it('spells out recording durations once they pass an hour', () => {
-    expect(durationMsLabel(72 * 60 * 1000)).toBe('1 hour and 12 minutes')
-    expect(durationMsLabel(60 * 60 * 1000)).toBe('1 hour')
-    expect(durationMsLabel(121 * 60 * 1000)).toBe('2 hours and 1 minute')
+describe('format (plan 174 S1.4, E-20)', () => {
+  it('writes recording durations as the one timecode, past an hour too', () => {
+    expect(durationMsLabel(72 * 60 * 1000)).toBe('1:12:00')
+    expect(durationMsLabel(60 * 60 * 1000)).toBe('1:00:00')
+    expect(durationMsLabel(121 * 60 * 1000 + 5_000)).toBe('2:01:05')
   })
 
-  it('keeps sub-hour recording durations compact', () => {
+  it('keeps sub-hour recording durations compact, and an unknown one a placeholder', () => {
     expect(durationMsLabel(12 * 60 * 1000 + 34 * 1000)).toBe('12:34')
-    expect(durationMsLabel(undefined)).toBe('--:--')
+    expect(durationMsLabel(65 * 1000)).toBe('1:05')
+    expect(durationMsLabel(undefined)).toBe(NO_VALUE)
+    expect(durationMsLabel(Number.NaN)).toBe('–')
+  })
+
+  it('says a missing metric with the one placeholder, never "--"', () => {
+    expect(formatMetric(29.94, 'fps')).toBe('29.9 fps')
+    expect(formatMetric(undefined, 'fps')).toBe('–')
+    expect(formatDroppedFrames(1)).toBe('1 drop')
+    expect(formatDroppedFrames(12)).toBe('12 drops')
+    expect(formatDroppedFrames(0)).toBe('0 drops')
+    expect(formatDroppedFrames(undefined)).toBe('–')
+  })
+})
+
+describe('plural', () => {
+  it('agrees the noun with the count', () => {
+    expect(plural(1, 'drop')).toBe('1 drop')
+    expect(plural(12, 'drop')).toBe('12 drops')
+    expect(plural(0, 'viewer')).toBe('0 viewers')
+    expect(plural(1, 'person', 'people')).toBe('1 person')
+    expect(plural(3, 'person', 'people')).toBe('3 people')
+    expect(plural(1204, 'viewer')).toBe(`${(1204).toLocaleString()} viewers`)
+  })
+})
+
+describe('missingValue', () => {
+  it('pairs the one placeholder with its reason', () => {
+    expect(missingValue('Not measured yet')).toEqual({ value: '–', reason: 'Not measured yet' })
+    expect(NO_VALUE).toBe('–')
   })
 })
 
@@ -24,6 +62,12 @@ describe('formatBytes', () => {
     expect(formatBytes(742 * 1024 * 1024)).toBe('742 MB')
     expect(formatBytes(1.2 * 1024 ** 3)).toBe('1.2 GB')
     expect(formatBytes(175 * 1024 ** 3)).toBe('175 GB')
+  })
+
+  it('never shows 1024 of a unit: a value that rounds up moves to the next unit', () => {
+    expect(formatBytes(1_048_500)).toBe('1 MB')
+    expect(formatBytes(1023.6 * 1024 ** 2)).toBe('1 GB')
+    expect(formatBytes(1023.4 * 1024)).toBe('1023 KB')
   })
 
   it('answers a calm dash for the unknowable', () => {

@@ -72,7 +72,9 @@ describe('CommentRow affiliation badge', () => {
       `videorc-asset://avatar/${encodeURIComponent(badgeUrl)}`
     )
     expect(image!.getAttribute('alt')).toBe('Neon')
-    expect(image!.getAttribute('title')).toBe('Neon')
+    // Named on hover by a tooltip, never a native title (plan 174 S1.10).
+    expect(image!.hasAttribute('title')).toBe(false)
+    expect(image!.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     // Directly after the author's name.
     expect(image!.previousElementSibling?.textContent).toBe('Dominik Koch')
   })

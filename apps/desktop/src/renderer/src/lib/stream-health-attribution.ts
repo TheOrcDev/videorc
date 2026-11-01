@@ -12,6 +12,35 @@ export type StreamHealthAttribution =
   | 'healthy'
   | 'unknown'
 
+/**
+ * The problem in a few words, for the Livestream page's checklist and the
+ * Studio's Stream fact (plan 174 S3.2): one wording on both surfaces.
+ */
+export function liveProblemLabel(attribution: StreamHealthAttribution): string {
+  switch (attribution) {
+    case 'device':
+      return 'Capture device lost'
+    case 'audio':
+      return 'Audio dropping'
+    case 'capture':
+      return 'Capture running slow'
+    case 'render':
+      return 'Rendering slow'
+    case 'encoder':
+      return 'Encoder dropping frames'
+    case 'fallback':
+      return 'Encoder fallback'
+    case 'network':
+      return 'Delivery degraded'
+    case 'preview':
+      return 'Preview degraded'
+    case 'healthy':
+      return 'Healthy'
+    default:
+      return 'Checking…'
+  }
+}
+
 const MIN_MEDIA_FPS_RATIO = 0.9
 const MIN_ENCODER_SPEED = 0.98
 const MIN_AUDIO_CAPTURE_COVERAGE = 0.95
@@ -130,6 +159,7 @@ function hasTargetNetworkProblem(streamTargets: readonly StreamTargetRuntime[]):
     (target) =>
       target.state === 'failed' ||
       target.state === 'warning' ||
+      target.state === 'reconnecting' ||
       /\breconnect(?:ed|ing)?\b/i.test(target.message ?? '')
   )
 }

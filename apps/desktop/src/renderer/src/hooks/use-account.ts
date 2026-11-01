@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 
 import { useStudioCore } from '@/hooks/use-studio'
 import { accountFromSnapshot, type VideorcAccount } from '@/lib/account'
-import { VIDEORC_WEB_LINKS, openVideorcWebLink } from '@/lib/videorc-web-links'
+import { VIDEORC_WEB_LINKS, beginVideorcSignIn, openVideorcWebLink } from '@/lib/videorc-web-links'
 
 export type UseVideorcAccount = {
   account: VideorcAccount
@@ -23,17 +23,7 @@ export function useVideorcAccount(): UseVideorcAccount {
   return useMemo(
     () => ({
       account,
-      signIn: () => {
-        const beginSignIn = window.videorc?.beginAccountSignIn
-        if (beginSignIn) {
-          void beginSignIn(VIDEORC_WEB_LINKS.desktopAuthorize)
-          return
-        }
-        // Browser-only development has no main-process transaction owner.
-        // Keep the link available, but the web page will reject it without the
-        // generated state/challenge instead of accepting an unbound callback.
-        openVideorcWebLink(VIDEORC_WEB_LINKS.desktopAuthorize)
-      },
+      signIn: beginVideorcSignIn,
       openAccount: () => openVideorcWebLink(VIDEORC_WEB_LINKS.account),
       signOut: () => void signOutAccount()
     }),

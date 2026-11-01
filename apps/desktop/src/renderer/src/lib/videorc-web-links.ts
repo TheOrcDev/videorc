@@ -18,6 +18,9 @@ const VIDEORC_WEB_ORIGIN =
     : 'https://www.videorc.com'
 
 export const VIDEORC_WEB_LINKS = {
+  home: VIDEORC_WEB_ORIGIN,
+  // Every desktop build, for a build that cannot update itself (plan 174 I-20).
+  download: `${VIDEORC_WEB_ORIGIN}/download`,
   account: `${VIDEORC_WEB_ORIGIN}/account`,
   login: `${VIDEORC_WEB_ORIGIN}/login`,
   // Desktop sign-in entry point: explicit consent returns only a short-lived,
@@ -33,6 +36,10 @@ export const VIDEORC_WEB_LINKS = {
   changelogApi: `${VIDEORC_WEB_ORIGIN}/api/changelog`,
   changelog: `${VIDEORC_WEB_ORIGIN}/changelog`
 } as const
+
+// Videorc's source and its AGPL-3.0 license, with the third-party notices
+// beside it (plan 174 I-21): Settings → About links here.
+export const VIDEORC_SOURCE_CODE_URL = 'https://github.com/TheOrcDev/videorc'
 
 export function releaseNotesUrl(version: string): string {
   return `${VIDEORC_WEB_ORIGIN}/releases/${version}`
@@ -55,4 +62,18 @@ export function openVideorcWebLink(url: string): void {
   }
 
   window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+// Start a Videorc sign-in. Main owns the state + PKCE-bound /desktop/authorize/v2
+// transaction; the web app returns only an opaque, short-lived code through the
+// videorc:// deep-link. Browser-only development has no main-process
+// transaction owner: it keeps the link, but the web page rejects it without the
+// generated state/challenge instead of accepting an unbound callback.
+export function beginVideorcSignIn(): void {
+  const beginSignIn = window.videorc?.beginAccountSignIn
+  if (beginSignIn) {
+    void beginSignIn(VIDEORC_WEB_LINKS.desktopAuthorize)
+    return
+  }
+  openVideorcWebLink(VIDEORC_WEB_LINKS.desktopAuthorize)
 }

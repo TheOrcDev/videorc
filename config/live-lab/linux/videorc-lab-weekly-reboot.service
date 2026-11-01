@@ -1,0 +1,17 @@
+# Plan 179: the Linux lab's weekly reboot, the twin of the lab Mac's
+# `sudo pmset repeat restart U 03:30:00`. A system unit, root-owned, that the
+# owner installs once with videorc-lab-weekly-reboot.timer (the lab user can
+# neither install nor change it). The install commands are in the header of
+# videorc-lab-weekly-reboot.timer.
+#
+# A reboot stops the lab user's videorc-live-lab.service like any other
+# shutdown: the tick gets SIGTERM, ends the stream and has 90 s. The first tick
+# after boot runs the doctor.
+
+[Unit]
+Description=Videorc lab weekly reboot (plan 179)
+
+[Service]
+Type=oneshot
+# `systemctl reboot` queues the reboot without waiting for it.
+ExecStart=/usr/bin/systemctl reboot

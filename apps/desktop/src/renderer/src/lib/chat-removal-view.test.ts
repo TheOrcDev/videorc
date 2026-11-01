@@ -7,6 +7,7 @@ import {
   REMOVAL_RESULT_VISIBLE_MS,
   REMOVAL_STATUS_LABELS,
   REMOVE_FROM_CHAT_LABEL,
+  REMOVE_UNDO_MS,
   YOUTUBE_CONFIRM_NOTE,
   removalCardView,
   removalOutcomeToast,
@@ -14,13 +15,15 @@ import {
   removalResultView,
   removalStatusView,
   removalToastView,
+  removalUndoToast,
   removeFromChatAvailable,
+  removeFromChatBlockedReason,
   secondsUntil
 } from './chat-removal-view'
 
 const NOW = Date.parse('2026-10-04T12:00:10Z')
 const HIDDEN_TWITCH =
-  'Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Orcle remove messages.'
+  'Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Buddy remove messages.'
 
 function operation(patch: Partial<ModerationOperation> = {}): ModerationOperation {
   return {
@@ -172,7 +175,7 @@ describe('removeFromChatAvailable: the row menu', () => {
   })
 })
 
-describe('removalCardView: Orcle removal cards', () => {
+describe('removalCardView: Buddy removal cards', () => {
   it('confirm first: Remove, then Cancel, and the time left to answer', () => {
     expect(removalCardView(operation({ reason: 'toxic' }), NOW)).toEqual({
       operationId: 'op-1',
@@ -245,6 +248,34 @@ describe('removalCardView: Orcle removal cards', () => {
     expect(removalCardView(operation({ phase: 'removed' }), NOW)).toBeNull()
   })
 
+  it("shows an agent's YouTube removal as the same card, and its toast (plan 209 S12)", () => {
+    const pending = operation({
+      source: 'agent',
+      platform: 'youtube',
+      reason: undefined,
+      confirmBy: '2026-10-04T12:00:30Z'
+    })
+    expect(removalCardView(pending, NOW)).toMatchObject({
+      mode: 'confirm',
+      title: REMOVAL_CARD_TITLE,
+      timer: 'Expires in 20s',
+      note: YOUTUBE_CONFIRM_NOTE,
+      primary: 'confirm',
+      confirmLabel: 'Remove'
+    })
+    expect(removalToastView(pending, NOW)).toMatchObject({
+      title: "Remove coders_x's message?",
+      action: { label: 'Remove', answer: 'confirm' }
+    })
+    const removed = operation({
+      source: 'agent',
+      phase: 'removed',
+      outcome: 'Removed from Twitch.',
+      updatedAt: '2026-10-04T12:00:09Z'
+    })
+    expect(removalResultView(removed, NOW)?.text).toBe('Removed from Twitch.')
+  })
+
   it('counts whole seconds and never below zero', () => {
     expect(secondsUntil('2026-10-04T12:00:12.200Z', NOW)).toBe(3)
     expect(secondsUntil('2026-10-04T11:59:00Z', NOW)).toBe(0)
@@ -282,7 +313,7 @@ describe('removalResultView and removalPaneView: the brief result', () => {
         operation({
           operationId: 'done',
           phase: 'cancelled',
-          outcome: 'Cancelled. Nothing was removed.',
+          outcome: 'Canceled. Nothing was removed.',
           updatedAt: '2026-10-04T12:00:09Z'
         })
       ],
@@ -293,7 +324,7 @@ describe('removalResultView and removalPaneView: the brief result', () => {
       ['a', false],
       ['b', true]
     ])
-    expect(view.results.map((result) => result.text)).toEqual(['Cancelled. Nothing was removed.'])
+    expect(view.results.map((result) => result.text)).toEqual(['Canceled. Nothing was removed.'])
     expect(view.active).toBe(true)
     expect(removalPaneView([], NOW).active).toBe(false)
   })
@@ -366,5 +397,49 @@ describe('removalOutcomeToast', () => {
     expect(
       removalOutcomeToast(operation({ phase: 'cancelled' }), { includeSuccess: true })
     ).toBeNull()
+  })
+})
+
+describe('removeFromChatBlockedReason (plan 174 S3.16a, H-11)', () => {
+  const twitch = { platform: 'twitch', targetId: 't1', moderate: 'missing-scope' } as const
+  const youtube = { platform: 'youtube', targetId: 'y1', moderate: 'ready' } as const
+
+  it('names the reconnect when the account cannot delete there', () => {
+    expect(removeFromChatBlockedReason(row({ platform: 'twitch' }), [twitch, youtube])).toBe(
+      'Reconnect Twitch to remove messages'
+    )
+    expect(
+      removeFromChatBlockedReason(row({ platform: 'x' }), [
+        { platform: 'x', moderate: 'missing-scope' }
+      ])
+    ).toBe('Authorize X Live to remove messages')
+  })
+
+  it('is null when the platform can delete, hides locally, or is not listed', () => {
+    expect(removeFromChatBlockedReason(row({ platform: 'youtube' }), [twitch, youtube])).toBeNull()
+    expect(
+      removeFromChatBlockedReason(row({ platform: 'custom' }), [
+        { platform: 'custom', moderate: 'unsupported' }
+      ])
+    ).toBeNull()
+    expect(removeFromChatBlockedReason(row({ platform: 'kick' }), [twitch])).toBeNull()
+  })
+
+  it('prefers the destination the message came from', () => {
+    const ready = { platform: 'twitch', targetId: 't2', moderate: 'ready' } as const
+    expect(
+      removeFromChatBlockedReason(row({ platform: 'twitch', targetId: 't2' }), [twitch, ready])
+    ).toBeNull()
+  })
+})
+
+describe('removalUndoToast (plan 174 D20)', () => {
+  it('names the author and keys the toast by the message', () => {
+    expect(removalUndoToast(row({ id: 'm1', authorName: 'Ada' }))).toEqual({
+      id: 'chat-removal-undo:m1',
+      title: "Removing Ada's message",
+      action: 'Undo'
+    })
+    expect(REMOVE_UNDO_MS).toBe(3_000)
   })
 })

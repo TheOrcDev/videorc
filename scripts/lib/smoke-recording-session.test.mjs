@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, it } from 'node:test'
 
-import { recordScenario } from '../smoke-recording-session.mjs'
+import { recordScenario, request } from '../smoke-recording-session.mjs'
 
 const temporaryDirectories = []
 
@@ -181,15 +181,42 @@ describe('recordScenario terminal contract', () => {
   })
 })
 
+describe('request', () => {
+  it('fails at once when the backend closes the socket, not at its timeout', async () => {
+    const ws = fakeSocket({})
+    // The backend restarts before it answers.
+    ws.send = () => {}
+    const pending = request(ws, 180_000, 'diagnostics.stats', {})
+    ws.close()
+    await assert.rejects(pending, /Backend connection closed before diagnostics\.stats answered/)
+    assert.equal(ws.listenerCount(), 0)
+  })
+
+  it('removes its listeners once answered', async () => {
+    const ws = fakeSocket({ 'scene.get': { sources: [] } })
+    assert.deepEqual(await request(ws, 1000, 'scene.get', {}), { sources: [] })
+    assert.equal(ws.listenerCount(), 0)
+  })
+})
+
 function fakeSocket(responses) {
   const listeners = new Set()
+  const closeListeners = new Set()
   return {
     requestedMethods: [],
     addEventListener(type, listener) {
       if (type === 'message') listeners.add(listener)
+      if (type === 'close') closeListeners.add(listener)
     },
     removeEventListener(type, listener) {
       if (type === 'message') listeners.delete(listener)
+      if (type === 'close') closeListeners.delete(listener)
+    },
+    close() {
+      for (const listener of [...closeListeners]) listener({})
+    },
+    listenerCount() {
+      return listeners.size + closeListeners.size
     },
     send(serializedRequest) {
       const request = JSON.parse(serializedRequest)

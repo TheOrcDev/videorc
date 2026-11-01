@@ -62,6 +62,7 @@ fn seventv_platform(platform: StreamPlatform) -> Option<&'static str> {
         StreamPlatform::Kick => Some("KICK"),
         StreamPlatform::Youtube => Some("GOOGLE"),
         StreamPlatform::X
+        | StreamPlatform::Facebook
         | StreamPlatform::Tiktok
         | StreamPlatform::Instagram
         | StreamPlatform::Custom => None,
@@ -372,7 +373,7 @@ impl SevenTvClient {
     pub(crate) fn with_endpoint(endpoint: impl Into<String>) -> Self {
         Self {
             http: reqwest::Client::builder()
-                .user_agent(concat!("Videorc-Desktop/", env!("CARGO_PKG_VERSION")))
+                .user_agent(crate::performance_check::desktop_user_agent())
                 .timeout(SEVENTV_REQUEST_TIMEOUT)
                 .connect_timeout(SEVENTV_CONNECT_TIMEOUT)
                 .build()
@@ -1762,6 +1763,7 @@ mod tests {
             author_avatar_url: None,
             author_badges: Vec::new(),
             author_affiliation: None,
+            author_verified: None,
             author_roles: Vec::new(),
             published_at: "2026-10-01T00:00:00Z".to_string(),
             received_at: "2026-10-01T00:00:00Z".to_string(),
@@ -1774,6 +1776,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            first_in_session: false,
         }
     }
 
@@ -1942,6 +1945,8 @@ mod tests {
             LiveChatEventType::System,
             LiveChatEventType::Membership,
             LiveChatEventType::Follow,
+            LiveChatEventType::PowerUp,
+            LiveChatEventType::Redemption,
             LiveChatEventType::Moderation,
             LiveChatEventType::Deleted,
         ] {

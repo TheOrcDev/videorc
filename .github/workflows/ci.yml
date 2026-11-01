@@ -16,11 +16,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Change scope
+    uses: ./.github/workflows/ci-change-scope.yml
+
   rust:
     name: Rust (test + clippy + fmt)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_rust == 'true' }}
     runs-on: macos-15
-    # Cold macOS builds can spend 38m compiling tests before the separate
-    # dev build and process/memory sentinel. Keep time for every gate.
+    # Every run on main since plan 172 was cancelled at the 75-minute limit
+    # while rustc was still compiling the backend *test* binary at the
+    # workspace dev opt-level 2 (one ~24k-line main.rs, full debuginfo, on a
+    # 3-core runner). The test/sentinel builds below compile the backend crate
+    # itself at opt-level 0 with line tables only (dependencies keep opt 2),
+    # which is a correctness gate, not a perf gate. 60 min is a hard ceiling.
     timeout-minutes: 60
     steps:
       - name: Check out repository
@@ -31,8 +41,25 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: CI-only fast backend build profile
+        # Written to CARGO_HOME (not the repo) so it also covers the dev app's
+        # own `cargo run` in the sentinel. Release builds are untouched.
+        run: |
+          mkdir -p "$HOME/.cargo"
+          cat >> "$HOME/.cargo/config.toml" <<'TOML'
+          [profile.dev]
+          debug = "line-tables-only"
+          [profile.dev.package.videorc-backend]
+          opt-level = 0
+          TOML
+          cat "$HOME/.cargo/config.toml"
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          # The job never finished, so the cache was never saved and every run
+          # rebuilt every dependency cold. Save the deps even on failure.
+          cache-on-failure: true
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -68,15 +95,22 @@ jobs:
       - name: Clippy
         run: cargo clippy -p videorc-backend -- -D warnings
 
+      - name: Compile tests
+        # Split from the run so a slow compile and a hung test are told apart.
+        timeout-minutes: 35
+        run: cargo test -p videorc-backend --no-run
+
       - name: Test
         # ffmpeg-spawning tests are #[ignore]d, so the default run needs no
         # ffmpeg binary and no capture devices.
+        timeout-minutes: 15
         run: cargo test -p videorc-backend
 
       - name: Build backend for process/memory sentinel
         # The sentinel launches the dev app through `cargo run`. Build the
         # exact binary first so its 120-second readiness budget measures app
         # startup rather than a cold Rust binary link on the macOS runner.
+        timeout-minutes: 15
         run: cargo build -p videorc-backend --bin videorc-backend
 
       - name: Install dependencies for process/memory sentinel
@@ -91,11 +125,28 @@ jobs:
         with:
           name: process-memory-sentinel-${{ github.run_id }}
           path: docs/acceptance/artifacts/performance/**/*.json
-          if-no-files-found: error
+          # warn: when an earlier step fails there is no report, and an
+          # upload error only hides the real failure. The sentinel step itself
+          # still fails the job if it produces no report.
+          if-no-files-found: warn
           retention-days: 30
+
+  rust-skip:
+    name: Rust (test + clippy + fmt)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_rust != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip hosted macOS Rust gates for an allow-listed docs or version-only change
+        run: |
+          echo "Skipped the hosted macOS Rust job for a ${{ needs.scope.outputs.kind }} change set."
+          echo "Ordinary code PRs still run the identical rust job on macos-15."
 
   js:
     name: JS (format + lint + tests)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -140,3 +191,15 @@ jobs:
 
       - name: Node logic tests
         run: pnpm test:scripts
+
+  js-skip:
+    name: JS (format + lint + tests)
+    needs: scope
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip JS gates for an allow-listed docs-record change
+        run: |
+          echo "Skipped the JS job for a ${{ needs.scope.outputs.kind }} change set."
+          echo "Version-only release PRs still run JS. Ordinary code PRs still run the identical JS job."

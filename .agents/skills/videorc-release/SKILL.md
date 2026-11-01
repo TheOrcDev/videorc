@@ -11,13 +11,18 @@ If the variable is absent or false, follow the legacy instructions below. Provis
 
 # Videorc release
 
-Ship one new numeric desktop version on both supported tracks:
+Ship one new numeric desktop version on the supported tracks:
 
 - macOS arm64 Beta: `<version>-beta.<N>`;
-- Windows 11 x64 Alpha: `<version>-alpha.1`.
+- Windows 11 x64 Alpha: `<version>-alpha.1`;
+- Linux x64 Alpha candidate: the same `<version>-alpha.1` (public download
+  still owed; announce only when that download is public).
 
-Target both platforms unless the user explicitly requests a platform-only
+Target macOS and Windows unless the user explicitly requests a platform-only
 release. Do not silently skip Windows because macOS can be released locally.
+Dispatch Linux in parallel with the macOS build and Windows candidate as soon
+as the version PR is on `main`; it is not required for coordinated-release
+completion.
 
 ## Start here: "release new version"
 
@@ -49,9 +54,10 @@ dispatch release workflows, publish, or announce a release for such a request.
    version's passing tests, or a playable MP4 is not proof that this candidate
    passed. Surface failed, missing, or skipped required gates before publication.
 
-Before acting, read both sources of truth in full:
+Before acting, read these sources of truth in full:
 
-- `docs/releases/release-runbook.md` for macOS, shared versioning, and rollback;
+- `docs/releases/release-runbook.md` for macOS, shared versioning, Linux
+  Alpha candidate notes, and rollback;
 - `docs/releases/windows-alpha-runbook.md` for Windows signing, candidate,
   physical acceptance, pilot, public promotion, and rollback.
 
@@ -65,21 +71,25 @@ not hand-written signing, upload, manifest-edit, or promotion replacements.
 Do not advance a platform past a checkpoint without its evidence. The numbered
 sections below contain the commands; the runbooks define their detailed gates.
 
-For macOS-only, run sections 1–2 and the macOS parts of section 5; skip Windows
-workflows, approvals, and prerequisites. For Windows-only, prepare the version
-and Alpha entry, then run sections 3–5 without a macOS build/upload or Beta entry.
-Do not block a platform-only request on the other platform's credentials.
+For macOS-only, run sections 1–2 and the macOS parts of section 6; skip Windows
+and Linux workflows, approvals, and prerequisites. For Windows-only, prepare
+the version and Alpha entry, then run sections 3–4 and 6 without a macOS
+build/upload or Beta entry. Linux (section 5) must be dispatched in parallel with Windows
+as soon as the version PR is on `main`. It is not required for
+coordinated-release completion. Do not block a
+platform-only request on the other platform's credentials.
 
 | Checkpoint              | AI action                                                               | Required result / human boundary                                                                                     |
 | ----------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Prepare                 | Select version, write accurate changelog, validate, open release PR     | Reviewed changes on protected `main`; exact source SHA recorded. Wait for required review, do not bypass protection. |
+| Prepare                 | Select version, write accurate changelog, validate, open release PR     | Reviewed changes on protected `main`; exact source SHA recorded. For a version-only PR wait for JS + review, not Windows/Linux/macOS-Rust heavy gates. Do not bypass protection. |
 | macOS build (§2)        | Run the local keychain build and artifact validation                    | Signed, notarized, stapled app plus validated download and updater artifacts.                                        |
 | macOS acceptance (§2)   | Run applicable release, installed-app, device, and provider gates       | Recorded PASS. Human supplies physical access and OS permission grants; synthetic checks do not replace them.        |
 | macOS publish (§2)      | Preflight storage, upload, follow download/update redirects             | Exact version/checksums verified in production; mirror result recorded.                                              |
 | Windows candidate (§3)  | Dispatch the protected-main candidate workflow and monitor both jobs    | Exact immutable signed candidate identity. Wait for protected-environment approval.                                  |
 | Windows acceptance (§4) | Coordinate physical acceptance, pilot update, and committed PASS record | Exact-candidate evidence, or the separately defined owner-written waiver route. Never fabricate either.              |
-| Windows publish (§4–5)  | Dispatch public promotion of the same bytes, then production checks     | Verified installer/feed/blockmap and visible acceptance status before enabling public web state.                     |
-| Finish (§5)             | Record both outcomes and announce only live platforms                   | Production evidence, remaining blockers, and next action; never describe a private candidate as shipped.             |
+| Windows publish (§4)    | Dispatch public promotion of the same bytes, then production checks     | Verified installer/feed/blockmap and visible acceptance status before enabling public web state.                     |
+| Linux candidate (§5)    | Dispatch the private Linux Alpha candidate workflow                     | Stored candidate identity only. Public download is still owed; never describe a private AppImage as shipped.         |
+| Finish (§6)             | Record outcomes and announce each publicly live platform                | Production evidence, remaining blockers, and next action; never describe a private candidate as shipped.             |
 
 For macOS, distinguish ordinary Beta publication from the one-time D3 exact
 promotion using the runbook's "Publication policy" section and current D3 state.
@@ -216,7 +226,12 @@ sync even when the primary is live. Use "complete" only under the contract below
    `channel: beta` and `platforms: [macos]`. For Windows-only, write the Alpha
    entry from section 3 instead.
 5. Run `pnpm changelog:check`, commit the version and requested platform entry,
-   push through a reviewed PR, and merge to protected `main`.
+   push through a reviewed PR, and merge to protected `main`. A PR that only
+   changes `apps/desktop/package.json` (version field), `changelog/*.md`, and
+   `docs/releases/*.md` is `version-release`: wait for JS and review. Do not
+   wait for Windows source gates, the Windows installer artifact, Linux Rust,
+   hosted macOS Rust, or Windows startup incident diagnostics. See
+   `docs/releases/release-runbook.md` "Faster coordinated release".
 
 Record the full lowercase 40-character source commit for the requested platform.
 For a coordinated release, this is the macOS source; record the later Windows
@@ -233,12 +248,19 @@ path, load release secrets, set `APPLE_TEAM_ID=C2PA37RB58`, set the exact Beta
 number, and normalize every origin endpoint to its host-only form before running:
 
 ```sh
+pnpm ffmpeg:status:macos
 pnpm package:backend:macos && pnpm ffmpeg:build:macos \
   && pnpm package:preflight:macos \
   && pnpm --filter @videorc/desktop dist:release \
   && pnpm release:manifest:macos \
   && pnpm release:validate:macos
 ```
+
+`pnpm ffmpeg:status:macos` is read-only. Keep `vendor/ffmpeg/current`,
+`vendor/ffmpeg/_src`, and `target/` on this Mac between releases so the FFmpeg
+compile is skipped when the pin and capture-clock patch are unchanged. Do not
+set `FFMPEG_REBUILD=1` unless those changed. Start this local build as soon as
+the version PR is on `main`; do not wait for Windows or Linux workflows.
 
 This local path intentionally bypasses `release:preflight:macos`, whose
 `CSC_LINK` requirement does not apply to the keychain identity. Do not bypass
@@ -268,7 +290,8 @@ versioned object.
 
 ## 3. Build the private Windows Alpha candidate
 
-For a coordinated release, continue after macOS upload and verification succeed.
+For a coordinated release, dispatch the Windows candidate as soon as the
+version PR is on protected `main`. Do not wait for the macOS build or upload.
 For Windows-only, start here after version preparation; macOS is not a dependency.
 Reuse the already prepared version/Alpha entry rather than bumping twice:
 
@@ -288,7 +311,9 @@ gh workflow run release-windows-alpha.yml --ref main \
   -f release_id=<version>-alpha.1
 ```
 
-Wait for both trust-separated jobs. The unprivileged job builds and hashes the
+Watch with `gh run watch` or `gh run view --json status,conclusion` every
+couple of minutes. Do not idle ten minutes between observations. Wait for both
+trust-separated jobs. The unprivileged job builds and hashes the
 unsigned handoff; only the protected OIDC job may sign, validate, and upload the
 immutable private candidate. Record the workflow URL, release ID, source commit,
 installer SHA-256, exact publisher, and candidate prefix.
@@ -321,6 +346,11 @@ ad-hoc unvalidated object edit or the changelog skip escape as a purge mechanism
 
 Follow every command and evidence rule in
 `docs/releases/windows-alpha-runbook.md`:
+
+Open the owner-waiver or physical-acceptance record PR as soon as the exact
+candidate identity exists. Do not wait for macOS upload or the other
+platform's promote job. A PR that only adds `docs/acceptance/windows-alpha/*.json`
+or `docs/releases/*.md` is `docs-record` and skips heavy CI.
 
 The default is the physical acceptance and pilot route below. The runbook also
 allows an owner-waiver route: read "Owner waiver instead of a PASS record" and
@@ -371,7 +401,32 @@ Never rebuild between acceptance and either promotion. Never substitute CI,
 VM-only, file-size, branch URL, or mutable-tag evidence for the exact physical
 record.
 
-## 5. Verify the coordinated production release
+## 5. Store the Linux Alpha candidate
+
+Linux is a third, candidate-only Alpha track. It is not required for a
+coordinated macOS+Windows completion. Follow the Linux section in
+`docs/releases/release-runbook.md` and `docs/distribution.md`. Public
+download, `promote-linux-alpha.yml`, and the videorc-web button are still
+owed; never treat a private candidate as shipped.
+
+1. Reuse the prepared `<version>-alpha.1` changelog entry (include `linux`
+   in `platforms`) rather than bumping the numeric version again.
+2. From current protected `main`, dispatch immediately after the version PR
+   merges (in parallel with the macOS build and the Windows candidate):
+
+   ```sh
+   gh workflow run release-linux-alpha.yml --ref main \
+     -f release_id=<version>-alpha.1
+   ```
+
+3. Record the workflow URL, AppImage SHA-256, candidate prefix, and any
+   owner waiver. Keep the candidate private.
+
+When the Linux download is actually public, preview then send its Discord
+announcement (see section 6). Hold that post until then. Never print
+`VIDEORC_DISCORD_RELEASE_WEBHOOK`.
+
+## 6. Verify the coordinated production release
 
 - Verify the signed-in Windows download returns the accepted installer and
   visible SHA-256.
@@ -386,10 +441,13 @@ record.
 - Update `docs/releases/<version>.md` with both platform outcomes, workflow and
   evidence links, rollback status, and any explicitly incomplete external gate.
 - Render/send announcements from the exact platform changelog entry only after
-  that platform is live. Preview with
+  that platform is publicly live. Preview with
   `pnpm release:notify:discord <releaseId> --dry-run`, then send with
-  `pnpm release:notify:discord <releaseId>`. Hold all Windows announcements
-  until public promotion.
+  `pnpm release:notify:discord <releaseId>`. Hold the Windows post until
+  public promotion. Hold the Linux post until its download is public. If one
+  Alpha entry names both Windows and Linux, send that post only when every
+  named platform is publicly live. Never print
+  `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
 
 ## Hard-won rules
 

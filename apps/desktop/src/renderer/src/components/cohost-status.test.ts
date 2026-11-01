@@ -2,13 +2,12 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
+import { BuddyLiveSwitch, CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import type { CohostListening, CohostQuestion, CohostState } from '@/lib/backend'
 import { offCohostState } from '@/lib/backend'
-import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 const NOW = Date.parse('2026-08-24T12:00:00.000Z')
-const ALLOWED: EntitlementUiGate = { allowed: true }
 
 function question(overrides: Partial<CohostQuestion> = {}): CohostQuestion {
   return {
@@ -42,9 +41,6 @@ function listening(overrides: Partial<CohostState> = {}): CohostState {
 function renderStatus(props: Partial<Parameters<typeof CohostStatus>[0]> = {}): string {
   return renderToStaticMarkup(
     createElement(CohostStatus, {
-      consented: true,
-      enabled: true,
-      gate: ALLOWED,
       nowMs: NOW,
       state: listening(),
       ...props
@@ -54,15 +50,26 @@ function renderStatus(props: Partial<Parameters<typeof CohostStatus>[0]> = {}): 
 
 describe('CohostStatus', () => {
   it('always renders, including for an off engine', () => {
-    const markup = renderStatus({ state: offCohostState(), enabled: false })
-    expect(markup).toContain('data-slot="cohost-status"')
+    const markup = renderStatus({ state: offCohostState() })
+    expect(markup).toContain('data-testid="cohost-status"')
     expect(markup).toContain('data-state-kind="off"')
-    expect(markup).toContain('Orcle off')
+    expect(markup).toContain('>Off<')
     expect(markup).toContain('data-tone="muted"')
+    // Plan 174 S3.14a: no popover and no switch of its own; turning Buddy on
+    // is the BuddyLiveSwitch beside it.
+    expect(markup).not.toContain('cohost-status-enable')
+    expect(markup).not.toContain('role="switch"')
   })
 
   it('renders the same element for a null state — presence is unconditional', () => {
-    expect(renderStatus({ state: null, enabled: false })).toContain('Orcle off')
+    expect(renderStatus({ state: null })).toContain('>Off<')
+  })
+
+  it('is a button only when there is a pane to go to, else a status line', () => {
+    expect(renderStatus({ onOpenPane: () => undefined })).toMatch(
+      /<button[^>]*data-testid="cohost-status"/
+    )
+    expect(renderStatus()).toMatch(/<span[^>]*data-testid="cohost-status"[^>]*role="status"/)
   })
 
   it('earns the live dot only while listening', () => {
@@ -71,13 +78,13 @@ describe('CohostStatus', () => {
     expect(markup).toContain('data-tone="live"')
     expect(markup).toContain('tone-success')
     expect(markup).toContain('glass-dot')
-    expect(markup).toContain('Orcle · 1 q')
+    expect(markup).toContain('1 question')
     expect(markup).not.toContain('cohost-typing-dots')
   })
 
   it('shows the typing shimmer while reading queued chat', () => {
     const markup = renderStatus({ state: listening({ pendingMessages: 4 }) })
-    expect(markup).toContain('Orcle · reading 4 new…')
+    expect(markup).toContain('Reading 4 new…')
     expect(markup).toContain('data-slot="cohost-typing-dots"')
     expect(markup).toContain('typing-dot')
     expect(markup).not.toContain('typing-dot-fast')
@@ -85,7 +92,7 @@ describe('CohostStatus', () => {
 
   it('runs the shimmer faster and pulses the dot while a tick is in flight', () => {
     const markup = renderStatus({ state: listening({ tickInFlight: true, pendingMessages: 4 }) })
-    expect(markup).toContain('Orcle · thinking…')
+    expect(markup).toContain('Thinking…')
     expect(markup).toContain('typing-dot-fast')
     expect(markup).toContain('animate-pulse')
   })
@@ -100,7 +107,7 @@ describe('CohostStatus', () => {
     })
     expect(markup).toContain('data-state-kind="error"')
     expect(markup).toContain('data-tone="destructive"')
-    expect(markup).toContain('Orcle error')
+    expect(markup).toContain('Stopped: Videorc AI error')
     // The server's own words live in the tooltip, not in the label.
     expect(markup).toContain('ai-gateway-error (HTTP 502)')
   })
@@ -109,7 +116,7 @@ describe('CohostStatus', () => {
     const markup = renderStatus({
       state: listening({ status: 'paused', reason: 'quota-exhausted' })
     })
-    expect(markup).toContain('Orcle paused · quota')
+    expect(markup).toContain('Paused: daily AI allowance used up')
     expect(markup).toContain('data-tone="muted"')
     expect(markup).not.toContain('tone-destructive')
   })
@@ -120,7 +127,7 @@ describe('CohostStatus', () => {
       state: listening({ questions: [question()] })
     })
     expect(markup).toContain('grouped 2 questions')
-    expect(markup).not.toContain('>Orcle · 1 q<')
+    expect(markup).not.toContain('>1 question<')
   })
 
   it('carries the collapsed-pane unread count', () => {
@@ -143,17 +150,54 @@ describe('CohostStatus', () => {
     })
     // The trigger may shrink; the label truncates, then leaves the eye only.
     expect(markup).toContain('min-w-0')
-    expect(markup).not.toMatch(/data-slot="cohost-status"[^>]*shrink-0/)
+    expect(markup).not.toMatch(/data-testid="cohost-status"[^>]*shrink-0/)
     expect(markup).toMatch(
       /class="[^"]*@max-\[330px\]\/chat-header:sr-only[^"]*"[^>]*data-slot="cohost-status-label"/
     )
-    expect(markup).toContain('aria-label="Orcle paused · quota')
-    // Hovering the lone dot still says what Orcle is doing.
-    expect(markup).toMatch(/title="Orcle paused · quota/)
+    expect(markup).toContain('aria-label="Paused: daily AI allowance used up')
+    // Hovering the lone dot still says what Buddy is doing: a tooltip, never
+    // a native title (plan 174 S1.10).
+    expect(markup).not.toContain('title=')
+    expect(markup).toMatch(
+      /<span(?=[^>]*data-testid="cohost-status")(?=[^>]*data-base-ui-tooltip-trigger)/
+    )
   })
 
   it('keeps the trigger draggable-safe in the frameless window header', () => {
     expect(renderStatus()).toContain('[-webkit-app-region:no-drag]')
+  })
+})
+
+describe('BuddyLiveSwitch (plan 174 S3.14a, D7)', () => {
+  const render = (props: Partial<Parameters<typeof BuddyLiveSwitch>[0]> = {}): string =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(BuddyLiveSwitch, {
+          checked: false,
+          onCheckedChange: () => undefined,
+          ...props
+        })
+      )
+    )
+
+  it('is one labelled switch named Buddy Live', () => {
+    const markup = render({ checked: true })
+    expect(markup).toContain('data-slot="buddy-live-switch"')
+    expect(markup).toMatch(/<label[^>]*for="buddy-live-switch"[^>]*>Buddy Live<\/label>/)
+    expect(markup).toMatch(/role="switch"[^>]*aria-checked="true"/)
+    // Base UI puts the id on the switch's hidden input, which the label points at.
+    expect(markup).toMatch(/<input[^>]*id="buddy-live-switch"[^>]*type="checkbox"/)
+    expect(markup).not.toContain('disabled=""')
+  })
+
+  it('says why it cannot move while it cannot, and is otherwise undescribed', () => {
+    const locked = render({ disabledReason: 'Buddy Live is part of Videorc Premium.' })
+    expect(locked).toContain('disabled=""')
+    expect(locked).toContain('data-slot="disabled-reason"')
+    expect(locked).toContain('Buddy Live is part of Videorc Premium.')
+    expect(render()).not.toContain('data-slot="disabled-reason"')
   })
 })
 
@@ -172,7 +216,8 @@ describe('CohostListeningIndicator (plan 068)', () => {
     expect(markup).toContain('data-listening-state="on"')
     expect(markup).toContain('>Listening<')
     expect(markup).toContain('text-success')
-    expect(markup).toContain('title="Orcle hears your microphone as text."')
+    expect(markup).not.toContain('title=')
+    expect(markup).toContain('. Buddy hears your microphone as text.')
   })
 
   it('says Starting to listen without a tone', () => {
@@ -186,11 +231,12 @@ describe('CohostListeningIndicator (plan 068)', () => {
     const markup = render({
       state: 'blocked',
       reasonCode: 'no-microphone',
-      message: 'Select a microphone so Orcle can hear you.'
+      message: 'Select a microphone so Buddy can hear you.'
     })
     expect(markup).toContain('>Not listening: no microphone selected<')
     expect(markup).toContain('text-warning')
-    expect(markup).toContain('title="Select a microphone so Orcle can hear you."')
+    expect(markup).not.toContain('title=')
+    expect(markup).toContain('. Select a microphone so Buddy can hear you.')
   })
 
   it('keeps only the microphone in a tight header', () => {
@@ -201,6 +247,6 @@ describe('CohostListeningIndicator (plan 068)', () => {
 
   it('adds the listening sentence to the status tooltip', () => {
     const markup = renderStatus({ state: listening({ listening: { state: 'on' } }) })
-    expect(markup).toContain('Orcle hears your microphone as text.')
+    expect(markup).toContain('Buddy hears your microphone as text.')
   })
 })

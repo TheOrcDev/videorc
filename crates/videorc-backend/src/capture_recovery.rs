@@ -49,8 +49,8 @@ const CAPTURE_RECOVERY_DOWNSTREAM_RATE_WINDOW: Duration = Duration::from_secs(2)
 const CAPTURE_RECOVERY_DOWNSTREAM_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CAPTURE_RECOVERY_RECOVERED_DWELL: Duration = Duration::from_secs(5);
 /// Recovery awaits the fenced camera transition rather than the shorter stop
-/// response. Keep this aligned with `CAMERA_COMMAND_TRANSITION_TIMEOUT` in
-/// `preview_camera`.
+/// response, so it covers the native startup (12 s for an FFmpeg-fed camera)
+/// plus inventory, not the shorter command reply budget in `preview_camera`.
 const CAPTURE_RECOVERY_CAMERA_NATIVE_RESTART_CONTRACT: Duration = Duration::from_secs(15);
 /// Preserve the former 60-second public bound for a stalled screen restart,
 /// but apply it only to predecessor teardown. The native join itself remains
@@ -1125,6 +1125,56 @@ impl Default for CaptureRecoveryCoordinator {
 }
 
 impl CaptureRecoveryCoordinator {
+    /// True only after the scoped recovery coordinator has exhausted automatic
+    /// repair. A transient preview Failed state during an attempt is not terminal.
+    pub(crate) fn source_failed_after_recovery(&self, source: &SourceKey) -> bool {
+        self.phase == CaptureRecoveryPhase::Failed
+            && self.automatic_attempts_operator_latched
+            && self
+                .restarted_scope
+                .as_ref()
+                .or(self.scope.as_ref())
+                .is_some_and(|scope| &scope.source_key == source)
+    }
+
+    /// The incident behind the terminal latch, when one is set. The latch is
+    /// process-global and outlives sessions (only an operator retry or an
+    /// explicit source/config edge clears it), so a take records this when it
+    /// arms: an incident that was already latched is not a failure of the take.
+    pub(crate) fn terminal_incident_epoch(&self) -> Option<u64> {
+        (self.phase == CaptureRecoveryPhase::Failed && self.automatic_attempts_operator_latched)
+            .then_some(self.epoch)
+    }
+
+    /// `source_failed_after_recovery`, excluding the incident that was already
+    /// latched when the caller armed (`armed_epoch`, from
+    /// `terminal_incident_epoch`).
+    pub(crate) fn source_failed_after_recovery_since(
+        &self,
+        source: &SourceKey,
+        armed_epoch: Option<u64>,
+    ) -> bool {
+        self.source_failed_after_recovery(source) && self.terminal_incident_epoch() != armed_epoch
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_camera_recovery_failed(&mut self, id: &str, exhausted: bool) {
+        self.scope = Some(CaptureRecoveryScope::camera(SourceKey::camera(id), 1));
+        self.retry_scope = self.scope.clone();
+        self.phase = CaptureRecoveryPhase::Failed;
+        self.attempts = if exhausted { MAX_AUTOMATIC_ATTEMPTS } else { 1 };
+        self.automatic_attempts_operator_latched = exhausted;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_screen_recovery_failed(&mut self, id: &str, exhausted: bool) {
+        self.scope = Some(CaptureRecoveryScope::screen(SourceKey::screen(id), 1));
+        self.retry_scope = self.scope.clone();
+        self.phase = CaptureRecoveryPhase::Failed;
+        self.attempts = if exhausted { MAX_AUTOMATIC_ATTEMPTS } else { 1 };
+        self.automatic_attempts_operator_latched = exhausted;
+    }
+
     pub(crate) fn status(&self) -> CaptureRecoveryStatus {
         let current_scope = self.restarted_scope.as_ref().or(self.scope.as_ref());
         CaptureRecoveryStatus {
@@ -3676,6 +3726,55 @@ mod tests {
 
     use super::*;
     use crate::storage::Database;
+
+    #[test]
+    fn source_iso_waits_for_scoped_terminal_recovery() {
+        let mut recovery = CaptureRecoveryCoordinator::default();
+        let key = SourceKey::camera("camera:one");
+        recovery.scope = Some(camera_scope("camera:one", 1));
+        recovery.phase = CaptureRecoveryPhase::Restarting;
+        recovery.attempts = 1;
+        assert!(!recovery.source_failed_after_recovery(&key));
+        recovery.phase = CaptureRecoveryPhase::Failed;
+        recovery.retry_scope = recovery.scope.clone();
+        assert!(!recovery.source_failed_after_recovery(&key));
+        recovery.attempts = MAX_AUTOMATIC_ATTEMPTS;
+        recovery.automatic_attempts_operator_latched = true;
+        assert!(recovery.source_failed_after_recovery(&key));
+        assert!(!recovery.source_failed_after_recovery(&SourceKey::camera("camera:other")));
+        assert!(!recovery.source_failed_after_recovery(&SourceKey::screen("camera:one")));
+        recovery.phase = CaptureRecoveryPhase::Recovered;
+        assert!(!recovery.source_failed_after_recovery(&key));
+    }
+
+    #[test]
+    fn source_iso_ignores_a_latch_that_predates_the_take() {
+        let mut recovery = CaptureRecoveryCoordinator::default();
+        let key = SourceKey::screen("screen:3");
+        assert_eq!(recovery.terminal_incident_epoch(), None);
+        // A retryable failure is not terminal and records no incident.
+        recovery.test_screen_recovery_failed("screen:3", false);
+        assert_eq!(recovery.terminal_incident_epoch(), None);
+
+        // The owner's 0.11.0 take: the screen latched an hour before Record.
+        recovery.reset_to_idle();
+        recovery.test_screen_recovery_failed("screen:3", true);
+        let armed = recovery.terminal_incident_epoch();
+        assert!(armed.is_some());
+        assert!(recovery.source_failed_after_recovery(&key));
+        assert!(!recovery.source_failed_after_recovery_since(&key, armed));
+
+        // A new incident during the take (every new incident bumps the epoch)
+        // that also exhausts recovery still ends the role.
+        recovery.reset_to_idle();
+        recovery.test_screen_recovery_failed("screen:3", true);
+        assert_ne!(recovery.terminal_incident_epoch(), armed);
+        assert!(recovery.source_failed_after_recovery_since(&key, armed));
+
+        // Nothing latched at arm: any terminal latch on the source counts.
+        assert!(recovery.source_failed_after_recovery_since(&key, None));
+        assert!(!recovery.source_failed_after_recovery_since(&SourceKey::camera("screen:3"), None));
+    }
 
     fn camera_scope(id: &str, generation: u64) -> CaptureRecoveryScope {
         CaptureRecoveryScope::camera(SourceKey::camera(id), generation)

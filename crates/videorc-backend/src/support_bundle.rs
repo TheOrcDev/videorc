@@ -60,6 +60,8 @@ pub struct SupportBundleExportInput {
     /// What this machine measured in the performance check. Secret- and
     /// path-free by contract, so it is embedded without redaction.
     pub performance_check: Option<crate::protocol::PerformanceCheckResult>,
+    /// The last 2 h of metrics journal lines; `None` while the journal is off.
+    pub metrics_journal: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +82,10 @@ pub struct SupportBundle {
     pub sessions: Vec<SupportBundleSessionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub performance_check: Option<crate::protocol::PerformanceCheckResult>,
+    /// Plan 166 S1: the last 2 h of metrics journal lines, only while the
+    /// journal is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics_journal: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub windows_mf_probe: Option<Value>,
     pub redaction_summary: SupportBundleRedactionSummary,
@@ -171,6 +177,9 @@ pub fn export_support_bundle(input: SupportBundleExportInput) -> Result<SupportB
         .with_context(|| format!("Could not write support bundle {}", path.display()))?;
 
     let mut sections = included_sections();
+    if bundle.metrics_journal.is_some() {
+        sections.push("metricsJournal".into());
+    }
     if bundle.windows_mf_probe.is_some() {
         sections.push("windowsMfProbe".into());
     }
@@ -224,6 +233,14 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
         redact_value(value, &mut redaction_summary);
     }
     redact_value(&mut logs, &mut redaction_summary);
+    let mut metrics_journal = input.metrics_journal.map(Value::Array);
+    if let Some(lines) = metrics_journal.as_mut() {
+        redact_value(lines, &mut redaction_summary);
+    }
+    let metrics_journal = metrics_journal.and_then(|lines| match lines {
+        Value::Array(lines) => Some(lines),
+        _ => None,
+    });
 
     let (sessions, session_redactions) = redact_sessions(input.sessions);
     redaction_summary.merge(session_redactions);
@@ -247,6 +264,7 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
         logs,
         sessions,
         performance_check: input.performance_check,
+        metrics_journal,
         windows_mf_probe,
         redaction_summary,
     })
@@ -395,8 +413,9 @@ fn redact_quality_status(
     };
 
     match status {
-        GateStatus::Ready { path } => GateStatus::Ready {
+        GateStatus::Ready { path, sampled } => GateStatus::Ready {
             path: redact_path(path),
+            sampled,
         },
         GateStatus::Repaired { path, interpolated } => GateStatus::Repaired {
             path: redact_path(path),
@@ -406,10 +425,12 @@ fn redact_quality_status(
             path,
             reasons,
             needs_attention,
+            sampled,
         } => GateStatus::NotHundredPercent {
             path: redact_path(path),
             reasons,
             needs_attention,
+            sampled,
         },
         GateStatus::Failed { path, reason } => GateStatus::Failed {
             path: redact_path(path),
@@ -711,6 +732,7 @@ mod tests {
                 path: r"C:\Users\orcdev\Videos\Videorc\Recordings\final.mp4".to_string(),
                 reasons: vec!["missing audio stream".to_string()],
                 needs_attention: true,
+                sampled: false,
             }),
             final_diagnostics: None,
             layout: crate::protocol::default_layout_settings(),
@@ -846,6 +868,7 @@ mod tests {
             }],
             sessions: vec![],
             performance_check: None,
+            metrics_journal: None,
         };
 
         let result = export_support_bundle(input).unwrap();
@@ -897,6 +920,22 @@ mod tests {
         assert_eq!(bundle.app.version, "0.9.16");
     }
 
+    #[test]
+    fn support_bundle_carries_metrics_journal_lines_only_when_the_journal_is_on() {
+        let off = serde_json::to_value(build_support_bundle(minimal_input(None)).unwrap()).unwrap();
+        assert!(off.get("metricsJournal").is_none());
+        let mut input = minimal_input(None);
+        input.metrics_journal = Some(vec![json!({
+            "schemaVersion": 1,
+            "kind": "sample",
+            "ts": "2026-10-12T10:00:00.000Z",
+            "sessionId": "session-1"
+        })]);
+        let on = serde_json::to_value(build_support_bundle(input).unwrap()).unwrap();
+        assert_eq!(on["metricsJournal"][0]["schemaVersion"], json!(1));
+        assert_eq!(on["metricsJournal"][0]["sessionId"], json!("session-1"));
+    }
+
     fn minimal_input(app_version: Option<String>) -> SupportBundleExportInput {
         SupportBundleExportInput {
             output_directory: None,
@@ -927,6 +966,7 @@ mod tests {
             logs: vec![],
             sessions: vec![],
             performance_check: None,
+            metrics_journal: None,
         }
     }
 }

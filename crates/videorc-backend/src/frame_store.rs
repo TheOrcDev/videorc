@@ -329,6 +329,8 @@ pub struct RetainedPixelBuffer;
 
 #[cfg(target_os = "windows")]
 mod source_d3d11_texture {
+    use std::sync::Arc;
+
     use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
     /// A captured D3D11 texture retained with the logical source frame.
@@ -336,14 +338,18 @@ mod source_d3d11_texture {
     /// The capture device is created with D3D11 multithread protection. Consumers
     /// may therefore retain this COM reference across the capture/compositor
     /// boundary instead of forcing the source through a BGRA byte pipe first.
+    ///
+    /// The texture is a capture-owned copy shared through an `Arc` so the
+    /// capture can tell when every holder has let a slot go (the strong count
+    /// is back to the capture's own one) before it writes a later frame there.
     #[derive(Clone)]
     pub struct RetainedD3D11Texture {
-        texture: ID3D11Texture2D,
+        texture: Arc<ID3D11Texture2D>,
         adapter_luid: u64,
     }
 
     impl RetainedD3D11Texture {
-        pub fn new(texture: ID3D11Texture2D, adapter_luid: u64) -> Self {
+        pub fn new(texture: Arc<ID3D11Texture2D>, adapter_luid: u64) -> Self {
             Self {
                 texture,
                 adapter_luid,
@@ -602,6 +608,32 @@ impl<P, M> FrameStore<P, M> {
         self.latest.clone()
     }
 
+    /// Make an already published frame this store's latest (plan 212 S2):
+    /// the Preview hold pins the frame presented when a performance check
+    /// began into a store of its own, so the lease and the pixel oracle keep
+    /// reading it while the run composes the benchmark. The handle keeps the
+    /// storage alive; nothing is copied.
+    pub fn pin_latest(&mut self, frame: FrameHandle<P, M>) {
+        self.latest = Some(frame);
+    }
+
+    /// Forget the latest frame so readers see no frame at all. Plan 210 S7
+    /// uses it as the last resort when a hidden screen's still cannot be
+    /// built in a store's format: no frame beats a live one.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn retire(&mut self) -> bool {
+        if self.latest.take().is_some() {
+            self.frames_replaced = self.frames_replaced.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Zero-filled checkout. Test-only since plan 191: its last production
+    /// callers, the CPU compositor's frame checkouts, overwrite every byte and
+    /// use `checkout_overwrite_buffer`.
+    #[cfg(test)]
     pub fn checkout_buffer(&mut self, byte_len: usize) -> Vec<u8> {
         self.buffer_pool
             .lock()

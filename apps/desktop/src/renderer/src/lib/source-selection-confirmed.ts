@@ -25,10 +25,14 @@ export function confirmedSourceSelection(
     microphoneId: selected.microphoneId,
     screenName: name(selected.screenId, current.screenId, current.screenName),
     windowName: name(selected.windowId, current.windowId, current.windowName),
+    // Plan 0002 (release test 146): a confirmed capture ends an earlier None;
+    // a confirmed empty slot keeps it, like the camera below.
+    captureOff: selected.screenId || selected.windowId ? undefined : current.captureOff,
     cameraName: name(selected.cameraId, current.cameraId, current.cameraName),
     // A confirmed camera ends an earlier Off; a confirmed empty slot keeps it.
     cameraOff: selected.cameraId ? undefined : current.cameraOff,
     microphoneName: name(selected.microphoneId, current.microphoneId, current.microphoneName),
+    microphoneOff: selected.microphoneId ? undefined : current.microphoneOff,
     testPattern: selected.testPattern
   }
 }

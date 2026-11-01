@@ -62,6 +62,37 @@ async function headArtifact({ artifact, config }) {
 }
 
 async function putArtifact({ artifact, config }) {
+  // Transient storage-edge failures (HTTP 5xx, dropped connections) are
+  // retried. A retried PUT is safe: If-None-Match keeps the object immutable,
+  // and a HEAD before each retry detects that a "failed" attempt actually
+  // landed the exact bytes (a 504 can arrive after the write completed).
+  const maxAttempts = 5
+  for (let attempt = 1; ; attempt += 1) {
+    let status
+    try {
+      status = await putArtifactOnce({ artifact, config })
+    } catch (error) {
+      if (error?.code === 'candidate-storage-collision' || attempt >= maxAttempts) throw error
+      status = `network error: ${error?.message ?? 'unknown'}`
+    }
+    if (status === 'stored') return
+    if (attempt >= maxAttempts) {
+      throw new Error(`candidate upload failed for ${artifact.objectKey}: ${status}`)
+    }
+    console.log(
+      `windows-release-candidate-upload: retrying ${artifact.objectKey} after ${status} ` +
+        `(attempt ${attempt + 1}/${maxAttempts})`
+    )
+    await new Promise((done) => setTimeout(done, 5000 * attempt))
+    const state = await headArtifact({ artifact, config }).catch((error) => {
+      if (error?.code === 'candidate-storage-collision') throw error
+      return 'unknown'
+    })
+    if (state === 'identical') return
+  }
+}
+
+async function putArtifactOnce({ artifact, config }) {
   const signed = buildSignedS3Request({
     additionalHeaders: { 'x-amz-meta-sha256': artifact.sha256 },
     config,
@@ -82,11 +113,11 @@ async function putArtifact({ artifact, config }) {
   })
   if (response.status === 412) {
     const state = await headArtifact({ artifact, config })
-    if (state === 'identical') return
+    if (state === 'identical') return 'stored'
   }
-  if (!response.ok) {
-    throw new Error(`candidate upload failed for ${artifact.objectKey}: HTTP ${response.status}`)
-  }
+  if (response.ok) return 'stored'
+  if (response.status >= 500) return `HTTP ${response.status}`
+  throw new Error(`candidate upload failed for ${artifact.objectKey}: HTTP ${response.status}`)
 }
 
 function signedFetch({ config, method, objectKey }) {

@@ -12,7 +12,8 @@ export type UpdaterEvent =
   | { type: 'progress'; percent: number }
   | { type: 'downloaded'; version: string }
   | { type: 'error'; message: string }
-  | { type: 'unsupported'; reason?: 'windows-feed-unpublished' }
+  | { type: 'download-available'; version: string }
+  | { type: 'unsupported'; reason?: 'windows-feed-unpublished' | 'linux-version-unknown' }
 
 // electron-updater surfaces an unpublished feed — no `latest*.yml` for this
 // build's platform/channel — as a 404 / "Cannot find channel" error. That is
@@ -61,11 +62,22 @@ export function updateStatusFromEvent(event: UpdaterEvent): UpdateStatus {
       return { phase: 'downloaded', version: event.version }
     case 'error':
       return { phase: 'error', message: event.message }
+    case 'download-available':
+      return { phase: 'download-available', version: event.version }
     case 'unsupported':
       return event.reason
         ? { phase: 'unsupported', reason: event.reason }
         : { phase: 'unsupported' }
   }
+}
+
+// electron-updater resolves a check with null, and emits no event, when it is
+// inactive: an AppImage run without the APPIMAGE variable (extracted, or
+// repackaged by a distro) or a snap. Nothing then moves the status off
+// 'checking', so Settings said "Checking for updates…" forever. A check that
+// resolved while still 'checking' settles as unsupported.
+export function settleStatusAfterCheck(status: UpdateStatus): UpdateStatus {
+  return status.phase === 'checking' ? updateStatusFromEvent({ type: 'unsupported' }) : status
 }
 
 // After a manual check resolves, start downloading immediately (one-click feel)
@@ -83,20 +95,42 @@ export const BACKGROUND_RECHECK_INTERVAL_MS = 30 * 60 * 1000
 // flight, never once an update is staged (it applies on the next quit), and
 // never when updates are unsupported — except a Windows build whose feed is not
 // published yet: signing in or a public Alpha can open one at any time, and the
-// check is one small yml fetch. 'available' with no download running means the
-// background download failed — re-checking retries it.
+// check is one small yml fetch — and Linux, whose notice check keeps watching
+// for the next release (or for videorc.com to answer at all). 'available' with
+// no download running means the background download failed — re-checking
+// retries it.
 export function shouldBackgroundRecheck(status: UpdateStatus): boolean {
   switch (status.phase) {
     case 'idle':
     case 'not-available':
     case 'error':
     case 'available':
+    case 'download-available':
       return true
     case 'checking':
     case 'downloading':
     case 'downloaded':
       return false
     case 'unsupported':
-      return status.reason === 'windows-feed-unpublished'
+      return (
+        status.reason === 'windows-feed-unpublished' || status.reason === 'linux-version-unknown'
+      )
+  }
+}
+
+/**
+ * The OS notice that a downloaded update is ready (plan 174 I-20): never while
+ * Videorc records or is on air, where a system banner can land on the
+ * captured screen. The sidebar chip and Settings → About still say it, and
+ * the update installs the next time Videorc quits either way.
+ */
+export function updateReadyNotification(
+  version: string,
+  captureActive: boolean
+): { title: string; body: string } | null {
+  if (captureActive) return null
+  return {
+    title: `Videorc ${version} is ready`,
+    body: 'Restart Videorc to finish updating, or it installs the next time you quit.'
   }
 }

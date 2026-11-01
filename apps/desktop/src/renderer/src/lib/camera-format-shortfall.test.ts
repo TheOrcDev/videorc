@@ -30,7 +30,7 @@ describe('cameraFormatShortfall', () => {
       selectedMaxFps: 25,
       singleFormat: true
     })
-    expect(cameraFormatShortfallMessage(shortfall!)).toContain('only offers 3840×2160 at 25 fps')
+    expect(cameraFormatShortfallMessage(shortfall!)).toContain('only offers 3840 × 2160 at 25 fps')
     expect(cameraFormatShortfallMessage(shortfall!)).toContain("can't reach 30 fps")
   })
 

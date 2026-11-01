@@ -9,7 +9,7 @@
 // Harnesses default to isolated app/user data and ledger reaping. Product launches
 // still use the normal app data path unless a smoke explicitly opts into this helper.
 
-import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
   closeSync,
@@ -26,6 +26,11 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
+import './smoke-env.mjs'
+import { acquireHostSmokeLock, waitForHostMemory, withBuildSlot } from './host-lock.mjs'
+
+import { spawnProcessGroup } from './process-group.mjs'
+
 import { assertSmokeCommandConnection } from './smoke-command-client.mjs'
 
 export const repoRoot = resolve(import.meta.dirname, '..', '..')
@@ -38,6 +43,7 @@ const LAUNCH_SERVICES_COMPUTED_ENV_NAMES = [
   'VIDEORC_RECORDINGS_DIR',
   'VIDEORC_SECRETS_PATH',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
+  'VIDEORC_SMOKE_SKIP_FIRST_RUN',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
   'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN',
   'VIDEORC_USER_DATA_DIR'
@@ -190,6 +196,10 @@ export function smokeAppEnv(env = {}, options = {}) {
     VIDEORC_SMOKE_PRINT_BACKEND_READY:
       smokeEnvValue(env, 'VIDEORC_SMOKE_PRINT_BACKEND_READY') ?? '1',
     VIDEORC_DISABLE_BACKEND_REAP: smokeEnvValue(env, 'VIDEORC_DISABLE_BACKEND_REAP') ?? '0',
+    // Every isolated profile is a new install: a smoke that records or goes
+    // live must not reach the anonymous usage stats unless a run asks to.
+    VIDEORC_USAGE_STATS: smokeEnvValue(env, 'VIDEORC_USAGE_STATS') ?? '0',
+    VIDEORC_SMOKE_SKIP_FIRST_RUN: env.VIDEORC_SMOKE_SKIP_FIRST_RUN ?? '1',
     VIDEORC_APP_DATA_DIR: appDataDir,
     VIDEORC_USER_DATA_DIR: userDataDir,
     // Isolating Electron userData is NOT enough: the backend resolves its own
@@ -225,6 +235,19 @@ export function smokeAppEnv(env = {}, options = {}) {
   // a parent shell must not silently redirect a new harness into an older run.
   if (!explicitStateDir) delete result.VIDEORC_SMOKE_STATE_DIR
   if (!explicitOutputDir) delete result.VIDEORC_SMOKE_OUTPUT_DIR
+  // The smoke Trash stand-in (plan 209 S16) lives in this run's own state, or
+  // nowhere: a Library delete in any other smoke still reaches the real Trash.
+  const smokeTrashDir = explicitSmokeEnvValue(env, 'VIDEORC_SMOKE_TRASH_DIR')
+  if (smokeTrashDir) {
+    result.VIDEORC_SMOKE_TRASH_DIR = isolatedSmokePath(
+      env,
+      'VIDEORC_SMOKE_TRASH_DIR',
+      smokeTrashDir,
+      isolationRoots
+    )
+  } else {
+    delete result.VIDEORC_SMOKE_TRASH_DIR
+  }
   return result
 }
 
@@ -310,7 +333,53 @@ function smokeEnvValue(env, name) {
  * @param {(line:string)=>void} [options.onLine] - called for every stdout/stderr line.
  * @returns {Promise<{connections:Record<string,object>, process:import('node:child_process').ChildProcess, stop:()=>Promise<void>}>}
  */
-export function launchDevApp({
+// API origins the backend honours only in debug builds (`cfg!(debug_assertions)`
+// in discord_announce/client.rs and youtube_quota.rs). A release dev backend
+// logs "refused in packaged builds" and sends the smoke's fixture webhook or
+// token to the real service instead of the local fake.
+export const DEBUG_ONLY_API_ORIGIN_ENV = Object.freeze([
+  'VIDEORC_DISCORD_API_BASE_URL',
+  'VIDEORC_YOUTUBE_API_BASE_URL'
+])
+
+/**
+ * Why a dev-app launch must not start, or null: a fake API origin with the
+ * release dev backend would reach the real service. Pure for the unit test.
+ */
+export function releaseBackendFakeOriginRefusal(env = {}, processEnv = process.env) {
+  const profile = env.VIDEORC_DEV_BACKEND_PROFILE ?? processEnv.VIDEORC_DEV_BACKEND_PROFILE
+  if (profile !== 'release') return null
+  const names = DEBUG_ONLY_API_ORIGIN_ENV.filter((name) => env[name] ?? processEnv[name])
+  if (names.length === 0) return null
+  return (
+    `${names.join(', ')} only works with the debug backend; with ` +
+    'VIDEORC_DEV_BACKEND_PROFILE=release the backend ignores it and calls the real ' +
+    'service. Unset VIDEORC_DEV_BACKEND_PROFILE (or set it to debug) for this smoke.'
+  )
+}
+
+export async function prepareSmokeLaunch({
+  dev = true,
+  env = process.env,
+  onLine,
+  prebuild = async () => {
+    const spec = devBackendPrebuildSpec({ env })
+    if (spec) {
+      const failure = await runDevBackendPrebuild(spec, { onLine, env: smokeAppEnv(env) })
+      if (failure) throw new Error(failure)
+    }
+  },
+  buildSlot = withBuildSlot,
+  hostLock = acquireHostSmokeLock,
+  memory = waitForHostMemory
+} = {}) {
+  const options = { env, log: onLine }
+  if (dev && env.VIDEORC_SMOKE_SKIP_PREBUILD !== '1') await buildSlot(prebuild, options)
+  await hostLock(options)
+  await memory(options)
+}
+
+export async function launchDevApp({
   env = {},
   timeoutMs = 120000,
   requiredMarkers = ['backend-ready'],
@@ -319,6 +388,13 @@ export function launchDevApp({
   launchViaMacosLaunchServices = false,
   spawnSpec: requestedSpawnSpec
 } = {}) {
+  const fakeOriginRefusal = requestedSpawnSpec ? null : releaseBackendFakeOriginRefusal(env)
+  if (fakeOriginRefusal) return Promise.reject(new Error(fakeOriginRefusal))
+  await prepareSmokeLaunch({
+    dev: !launchViaMacosLaunchServices && !requestedSpawnSpec,
+    env: { ...process.env, ...env },
+    onLine
+  })
   return new Promise((resolveLaunch, rejectLaunch) => {
     const connections = {}
     let settled = false
@@ -344,23 +420,6 @@ export function launchDevApp({
     }
     if (spawnSpec.appOwnership) {
       mkdirSync(dirname(spawnSpec.appOwnership.path), { recursive: true })
-    }
-
-    if (!launchViaMacosLaunchServices && !requestedSpawnSpec) {
-      // `pnpm dev` runs `cargo run --quiet`, which prints nothing while the
-      // debug backend recompiles (5-7 min on ogre after a pull), so the
-      // launch clock used to race the compiler and fail with misleading GPU
-      // noise from a SIGTERMed Electron (Plan 0009). Build first, with its
-      // own bounded deadline, then start the launch clock.
-      const prebuild = devBackendPrebuildSpec({ env: process.env })
-      if (prebuild) {
-        const failure = runDevBackendPrebuild(prebuild, { onLine, env: childEnv })
-        if (failure) {
-          settled = true
-          rejectLaunch(new Error(failure))
-          return
-        }
-      }
     }
 
     const child = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)
@@ -1093,27 +1152,35 @@ export function devBackendPrebuildFailure(spec, { status, signal, error, stderrT
   return null
 }
 
-function runDevBackendPrebuild(spec, { onLine, env }) {
+export async function runDevBackendPrebuild(spec, { onLine, env } = {}) {
+  if (!spec) return null
   const startedAt = Date.now()
   const describe = `${spec.command} ${spec.args.join(' ')}`
   onLine?.(`[smoke:prebuild] ${describe} (timeout ${Math.round(spec.timeoutMs / 1000)}s)`)
-  const result = spawnSync(spec.command, spec.args, {
+  const { child, result } = spawnProcessGroup(spec.command, spec.args, {
     cwd: spec.cwd,
     env,
-    encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: spec.timeoutMs,
-    killSignal: 'SIGTERM',
-    maxBuffer: 64 * 1024 * 1024
+    timeoutMs: spec.timeoutMs
   })
-  const stderrTail = `${result.stdout ?? ''}${result.stderr ?? ''}`.split(/\r?\n/)
-  for (const line of stderrTail.slice(-20)) {
+  const stderrTail = []
+  const keepLine = (line) => {
+    stderrTail.push(line)
+    if (stderrTail.length > 20) stderrTail.shift()
+  }
+  const stdout = createLineBuffer(keepLine)
+  const stderr = createLineBuffer(keepLine)
+  child.stdout.setEncoding('utf8').on('data', (chunk) => stdout.write(chunk))
+  child.stderr.setEncoding('utf8').on('data', (chunk) => stderr.write(chunk))
+  const outcome = await result
+  stdout.flush()
+  stderr.flush()
+  for (const line of stderrTail) {
     if (line.trim()) onLine?.(`[smoke:prebuild] ${line}`)
   }
   const failure = devBackendPrebuildFailure(spec, {
-    status: result.status,
-    signal: result.signal,
-    error: result.error,
+    ...outcome,
+    error: outcome.timedOut ? { code: 'ETIMEDOUT' } : outcome.error,
     stderrTail
   })
   if (!failure) {

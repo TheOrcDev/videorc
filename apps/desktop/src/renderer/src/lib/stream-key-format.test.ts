@@ -22,7 +22,7 @@ describe('stream-key-format', () => {
       detectStreamKeyPlatform('sk_us-west-2_AbC123dEf456_GhIjKlMnOpQrStUvWxYz0123456789')
     ).toBe('kick')
     expect(streamKeyPlatformMismatch('twitch', 'sk_us-west-2_abc_def')).toMatch(
-      /looks like a Kick stream key, but you are saving it to Twitch/
+      /looks like a Kick stream key, but you're saving it to Twitch/
     )
     expect(streamKeyPlatformMismatch('kick', 'sk_us-west-2_abc_def')).toBeNull()
   })

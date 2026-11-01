@@ -147,7 +147,7 @@ describe('activeAudioProcessingUpdateParams', () => {
       rollback: { microphoneGainDb: -2, microphoneMuted: false },
       disableForSession: true,
       message:
-        'The live microphone change could not be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute.'
+        "The live microphone change couldn't be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute."
     })
   })
 
@@ -263,7 +263,7 @@ describe('activeAudioProcessingUpdateParams', () => {
         rollback: { microphoneGainDb: -2, microphoneMuted: false },
         disableForSession: true,
         message:
-          'The live microphone change could not be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute.'
+          "The live microphone change couldn't be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute."
       })
     }
   )
@@ -449,7 +449,7 @@ describe('LatestWinsLiveAudioProcessingQueue', () => {
       rollback: { microphoneGainDb: 0, microphoneMuted: false },
       disableForSession: true,
       message:
-        'The live microphone change could not be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute.'
+        "The live microphone change couldn't be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute."
     })
   })
 })

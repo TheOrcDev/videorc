@@ -18,6 +18,9 @@ describe('microphoneStreamAcquisitionEnabled', () => {
   it('allows acquisition only when requested and OS microphone access is exactly granted', () => {
     expect(microphoneStreamAcquisitionEnabled(true, 'granted')).toBe(true)
     expect(microphoneStreamAcquisitionEnabled(false, 'granted')).toBe(false)
+    // Linux (plan 0011): no OS grant exists, so nothing is requested by opening it.
+    expect(microphoneStreamAcquisitionEnabled(true, 'not-applicable')).toBe(true)
+    expect(microphoneStreamAcquisitionEnabled(false, 'not-applicable')).toBe(false)
 
     for (const status of [
       'not-determined',

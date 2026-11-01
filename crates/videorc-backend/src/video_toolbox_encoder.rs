@@ -184,7 +184,7 @@ fn send_async_annex_b_frame(
 ) {
     // This channel must not block a VideoToolbox callback: complete_pending_frames
     // can wait for the callback on the same bridge thread. It is logically
-    // bounded by the bridge's submitted-frame admission ceiling (16), so an
+    // bounded by the bridge's configured submitted-frame admission ceiling, so an
     // unbounded mpsc transport removes callback overflow without permitting an
     // unbounded media backlog.
     let _ = sender.send(frame);
@@ -1221,6 +1221,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 1,
             height: 1,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -1229,6 +1230,9 @@ mod tests {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         compositor
             .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
@@ -1322,6 +1326,7 @@ mod tests {
                 content_key: None,
                 iosurface: None,
                 pixel_buffer: None,
+                texture: None,
                 width: 1,
                 height: 1,
                 dest: [0.0, 0.0, 1.0, 1.0],
@@ -1330,6 +1335,9 @@ mod tests {
                 mask: crate::metal_compositor::SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             }];
             compositor
                 .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
@@ -1423,6 +1431,7 @@ mod tests {
             content_key: None,
             iosurface: None,
             pixel_buffer: None,
+            texture: None,
             width: 1,
             height: 1,
             dest: [0.0, 0.0, 1.0, 1.0],
@@ -1431,6 +1440,9 @@ mod tests {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         compositor
             .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)

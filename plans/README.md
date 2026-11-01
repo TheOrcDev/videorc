@@ -1,6 +1,709 @@
 # Implementation Plans
 
+- 2026-10-31: [Plan 212](212-the-preview-never-shows-test-noise.md), The
+  Preview never shows test noise. Owner report: on the first launch after
+  0.17.2 the Preview showed coloured noise for about 18 s before the
+  camera. Cause: the performance check re-runs after every update, 8 s
+  after launch. Each rung borrows the Preview's compositor, replaces the
+  user's scene with a test pattern, and turns on a process-wide noise
+  switch. Nothing gives the scene back except a Clips re-arm. Its smoke
+  never looked at the Preview, and this run's verdict came from an
+  overloaded Mac (1080p30 on a 4K30 machine).
+  - Phase 1: a gate that reads the Preview (red first). The benchmark
+    draws only into its encoder, the user's scene stays, the noise
+    belongs to the benchmark, the Preview holds the program across the
+    ladder, main's watchdog leaves a hold alone, and packaged builds
+    never present a test-pattern frame. No launch or post-update check
+    (first-run setup or the Output button only), and no verdict from a
+    busy Mac.
+  - Phase 2 (optional, D2): the Preview stays live during a check.
+    **Phase 1 BUILT** 2026-10-31 (D1 to D3 as recommended; Phase 2 not
+    built). Owed: by-eye in both themes, packaged acceptance, Windows
+    tester, and the owner's "Check this computer" on a quiet Mac.
+- 2026-10-28: [Plan 210](210-scenes-for-your-apps-and-hide-screen.md),
+  Scenes for your apps, and Hide screen. Owner request: "our whole Scene tab
+  needs to be much smarter", quoting a user who switches between T3 Code and
+  Figma on stream and hides a sign-in behind a blurry picture in OBS. Today
+  that takes about nine clicks, the scene breaks when the app relaunches (a
+  window id), every switch stops one capture and starts another (a frozen
+  picture, probably a black frame, never measured), saved scenes have no
+  key, Deck or phone button, and nothing can blur the screen.
+  - Phase A (macOS): New scene… makes one scene per app in your current look.
+    The scene follows the app's front window and survives a relaunch. Swap in
+    place on one capture, holding the last frame (no black). A scene list on
+    the Scene page with auto-save. Keys, Deck and phone for saved scenes.
+  - Phase B (all platforms): Hide screen, a frosted still of the screen on
+    every output while the camera and microphone stay on, done at the
+    capture source. A default key (⌃⌥H) and every other surface. Agents can
+    hide, never show.
+  - Phase C (macOS): Follow the app in front, and Hide screen when a password
+    manager comes to the front on a display scene.
+  - Phase D: the smoke, docs and acceptance.
+
+  **EXECUTING** 2026-10-28: the owner took every recommended answer (D1
+  to D13) and asked for the whole plan in one PR. S11's smoke and docs
+  landed 2026-10-29:
+  [acceptance record](../docs/acceptance/2026-10-29-smarter-scenes-acceptance.md)
+  (owner by-eye checks owed).
+
+- 2026-10-28: [Plan 211](211-buddy-talks-only-in-its-bubble.md), Buddy
+  talks only in its bubble, and Auto is gone. Owner request, after Auto
+  posted an AI welcome in chat as them on the 2026-10-28 stream and Off then
+  skipped 46 greetings: Buddy greets on stream, never in chat. The control
+  becomes "{name} talks: Off · Bubble · Suggest". Bubble speaks greetings,
+  answers ("@name …") and banter in the bubble only. It is paced and queued
+  so no line cuts another short, skipped while Buddy is off stream, and
+  listed under "Said on stream" in Reports. Nothing automatic can reach
+  chat: the lane's send output is deleted, and the Say box and `buddy_say`
+  are bubble-only. A new `autoChat.talk` field keeps older apps safe (Bubble
+  is saved as `mode: off`). New installs and saved Auto start in Bubble;
+  saved Off stays Off. Agents' `set_buddy` takes `talk`. One desktop PR in
+  five phases, plus an eval-fixture tidy on the web. Supersedes plan 202
+  Phases B to D. **BUILT** 2026-10-29 as one desktop PR (all five phases)
+  and a web eval-fixture PR; owner answers recorded 2026-10-28. Owed: the
+  owner's by-eye pass in both themes, a live take, and `smoke:agent-mcp`
+  B1 (local RTMP go-live), red on this Mac before Buddy's step.
+- 2026-10-27: [Plan 209](209-agents-control-videorc-mcp.md), Videorc MCP:
+  agents and Buddy run the studio. Owner request: a complete MCP so people
+  control everything from their agents, with Buddy using it too. Agents on
+  this computer (Claude Desktop, Claude Code, Cursor, Codex, VS Code) connect
+  through `videorc-mcp`, a stdio bridge shipped in the app, to a loopback-only
+  `/mcp` endpoint with per-agent tokens. 43 tools cover looking (status,
+  picture, chat, Library), running the show, arranging the picture ("move
+  Buddy to the top left", "the banner to the bottom left", with the Scene
+  canvas's own snaps), chat, Buddy, preparing and the Library. They run through the same executor as the buttons and Stream
+  Deck, whose allowlists stay unchanged. The owner chose full control with no
+  prompts, so actions are logged and attributed, one Stop cuts every agent,
+  deletes go to the Trash, and YouTube removals still wait for a click (API
+  policy). Free; Buddy's tool use is Premium, triggered only by the
+  streamer's voice or `/buddy`, through a new videorc.com planner whose
+  calls the desktop checks against Buddy's subset.
+  **BUILT** 2026-10-28 as one desktop PR (all 23 slices, plus one-click
+  Connect, a `.mcpb` and two MCP prompts) and a videorc.com PR (the planner
+  route and an agents page; deploy it first). Local gates and smokes green;
+  owner acceptance, packaged by-eye, the planner's live eval and
+  Windows/Linux runs owed; the owner took all seven recommended answers
+  (2026-10-28).
+- 2026-10-27: [Plan 208](208-liquid-chrome-colours.md), Liquid Chrome
+  colours. Owner request: redesign Videorc's colour after the Welcome
+  screen's Liquid Chrome, metallic black with its shine, and the other way
+  around in light mode. Owner calls from a rendered mockup:
+  - every window sits on a solid, frosted still of Liquid Chrome under the
+    coats, with no desktop showing through, the same on every platform;
+  - polished chrome controls and edges (primary buttons, beads, plates, a
+    red LED Record) while panels, menus and text stay flat;
+  - light mode is the crisp pixel invert;
+  - the phone remote and the OAuth page come along.
+
+  Eight slices, from before pictures through the ground assets, opaque
+  windows, the probe, controls, the Welcome invert and the served pages, to
+  docs and gates. **EXECUTED** 2026-10-27 (S0 to S7) on
+  `plan-208-liquid-chrome-colour`, PR #883: every window sits on the
+  chrome ground, controls wear chrome, Record is the red LED, light
+  Welcome is the invert, and the phone remote and OAuth page follow; the
+  design skill is rewritten for it. `VIDEORC_GLASS=clear` keeps the old
+  glass for one release. Gates in the
+  [acceptance record](../docs/acceptance/2026-10-27-liquid-chrome-colours.md);
+  the owner's by-eye in both themes and a Windows pass are owed.
+
+- 2026-10-27: [Plan 207](207-first-run-setup-steps.md), First-run setup,
+  steps 2 to 5. Owner request: after permissions, "What are you making?",
+  "Your look", "Sound check" and "Where you stream". The goal (Recordings,
+  Livestreams or Both) decides whether the streaming step shows. Your look
+  picks orientation, layout, camera shape and a live background on the
+  scene's own picture, with the background moving. Sound check is the
+  microphone, its level with a verdict, "Set level for me", and System
+  audio. Where you stream signs in to YouTube, Twitch, Kick or X and turns
+  each one on. Nothing in setup opens a capture device. It also fixes
+  "Clips couldn't start" on a fresh install without a screen. **BUILT IN PR**
+  (unmerged); owner acceptance and the final smoke bundle are still owed.
+  [Acceptance](../docs/acceptance/2026-10-27-first-run-steps.md).
+- 2026-10-27: [Plan 206](206-facebook-live.md), Facebook Live in the
+  Livestream tab. Owner request: a Facebook connector like the other
+  platforms, stream key first, the rest once Meta approves. Phase 1 (one
+  desktop PR, no Meta, no web change): a horizontal Facebook card after X,
+  server filled in, key from Live Producer, a Go Live reminder to press Go
+  live there; chat, viewers and title say they need sign-in. Phase 2: the
+  owner's Meta app and Business Verification, plus a spike that picks device
+  code or a website relay for sign-in. Phase 3 (dark in public builds):
+  connect a Page, Go Live with our title, comments, viewers. Phase 4: App
+  Review and the switch. Replaces plan 079 (#504, closed stale). **Phase 1
+  BUILT** (S0 to S5, one desktop PR; owner live take owed); Phases 2 to 4
+  wait on the owner's Meta setup (M1). Owner calls D6 (website) and D7
+  (sign-in, after S6) open.
+- 2026-10-27: [Plan 205](205-preview-is-the-source-of-truth.md), The
+  preview is the source of truth. Owner request: a banner and Buddy put on
+  the picture weren't visible in the preview; "our preview window should
+  actually be the source of truth". Root causes, checked on the owner's
+  profile: Clips (on by default) makes the idle preview a recording, so
+  Buddy set to stream only never draws. The idle preview never draws Buddy
+  at all, and draws it only while the Scene editor holds it. The banner
+  was placed while hidden, and on the docked live canvas no label says so.
+  One rule, "the Preview shows the program": every layer at least one
+  running output carries, and at idle every layer with a switch on. Phase
+  1 covers that rule in Rust and TS, Clips following Show in recording, "Hidden",
+  "Off" and "Stream only" on the Scene chips, and a dev-only Preview pixel
+  oracle with `smoke:preview-truth`. Phase 2 adds a macOS program leg for
+  Clips at idle and record + stream with a split stream leg (measured spike
+  first). Phase 3
+  covers the Windows media session's preview and Buddy on the proof
+  surface. **BUILT**, PR #880: S1 to S9. Owed: S10 (Windows tester pass,
+  Linux box), the owner's by-eye, the 4K idle program-leg cost call.
+- 2026-10-27: [Plan 204](204-chat-in-the-studio.md), Chat in the Studio.
+  Owner request: live chat in the Studio in a small window, optional with a
+  switch, a click putting a message on stream, less detail than the Stream
+  Manager. With **Chat in Studio** on (Settings → General → Chat, off by
+  default; ⌘K mirrors it), the inspector shows a Chat section under Session
+  while on air. Each row has a small avatar, the name, the words and the
+  platform mark. A click shows the message on stream through the same
+  highlight the Stream Manager uses. The list follows the newest message,
+  and the header has Open Stream Manager and a hide button with Undo. It
+  keeps its default look under Retro LCD. The Stream Manager's list
+  mechanics moved, unchanged, into one hook both lists share. Renderer
+  only, in its own lazy chunk (+88 eager gzip bytes). `smoke:studio-chat`
+  proves the card in the stream output. **BUILT IN PR**. Owed: the owner's
+  by-eye on a real stream, the two-destination fit, and confirming that
+  "yes" meant avatars.
+- 2026-10-27: [Plan 203](203-first-run-permissions.md), First-run setup,
+  step 1: permissions. Owner request: onboarding only on the first launch,
+  a Settings button to run it again, and permissions done perfectly first.
+  The Liquid Chrome live background fills the window (the shared WebGL2
+  player, lazy, 30 fps cap, poster when still), and one centred card asks
+  for Screen Recording, System audio, Microphone and Camera in place, with
+  live states and proof. Launch requests were removed; Reopen and resume
+  handle grants that require a relaunch. Existing installs skip it; smokes
+  suppress it by default. "Run setup again…" sits in Settings → General
+  and ⌘K. **SHIPPED IN PR**: S1 to S7 implemented, Polished at Normal
+  chosen by the owner. Owner-owed: S0 clean macOS account (cold launch,
+  main's identity, System audio and Reopen), light and dark by-eye, Windows
+  tester pass, long refused-row copy, review of D2/D3/D5 to D7 shipped as
+  recommended. [Acceptance](../docs/acceptance/2026-10-27-first-run-permissions.md).
+- 2026-10-26: [Plan 202](202-buddy-talks-in-its-bubble.md), Buddy talks in
+  its bubble. Owner request: a mode where Buddy talks only in its bubble, not
+  in chat, and a switch for whether Buddy shows on takeover screens. A fourth
+  mode, "Buddy talks: Off · Bubble · Suggest · Auto": greetings, answers and
+  banter speak only in the on-stream bubble and never post to chat. It needs
+  no posting consent, uses a settings field older apps survive, paces bubbles
+  so none is cut short, and answers start with "@name". "Show on takeovers"
+  in Layout → Buddy hides the pet and bubble while a takeover shows; it
+  starts off for everyone, so the release notes must say so. Four desktop
+  phases, no web change. **PLANNED**; owner answers recorded 2026-10-26.
+  **2026-10-28**: Phases B to D (Bubble mode) are superseded by plan 211.
+  Only Phase A, "Show on takeovers", remains, and it runs after plan 211.
+- 2026-10-26: [Plan 201](201-studio-audio-balance.md), Balance the Microphone
+  and System audio from the Studio. One Audio section puts both levels on
+  one audiocn Mixer scale, each with the same Gain fader Sources uses, in
+  the default and Retro LCD looks. System audio's idle level comes from the
+  Clips bus; no new capture. The Sources mirror keeps Screen and Camera.
+  **BUILT** 2026-10-27: S0 to S4 done. Owed: the granted System audio smoke,
+  the Sources idle meter check, the owner's by-eye in both looks and themes
+  (including D5's LCD faders), and the granted CPU comparison. The four CPU
+  attempts and their failures are in the
+  [acceptance record](../docs/acceptance/2026-10-27-studio-audio-balance.md).
+- 2026-10-26: [Plan 200](200-better-recordings-export-separate-files-sound.md),
+  Better recordings: exports, separate files and sound. Owner request: make
+  exporting with separate sources, sound and system audio even better. Four
+  audits plus measurements of real takes found: Clips squash a frame at every
+  2 s join; the mic fold distorts 2-input interfaces; MP4 frame times sit on a
+  1 ms grid (editors see VFR); 5.3 GB of leaked repair temps and backups;
+  record+stream audio re-encoded AAC→AAC; separate files at 4K can damage
+  Combined; the Camera file is upscaled with nearest sampling. Groups A
+  (sound), B (Clips), C (export and files), D (separate files and picture),
+  19 slices. **SHIPPED** 2026-10-26, D1–D7 at the recommendations. Open:
+  the 4K separate-source runtime case, an intermittent runtime timing case
+  and `1080p60:hard` in the recording matrix (see As built, slice E), and
+  the owner-run checks.
+- 2026-10-25: [Plan 199](199-one-minute-clips.md), A 1-minute clip beside
+  the 30-second clip. Owner request: "Let's also add a 60-second clip." The
+  ring always keeps 1 min, and each press says 30 or 60. There is a second
+  global key (unbound), two Stream Manager buttons, two ⌘K items,
+  `/clip 60`, "clip the last minute" by voice, and the optional `seconds` on
+  `clip.mark`, `replay.save` and the remote `clipMark`. A 1-min mark spans
+  the minute in Buddy's report. The Length setting goes away (D2). Disk use
+  roughly doubles, and CPU does not change. Slices S0–S6. **EXECUTING**
+  2026-10-25 on `plan-199-clip-length`, with D1–D9 at the recommendations
+  (owner: "Execute the entire plan and create a PR"). Rebases onto plan
+  198 when that lands.
+
+- 2026-10-25: [Plan 198](198-separate-recordings-screen-file-and-clips.md),
+  The Screen file dies at Record, and Clips loops after the take. Owner's
+  first 0.11.0 take with Separate source recordings left Combined + Camera
+  only: a capture-recovery latch from an hour earlier failed the Screen role
+  12 ms in. Clips buffer-only starts arm the ISO legs and are refused, and the
+  give-up limit never trips (62 refusals in 40 s). Plus a false "restart
+  Videorc" leak warning. Slices S1 latch scoped to the take, S2 Clips never
+  arms ISO, S3 Clips failure count, S4 leak snapshot, S5 toast + honest
+  Library row, S6 acceptance. **BUILT** 2026-10-25 on
+  `fix/198-screen-iso-startup`; owner's packaged take and by-eye owed;
+  hotfix candidate (0.11.1).
+
+- 2026-10-25: [Plan 195](195-windows-slow-microphone-breaks-recording-start.md),
+  A slow Windows microphone makes Record fail. Tester bundle (0.9.150, Iris
+  Xe, Cirrus Logic mic): the capture worker's fixed 2 s readiness never
+  passes, so the mic falls back to FFmpeg's direct DirectShow input, and
+  FFmpeg then needs 5-7 s to start against an 8 s deadline (0.5 s without a
+  mic on the same PC). Also explains "Microphone can't be changed", "Videorc
+  was busy" (liveControl expiries behind a 19 s poster) and the 3-31 s
+  start delay. Slices: S0 Windows measurement script, S1 evidence, S2
+  per-protocol readiness budget, S3 deadline per input topology (with PR
+  #769), S4 busy toasts, S5 output right-sizing. Part W is a self-contained
+  Windows test guide. **BUILT** 2026-10-25 on
+  `fix/195-windows-slow-mic-recording-start`: S1–S5 done; S0/W3/W4 need
+  Windows hardware; D1 (land #769) and D2 (Quick Sync default) are owner
+  calls.
+
+- 2026-10-25: [Plan 197](197-retro-lcd-studio.md), Retro LCD. Owner asked for
+  the whole Studio in audiocn's LCD-display style, every dropdown included,
+  then, on seeing it, for it to be an option. Settings → General → Retro LCD
+  (off by default) draws each Studio inspector section on one LCD screen
+  (titles, rows, the transport's keys, LCD dropdowns through `DevicePicker
+trigger="lcd"`) and every level meter as plan 196's LCD meter. Off, the
+  Studio is main's and the meters are the segmented bar again. **BUILT**
+  2026-10-25 on `feat/studio-lcd-style`; owner's by-eye owed.
+
+- 2026-10-25: [Plan 196](196-lcd-level-meter.md), The LCD meter for every
+  audio level. Owner request: the Studio microphone meter and the meters on
+  Sources become audiocn's LCD meter. `MicLevelMeter` stays the one meter
+  component and draws `LcdDisplay` + `LcdMeter` in Videorc's `--primary`
+  ink. A spike installed it on `4891fc53`: it builds, the eager bundle moves
+  9 gzip bytes, and it trips only gates on the audiocn files (Base UI fence,
+  colour literals, radii, one `cursor-pointer`, dock-slot coverage), fixed by
+  one upstream line (U1) and allowlists (S1). S2 swaps the meter and
+  measures the glow's CPU cost. The meter grows from 8 px to about 95 px.
+  Owner calls D1 to D5 (ink, readout, size, clip colour, which Sources rows)
+  have recommended defaults. **PR #800** 2026-10-25: built on the
+  defaults, with audiocn PR #32 (U1). Owed: #32 merged and deployed, the CPU
+  comparison and `smoke:sources` on a quiet host, owner by-eye.
+
+- 2026-10-25: [Plan 194](194-five-more-live-backgrounds.md), Five more live
+  backgrounds: Beams, Color Bends, Dither, Ferrofluid and Ghost Fibers from
+  React Bits, on plan 190's machinery (free, three looks each, all three
+  platforms). Beams, Dither and Ferrofluid are multi-pass like Silk and
+  Plasma; Color Bends is one pass. Ferrofluid drops its spring simulation for
+  React Bits' settled target (N1), so it stays a pure function of the phase.
+  Ghost Fibers draws instanced quads with additive blending, so every
+  renderer gains an instanced pass kind (N2), and the uniform block widens.
+  S1 is a hard cost gate on the M4 before any port. **DRAFT PR #810**
+  2026-10-25:
+  all nine slices done. Owner calls: A (ship the two if Metal fits) and
+  Ferrofluid at three quarters (at most 810 on its short side). Owed: Windows
+  CI (the first fxc compile and WARP goldens), Linux GLES goldens, a
+  quiet-host smoke with the budget (Ghost Fibers 1080p60), and the owner's
+  by-eye check.
+
+- 2026-10-24: [Plan 193](193-live-background-on-the-stream.md), The live
+  background moves on the stream. Owner report: live backgrounds animate in
+  Studio but sit still on the live stream. On macOS every record-and-stream
+  session streams from an auxiliary compositor leg, and plan 190 wired the
+  live background to the primary leg only (`live_background: None` on the
+  auxiliary inputs), so the stream drew the poster. The owner's 10-24
+  session proves it: its recording's ring moves on every frame, and the
+  stream leg's code never sees the shader. Fix (D1): the stream leg draws the
+  texture the recording rendered in the same tick, so no shader cost is
+  added and the two can't disagree. Windows gets a WARP test that pins its
+  stream target; Linux shares one frame already. The smoke gains
+  record-and-stream cases (it only recorded). D2: 4K60 stays the poster.
+  **MERGED** 2026-10-24 as #794 `a465a042`, shipped in 0.10.0. The smoke
+  shows the stream ring moving like the recording's on every case. Owed: the
+  Windows CI run of the S3 tests, a quiet-host p95 run and
+  `smoke:recording-studio`, owner by-eye on a real stream.
+
+- 2026-10-24: [Plan 192](192-buddy-greets-and-talks-on-its-own.md), Buddy
+  greets and talks on its own. On the owner's 10-24 stream (0.9.150), Buddy
+  was in Auto and posted nothing by itself, only the owner's two Say lines.
+  There were five causes:
+  - Greetings had no lines, so they posted nothing.
+  - First-time chatters were never greeted automatically (only the "Say hi"
+    nudge to the streamer).
+  - Greetings never use AI (plan 164 D5).
+  - Answers and Banter were off. Answers reply only when a viewer types
+    Buddy's name; the "unanswered question" half of 164 D5 was never built.
+  - About 10% of ticks failed with 502.
+
+  The fix, in six phases:
+  - built-in lines for every kind;
+  - welcomes for first-time and returning chatters;
+  - a Premium `/api/ai/cohost/greet` route that writes each greeting in the
+    persona's voice, with the line as the fallback;
+  - Answers from the streamer notes after 60 s;
+  - a tick 502 diagnosis;
+  - smokes and a live acceptance.
+
+  **BUILT** 2026-10-24 (owner took every recommendation): web #93 and #92
+  merged; the desktop PR carries Phases 0–3 and the smoke. Owed: a live
+  acceptance stream and the next stream's tick failure rate.
+
+- 2026-10-24: [Plan 190](190-live-backgrounds.md), Live backgrounds. The
+  owner wants five animated React Bits backgrounds (Silk, Side Rays, Plasma
+  Wave, Liquid Chrome, Line Waves) behind the screen and camera, free, on
+  macOS, Windows and Linux in one plan, with no cost to anyone who doesn't
+  turn one on. A live background is a bundled poster picture with a shader
+  attached. The GLSL from React Bits is the source of truth. Metal and D3D11
+  run hand ports, checked against golden grids. Linux runs the GLSL through
+  EGL/GLES on a latest-wins readback thread, under `linux_vaapi.rs`'s
+  render-node rules, because a CPU renderer measured far too slow. The two
+  Electron previews run it in WebGL2. A budget guard drops to half size,
+  then to the poster. Measured on an M4: 0.3–1.7 ms GPU per 1080p frame (a
+  still is 0.05–0.08 ms), 0–1 MB extra for four of the five, about 13 MB for
+  Plasma Wave. S1 is a hard cost gate on all three machines before any
+  product code. S9 proves zero cost when off with an A/B against
+  `origin/main`. Licence: the creator gave permission. D2–D6 answered.
+  **MERGED** 2026-10-24 as #779 `2b6114e0`; shipped in 0.9.149 (macOS) and
+  0.9.150 (all three). Every slice is built (S4 Windows and S5 Linux on
+  Opus, never run on their platforms). The gates found and fixed a contract
+  bug that retired main's present pump whenever a live background showed.
+  The macOS stream leg drew the poster: fixed by plan 193. Owed: a
+  quiet-host smoke run, the Windows and ogre checks, S1 cost on both, owner
+  by-eye in both themes.
+
+- 2026-10-24: [Plan 191](191-performance-pass.md), Performance pass. The
+  owner asked for an inspection of leaks and waste that changes no feature,
+  and then for one PR per confirmed problem. Seven read-only subsystem audits,
+  each finding re-checked at its line by the orchestrator, with measurements
+  on copies of the owner's real profile: a 2 GB Chromium cache of stale
+  backend 404s, a Library page that scanned its whole history (111–144 ms →
+  6 ms), rollback-journal writes (2.3 → ~0.3 ms in WAL), a `ps` fork every
+  second (~42 ms → ~35 µs per sample) and a 9.5–56 ms per-frame Windows preview
+  resize. **MERGED** 2026-10-24 (13 PRs plus #777, squashed; last
+  `b9ae4d8b`): one executor and one PR per problem, each reviewed, then
+  verified together on a merged tree (smoke:dev,
+  probe:comments-window, session-decay A/B against the base, clippy). Three
+  findings were closed after measurement showed no worthwhile win (#759,
+  #762, and the proof-surface decode, which moved to Part B). Part B holds the
+  owner decisions (Clips is on by default, so an idle Studio runs a full
+  encode; process-wide renderer un-throttling) and the follow-up slices, which
+  need a quiet host or a Windows box. Found on the way: CI's Rust job dies at
+  `cargo audit` (RUSTSEC-2026-0386, tokio) on main and every PR; #777 fixed
+  that, and the job now times out in its test build instead (N14).
+
+- 2026-10-23: [Plan 189](189-soundboard.md), Soundboard. The owner wants
+  a soundboard in Studio on audiocn's sound pads, with the sounds streamers
+  use most built in. Sounds join the session audio bus as a third mix
+  ingredient after every tap (never in the Microphone ISO file, captions,
+  Buddy or the echo guard), placed at the press instant; a session with no
+  sound played writes byte-identical PCM. Import decodes, trims and levels
+  each sound to -18 LUFS with the bundled FFmpeg; twelve CC0 starters ship
+  in the app. Studio plays, Assets → Sounds manages, Sources → Sounds holds
+  the level and "Hear sounds yourself" (a main-window Web Audio monitor).
+  Phase 2 in the same PR: Stream Manager, `/sound`, ⌘K, Stream Deck and the
+  phone. 9 decisions (D1–D9), taken on the recommended defaults because the
+  owner asked to execute the whole plan and open a PR. **EXECUTED**
+  2026-10-23 (both phases) on `plan-189-soundboard`: every gate and both
+  soundboard smokes pass; brand marks moved to files to keep the eager
+  bundle under its unchanged ceiling; the owner's by-ear on the starters and
+  a live take are owed.
+
+- 2026-10-22: [Plan 187](187-discord-go-live-announcement.md), Discord
+  go-live announcement (issue #634). One Discord webhook, free, automatic:
+  the first ticked destination confirmed live posts one message sent as the
+  streamer (name + avatar), with the title, the thumbnail, a ping (none /
+  @here / @everyone) and a link button per live platform. It edits itself
+  as more legs join and turns into "Was live · 1h 42m" on Stop. Public only
+  (unlisted/private YouTube skipped), a 15-minute restart window never
+  pings twice, and crash recovery is included. The backend owns the secret
+  and the trigger; the Discord section sits on the Livestream page after
+  Stream details. 14 owner decisions (D1–D14), 7 slices. **EXECUTED**
+  2026-10-22 (whole plan) on `plan-187-discord-go-live`: gates and
+  smoke:discord-announce pass; the test RPC is `discord.webhook.sendTest`
+  (`.test` names are admin-only); real-Discord check and owner by-eye owed.
+
+- 2026-10-20: [Plan 186](186-banners-on-the-picture.md), Banners. The
+  owner wants their own images (a sponsor strip, "Follow me", a logo, a
+  full-frame frame) placed anywhere on the picture, with recommended sizes.
+  A banner is an overlay-style layer, not a source: a backend-owned
+  `banners` table (alpha kept, 24 in Assets, 4 showing), rects per
+  orientation and the overlay leg plan unchanged, prepared off the render
+  thread to exact pixels and drawn 1:1 on Metal, CPU, D3D11, the legacy
+  FFmpeg FIFO and the proof surface. Assets manages, Scene places and
+  shows, with Stream Manager, `/banner`, ⌘K and Stream Deck/phone mirrors;
+  sharp sizes plus a per-place "soft at this size" hint. Phase 2: timer
+  (sponsor rotation) and Buddy voice. 11 decisions (D1–D11).
+  **EXECUTED** 2026-10-21 (whole plan, both phases) in draft PR #728: free,
+  one set of banners, the Scene page controls them, stacking as
+  recommended; smoke:banners passes on recording, stream and the vertical
+  stream; owner by-eye owed.
+
+### Plan 182 Import takeovers while recording or live
+
+- 2026-10-13: [Plan 182](182-import-takeovers-during-recording-and-livestreams.md)
+  — implemented in [PR #696](https://github.com/TheOrcDev/videorc/pull/696) (draft).
+  Live image import, bounded processing, explicit Studio activation and
+  recording/local-RTMP artifacts passed; broader gate blockers are documented.
+
 Generated by the improve skill.
+
+- 2026-10-12: [Plan 181](181-replay-buffer.md), clips: the replay buffer.
+  A user on X asked for the gamer workflow and the owner redesigned the
+  first build (R1-R4): Videorc keeps the last 30 seconds whenever it is
+  open (one switch on the Output page, on by default; the status bar shows
+  "Clip · 0:30"), and one action saves them as a clip: the Stream Manager's
+  Clip button, the Save a clip key, ⌘K, a deck `clipMark`, `/clip` in the
+  streamer's composer, the spoken "clip that" while a session has captions
+  or Buddy listening. While recording, the press also keeps the mark in the
+  recording. The ring is one more `-f segment` output on the session's
+  FFmpeg child (a stream copy behind the encoded bridges, a split plus a
+  second encode on the raw paths); a buffer-only session composes like a
+  record-only one and writes nothing permanent; Record and Go Live carry the
+  ring and the backend hands over inside `session.start`; a software
+  encoder path keeps the default off and says why. Clips go to
+  `<recordings>/Clips/Clip YYYY-MM-DD HH-MM-SS.mp4` with a Library row.
+  **EXECUTED** 2026-10-12 on `plan-181-replay-buffer` (PR #694): S0-S8,
+  then the redesign slices RS1-RS5; gates with the ring on by default, the
+  idle cost and the owner's by-eye are in the plan's "As built".
+- 2026-10-12: [Plan 179](179-live-lab-on-linux.md), the live lab on Linux.
+  The plan 178 harness runs on ogre (Omarchy, Hyprland) with the same safety
+  guarantees: a Hyprland headless output as the lab display, captured through
+  the ScreenCast portal and answered by a lab share picker (no restore token
+  is ever reused); a PipeWire remap source as the lab mic; espeak-ng speech;
+  `/etc/videorc-lab/policy.json`; a root-owned tc/netem fault helper behind
+  four sudoers verbs; a systemd user timer; `live:install` from an AppImage
+  (`file:`/`local:`, both candidates). **EXECUTED** offline on
+  `feat/live-lab-linux`; every ogre check is owed (SSH key not authorized).
+- 2026-10-12: [Plan 178](178-unattended-live-lab.md), the unattended live
+  lab. The owner wants Claude to go live and test with nobody present, on a
+  dedicated Mac. Merges plan 166 (soak) and plan 176 (attended lab): the lab
+  Mac goes live on @VideorcApp on a schedule and on demand (`live:remote`
+  over SSH from any session), clicking the real Go Live dialog through CDP,
+  so plan 166's remote-Go-Live product setting is dropped. An owner-owned
+  `policy.json` the lab user cannot write is the standing authorization
+  (limits, visibility, quota, kill switch via `control.json`); candidates are
+  Developer-ID signed in CI so the key never sits on the lab Mac and TCC
+  grants survive; frame checks on pulled clips replace by-eye steps; reports,
+  deduped `live-lab` issues, Discord P0. 16 slices in 3 phases.
+  **EXECUTED** 2026-10-12: every code slice built (U0-U13, U15 step 1); the
+  lab-machine visit, D1-D3 (machine, lab project In production, viewer
+  account), the first unattended runs (U8a, U14) and 14 days of data for
+  gates are owed.
+- 2026-10-11: [Plan 177](177-activity-reward-rows.md), Activity reward
+  rows. The owner wants a background behind channel point redemptions in
+  Activity, and the row ⋯ menu is cut off. Cause: Radix ScrollArea's
+  `display: table` wrapper lets long rows grow past the pane (Clean cut
+  already overrides it). S1 adds a probe check (red first) and the override;
+  S2 paints redemption rows `bg-reward/8` from a new `--reward` token (D1;
+  alt: the reward's own Twitch colour via Helix). **EXECUTED** 2026-10-11 with
+  D1 (a), then D2 (block layout in the shared ScrollArea) and D3 (tips paint
+  the paid tint); probe red then green in light and dark; PR #664.
+
+- 2026-10-11: [Plan 176](176-live-youtube-test-lab.md), the live lab.
+  The owner made a Videorc YouTube channel for real live tests. Claude goes
+  live on it, attended, from the owner's Mac: Videorc captures only a virtual
+  lab display showing a test card, the mic is BlackHole fed scripted speech,
+  and Go Live is clicked through CDP (`VIDEORC_REMOTE_DEBUG_PORT`). A lab
+  Google project (Testing mode, runtime client override) carries every lab
+  API call, so shared quota stays at zero: an observer reads broadcast and
+  ingest health, a viewer bot chats, yt-dlp clips are analysed for freezes
+  and A/V sync. Six suites (first light, OAuth Go Live, chat, on-stream
+  features, resilience, long/vertical/scheduled) close the owed live
+  acceptances, then a 20-min release suite. Builds plan 166's S1/S3/S6/S7
+  first. **L0 BUILT** 2026-10-12 (`live:hookup`, `live:doctor`,
+  `docs/live-lab.md`); continued as plan 178 (unattended).
+- 2026-10-08: [Plan 166](166-unattended-live-soak-on-youtube.md), Videorc
+  tests itself live on YouTube with nobody at the machine (daily soak on a
+  dedicated Mac, metrics journal, receiver watch, public reports).
+  **SUPERSEDED** by plan 178, which keeps its S1, S3, S6-S10 and drops S2.
+- 2026-10-11: [Plan 175](175-instant-captions-gateway-streaming-transcription.md),
+  instant live captions. The owner: captions are "3 - 5 seconds late". The
+  lag is structural: production runs the 3-second chunked fallback because the
+  voice-model realtime path was kill-switched in July (it created assistant
+  turns and could not be metered). The gateway now has a transcription-only
+  streaming WebSocket (`spacexai/grok-stt` $0.10/h, `openai/gpt-realtime-whisper`
+  $1.02/h); the plan moves the desktop transport to its envelope, meters it
+  with mint-time leases settled by `finish.durationInSeconds` and reconciled
+  against the gateway report API, keeps chunked as the fallback, and starts
+  with an owner bake-off (`pnpm probe:caption-stt`). **EXECUTED, in review** on
+  `plan-175-streaming-captions` + videorc-web #80 (deploy web first); S1
+  bake-off and rollout need the owner's gateway key.
+- 2026-10-10: [Plan 174](174-ui-ux-pass.md), the UI/UX pass. A whole-app
+  audit (347 findings with evidence in [the register](174-ui-ux-findings.md))
+  becomes 53 slices: stop the harm first (11 P0s: a livestream ending on
+  one key, Buddy posting or listening without the streamer, unconfirmed
+  deletes, dead controls, screen-reader blockers), then shared primitives,
+  one vocabulary, every page and window, and guards. Owner calls
+  2026-10-10: Buddy stays directly under Studio and keeps Clean cut; a
+  click on a live chat row puts it on stream. **EXECUTED** 2026-10-11
+  inside #647 (owner call 2026-10-10): all slices landed, the register is
+  fully marked (6 partials deferred with reasons), and the owner's by-eye
+  pass is owed.
+- 2026-10-10: [Plan 173](173-sources-tab-rewrite.md), the Sources tab
+  rebuilt. The owner: "everything is just one on another". Video (Screen,
+  Camera) now sits beside Audio (Microphone, System audio) at `lg`, the
+  Config-grid page `page.tsx` always named, and every source takes one
+  shape (`SourceItem`): a header with one status chip and one quick control,
+  a body indented to the title, and the rare settings (Sync, the echo guard)
+  folded into More. One status vocabulary (a missing device says "Not
+  found"), a facts line (screen size, camera format and rate), no dead
+  System audio meter, Calibrate in development builds only. Renderer only;
+  every probe selector kept. **EXECUTED, in review** on
+  `plan-173-sources-rewrite`.
+- 2026-10-09: [Plan 172](172-make-buddy-alive.md), Make it Alive for
+  real: a headless run of the creator's pipeline makes animated packs for
+  the official five (owner review per row; Buddy the Golem bundled, the
+  other four downloaded on first use), alive packs sync with the Buddy in
+  the account library (presigned uploads to Neon), a pack player animates
+  videorc.com, and a real creation plus a stream acceptance close plan 168.
+  PLANNED.
+- 2026-10-09: [Plan 171](171-golem-becomes-buddy.md), the companion's name
+  becomes Buddy everywhere (copy, code, wire names, URLs, the wake word);
+  the stone golem stays a golem creature named Buddy; the Buddy library's
+  pictures live in a private Neon bucket with their own S3 settings.
+- 2026-10-09: [Plan 170](170-golem-library-and-onboarding-on-web-and-app.md),
+  one Golem library per Videorc account, shared by videorc.com and the app,
+  plus the same four-step onboarding in both (meet your sidekick with a live
+  stream demo, describe it with an optional picture, give it a personality
+  and an about-you, generate the four still poses into the library). The
+  official library (the Golem, then an Orc, a Goblin, a Pirate and a Robot
+  in the house look, owner-reviewed) is free; creating your own is Premium
+  on the shared daily image allowance. Picking an avatar on either side
+  makes it the Golem; the app downloads it. Phase R renames Orcle to Golem
+  everywhere first (web pages and URLs with redirects, prompts, docs, code
+  names), keeping saved and wire values. EXECUTED 2026-10-09 in #647 and web
+  #79; owner review of the official art and live acceptance owed.
+- 2026-10-08: [Plan 168](168-living-golem-page-pet-sprites-and-creator.md),
+  the Golem comes alive with [page-pet](https://github.com/gvastethecreator/page-pet-skill)
+  sprite atlases (25 drawn look directions plus reactions in one
+  transparent WebP, manifest v1 unchanged). The backend owns the atlas and
+  an animator (viewer-plus-events gaze per leg, reactions from activity,
+  talk frames, blink, sleep, page-pet's motion ported without GSAP) and
+  draws one affine sprite quad on CPU, Metal and D3D11. Premium users
+  create their own pet in an in-app creator (web generates 9 sheets,
+  the desktop cuts, registers and packs them in Rust, the user reviews
+  every row); anyone imports page-pet packs; our default Golem is made with
+  the creator. Phase 0 first fixes the Golem settings padding (an
+  overridden shadcn `data-slot` hid the card's row padding). Eight phases, built in the plan 164 PRs (#647, #75).
+  **EXECUTED, in review** inside #647 and web #75 (owner call 2026-10-08).
+  Owed: the web deploy with its migration and the two model env vars, the
+  S-E1 cost probe, one real creation, the owner's frame review that makes
+  our default Golem pack (Phase G), a by-eye pass on the Stream Manager
+  header, and the D3D11 path's first Windows CI run.
+
+- 2026-10-08: [Plan 167](167-x-partner-kit-mark-and-verified-checks.md), X's
+  partner icon kit. The official X mark replaces three home-made drawings
+  (a Phosphor glyph in the app, a stroked "x" on the stream highlight card, a
+  letter on the phone remote), and X's Premium/Business/Government checks show
+  beside verified X chat authors. The web relay already sends `verified_type`;
+  the desktop starts keeping it. **EXECUTED, in review** on
+  `plan-167-x-partner-kit` (web part on `plan-167-x-kit-web`).
+
+- 2026-10-08: [Plan 164](164-golem-named-companion-avatar-and-auto-chat.md),
+  the Orcle tab becomes **Golem**: each user names their own companion,
+  gives it a personality and state images, places it on the Live Scene
+  canvas with a comic speech bubble instead of a voice, and turns on
+  automatic chat from Stream Manager. The highlight card, captions and the
+  Golem all get a free rect per orientation plus "Show on stream" and "Show
+  in recording" switches. **EXECUTED, in review** on `plan-164-golem-b`;
+  the owner's by-eye acceptance and the live Suggest-then-Auto pass stay
+  owed. Docs: `docs/golem.md`, `docs/overlays.md`.
+  - Phase A (tab, persona, avatar images): the tab and every line of copy
+    say Golem; `cohostSettings.persona` and `autoChat` on the wire with
+    Rust validation; uploads through main into `userData/golem-assets`;
+    generation as accept + event through the web's `/api/ai/cohost/avatar`;
+    the creation screen; wake words are `golem` plus the persona's name,
+    with the Orcle spellings as hidden aliases until 0.9.140.
+  - Phase B (overlays as placeable per-output items): the backend-owned
+    `overlayLayout` store and `overlays.layout.get/set` RPCs with a one-time
+    highlight-anchor migration; one `overlay_leg_plan` for captions, the
+    highlight card and the Golem, with the D13 fallbacks said in the Go Live
+    sheet; rects blitted by one oracle on the CPU, Metal and D3D11 paths;
+    three dashed items on the Live Scene canvas with an Orientation toggle,
+    an inspector and a Snap menu; captions derive `burnTarget` from the
+    switches.
+  - Phase C (the Golem on stream): the `golem_overlay` state machine, slot
+    and `cohost.golem.say`; the renderer rasterizes the avatar and its
+    bubble per output canvas; the three paths blit it under the highlight
+    card; the Stream Manager's Golem pane header and Say box. The item
+    ships with both switches off (opt-in). The owner's stone golem is the
+    emblem and the default avatar.
+  - Phase D (automatic chat): the greeting engine with user-written
+    templates and no model; the throttle and the send path with a
+    Golem-owned `operationId`; answers on tick v4 only when the web says
+    so; banter on dead air, default off; the greetings editor on the Chat
+    tab; the chat mode (Off, Suggest, Auto) and consent in Stream Manager.
+    Every message posts as the streamer's own account.
+  - Phase E (docs, gates): `docs/golem.md` rewritten, `docs/overlays.md`
+    new, the Cloud AI consent names avatar images and chat replies as you.
+- 2026-10-08: [Plan 165](165-youtube-tos-report-official-icon.md), the reply
+  to Google's YouTube API ToS Violations Report V.1. The one violation
+  (III.F.2a) is fixed by showing the official YouTube icon, converted
+  losslessly from the brand-site file, at 20px or taller on every desktop
+  surface, including the flagged Stream Manager chat, activity and status bar
+  and the YouTube / YouTube Vertical destination rows. The two confirmations
+  (III.D.1c project numbers, III.E.4 refresh/delete cadence) get written
+  answers, with no code. The owner scoped it to what the report names: no
+  retention or deletion work. **EXECUTED, in review** on `plan-165-youtube-tos`.
+
+- 2026-10-08: [Plan 163](163-channel-points-name-and-auto-show-redemptions.md),
+  redemptions say the channel's own points name ("500 Orc Gold", "1,500
+  Diamonds") and auto-show when the Activity switch is on. Helix has no field
+  for the name; it is read once per stream from Twitch's own GQL, with only
+  the public channel id, and falls back to "points" on any failure.
+  **EXECUTED, in review** on `plan-163-channel-points-name`.
+
+- 2026-10-07: [Plan 161](161-dead-stream-destination-reported-and-reconnected.md),
+  a stream destination whose ingest closes mid-stream is reconnected and
+  reported. **MERGED** via PR #637 (`fix/161-dead-stream-leg`); the owner's
+  pull-the-cable acceptance stays owed.
+  - Incident 2026-10-07: YouTube closed the RTMP connection eight minutes in;
+    FFmpeg's fifo did not retry the EOF and the app stayed "On air".
+  - Legs reconnect after any error on a keyframe; FFmpeg's per-leg reconnects
+    and deaths are attributed exactly (`-loglevel level+info`).
+  - YouTube (stream status) and Twitch (viewer poll) say when they stop
+    receiving; the Streaming tab, cards, Stream Manager and toasts show it.
+  - New `pnpm smoke:stream-leg-eof`.
+
+- 2026-10-07: [Plan 162](162-twitch-bits-power-ups-and-channel-points-in-activity.md),
+  Twitch Power-ups and channel point redemptions in Activity. Bits and a
+  redemption on the 10-07 stream never reached Activity: Videorc subscribed
+  only to chat EventSub types, and a Celebration or a redemption posts no chat
+  cheer. **EXECUTED, in review** on `plan-162-twitch-bits-points`; owner
+  acceptance on a live Twitch stream (S7) stays with the owner.
+  - Optional `bits:read` + `channel:read:redemptions`; `channel.bits.use` and
+    both redemption subscriptions, best-effort (a refusal never costs chat).
+  - Activity-only rows: Power-ups under Tips (counted as bits), redemptions
+    under a new Rewards chip (never summed); a reconnect hint in Activity.
+
+### PR 632 separate-source recording review fixes
+
+- 2026-10-07: [Plan 158](158-harden-separate-source-recordings.md)
+  addresses all eight review findings on `b9ee699c`. **IN PROGRESS** with
+  owner authorization to implement and push to PR #632. Execution order:
+  deterministic tests, startup ownership, per-role failures, durable recovery,
+  shared timeline, audio offsets, source removal, metadata, production smokes
+  and final acceptance. The plan records dependencies and verification gates.
+  The first three fix commits are pushed, latest `366721f0`. A reviewed
+  corrective follow-up drains the exact PCM Stop boundary, seeds explicit
+  Windows fixture selection authority and tests FIFO timing deterministically.
+  Compile-check, strict Clippy and formatting pass. Full Rust remains in progress
+  under an owned supervisor. The follow-up uses CI verification in parallel,
+  with all acceptance gates retained. Focused native-latency 30/60 fps recordings
+  and real crash/restart recovery pass. The follow-up passes all 19
+  lifecycle cases and final full Rust, including the late-start rollback
+  regression. The final collected runtime fails six recording cases and the
+  Stop→Idle latency gate; corrections and app/device gates remain in progress.
+  Three simultaneous 4K30 outputs
+  remain blocked by measured M4 hardware throughput. Windows source/audio
+  stability passed on `35b6f71d`; the corrective head still needs the Windows
+  25×/3× gates and macOS full suite. The preceding head failed its Windows
+  selection-authority fixture and a macOS FIFO wall-scheduler test.
+  The latest runtime also overlaps the owner's active installed-app media
+  session, so quiet-host performance qualification remains required.
+
+- 2026-10-06: [Plan 157](157-separate-source-recordings.md), optional separate
+  source recordings: one Record session also writes a Screen file (system
+  audio) and a Camera file (microphone) beside the Combined file, for free
+  editing later. **EXECUTED, in review** on `feat/separate-source-recordings`;
+  the packaged-app camera take and `pnpm smoke:separate-source-take` on it
+  stay with the owner (the dev app has no camera TCC grant).
+  - Recording tab → Output → "Separate source recordings" switch, off by
+    default, locked while live, with the exact reason when the scene lacks a
+    camera or a screen/window. Free, no Premium gate.
+  - Preview, Combined recording and every stream stay composed exactly as
+    today; the ISO legs are extra compositor outputs on the same capture
+    graph (recording canvas, fit/contain, no bubble/chroma/background), each
+    with its own VideoToolbox bridge and MKV muxer fed by a mic or system tap
+    off the audio bus.
+  - Library lists the three files as one take (`takeId`, role badge); each
+    ISO row runs the ordinary MKV → MP4 finalization. Refusals are explicit
+    (no encoder bridge, record off, `keepCombined: false`, missing source).
 
 - 2026-10-07: [Plan 159](159-web-stops-selling-4k-streaming.md) runs Plan
   075's web slices that never ran. videorcweb no longer sells streaming
@@ -105,6 +808,7 @@ Generated by the improve skill.
   - Condensed: a long stream cut down to about 15 minutes.
   - Still owed by the owner: S0 calibration, acceptance A1–A3 and the provider
     key.
+
 ### In-app QA sweep (2026-10-03)
 
 The initial audit tested release 0.9.129 at `05ff9188` alongside the installed
@@ -134,53 +838,53 @@ Original OBS, glass,
 preview, camera, audio and shared-stop causes, physical Windows and remaining capability
 checks keep final acceptance open. The original checkout and unrelated plans are preserved.
 
-| Plan | Fix | Priority | Depends on | Status |
-| --- | --- | --- | --- | --- |
-| [098](098-apply-orcle-consent-changes-during-sessions.md) | Apply active Orcle consent changes | P1 | — | IMPLEMENTED `9e015cb1` / PR 546; 317 focused tests; final E2E pending |
-| [111](111-cancel-detached-phone-stop-gestures.md) | Cancel retired Phone remote stop gestures | P1 | — | IMPLEMENTED `5a81d166` / PR 545; 44 focused tests; final E2E and physical pointer verification pending |
-| [102](102-bootstrap-idle-microphone-meter-fallback.md) | Bootstrap idle microphone analyser demand | P1 | — | IMPLEMENTED `1a69b9d6` / PR 547; 104 focused tests; final E2E pending |
-| [104](104-refresh-source-reconciliation-smoke-contract.md) | Repair source smoke's Camera Off fixture | P1 | — | IMPLEMENTED `9ba10371` / PR 548; CLI smoke and120 focused tests pass; current local aggregate Sources stage PASS |
-| [105](105-make-scene-preset-smoke-state-cloneable.md) | Make scene smoke diagnostic state cloneable | P1 | — | IMPLEMENTED `59a0cf0f` / PR 549; 140 focused tests; final E2E pending |
-| [106](106-diagnose-source-loss-audio-in-stream-artifacts.md) | Diagnose source-loss audio in stream artifact | P1 | — | IMPLEMENTED; PR 560; all source-switch modes and three fresh stream legs PASS; broader recording/A/V gates pending; Shadscan 37 |
-| [107](107-diagnose-floating-preview-input-latency.md) | Diagnose floating native-preview input latency | P1 | — | CAMERA FIX merged PR564; three post-fix native stress PASS unchanged100ms; current complete36-stage recording/device PASS; original samples retained |
-| [110](110-reject-obstructed-glass-probe-evidence.md) | Reject system-dialog-obstructed glass evidence | P1 | — | IMPLEMENTED `d91a7cb7` / PR 551; latest full bundle correctly INVALID at first glass sample due other-app overlap; zero scored rows; clean visual E2E pending |
-| [109](109-diagnose-live-layout-intent-buttons.md) | Diagnose live layout buttons blocking latest intent | P1 | — | IMPLEMENTED PR553; three physical preview stress runs and current36-stage recording/device PASS; full local bundle pending |
-| [108](108-repair-obs-import-smoke-and-owned-teardown.md) | Repair OBS import smoke and owned teardown | P1 | — | IMPLEMENTED `205a6f5e` / PR 550; 47 Node + 43 OBS desktop tests; three current real-IPC runs FAIL at obsRead; private storage-boundary trace lacks complete owner proof; diagnosis open |
-| [101](101-restore-camera-off-in-saved-scenes.md) | Preserve saved Camera Off | P1 | — | IMPLEMENTED `43716ab3` / PR 552; 263 focused tests; final E2E pending |
-| [103](103-persist-source-visibility-in-scene-snapshots.md) | Preserve saved source visibility | P1 | — | IMPLEMENTED PR554; current three full scene trials: one PASS including final camera artifacts, two hide timeouts; Plan133 cause open |
-| [097](097-scope-voice-clip-marks-to-recordings.md) | Scope clip matcher/dedupe to recording | P1 | — | IMPLEMENTED PR558; one current synthetic-native A-manual/B-voice diagnostic PASS with original caption/artifact checks and B dedupe; 11knownPIDs/two groups absent; full bundle still pending |
-| [099](099-count-new-chat-during-buffer-rollover.md) | Count unread chat beyond buffer rollover | P1 | — | IMPLEMENTED `d5729943` / PR 555; 272 root focused tests; current strict fake-provider and Comments-window PASS; complete bundle pending |
-| [114](114-sync-source-visibility-protocol-fixture.md) | Synchronize source visibility protocol fixture | P1 | 103 | IMPLEMENTED `fef7bc40` / PR 556; focused and predecessor full logic gates pass; final app acceptance pending |
-| [100](100-preserve-whole-session-stream-manager-totals.md) | Keep durable session support/chat totals | P1 | — | IMPLEMENTED `bd85a1ef` / PR 557; 539 independent focused cases; current strict totals/rollover/finished-History and Comments-window PASS; complete bundle pending |
-| [115](115-fix-durable-chat-tip-sort-clippy.md) | Restore durable totals strict Rust lint | P1 | 100 | IMPLEMENTED; PR 559; 12 root tests and strict local 1.98 Clippy; fresh macOS/Linux 1.99 gates pass; Shadscan 37 |
-| [113](113-restore-renderer-initial-asset-budget.md) | Restore initial renderer asset budget | P1 | Remaining 097–111 implementations | IMPLEMENTED; PR 562; unchanged asset limits, fresh build and full JS gates pass; final E2E pending |
-| [116](116-preserve-rollover-coverage-with-bounded-activity-fixtures.md) | Stabilize follow rollover integration fixture without weakening coverage | P1 | 099, 100, 113 | IMPLEMENTED; PR 563; full desktop 2,808 pass / 1 existing skip and JS CI green; exact rollover/Activity identities preserved; final app acceptance pending |
-| [117](117-diagnose-preview-lifecycle-main-window-readiness.md) | Diagnose main-window loss during preview lifecycle | P1 | Final 107 verification | Diagnostics merged PR565; three instrumented100-cycle passes; original intermittent cause open |
-| [118](118-diagnose-listen-only-caption-contract-upload.md) | Restore caption fixture sample clock | P1 | Final recording-studio verification | FIX merged PR566; HTTP/listen-only/current36-stage device batch PASS; both Windows fixture cases each28PASS; whole-job audits tracked in124 |
-| [120](120-restore-detached-comments-probe-command-contract.md) | Restore detached Comments probe command contract | P1 | Final recording-studio verification | FIX merged PR567; root118 desktop/10Node pass; unchanged app probe PASS in complete36-stage device batch |
-| [121](121-diagnose-native-preview-scene-update-budget.md) | Diagnose native scene-update budget failure | P1 | Final recording-studio verification | Five current-main trials PASS unchanged limits; original50.2ms cause open |
-| [122](122-diagnose-blocked-worker-live-control-deadline-test.md) | Enforce original mutation deadlines | P1 | Final source verification | FIX merged PR568; root13/neighbor24/fullRust2993pass; modern macOS/Linux and later Windows25/3 PASS; earlier audio failures retained in126 |
-| [123](123-update-deadline-production-wiring-contract-check.md) | Update deadline production wiring contract check | P1 | Final script verification | TEST FIX merged PR569; root9/fullNode1824 pass; complete36-stage device batch PASS; production unchanged |
-| [124](124-allow-windows-source-gates-to-finish-required-audits.md) | Allow Windows source gate audits to finish | P1 | Final source verification | CI FIX merged PR570; actual Windows job111330354018 SUCCESS, all25/3 passes and audits; later source slices remain separate |
-| [125](125-diagnose-fake-provider-activity-accounting-contract.md) | Repair fake-provider activity comparison | P1 | Final local verification | FIX merged PR571/main8dd2aa9d; correct RPC rejected solely by JSON property order; rootNode20/Rust14/strictClippy and Windows25/3/audits PASS; distinct readiness138 merged; current complete fake-provider app PASS, bundle INVALID at glass |
-| [126](126-diagnose-windows-audio-mixer-stability-failures.md) | Diagnose Windows audio mixer stability failures | P1 | Final Windows verification | Observation-only repair merged PR573; earlier actual25/3 PASS retained; PR602 audio pass22/PR603 before-stall PCM pass16 FAIL retained; automatic identical main source actual25/3 PASS; no attributed audio repair, cause OPEN |
-| [112](112-diagnose-windows-incident-artifact-failures.md) | Diagnose Windows CI artifact freezes and stop tails | P1 | — | Four hash-joined cohorts FAIL; latest main controlled42/48/tone21/48, worst7633ms freeze/10742ms quiet; component49/50 after prior50/50 control; cause/physical Windows OPEN |
-| [127](127-fix-legacy-oauth-smoke-startup-ownership.md) | Share OAuth smoke build/startup ownership | P1 | Final local verification | FIX merged PR574/mainc51f9e5f; actual callers RED8/4 controls, final GREEN44; unchanged OAuth assertions/90-second limit; actual Windows25/3/all audits PASS including12newOAuthcases×25; latest actual OAuth/OAuthguardsPASS, whole bundleFAIL135 |
-| [128](128-diagnose-orcle-consent-smoke-caption-audio-startup.md) | Repair Orcle consent caption-audio startup | P1 | Final feature verification | FIX merged PR576/main60de246a; debug RPC switch and independent-caption start order; focused22PASS and actual maintained five-second audio gate PASS; next discrepancy129 |
-| [129](129-diagnose-orcle-consent-caption-final-event.md) | Repair repeated caption fixture capture resets | P1 | Final feature verification | DEBUG FIX merged PR577/main180b509c; root7/192 unique Rust/22 Node, strictClippy/fmt, Shadscan37; original full-smoke timing unproven; complete cohost/fresh36studio PASS; all7Rustfixturecases25times and fullWindows3 PASS on byte-identical current Rusttree; latest131all7pump Node cases×25/raw/fullWindows3/audits PASS |
-| [130](130-diagnose-orcle-consent-caption-socket-retirement.md) | Diagnose held-consent caption socket retirement | P1 | Final feature verification | FIX merged PR578/main1e8cb13f; focused25/root9/actualbackend preserves284context/twofinals; complete cohost/fresh36-stage device PASS; actualWindows all9fake-provider cases×25/three full suites/audits PASS; latest131pump separate |
-| [131](131-diagnose-spotlight-short-caption-final.md) | Diagnose missing short Spotlight breaker final | P1 | Final feature verification | FIX merged946f6fee/PR581/main7f345759: confirmed stream uses native PCM clock, idle tap unchanged; same-body RED2fail/5controls→GREEN7, focused32PASS, actual stream/idle all3finals PASS after exact cleanup; complete unchanged cohost53321 PASS; fresh36-stage studio/device PASS; latestWindows all7pump/9fake/12OAuthcases×25,26Rustfilters×25/full3/audits rawPASS; remaining app gates pending |
-| [132](132-diagnose-cohost-stream-startup-audio-stall.md) | Diagnose stream-startup audio loss notice | P2 | Final feature verification | INVESTIGATED: zero-only pre-injection fixture loss triggers existing Plan076 notice; complete cohost PASS; no supported new correction, encoded artifact absent and stall cause unassigned |
-| [133](133-diagnose-scene-camera-visibility-toggle.md) | Diagnose camera visibility UI timeout | P1 | Final scene verification | Four original timeouts retained; current three full trials: one PASS incl 52 visible/175 hidden frames, two hide timeouts; cause open; DOM-model diagnostic separate |
-| [134](134-dispose-losing-record-latency-waits.md) | Dispose record-latency smoke wait owners | P2 | Full local verification | ActualRED2fail/6controls then GREEN19/fullNode1879; owner repair merged326b988/PR585/maincacc3c7e/Shad37; current original5artifact enforcement PASS, exact controller exit unmeasured; Windowsraw pending |
-| [135](135-diagnose-live-system-audio-toggle-dropout.md) | Diagnose live system-audio dropout | P1 | Full local verification | Original full bundle FAIL; three original six-case controls18/18 and current bundle6/6PASS; original stereo quiet gap/in-phase/continuous AAC confirmed; cause OPEN, later gates/full soaks pending |
-| [136](136-renew-scene-recording-output-capability.md) | Renew scene recording output authority | P2 | Final scene verification | SOURCE FIX mergedb2c985b/PR586/main37f49f45; exactRust1/static/Shad37PASS; full original run proves both final camera artifacts; current133 intermittent timeouts remain distinct |
-| [137](137-clean-up-shared-remote-client-waits.md) | Dispose failed shared request/event owners | P2 | 134 | SOURCE FIX merged27d2942d/PR587/main6dbabec1; RED5/2 then root26/fullNode1886/static/Shad37PASS; real latency/remote-control/LAN PASS; actual Windows shared-client7/latency19 each25 and fullRust3 PASS, root raw verified; complete bundle pending |
-| [138](138-await-complete-fake-activity-receipts.md) | Await complete fake activity receipts | P2 | 125 | FIX merged5e875661/PR589/main26b296ad; actualRED6fail/24controls, rootfocused30/fullNode1897/static/Shad37PASS; unchanged app strict totals/rollover PASS; original Windows pass22 recovery failure retained in139; current main all30receipt cases×25/fullRust3 rawPASS; final bundle/soaks pending |
-| [139](139-retain-bounded-source-clock-recovery-evidence.md) | Retain bounded source-clock recovery evidence | P1 | 126 | Diagnostic merged PR593; current Windows 26 filters ×25 / full3 and local 49 mixer PASS; earlier recovery/FIFO failures remain unassigned, complete raw evidence retained |
-| [146](146-bound-legacy-pcm-recording-sync.md) | Bound legacy PCM recording synchronization | P1 | Final profile matrix | FIX merged PR600/main2310b6fd; real-command RED→GREEN, full Rust/desktop/Node and actual Windows25/3 PASS; downstream unchanged matrix18/18 PASS; studio/device/full bundle blocked |
-| [147](147-diagnose-shared-record-stream-stop.md) | Diagnose shared record/stream stop failure | P1 | Final profile matrix | Original TERM/KILL/missing artifact retained; three isolated trials6/6 and later complete matrix18/18 PASS; restored original plan body; original cause OPEN |
-| [148](148-diagnose-legacy-recording-startup-admission.md) | Diagnose legacy recording startup admission | P1 | 146 | FIX PR602 plus test cleanup PR603 merged; explicit pre-exec RED→GREEN, matrix18/18, latency5 and macOS reader25/fullRust PASS; failed PR audio cohorts retained; automatic identical main reader25/fullRust3/source gates PASS; visible-device/full bundle blocked |
+| Plan                                                                    | Fix                                                                      | Priority | Depends on                          | Status                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------ | -------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [098](098-apply-orcle-consent-changes-during-sessions.md)               | Apply active Orcle consent changes                                       | P1       | —                                   | IMPLEMENTED `9e015cb1` / PR 546; 317 focused tests; final E2E pending                                                                                                                                                                                                                                                                                                                                 |
+| [111](111-cancel-detached-phone-stop-gestures.md)                       | Cancel retired Phone remote stop gestures                                | P1       | —                                   | IMPLEMENTED `5a81d166` / PR 545; 44 focused tests; final E2E and physical pointer verification pending                                                                                                                                                                                                                                                                                                |
+| [102](102-bootstrap-idle-microphone-meter-fallback.md)                  | Bootstrap idle microphone analyser demand                                | P1       | —                                   | IMPLEMENTED `1a69b9d6` / PR 547; 104 focused tests; final E2E pending                                                                                                                                                                                                                                                                                                                                 |
+| [104](104-refresh-source-reconciliation-smoke-contract.md)              | Repair source smoke's Camera Off fixture                                 | P1       | —                                   | IMPLEMENTED `9ba10371` / PR 548; CLI smoke and120 focused tests pass; current local aggregate Sources stage PASS                                                                                                                                                                                                                                                                                      |
+| [105](105-make-scene-preset-smoke-state-cloneable.md)                   | Make scene smoke diagnostic state cloneable                              | P1       | —                                   | IMPLEMENTED `59a0cf0f` / PR 549; 140 focused tests; final E2E pending                                                                                                                                                                                                                                                                                                                                 |
+| [106](106-diagnose-source-loss-audio-in-stream-artifacts.md)            | Diagnose source-loss audio in stream artifact                            | P1       | —                                   | IMPLEMENTED; PR 560; all source-switch modes and three fresh stream legs PASS; broader recording/A/V gates pending; Shadscan 37                                                                                                                                                                                                                                                                       |
+| [107](107-diagnose-floating-preview-input-latency.md)                   | Diagnose floating native-preview input latency                           | P1       | —                                   | CAMERA FIX merged PR564; three post-fix native stress PASS unchanged100ms; current complete36-stage recording/device PASS; original samples retained                                                                                                                                                                                                                                                  |
+| [110](110-reject-obstructed-glass-probe-evidence.md)                    | Reject system-dialog-obstructed glass evidence                           | P1       | —                                   | IMPLEMENTED `d91a7cb7` / PR 551; latest full bundle correctly INVALID at first glass sample due other-app overlap; zero scored rows; clean visual E2E pending                                                                                                                                                                                                                                         |
+| [109](109-diagnose-live-layout-intent-buttons.md)                       | Diagnose live layout buttons blocking latest intent                      | P1       | —                                   | IMPLEMENTED PR553; three physical preview stress runs and current36-stage recording/device PASS; full local bundle pending                                                                                                                                                                                                                                                                            |
+| [108](108-repair-obs-import-smoke-and-owned-teardown.md)                | Repair OBS import smoke and owned teardown                               | P1       | —                                   | IMPLEMENTED `205a6f5e` / PR 550; 47 Node + 43 OBS desktop tests; three current real-IPC runs FAIL at obsRead; private storage-boundary trace lacks complete owner proof; diagnosis open                                                                                                                                                                                                               |
+| [101](101-restore-camera-off-in-saved-scenes.md)                        | Preserve saved Camera Off                                                | P1       | —                                   | IMPLEMENTED `43716ab3` / PR 552; 263 focused tests; final E2E pending                                                                                                                                                                                                                                                                                                                                 |
+| [103](103-persist-source-visibility-in-scene-snapshots.md)              | Preserve saved source visibility                                         | P1       | —                                   | IMPLEMENTED PR554; current three full scene trials: one PASS including final camera artifacts, two hide timeouts; Plan133 cause open                                                                                                                                                                                                                                                                  |
+| [097](097-scope-voice-clip-marks-to-recordings.md)                      | Scope clip matcher/dedupe to recording                                   | P1       | —                                   | IMPLEMENTED PR558; one current synthetic-native A-manual/B-voice diagnostic PASS with original caption/artifact checks and B dedupe; 11knownPIDs/two groups absent; full bundle still pending                                                                                                                                                                                                         |
+| [099](099-count-new-chat-during-buffer-rollover.md)                     | Count unread chat beyond buffer rollover                                 | P1       | —                                   | IMPLEMENTED `d5729943` / PR 555; 272 root focused tests; current strict fake-provider and Comments-window PASS; complete bundle pending                                                                                                                                                                                                                                                               |
+| [114](114-sync-source-visibility-protocol-fixture.md)                   | Synchronize source visibility protocol fixture                           | P1       | 103                                 | IMPLEMENTED `fef7bc40` / PR 556; focused and predecessor full logic gates pass; final app acceptance pending                                                                                                                                                                                                                                                                                          |
+| [100](100-preserve-whole-session-stream-manager-totals.md)              | Keep durable session support/chat totals                                 | P1       | —                                   | IMPLEMENTED `bd85a1ef` / PR 557; 539 independent focused cases; current strict totals/rollover/finished-History and Comments-window PASS; complete bundle pending                                                                                                                                                                                                                                     |
+| [115](115-fix-durable-chat-tip-sort-clippy.md)                          | Restore durable totals strict Rust lint                                  | P1       | 100                                 | IMPLEMENTED; PR 559; 12 root tests and strict local 1.98 Clippy; fresh macOS/Linux 1.99 gates pass; Shadscan 37                                                                                                                                                                                                                                                                                       |
+| [113](113-restore-renderer-initial-asset-budget.md)                     | Restore initial renderer asset budget                                    | P1       | Remaining 097–111 implementations   | IMPLEMENTED; PR 562; unchanged asset limits, fresh build and full JS gates pass; final E2E pending                                                                                                                                                                                                                                                                                                    |
+| [116](116-preserve-rollover-coverage-with-bounded-activity-fixtures.md) | Stabilize follow rollover integration fixture without weakening coverage | P1       | 099, 100, 113                       | IMPLEMENTED; PR 563; full desktop 2,808 pass / 1 existing skip and JS CI green; exact rollover/Activity identities preserved; final app acceptance pending                                                                                                                                                                                                                                            |
+| [117](117-diagnose-preview-lifecycle-main-window-readiness.md)          | Diagnose main-window loss during preview lifecycle                       | P1       | Final 107 verification              | Diagnostics merged PR565; three instrumented100-cycle passes; original intermittent cause open                                                                                                                                                                                                                                                                                                        |
+| [118](118-diagnose-listen-only-caption-contract-upload.md)              | Restore caption fixture sample clock                                     | P1       | Final recording-studio verification | FIX merged PR566; HTTP/listen-only/current36-stage device batch PASS; both Windows fixture cases each28PASS; whole-job audits tracked in124                                                                                                                                                                                                                                                           |
+| [120](120-restore-detached-comments-probe-command-contract.md)          | Restore detached Comments probe command contract                         | P1       | Final recording-studio verification | FIX merged PR567; root118 desktop/10Node pass; unchanged app probe PASS in complete36-stage device batch                                                                                                                                                                                                                                                                                              |
+| [121](121-diagnose-native-preview-scene-update-budget.md)               | Diagnose native scene-update budget failure                              | P1       | Final recording-studio verification | Five current-main trials PASS unchanged limits; original50.2ms cause open                                                                                                                                                                                                                                                                                                                             |
+| [122](122-diagnose-blocked-worker-live-control-deadline-test.md)        | Enforce original mutation deadlines                                      | P1       | Final source verification           | FIX merged PR568; root13/neighbor24/fullRust2993pass; modern macOS/Linux and later Windows25/3 PASS; earlier audio failures retained in126                                                                                                                                                                                                                                                            |
+| [123](123-update-deadline-production-wiring-contract-check.md)          | Update deadline production wiring contract check                         | P1       | Final script verification           | TEST FIX merged PR569; root9/fullNode1824 pass; complete36-stage device batch PASS; production unchanged                                                                                                                                                                                                                                                                                              |
+| [124](124-allow-windows-source-gates-to-finish-required-audits.md)      | Allow Windows source gate audits to finish                               | P1       | Final source verification           | CI FIX merged PR570; actual Windows job111330354018 SUCCESS, all25/3 passes and audits; later source slices remain separate                                                                                                                                                                                                                                                                           |
+| [125](125-diagnose-fake-provider-activity-accounting-contract.md)       | Repair fake-provider activity comparison                                 | P1       | Final local verification            | FIX merged PR571/main8dd2aa9d; correct RPC rejected solely by JSON property order; rootNode20/Rust14/strictClippy and Windows25/3/audits PASS; distinct readiness138 merged; current complete fake-provider app PASS, bundle INVALID at glass                                                                                                                                                         |
+| [126](126-diagnose-windows-audio-mixer-stability-failures.md)           | Diagnose Windows audio mixer stability failures                          | P1       | Final Windows verification          | Observation-only repair merged PR573; earlier actual25/3 PASS retained; PR602 audio pass22/PR603 before-stall PCM pass16 FAIL retained; automatic identical main source actual25/3 PASS; no attributed audio repair, cause OPEN                                                                                                                                                                       |
+| [112](112-diagnose-windows-incident-artifact-failures.md)               | Diagnose Windows CI artifact freezes and stop tails                      | P1       | —                                   | Four hash-joined cohorts FAIL; latest main controlled42/48/tone21/48, worst7633ms freeze/10742ms quiet; component49/50 after prior50/50 control; cause/physical Windows OPEN                                                                                                                                                                                                                          |
+| [127](127-fix-legacy-oauth-smoke-startup-ownership.md)                  | Share OAuth smoke build/startup ownership                                | P1       | Final local verification            | FIX merged PR574/mainc51f9e5f; actual callers RED8/4 controls, final GREEN44; unchanged OAuth assertions/90-second limit; actual Windows25/3/all audits PASS including12newOAuthcases×25; latest actual OAuth/OAuthguardsPASS, whole bundleFAIL135                                                                                                                                                    |
+| [128](128-diagnose-orcle-consent-smoke-caption-audio-startup.md)        | Repair Orcle consent caption-audio startup                               | P1       | Final feature verification          | FIX merged PR576/main60de246a; debug RPC switch and independent-caption start order; focused22PASS and actual maintained five-second audio gate PASS; next discrepancy129                                                                                                                                                                                                                             |
+| [129](129-diagnose-orcle-consent-caption-final-event.md)                | Repair repeated caption fixture capture resets                           | P1       | Final feature verification          | DEBUG FIX merged PR577/main180b509c; root7/192 unique Rust/22 Node, strictClippy/fmt, Shadscan37; original full-smoke timing unproven; complete cohost/fresh36studio PASS; all7Rustfixturecases25times and fullWindows3 PASS on byte-identical current Rusttree; latest131all7pump Node cases×25/raw/fullWindows3/audits PASS                                                                         |
+| [130](130-diagnose-orcle-consent-caption-socket-retirement.md)          | Diagnose held-consent caption socket retirement                          | P1       | Final feature verification          | FIX merged PR578/main1e8cb13f; focused25/root9/actualbackend preserves284context/twofinals; complete cohost/fresh36-stage device PASS; actualWindows all9fake-provider cases×25/three full suites/audits PASS; latest131pump separate                                                                                                                                                                 |
+| [131](131-diagnose-spotlight-short-caption-final.md)                    | Diagnose missing short Spotlight breaker final                           | P1       | Final feature verification          | FIX merged946f6fee/PR581/main7f345759: confirmed stream uses native PCM clock, idle tap unchanged; same-body RED2fail/5controls→GREEN7, focused32PASS, actual stream/idle all3finals PASS after exact cleanup; complete unchanged cohost53321 PASS; fresh36-stage studio/device PASS; latestWindows all7pump/9fake/12OAuthcases×25,26Rustfilters×25/full3/audits rawPASS; remaining app gates pending |
+| [132](132-diagnose-cohost-stream-startup-audio-stall.md)                | Diagnose stream-startup audio loss notice                                | P2       | Final feature verification          | INVESTIGATED: zero-only pre-injection fixture loss triggers existing Plan076 notice; complete cohost PASS; no supported new correction, encoded artifact absent and stall cause unassigned                                                                                                                                                                                                            |
+| [133](133-diagnose-scene-camera-visibility-toggle.md)                   | Diagnose camera visibility UI timeout                                    | P1       | Final scene verification            | Four original timeouts retained; current three full trials: one PASS incl 52 visible/175 hidden frames, two hide timeouts; cause open; DOM-model diagnostic separate                                                                                                                                                                                                                                  |
+| [134](134-dispose-losing-record-latency-waits.md)                       | Dispose record-latency smoke wait owners                                 | P2       | Full local verification             | ActualRED2fail/6controls then GREEN19/fullNode1879; owner repair merged326b988/PR585/maincacc3c7e/Shad37; current original5artifact enforcement PASS, exact controller exit unmeasured; Windowsraw pending                                                                                                                                                                                            |
+| [135](135-diagnose-live-system-audio-toggle-dropout.md)                 | Diagnose live system-audio dropout                                       | P1       | Full local verification             | Original full bundle FAIL; three original six-case controls18/18 and current bundle6/6PASS; original stereo quiet gap/in-phase/continuous AAC confirmed; cause OPEN, later gates/full soaks pending                                                                                                                                                                                                   |
+| [136](136-renew-scene-recording-output-capability.md)                   | Renew scene recording output authority                                   | P2       | Final scene verification            | SOURCE FIX mergedb2c985b/PR586/main37f49f45; exactRust1/static/Shad37PASS; full original run proves both final camera artifacts; current133 intermittent timeouts remain distinct                                                                                                                                                                                                                     |
+| [137](137-clean-up-shared-remote-client-waits.md)                       | Dispose failed shared request/event owners                               | P2       | 134                                 | SOURCE FIX merged27d2942d/PR587/main6dbabec1; RED5/2 then root26/fullNode1886/static/Shad37PASS; real latency/remote-control/LAN PASS; actual Windows shared-client7/latency19 each25 and fullRust3 PASS, root raw verified; complete bundle pending                                                                                                                                                  |
+| [138](138-await-complete-fake-activity-receipts.md)                     | Await complete fake activity receipts                                    | P2       | 125                                 | FIX merged5e875661/PR589/main26b296ad; actualRED6fail/24controls, rootfocused30/fullNode1897/static/Shad37PASS; unchanged app strict totals/rollover PASS; original Windows pass22 recovery failure retained in139; current main all30receipt cases×25/fullRust3 rawPASS; final bundle/soaks pending                                                                                                  |
+| [139](139-retain-bounded-source-clock-recovery-evidence.md)             | Retain bounded source-clock recovery evidence                            | P1       | 126                                 | Diagnostic merged PR593; current Windows 26 filters ×25 / full3 and local 49 mixer PASS; earlier recovery/FIFO failures remain unassigned, complete raw evidence retained                                                                                                                                                                                                                             |
+| [146](146-bound-legacy-pcm-recording-sync.md)                           | Bound legacy PCM recording synchronization                               | P1       | Final profile matrix                | FIX merged PR600/main2310b6fd; real-command RED→GREEN, full Rust/desktop/Node and actual Windows25/3 PASS; downstream unchanged matrix18/18 PASS; studio/device/full bundle blocked                                                                                                                                                                                                                   |
+| [147](147-diagnose-shared-record-stream-stop.md)                        | Diagnose shared record/stream stop failure                               | P1       | Final profile matrix                | Original TERM/KILL/missing artifact retained; three isolated trials6/6 and later complete matrix18/18 PASS; restored original plan body; original cause OPEN                                                                                                                                                                                                                                          |
+| [148](148-diagnose-legacy-recording-startup-admission.md)               | Diagnose legacy recording startup admission                              | P1       | 146                                 | FIX PR602 plus test cleanup PR603 merged; explicit pre-exec RED→GREEN, matrix18/18, latency5 and macOS reader25/fullRust PASS; failed PR audio cohorts retained; automatic identical main reader25/fullRust3/source gates PASS; visible-device/full bundle blocked                                                                                                                                    |
 
 Execute privacy, remote gesture, and microphone-demand fixes first, repair
 acceptance gates, then close scene

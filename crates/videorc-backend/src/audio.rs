@@ -331,6 +331,9 @@ pub struct AudioCaptureStats {
     // freezes them before FFmpeg finishes flushing. Tracking that exact window avoids
     // counting either startup or finalization latency as a microphone capture gap.
     recording_window: std::sync::Mutex<AudioCaptureWindow>,
+    // Plan 200 A3: the device-side sample rate read when the input opened
+    // (f64 bits; 0 = not read). Never reset: it describes the device.
+    device_sample_rate_bits: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -342,6 +345,18 @@ struct AudioCaptureWindow {
 impl AudioCaptureStats {
     pub fn captured_frames(&self) -> u64 {
         self.captured_frames.load(Ordering::Relaxed)
+    }
+
+    /// Plan 200 A3: the input device's own sample rate, when the open read it.
+    pub fn device_sample_rate(&self) -> Option<f64> {
+        let rate = f64::from_bits(self.device_sample_rate_bits.load(Ordering::Relaxed));
+        (rate.is_finite() && rate > 0.0).then_some(rate)
+    }
+
+    #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+    pub(crate) fn record_device_sample_rate(&self, rate: f64) {
+        self.device_sample_rate_bits
+            .store(rate.to_bits(), Ordering::Relaxed);
     }
 
     pub fn dropped_frames(&self) -> u64 {
@@ -652,7 +667,7 @@ pub fn parse_windows_dshow_microphone_id(id: &str) -> Option<String> {
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn windows_dshow_microphone_device_id(device_name: &str) -> String {
+pub(crate) fn windows_dshow_microphone_device_id(device_name: &str) -> String {
     format!(
         "{WINDOWS_DSHOW_MICROPHONE_PREFIX}{}",
         encode_hex(device_name.as_bytes())
@@ -869,10 +884,32 @@ fn sample_meter_from_source(mut source: NativeAudioSource, duration: Duration) -
     }
 }
 
+/// Folds a block of interleaved microphone PCM to centered stereo (the voice
+/// in both channels), then applies gain and mute and clamps to full scale.
+///
+/// This is a one-shot fold: the block alone decides how the first two
+/// channels combine ([`VoiceFold`]). Live microphone streams keep a
+/// [`VoiceFold`] across blocks instead (plan 200 A1); this entry point is for
+/// callers without stream state, such as the standby meter, whose input is
+/// already folded.
 pub fn process_interleaved_f32(
     input: &[f32],
     source_channels: usize,
     settings: AudioProcessingSettings,
+) -> Vec<f32> {
+    let plan = VoiceFold::default().plan(input, source_channels);
+    fold_interleaved_f32(input, source_channels, settings, plan, true)
+}
+
+/// Applies one block's [`FoldPlan`] plus gain and mute. `clamp` limits the
+/// result to full scale; the session bus passes `false` so its peak limiter
+/// (not a hard clamp) keeps a hot microphone under the ceiling.
+pub(crate) fn fold_interleaved_f32(
+    input: &[f32],
+    source_channels: usize,
+    settings: AudioProcessingSettings,
+    plan: FoldPlan,
+    clamp: bool,
 ) -> Vec<f32> {
     if input.is_empty() || source_channels == 0 {
         return Vec::new();
@@ -889,14 +926,21 @@ pub fn process_interleaved_f32(
     for frame_index in 0..frame_count {
         let base = frame_index * source_channels;
         let mono = if source_channels > 1 {
-            centered_voice_sample(
+            plan.fold(
                 input[base],
                 input.get(base + 1).copied().unwrap_or(input[base]),
+                frame_index,
+                frame_count,
             )
         } else {
             input[base]
         };
-        let sample = (mono * gain).clamp(-1.0, 1.0);
+        let sample = mono * gain;
+        let sample = if clamp {
+            sample.clamp(-1.0, 1.0)
+        } else {
+            sample
+        };
         output.push(sample);
         output.push(sample);
     }
@@ -904,19 +948,178 @@ pub fn process_interleaved_f32(
     output
 }
 
+/// Smoothing time constant of the fold's per-channel level detector.
+const VOICE_FOLD_SMOOTHING_SECONDS: f64 = 0.150;
+/// A channel this far below the other is noise (the unused input of a
+/// two-input interface): the fold uses the louder channel alone.
+const VOICE_FOLD_SINGLE_GAP_DB: f64 = 20.0;
+/// A single-channel fold returns to averaging once the gap closes under this
+/// (hysteresis against the 20 dB entry gap).
+const VOICE_FOLD_AVERAGE_GAP_DB: f64 = 12.0;
+/// Both channels under this level are averaged: exact zeros stay zero and
+/// the fold never gates.
+const VOICE_FOLD_SILENCE_DB: f64 = -110.0;
+
+/// How a block weights the first two channels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum FoldMode {
+    #[default]
+    Average,
+    Left,
+    Right,
+}
+
+impl FoldMode {
+    const fn weights(self) -> (f32, f32) {
+        match self {
+            Self::Average => (0.5, 0.5),
+            Self::Left => (1.0, 0.0),
+            Self::Right => (0.0, 1.0),
+        }
+    }
+
+    /// The next mode from the smoothed channel energies (mean squares).
+    fn next(self, energy: [f64; 2]) -> Self {
+        let db = energy.map(|energy| 10.0 * energy.max(1.0e-30).log10());
+        if db[0] < VOICE_FOLD_SILENCE_DB && db[1] < VOICE_FOLD_SILENCE_DB {
+            return Self::Average;
+        }
+        let gap = db[0] - db[1];
+        let single = if gap > VOICE_FOLD_SINGLE_GAP_DB {
+            Some(Self::Left)
+        } else if gap < -VOICE_FOLD_SINGLE_GAP_DB {
+            Some(Self::Right)
+        } else {
+            None
+        };
+        match (self, single) {
+            (_, Some(single)) => single,
+            (Self::Left, None) if gap >= VOICE_FOLD_AVERAGE_GAP_DB => Self::Left,
+            (Self::Right, None) if gap <= -VOICE_FOLD_AVERAGE_GAP_DB => Self::Right,
+            _ => Self::Average,
+        }
+    }
+}
+
+/// Plan 200 A1: the microphone's stereo-to-voice fold, decided per block
+/// rather than per sample. The old per-sample rule treated any sample under
+/// 1e-5 as a "silent channel", so the noise on the unused input of a
+/// two-input interface flipped every sample between the full mic and half
+/// the mic (signal-dependent distortion), and a true stereo mic jumped at
+/// every zero crossing. Each block now measures both channels' mean-square
+/// energy, smooths it with a ~150 ms one-pole, and picks the weights:
+/// average within 20 dB, the louder channel alone past a 20 dB gap (back to
+/// averaging under 12 dB), and average when both are under -110 dBFS. A mode
+/// change crossfades linearly across the block, so it never clicks.
+///
+/// `Copy` on purpose: a writer that re-renders a chunk plans it once and
+/// re-applies the same [`FoldPlan`].
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VoiceFold {
+    /// Smoothed mean-square energy of channels 0 and 1; `None` until the
+    /// first block, which sets it directly so a new stream decides at once.
+    energy: Option<[f64; 2]>,
+    mode: FoldMode,
+}
+
+impl VoiceFold {
+    /// Measures one block of interleaved PCM, advances the detector and
+    /// returns the weights to fold that block with. One pass, no allocation
+    /// (it runs on the CoreAudio callback).
+    pub(crate) fn plan(&mut self, input: &[f32], source_channels: usize) -> FoldPlan {
+        let steady = FoldPlan {
+            from: self.mode,
+            to: self.mode,
+        };
+        if source_channels < 2 {
+            return steady;
+        }
+        let frames = input.len() / source_channels;
+        if frames == 0 {
+            return steady;
+        }
+        let mut sums = [0.0_f64; 2];
+        for frame in input.chunks_exact(source_channels) {
+            sums[0] += f64::from(frame[0]) * f64::from(frame[0]);
+            sums[1] += f64::from(frame[1]) * f64::from(frame[1]);
+        }
+        let block = sums.map(|sum| sum / frames as f64);
+        if !block.iter().all(|energy| energy.is_finite()) {
+            return steady;
+        }
+        let (energy, from) = match self.energy {
+            None => (block, None),
+            Some(previous) => {
+                let alpha = 1.0
+                    - (-(frames as f64)
+                        / (VOICE_FOLD_SMOOTHING_SECONDS * f64::from(NATIVE_AUDIO_SAMPLE_RATE)))
+                    .exp();
+                (
+                    [
+                        previous[0] + (block[0] - previous[0]) * alpha,
+                        previous[1] + (block[1] - previous[1]) * alpha,
+                    ],
+                    Some(self.mode),
+                )
+            }
+        };
+        self.energy = Some(energy);
+        self.mode = self.mode.next(energy);
+        FoldPlan {
+            from: from.unwrap_or(self.mode),
+            to: self.mode,
+        }
+    }
+}
+
+/// One block's fold: a linear crossfade from the previous block's weights to
+/// this block's. Steady blocks fold exactly (no crossfade arithmetic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FoldPlan {
+    from: FoldMode,
+    to: FoldMode,
+}
+
+impl FoldPlan {
+    /// The fold of one block, decided from that block alone.
+    #[cfg(test)]
+    pub(crate) fn one_shot(input: &[f32], source_channels: usize) -> Self {
+        VoiceFold::default().plan(input, source_channels)
+    }
+
+    fn fold(self, left: f32, right: f32, frame_index: usize, frame_count: usize) -> f32 {
+        if self.from == self.to {
+            return match self.to {
+                FoldMode::Average => (left + right) * 0.5,
+                FoldMode::Left => left,
+                FoldMode::Right => right,
+            };
+        }
+        let (from_left, from_right) = self.from.weights();
+        let (to_left, to_right) = self.to.weights();
+        // Reaches the new weights on the block's last frame.
+        let t = (frame_index + 1) as f32 / frame_count as f32;
+        let left_weight = from_left + (to_left - from_left) * t;
+        let right_weight = from_right + (to_right - from_right) * t;
+        left * left_weight + right * right_weight
+    }
+}
+
 #[cfg(any(test, target_os = "macos", debug_assertions))]
 fn processed_capture_frame(
     input: &[f32],
     source_channels: usize,
     settings: AudioProcessingSettings,
+    fold: &mut VoiceFold,
     timestamp_micros: u64,
 ) -> AudioFrame {
+    let plan = fold.plan(input, source_channels);
     AudioFrame {
         timestamp_micros,
         captured_at: Instant::now(),
         sample_rate: NATIVE_AUDIO_SAMPLE_RATE,
         channels: NATIVE_AUDIO_CHANNELS,
-        samples: process_interleaved_f32(input, source_channels, settings),
+        samples: fold_interleaved_f32(input, source_channels, settings, plan, true),
     }
 }
 
@@ -925,9 +1128,48 @@ fn processed_capture_frame_with_handle(
     input: &[f32],
     source_channels: usize,
     settings: &AudioProcessingSettingsHandle,
+    fold: &mut VoiceFold,
     timestamp_micros: u64,
 ) -> AudioFrame {
-    processed_capture_frame(input, source_channels, settings.load(), timestamp_micros)
+    processed_capture_frame(
+        input,
+        source_channels,
+        settings.load(),
+        fold,
+        timestamp_micros,
+    )
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn test_controlled_native_audio_source() -> (
+    NativeAudioSource,
+    mpsc::SyncSender<AudioFrame>,
+    Arc<AudioCaptureStats>,
+) {
+    let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
+    let stats = Arc::new(AudioCaptureStats::default());
+    let stop = Arc::new(AtomicBool::new(false));
+    (
+        NativeAudioSource {
+            device_id: 42,
+            device_name: "Test microphone".to_string(),
+            receiver: Some(receiver),
+            stats: stats.clone(),
+            processing_settings: AudioProcessingSettingsHandle::new(
+                AudioProcessingSettings::default(),
+            ),
+            stop,
+            stop_on_drop: true,
+            #[cfg(debug_assertions)]
+            caption_contract_test_injector: None,
+            #[cfg(debug_assertions)]
+            caption_contract_test_producer: None,
+            #[cfg(target_os = "macos")]
+            audio_unit: None,
+        },
+        sender,
+        stats,
+    )
 }
 
 /// Test seam: a hardware-free native source (the caption-contract producer)
@@ -976,6 +1218,7 @@ fn start_contract_test_audio_source(
         let fixture_started = Instant::now();
         let mut clock = fixture_clock::FixtureAudioClock::new(fixture_started);
         let raw_settings = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
+        let mut voice_fold = VoiceFold::default();
 
         while !producer_stop.load(Ordering::Acquire)
             && !producer_injector
@@ -1024,6 +1267,7 @@ fn start_contract_test_audio_source(
                 &input,
                 SOURCE_CHANNELS,
                 &raw_settings,
+                &mut voice_fold,
                 timestamp_for_frame(frame_cursor),
             );
             frame.captured_at = timing.captured_at;
@@ -1077,20 +1321,6 @@ fn start_contract_test_audio_source(
     })
 }
 
-fn centered_voice_sample(left: f32, right: f32) -> f32 {
-    const SILENT_CHANNEL_THRESHOLD: f32 = 1.0e-5;
-
-    match (
-        left.abs() > SILENT_CHANNEL_THRESHOLD,
-        right.abs() > SILENT_CHANNEL_THRESHOLD,
-    ) {
-        (true, true) => (left + right) * 0.5,
-        (true, false) => left,
-        (false, true) => right,
-        (false, false) => 0.0,
-    }
-}
-
 #[cfg(test)]
 fn fake_pcm_frames(frame_count: usize, chunk_frames: usize, frequency_hz: f32) -> Vec<AudioFrame> {
     let mut frames = Vec::new();
@@ -1117,6 +1347,53 @@ fn fake_pcm_frames(frame_count: usize, chunk_frames: usize, frequency_hz: f32) -
     }
 
     frames
+}
+
+/// Plan 200 A3: the Health code for a microphone whose device runs at
+/// another rate than the 48 kHz Videorc records at.
+pub(crate) const MICROPHONE_SAMPLE_RATE_CODE: &str = "audio-input-sample-rate";
+
+/// Plan 200 A3: what Health says when a microphone's device runs at a rate
+/// other than 48 kHz, or `None` at 48 kHz (or an unreadable rate). The
+/// input asks for 48 kHz without resampling, so such a device is either
+/// refused or recorded at the wrong rate; the fix is the device's own rate.
+pub(crate) fn microphone_sample_rate_warning(
+    device_name: &str,
+    device_rate: f64,
+) -> Option<String> {
+    if !device_rate.is_finite()
+        || device_rate <= 0.0
+        || (device_rate - f64::from(NATIVE_AUDIO_SAMPLE_RATE)).abs() < 0.5
+    {
+        return None;
+    }
+    Some(format!(
+        "{device_name} runs at {}. Set it to 48 kHz in Audio MIDI Setup for the best recording.",
+        kilohertz_label(device_rate)
+    ))
+}
+
+/// Plan 200 A3: why the 48 kHz client format was refused. On a device that
+/// runs at another rate the plain-words rate warning leads; CoreAudio's own
+/// error always follows, so a permission or busy-device cause stays visible
+/// (and `permission_or_unavailable` still reads it).
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn stream_format_failure_message(
+    device_name: &str,
+    rate_warning: Option<&str>,
+    underlying: &str,
+) -> String {
+    match rate_warning {
+        Some(warning) => format!("{warning} ({underlying})"),
+        None => format!("Could not set CoreAudio stream format for {device_name}: {underlying}"),
+    }
+}
+
+/// `44100.0` → `44.1 kHz`, `96000.0` → `96 kHz`.
+fn kilohertz_label(rate: f64) -> String {
+    let label = format!("{:.2}", rate / 1_000.0);
+    let label = label.trim_end_matches('0').trim_end_matches('.');
+    format!("{label} kHz")
 }
 
 pub(crate) fn db_to_gain(db: f32) -> f32 {
@@ -1182,6 +1459,8 @@ fn permission_or_unavailable(message: &str) -> AudioMeterStatus {
 
 fn unavailable_microphone(id: &str, name: &str, detail: &str) -> Device {
     Device {
+        app: None,
+        window_title: None,
         id: id.to_string(),
         name: name.to_string(),
         kind: DeviceKind::Microphone,
@@ -1231,18 +1510,42 @@ fn start_platform_audio_source(
     let mut audio_unit = audio_unit_from_device_id(device_id, true)
         .with_context(|| format!("Could not open CoreAudio input device {device_name}"))?;
 
+    // Plan 200 A3: the client format below asks for 48 kHz and the input
+    // does not resample, so read the device's own rate first.
+    let device_rate = coreaudio_input_device_sample_rate(&audio_unit);
+    let rate_warning =
+        device_rate.and_then(|rate| microphone_sample_rate_warning(&device_name, rate));
+    if let Some(warning) = rate_warning.as_deref() {
+        tracing::warn!(
+            device = %device_name,
+            device_rate = device_rate.unwrap_or_default(),
+            "{warning}"
+        );
+    }
+
     let stream_format = StreamFormat {
         sample_rate: f64::from(NATIVE_AUDIO_SAMPLE_RATE),
         sample_format: SampleFormat::F32,
         flags: LinearPcmFlags::IS_FLOAT | LinearPcmFlags::IS_PACKED,
         channels: u32::from(NATIVE_AUDIO_CHANNELS),
     };
+    // A device the 48 kHz client format is refused on says why in plain
+    // words, and keeps CoreAudio's own error beside it.
     audio_unit
         .set_stream_format(stream_format, Scope::Output, Element::Input)
-        .with_context(|| format!("Could not set CoreAudio stream format for {device_name}"))?;
+        .map_err(|error| {
+            anyhow::anyhow!(stream_format_failure_message(
+                &device_name,
+                rate_warning.as_deref(),
+                &error.to_string(),
+            ))
+        })?;
 
     let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
     let stats = Arc::new(AudioCaptureStats::default());
+    if let Some(rate) = device_rate {
+        stats.record_device_sample_rate(rate);
+    }
     let callback_stats = stats.clone();
     let processing_settings = AudioProcessingSettingsHandle::new(settings);
     let callback_processing_settings =
@@ -1250,6 +1553,8 @@ fn start_platform_audio_source(
     let stop = Arc::new(AtomicBool::new(false));
     let callback_stop = stop.clone();
     let mut frame_cursor = 0_u64;
+    // Plan 200 A1: the fold keeps its level detector across callbacks.
+    let mut voice_fold = VoiceFold::default();
 
     type Args = render_callback::Args<data::Interleaved<f32>>;
     audio_unit
@@ -1265,6 +1570,7 @@ fn start_platform_audio_source(
                 args.data.buffer,
                 args.data.channels,
                 &callback_processing_settings,
+                &mut voice_fold,
                 timestamp_for_frame(frame_cursor),
             );
             let frame_count = frame.samples.len() / usize::from(NATIVE_AUDIO_CHANNELS);
@@ -1314,6 +1620,31 @@ fn start_platform_audio_source(
         caption_contract_test_producer: None,
         audio_unit: Some(audio_unit),
     })
+}
+
+/// Plan 200 A3: the input device's current sample rate, read from the device
+/// side of the AUHAL (the input element's input scope carries the device's
+/// nominal format) through the existing AudioUnit binding. `None` when
+/// CoreAudio will not say.
+#[cfg(target_os = "macos")]
+fn coreaudio_input_device_sample_rate(
+    audio_unit: &coreaudio::audio_unit::AudioUnit,
+) -> Option<f64> {
+    use coreaudio::audio_unit::{Element, Scope};
+    /// `kAudioUnitProperty_SampleRate` (AudioUnitProperties.h), a Float64.
+    const AUDIO_UNIT_PROPERTY_SAMPLE_RATE: u32 = 2;
+    audio_unit
+        .stream_format(Scope::Input, Element::Input)
+        .map(|format| format.sample_rate)
+        .or_else(|_| {
+            audio_unit.get_property::<f64>(
+                AUDIO_UNIT_PROPERTY_SAMPLE_RATE,
+                Scope::Input,
+                Element::Input,
+            )
+        })
+        .ok()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1402,6 +1733,8 @@ mod windows_native {
         // symbolic link in detail for support bundles only.
         let capture_name = friendly_name.clone();
         Device {
+            app: None,
+            window_title: None,
             id: windows_dshow_microphone_device_id(&capture_name),
             name: friendly_name.clone(),
             kind: DeviceKind::Microphone,
@@ -1469,6 +1802,8 @@ fn list_platform_microphones() -> Result<Vec<Device>> {
             get_device_name(device_id).unwrap_or_else(|_| format!("CoreAudio device {device_id}"));
         let is_default = default_input == Some(device_id);
         devices.push(Device {
+            app: None,
+            window_title: None,
             id: format!("microphone:coreaudio:{device_id}"),
             name,
             kind: DeviceKind::Microphone,
@@ -1554,30 +1889,7 @@ mod tests {
         mpsc::SyncSender<AudioFrame>,
         Arc<AudioCaptureStats>,
     ) {
-        let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
-        let stats = Arc::new(AudioCaptureStats::default());
-        let stop = Arc::new(AtomicBool::new(false));
-        (
-            NativeAudioSource {
-                device_id: 42,
-                device_name: "Test microphone".to_string(),
-                receiver: Some(receiver),
-                stats: stats.clone(),
-                processing_settings: AudioProcessingSettingsHandle::new(
-                    AudioProcessingSettings::default(),
-                ),
-                stop,
-                stop_on_drop: true,
-                #[cfg(debug_assertions)]
-                caption_contract_test_injector: None,
-                #[cfg(debug_assertions)]
-                caption_contract_test_producer: None,
-                #[cfg(target_os = "macos")]
-                audio_unit: None,
-            },
-            sender,
-            stats,
-        )
+        test_controlled_native_audio_source()
     }
 
     #[cfg(unix)]
@@ -2019,6 +2331,7 @@ mod tests {
                 gain_db: 24.0,
                 muted: true,
             },
+            &mut VoiceFold::default(),
             42,
         );
         assert_eq!(muted.timestamp_micros, 42);
@@ -2031,6 +2344,7 @@ mod tests {
                 gain_db: 6.0,
                 muted: false,
             },
+            &mut VoiceFold::default(),
             43,
         );
         assert!(gained.samples[0] > 0.1);
@@ -2067,7 +2381,8 @@ mod tests {
             gain_db: 6.0,
             muted: false,
         });
-        let gained = processed_capture_frame_with_handle(&input, 2, &settings, 100);
+        let mut fold = VoiceFold::default();
+        let gained = processed_capture_frame_with_handle(&input, 2, &settings, &mut fold, 100);
         let caption_gained = crate::captions::round_trip_caption_audio_test_frame(&gained);
         assert_eq!(caption_gained.samples, gained.samples);
         assert!(gained.samples[0] > input[0]);
@@ -2076,7 +2391,7 @@ mod tests {
             gain_db: 24.0,
             muted: true,
         });
-        let muted = processed_capture_frame_with_handle(&input, 2, &settings, 101);
+        let muted = processed_capture_frame_with_handle(&input, 2, &settings, &mut fold, 101);
         let caption_muted = crate::captions::round_trip_caption_audio_test_frame(&muted);
         assert!(muted.samples.iter().all(|sample| *sample == 0.0));
         assert!(caption_muted.samples.iter().all(|sample| *sample == 0.0));
@@ -2123,6 +2438,286 @@ mod tests {
         let output =
             process_interleaved_f32(&[0.6, 0.2, 1.0], 3, AudioProcessingSettings::default());
         assert_eq!(output, vec![0.4, 0.4]);
+    }
+
+    // ---- Plan 200 A1: the fold decides per block ---------------------------
+
+    /// Folds `left`/`right` through one persistent [`VoiceFold`] in blocks of
+    /// `block` frames, as a live stream does, and returns the mono output.
+    fn fold_stream(left: &[f32], right: &[f32], block: usize) -> Vec<f32> {
+        let mut fold = VoiceFold::default();
+        let interleaved = left
+            .iter()
+            .zip(right)
+            .flat_map(|(left, right)| [*left, *right])
+            .collect::<Vec<_>>();
+        let mut mono = Vec::with_capacity(left.len());
+        for chunk in interleaved.chunks(block * 2) {
+            let plan = fold.plan(chunk, 2);
+            let output =
+                fold_interleaved_f32(chunk, 2, AudioProcessingSettings::default(), plan, true);
+            for frame in output.chunks_exact(2) {
+                assert_eq!(frame[0], frame[1], "the fold is centered");
+                mono.push(frame[0]);
+            }
+        }
+        mono
+    }
+
+    /// A sine with its phase computed in f64, so steps compare exactly
+    /// across a long fixture.
+    fn sine(frames: usize, hz: f64, amplitude: f64, phase: f64) -> Vec<f32> {
+        (0..frames)
+            .map(|index| {
+                (amplitude
+                    * (std::f64::consts::TAU * hz * index as f64
+                        / f64::from(NATIVE_AUDIO_SAMPLE_RATE)
+                        + phase)
+                        .sin()) as f32
+            })
+            .collect()
+    }
+
+    /// Deterministic Gaussian noise (an LCG through Box-Muller).
+    fn gaussian_noise(frames: usize, sigma: f64) -> Vec<f32> {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut uniform = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 11) as f64 + 0.5) / (1_u64 << 53) as f64
+        };
+        (0..frames)
+            .map(|_| {
+                let radius = (-2.0 * uniform().ln()).sqrt();
+                (sigma * radius * (std::f64::consts::TAU * uniform()).cos()) as f32
+            })
+            .collect()
+    }
+
+    fn rms_db(samples: &[f32]) -> f64 {
+        let mean_square = samples
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>()
+            / samples.len() as f64;
+        10.0 * mean_square.log10()
+    }
+
+    fn max_step(samples: &[f32]) -> f32 {
+        samples
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn interface_noise_on_the_unused_input_never_halves_the_mic() {
+        // A two-input interface: the mic on input 1 at -20 dBFS, input 2's
+        // noise floor at sigma 1e-5 (-100 dBFS). The old per-sample rule
+        // flipped between the full and the half mic on every noise sample.
+        let frames = NATIVE_AUDIO_SAMPLE_RATE as usize;
+        let mic = sine(frames, 440.0, 0.1, 0.0);
+        let noise = gaussian_noise(frames, 1.0e-5);
+        let output = fold_stream(&mic, &noise, 512);
+        assert!(
+            (rms_db(&output) - rms_db(&mic)).abs() < 0.1,
+            "output {} dB vs mic {} dB",
+            rms_db(&output),
+            rms_db(&mic)
+        );
+        assert_eq!(output, mic, "the louder input alone, sample for sample");
+        // Either input: the fold is symmetric.
+        assert_eq!(fold_stream(&noise, &mic, 512), mic);
+    }
+
+    #[test]
+    fn true_stereo_is_averaged_and_never_jumps_at_a_zero_crossing() {
+        let frames = NATIVE_AUDIO_SAMPLE_RATE as usize / 2;
+        let left = sine(frames, 440.0, 0.5, 0.0);
+        let right = sine(frames, 660.0, 0.5, 1.0);
+        let output = fold_stream(&left, &right, 480);
+        let average = left
+            .iter()
+            .zip(&right)
+            .map(|(left, right)| (left + right) * 0.5)
+            .collect::<Vec<_>>();
+        assert_eq!(output, average);
+        // Each channel crosses zero hundreds of times; the fold never jumps
+        // past the average's own slope.
+        let bound = 0.5 * (max_step(&left) + max_step(&right)) + 1.0e-6;
+        assert!(
+            max_step(&output) <= bound,
+            "{} > {bound}",
+            max_step(&output)
+        );
+    }
+
+    #[test]
+    fn identical_channels_fold_to_themselves_exactly() {
+        // The bus folds frames the CoreAudio callback already centered; that
+        // second fold must be the identity.
+        let frames = 48_000;
+        let mut signal = sine(frames, 220.0, 0.3, 0.0);
+        signal[10_000..20_000].fill(0.0);
+        for (sample, noise) in signal.iter_mut().zip(gaussian_noise(frames, 1.0e-6)) {
+            *sample += noise;
+        }
+        assert_eq!(fold_stream(&signal, &signal, 480), signal);
+    }
+
+    #[test]
+    fn exact_silence_stays_exact_silence() {
+        let silence = vec![0.0; 48_000];
+        let output = fold_stream(&silence, &silence, 512);
+        assert!(output.iter().all(|sample| sample.to_bits() == 0));
+        let mut fold = VoiceFold::default();
+        fold.plan(&[0.0; 960], 2);
+        assert_eq!(fold.mode, FoldMode::Average, "silence never gates");
+    }
+
+    #[test]
+    fn a_mode_switch_crossfades_without_a_click() {
+        // Mono on both inputs for 0.5 s (averaged), then input 2 goes quiet.
+        // The detector moves to input 1 alone once input 2 is 20 dB down,
+        // crossfading the weights across one block.
+        let frames = 2 * NATIVE_AUDIO_SAMPLE_RATE as usize;
+        let left = sine(frames, 440.0, 0.25, 0.0);
+        let mut right = left.clone();
+        let cut = frames / 4;
+        right[cut..].fill(0.0);
+        let output = fold_stream(&left, &right, 480);
+        // The steady state after the switch is input 1 alone; the region
+        // checked starts after the input's own cut and spans the switch.
+        let steady = max_step(&output[frames - frames / 4..]);
+        let switching = &output[cut + 480..];
+        assert!(
+            max_step(switching) <= steady * 1.01,
+            "switch step {} vs steady {steady}",
+            max_step(switching)
+        );
+        assert_eq!(
+            output[frames - 480..],
+            left[frames - 480..],
+            "the switch happened: input 1 alone"
+        );
+        // Before the detector switches, the quiet input still averages in.
+        assert_eq!(output[cut + 480], left[cut + 480] * 0.5);
+    }
+
+    #[test]
+    fn fold_mode_has_hysteresis_and_a_silence_floor() {
+        let level = |db: f64| 10.0_f64.powf(db / 10.0);
+        let at = |left: f64, right: f64| [level(left), level(right)];
+        assert_eq!(FoldMode::Average.next(at(-20.0, -35.0)), FoldMode::Average);
+        assert_eq!(FoldMode::Average.next(at(-20.0, -41.0)), FoldMode::Left);
+        assert_eq!(FoldMode::Average.next(at(-41.0, -20.0)), FoldMode::Right);
+        // Inside the 12-20 dB band a single-channel fold holds...
+        assert_eq!(FoldMode::Left.next(at(-20.0, -35.0)), FoldMode::Left);
+        assert_eq!(FoldMode::Right.next(at(-35.0, -20.0)), FoldMode::Right);
+        // ...and returns to averaging under 12 dB.
+        assert_eq!(FoldMode::Left.next(at(-20.0, -31.0)), FoldMode::Average);
+        assert_eq!(FoldMode::Right.next(at(-31.0, -20.0)), FoldMode::Average);
+        // A swap goes straight to the other channel.
+        assert_eq!(FoldMode::Left.next(at(-45.0, -20.0)), FoldMode::Right);
+        // Both under -110 dBFS: averaged, whatever the gap.
+        assert_eq!(FoldMode::Left.next(at(-115.0, -200.0)), FoldMode::Average);
+        assert_eq!(FoldMode::Average.next([0.0, 0.0]), FoldMode::Average);
+        assert_eq!(FoldMode::Average.next(at(-105.0, -200.0)), FoldMode::Left);
+    }
+
+    #[test]
+    fn a_new_stream_decides_from_its_first_block_and_a_bad_block_changes_nothing() {
+        let mut fold = VoiceFold::default();
+        let plan = fold.plan(&[0.5, 0.0, -0.5, 0.0], 2);
+        assert_eq!(plan.from, FoldMode::Left, "no fade in from a default");
+        assert_eq!(plan.to, FoldMode::Left);
+        let plan = fold.plan(&[f32::NAN, 0.5, 0.25, 0.5], 2);
+        assert_eq!((plan.from, plan.to), (FoldMode::Left, FoldMode::Left));
+        assert!(fold.energy.unwrap().iter().all(|energy| energy.is_finite()));
+        // Mono input has nothing to fold.
+        assert_eq!(
+            process_interleaved_f32(&[0.1, 0.2], 1, AudioProcessingSettings::default()),
+            vec![0.1, 0.1, 0.2, 0.2]
+        );
+    }
+
+    #[test]
+    fn a_microphone_off_48_khz_gets_a_plain_warning() {
+        assert_eq!(
+            microphone_sample_rate_warning("Shure MV7", 44_100.0).as_deref(),
+            Some(
+                "Shure MV7 runs at 44.1 kHz. Set it to 48 kHz in Audio MIDI Setup for the best recording."
+            )
+        );
+        assert_eq!(
+            microphone_sample_rate_warning("Scarlett 2i2 USB", 96_000.0).as_deref(),
+            Some(
+                "Scarlett 2i2 USB runs at 96 kHz. Set it to 48 kHz in Audio MIDI Setup for the best recording."
+            )
+        );
+        assert!(
+            microphone_sample_rate_warning("Old mic", 22_050.0)
+                .unwrap()
+                .contains("runs at 22.05 kHz.")
+        );
+        assert!(
+            microphone_sample_rate_warning("Interface", 88_200.0)
+                .unwrap()
+                .contains("runs at 88.2 kHz.")
+        );
+        for fine in [48_000.0, 48_000.2, 47_999.8] {
+            assert_eq!(microphone_sample_rate_warning("Mic", fine), None, "{fine}");
+        }
+        for unreadable in [0.0, -44_100.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(microphone_sample_rate_warning("Mic", unreadable), None);
+        }
+        // Never read as a permission problem (`permission_or_unavailable`).
+        let warning = microphone_sample_rate_warning("Mic", 44_100.0).unwrap();
+        assert_eq!(
+            permission_or_unavailable(&warning),
+            AudioMeterStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_refused_client_format_keeps_the_underlying_error() {
+        let warning = microphone_sample_rate_warning("Shure MV7", 44_100.0).unwrap();
+        let refused = stream_format_failure_message(
+            "Shure MV7",
+            Some(&warning),
+            "kAudioUnitErr_FormatNotSupported",
+        );
+        assert_eq!(
+            refused,
+            format!("{warning} (kAudioUnitErr_FormatNotSupported)")
+        );
+        // A permission cause under a rate warning still reads as permission.
+        let denied = stream_format_failure_message(
+            "Shure MV7",
+            Some(&warning),
+            "Microphone permission denied",
+        );
+        assert!(denied.starts_with(&warning));
+        assert_eq!(
+            permission_or_unavailable(&denied),
+            AudioMeterStatus::PermissionRequired
+        );
+        // At 48 kHz there is no warning: the plain failure and its cause.
+        assert_eq!(
+            stream_format_failure_message("Mic", None, "busy"),
+            "Could not set CoreAudio stream format for Mic: busy"
+        );
+    }
+
+    #[test]
+    fn capture_stats_carry_the_device_rate_once_read() {
+        let stats = AudioCaptureStats::default();
+        assert_eq!(stats.device_sample_rate(), None);
+        stats.record_device_sample_rate(44_100.0);
+        assert_eq!(stats.device_sample_rate(), Some(44_100.0));
+        stats.record_device_sample_rate(f64::NAN);
+        assert_eq!(stats.device_sample_rate(), None);
     }
 
     #[test]

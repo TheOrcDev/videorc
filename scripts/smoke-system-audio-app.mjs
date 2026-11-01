@@ -13,10 +13,12 @@
 // A looping silent afplay keeps the output device awake for the whole run, so
 // a tone starts within a few hundred ms of its request instead of up to ~2 s
 // on a cold device.
-// Every verdict uses a 1 kHz-selective measure, so music or a notification
+// Artifact verdicts use a 1 kHz-selective measure, so music or a notification
 // during a run cannot fake the tone; only energy at 1 kHz can fail a silence
 // check. The Off case also requires broadband digital silence, which holds
 // whatever else plays, because Off means nothing is captured.
+// The clips-idle case reads the bus's window peaks instead, so it needs a
+// quiet host outside its tone to prove the readings return to the floor.
 //
 // Sessions: a screen-only scene on the renderer's synthetic source, no
 // microphone (VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE=1, so the bus writes
@@ -39,6 +41,8 @@
 //               present (self-exclusion, plan 069 decision 9 amended).
 //   stream      Record + stream with System audio On, tone at 3-6 s: in the
 //               file and in the stream the local RTMP listener received.
+//   clips-idle  Clips on, no recording, tone at 2-5 s, Gain -6 -> -18 at
+//               3.5 s: ring levels drop 12 +/- 2 dB, then return to the floor.
 //
 // File time and the toggle reference: all times are seconds from the file's
 // first video frame (the session's video epoch; see system-audio-gates.mjs).
@@ -78,10 +82,12 @@ import {
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
+  CLIPS_IDLE_LEVEL_GATES,
   SYSTEM_AUDIO_GATES,
   analyzeSystemAudioArtifact,
   bandMaxDbfs,
   cutoverFileSeconds,
+  evaluateClipsIdleCase,
   evaluateRecordAndStreamCase,
   evaluateSelfExclusionCase,
   evaluateSystemAudioOffCase,
@@ -92,14 +98,16 @@ import {
   evaluateStaticScreenEpoch,
   parseRecordingEpochLine,
   mixSourcesIncludeSystemAudio,
+  startedSessionStatus,
   parseSystemAudioMixCutover,
   reportDbfs,
   toneWavArgs,
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
+import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-const ALL_CASES = ['on', 'toggle-off', 'toggle-on', 'off', 'self', 'stream']
+const ALL_CASES = ['clips-idle', 'on', 'toggle-off', 'toggle-on', 'off', 'self', 'stream']
 
 const { values: args } = parseArgs({
   options: {
@@ -124,7 +132,7 @@ const appExecutable = args['app-executable']
 const packagedCapability = appExecutable ? randomBytes(32).toString('base64url') : undefined
 if (
   appExecutable &&
-  (!staticScreenId || selectedCases.some((name) => ['self', 'stream'].includes(name)))
+  (!staticScreenId || selectedCases.some((name) => ['self', 'stream', 'clips-idle'].includes(name)))
 ) {
   fail(
     '--app-executable requires --static-screen-id and --cases on,toggle-off,toggle-on,off; packaged setup uses the Studio UI, without eval-js'
@@ -187,6 +195,7 @@ class BackendEventRecorder {
       if (message.event === 'diagnostics.stats') {
         this.systemAudioActiveSamples.push({
           at: record.at,
+          sessionId: message.payload?.sessionId,
           active: message.payload?.systemAudioActive === true
         })
         return
@@ -476,14 +485,15 @@ async function seedRenderer(smoke, sources) {
         let current = {};
         try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
         // Screen-only on the synthetic source (the dev app has no camera
-        // grant), record only, System audio Off until a case turns it on.
+        // grant), with Clips on. The idle case starts with System audio On.
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
-        const audio = { ...(current.audio ?? {}), systemAudioEnabled: false, systemAudioGainDb: -6 };
-        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources: params.sources ?? current.sources, layout, audio, recordEnabled: true, streamEnabled: false }));
-        setTimeout(() => location.reload(), 50);
+        const audio = { ...(current.audio ?? {}), systemAudioEnabled: params.systemAudioEnabled, systemAudioGainDb: -6 };
+        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources: params.sources ?? current.sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
+        ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       sources,
+      systemAudioEnabled: selectedCases[0] === 'clips-idle',
       video: { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
     },
     { timeoutMs }
@@ -594,12 +604,12 @@ async function recordRendererSession(ctx, { name, systemAudioAtStart, timeline }
       `static screen ready: content age ${ready.previewScreenFrameAgeMs}ms, callback age ${ready.previewScreenCaptureCallbackAgeMs}ms`
     )
   }
+  // Only the session this Record starts: the Clips ring re-arms after the
+  // last Stop and can publish its buffer-only `recording` status (marked
+  // `replayOnly`) right here, before the Record hands over from it.
   const recordingPromise = recorder.waitFor(
     `${name} recording.status(recording)`,
-    (record) =>
-      record.event === 'recording.status' &&
-      (record.payload?.state === 'recording' || record.payload?.state === 'streaming') &&
-      typeof record.payload?.sessionId === 'string'
+    (record) => record.event === 'recording.status' && startedSessionStatus(record.payload)
   )
   const clickAt = performance.now()
   const startTicket = await remoteRequest(
@@ -690,8 +700,16 @@ function sessionWindow(recorder, session) {
           inSession(record)
       )
       .map((record) => record.payload.code),
+    // Plan 181 (redesign R2): the clip ring runs by default and Record hands
+    // over from it, so the ring's own diagnostics (a system-audio source the
+    // previous case left on) still arrive just after the click; only this
+    // session's samples count.
     systemAudioActiveSamples: recorder.systemAudioActiveSamples.filter(
-      (sample) => sample.at >= session.clickAt && sample.at <= session.endAt && sample.active
+      (sample) =>
+        sample.at >= session.clickAt &&
+        sample.at <= session.endAt &&
+        sample.active &&
+        (sample.sessionId === undefined || sample.sessionId === session.sessionId)
     ).length
   }
 }
@@ -733,6 +751,81 @@ function checkDuration(analysis, label, failures) {
 }
 
 const cases = {
+  async 'clips-idle'(ctx) {
+    await setSystemAudio(ctx, true)
+    const ring = await waitForBackendState(
+      ctx.renderer,
+      'replay.status',
+      (status) => status?.state === 'on' && status?.replayOnly === true,
+      'clips-idle ring on without recording'
+    )
+    const ringStatus = (record) =>
+      statusEvent('recording', ring.sessionId)(record) && record.payload?.replayOnly === true
+    const ready =
+      ctx.recorder.events.findLast(ringStatus) ??
+      (await ctx.recorder.waitFor('clips-idle recording.status(replayOnly: true)', ringStatus))
+    const configureGain = async (gainDb) => {
+      const response = await requestSmokeCommand(
+        ctx.smoke,
+        'eval-js',
+        {
+          code: `
+          const harness = window.__videorcSmokeScenePresets;
+          if (!harness) throw new Error('renderer configure smoke hook unavailable');
+          const current = harness.streamingState().captureConfig;
+          harness.configure({ audio: { ...current.audio, systemAudioGainDb: params.gainDb } });
+          return true;
+        `,
+          gainDb
+        },
+        { timeoutMs }
+      )
+      if (response?.result !== true) fail('clips-idle: renderer gain update failed')
+    }
+    await configureGain(-6)
+    const startedAt = performance.now()
+    const at = (seconds) => sleep(startedAt + seconds * 1000 - performance.now())
+    try {
+      await at(2)
+      const toneStartAt = playTone(ctx.tones[3])
+      await at(3.5)
+      const gainChangedAt = performance.now()
+      await configureGain(-18)
+      await at(7)
+      const endedAt = performance.now()
+      const levels = ctx.recorder.between(
+        startedAt,
+        endedAt,
+        (record) => record.event === 'audio.levels'
+      )
+      const result = evaluateClipsIdleCase({
+        levels,
+        sessionId: ready.payload.sessionId,
+        toneStartAt,
+        gainChangedAt,
+        toneEndAt: toneStartAt + 3000
+      })
+      const statuses = ctx.recorder.between(
+        startedAt,
+        endedAt,
+        (record) => record.event === 'recording.status'
+      )
+      if (
+        statuses.some(
+          ({ payload }) =>
+            payload?.sessionId !== ring.sessionId ||
+            payload?.replayOnly !== true ||
+            payload?.state !== 'recording'
+        )
+      ) {
+        result.failures.push('clips-idle: the ring stopped, restarted, or became a recording')
+      }
+      return finish(result, { replayOnly: true })
+    } finally {
+      await configureGain(-6)
+    }
+  },
+
   async on(ctx) {
     let playAt
     const session = await recordRendererSession(ctx, {
@@ -1136,6 +1229,9 @@ function printCase(name, result) {
     .map((region) => `${region.start}-${region.end}s@${region.medianDbfs}dBFS`)
     .join(' ')
   const extras = [
+    name === 'clips-idle'
+      ? `session ${ev.sessionId} · readings ${ev.systemAudioReadingCount}/${ev.levelEventCount} · peak ${round(ev.beforeDbfs)} -> ${round(ev.afterDbfs)} dBFS · drop ${round(ev.dropDb)} dB · floor ${ev.floorPeakDbfs} dBFS`
+      : null,
     ev.stopDeltaMs !== undefined ? `stop vs cutover ${ev.stopDeltaMs} ms` : null,
     ev.startDeltaMs !== undefined && name === 'toggle-on'
       ? `start vs cutover ${ev.startDeltaMs} ms`
@@ -1149,7 +1245,7 @@ function printCase(name, result) {
       : null
   ].filter(Boolean)
   log(
-    `${result.pass ? 'PASS' : 'FAIL'} ${name}: tone ${regions || 'none'}${extras.length ? ` · ${extras.join(' · ')}` : ''}`
+    `${result.pass ? 'PASS' : 'FAIL'} ${name}: ${name === 'clips-idle' ? extras.join(' · ') : `tone ${regions || 'none'}${extras.length ? ` · ${extras.join(' · ')}` : ''}`}`
   )
   for (const failure of result.failures) log(`  - ${failure}`)
 }
@@ -1351,6 +1447,7 @@ try {
         {
           generatedAt: new Date().toISOString(),
           gates: SYSTEM_AUDIO_GATES,
+          clipsIdleLevelGates: CLIPS_IDLE_LEVEL_GATES,
           ffmpegPath,
           pass,
           cases: results,

@@ -25,3 +25,13 @@ const getServerSnapshot = () => false
 /** True when the user asked the system to reduce motion. */
 export const useReducedMotion = (): boolean =>
   useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
+
+/**
+ * The behaviour for a script-driven scroll: smooth,
+ * unless the user asked the system to reduce motion. CSS scroll-behavior
+ * already collapses under reduced motion; `scrollIntoView` and `scrollTo`
+ * calls pass this instead of a bare 'smooth'.
+ */
+export function smoothScrollBehavior(): ScrollBehavior {
+  return getSnapshot() ? 'auto' : 'smooth'
+}

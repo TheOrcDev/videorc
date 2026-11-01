@@ -4,6 +4,7 @@ import type {
   StreamPlatform,
   LiveChatEventType
 } from './backend'
+import { isStreamPlatform } from './stream-platforms'
 
 export const MAX_CHAT_DELIVERIES = 2000
 export interface ChatDeliveryBoundary {
@@ -100,12 +101,18 @@ export function validateChatDelivery(value: ChatDelivery): ChatDelivery {
       typeof entry.message.authorName !== 'string' ||
       typeof entry.message.isDeleted !== 'boolean' ||
       typeof entry.message.activity !== 'boolean' ||
-      !['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom'].includes(
-        entry.message.platform
-      ) ||
-      !['message', 'paid', 'membership', 'follow', 'moderation', 'system', 'deleted'].includes(
-        entry.message.eventType
-      ) ||
+      !isStreamPlatform(entry.message.platform) ||
+      ![
+        'message',
+        'paid',
+        'membership',
+        'follow',
+        'power-up',
+        'redemption',
+        'moderation',
+        'system',
+        'deleted'
+      ].includes(entry.message.eventType) ||
       (entry.message.communityGiftId !== undefined &&
         typeof entry.message.communityGiftId !== 'string') ||
       (entry.message.gift !== undefined && !['community', 'single'].includes(entry.message.gift)) ||

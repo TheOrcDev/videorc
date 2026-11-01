@@ -8,7 +8,9 @@ import { createServer } from 'node:http'
 // It records every request, `controls.quotaExhausted` flips every Data API
 // route to Google's 403 `quotaExceeded` envelope on command, and
 // `controls.deleteFailure` scripts the delete. Never accepts anything but its
-// own fixture token.
+// own fixture token, plus any `extraTokens` (plan 178 U8: a second
+// account, like the live lab's viewer bot, whose chat inserts are authored
+// as that account).
 
 export const FAKE_YOUTUBE_ACCESS_TOKEN = 'smoke-youtube-token'
 export const FAKE_YOUTUBE_REFRESH_TOKEN = 'smoke-youtube-refresh'
@@ -110,7 +112,11 @@ export async function startFakeYouTubeApi({
   streamKey = 'smoke-yt-key',
   accessToken = FAKE_YOUTUBE_ACCESS_TOKEN,
   subscriberCount = 1234,
-  concurrentViewers = 7
+  concurrentViewers = 7,
+  // { [token]: { authorName } }: more accepted bearer tokens. A chat insert
+  // with one is authored by that name instead of the streamer. Empty by
+  // default, so existing smokes see exactly one accepted token.
+  extraTokens = {}
 } = {}) {
   const requests = []
   // `deleteFailure` scripts every `liveChatMessages.delete`: null answers 204;
@@ -194,7 +200,9 @@ export async function startFakeYouTubeApi({
       send({})
       return
     }
-    if (request.headers.authorization !== `Bearer ${accessToken}`) {
+    const bearer = String(request.headers.authorization ?? '').replace(/^Bearer /, '')
+    const extraAccount = Object.hasOwn(extraTokens, bearer) ? extraTokens[bearer] : null
+    if (request.headers.authorization !== `Bearer ${accessToken}` && !extraAccount) {
       send(
         {
           error: {
@@ -259,6 +267,7 @@ export async function startFakeYouTubeApi({
         }
         if (request.method === 'DELETE') {
           broadcasts.delete(url.searchParams.get('id'))
+          record.status = 204
           response.writeHead(204).end()
           return
         }
@@ -337,8 +346,10 @@ export async function startFakeYouTubeApi({
         }
         if (request.method === 'POST') {
           const text = body?.snippet?.textMessageDetails?.messageText ?? ''
-          const sent = postChat(text, 'videorc_streamer')
-          chat.sent.push(sent)
+          const sent = postChat(text, extraAccount?.authorName ?? 'videorc_streamer')
+          // `chat.sent` stays the streamer's own sends; a viewer's insert is
+          // just another message in the chat.
+          if (!extraAccount) chat.sent.push(sent)
           send(sent)
           return
         }

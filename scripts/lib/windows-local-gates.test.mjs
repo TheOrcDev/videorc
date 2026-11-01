@@ -260,6 +260,7 @@ describe('Windows candidate payload binding', () => {
         'apps/desktop/release/win-unpacked/Videorc.exe',
         'apps/desktop/release/win-unpacked/resources/app.asar',
         'apps/desktop/release/win-unpacked/resources/videorc-backend.exe',
+        'apps/desktop/release/win-unpacked/resources/videorc-mcp.exe',
         'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg.exe',
         'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffprobe.exe',
         'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg-capture.exe',

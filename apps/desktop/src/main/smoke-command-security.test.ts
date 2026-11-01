@@ -180,11 +180,16 @@ describe('smoke command security', () => {
         'audio.test.inject-pcm',
         'captions.test.inject-audio',
         'captions.test.snapshot',
+        'cohost.pet.import',
         'compositor.scene.update',
+        'diagnostics.stats',
         'encoder_bridge.synthetic_record',
         'recording.start_test'
       ])
     )
+    expect(
+      validateSmokeBackendRpcRequest({ method: 'diagnostics.stats', params: {}, timeoutMs: 30_000 })
+    ).toEqual({ method: 'diagnostics.stats', params: {}, timeoutMs: 30_000 })
     expect(
       validateSmokeBackendRpcRequest({
         method: 'audio.test.disconnect',
@@ -292,6 +297,13 @@ describe('smoke command security', () => {
   it('restricts an authenticated packaged harness to the preview gate command subset', async () => {
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('app-quit')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('authorize-smoke-resource')).toBe(false)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-takeover-image')).toBe(false)
+    expect(
+      validateSmokeCommandPayload({
+        command: 'import-takeover-image',
+        params: { path: '/tmp/fixture.png' }
+      })
+    ).not.toBeNull()
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-background')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-scheduled-thumbnail')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('set-page-zoom')).toBe(false)
@@ -303,6 +315,16 @@ describe('smoke command security', () => {
     ).not.toBeNull()
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('inspect-packaged-bundled-background')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-live-audio-harness')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-d3d11-preview-harness')).toBe(true)
+    expect(
+      validateSmokeCommandPayload({
+        command: 'windows-d3d11-preview-harness',
+        params: { action: 'configure', screenId: 'screen:dxgi:0000000000000001:1' }
+      })
+    ).not.toBeNull()
+    // The renderer's dev-only selectors stay out of packaged builds.
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('select-screen-device')).toBe(false)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('select-layout-preset')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-open')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-save-document')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('comments-window-open')).toBe(true)

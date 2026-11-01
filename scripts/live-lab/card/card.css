@@ -1,0 +1,551 @@
+/* Plan 178 U7 test card. Dark only: it is a broadcast picture, not an app
+   page. Sized in vw/vh for a fullscreen 16:9 lab display. Keep the frame
+   dark (mean luma well under 100) so the white flash is unmistakable to
+   measure-av-sync. Marker regions (markers.json) stay clear of content. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0d0d0f;
+  --panel: #141416;
+  --panel-rim: rgba(255, 255, 255, 0.07);
+  --ink: #ededef;
+  --ink-2: #a1a1aa;
+  --ink-3: #6b6b74;
+  --accent: #3987e5;
+  --good: #0ca30c;
+  --live: #e5484d;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  cursor: none;
+}
+
+h2 {
+  margin: 0;
+  font-size: 1.45vh;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.card {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 52vw 1fr;
+  grid-template-rows: 7.1vh 1fr 7.1vh;
+  column-gap: 2.5vw;
+  row-gap: 3.2vh;
+  padding: 2.22vh 6.5vw;
+}
+
+/* Header: sits between the top fiducials. */
+.top {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2vw;
+  min-width: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.9vw;
+  white-space: nowrap;
+}
+
+.brand-mark {
+  width: 3.4vh;
+  height: 3.4vh;
+  border-radius: 0.9vh;
+  background:
+    radial-gradient(circle at 50% 50%, var(--live) 0 26%, transparent 27%),
+    linear-gradient(145deg, #2a2a2e, #18181b);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.brand-name {
+  font-size: 2.6vh;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.brand-sub {
+  font-size: 2.6vh;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6vh;
+  margin-left: 0.6vw;
+  padding: 0.55vh 1.1vh;
+  border-radius: 99px;
+  background: rgba(57, 135, 229, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(57, 135, 229, 0.4);
+  color: #b9d3f5;
+  font-size: 1.55vh;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pill-dot {
+  width: 0.8vh;
+  height: 0.8vh;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.run-meta {
+  display: flex;
+  gap: 1.8vw;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 1.75vh;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.meta-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.6vw;
+  min-width: 0;
+}
+
+.meta-label {
+  font-family: var(--sans);
+  font-size: 1.35vh;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* Left column: status, clock, motion, events. */
+.left {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 3vh;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 1.4vw;
+  font-size: 2vh;
+  white-space: nowrap;
+}
+
+.session {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7vh;
+  padding: 0.5vh 1.2vh;
+  border-radius: 0.8vh;
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--panel-rim);
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.session-dot {
+  width: 1vh;
+  height: 1vh;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+
+.session[data-state='live'] .session-dot,
+.session[data-state='both'] .session-dot {
+  background: var(--live);
+}
+
+.session[data-state='recording'] .session-dot {
+  background: #f5a524;
+}
+
+.step {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.8vw;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.step-label {
+  font-weight: 600;
+}
+
+.step-name {
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.link-state {
+  font-size: 1.5vh;
+  color: #ec835a;
+}
+
+.clock-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6vh;
+}
+
+.clock-label {
+  font-size: 1.6vh;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--ink-3);
+}
+
+.clock {
+  font-family: var(--mono);
+  font-size: 13.2vh;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.uptime-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1vw;
+  margin-top: 0.8vh;
+}
+
+.uptime-label {
+  font-size: 1.6vh;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.uptime {
+  font-family: var(--mono);
+  font-size: 3.4vh;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.motion {
+  display: flex;
+  align-items: center;
+  gap: 2vw;
+}
+
+.track {
+  position: relative;
+  flex: 1;
+  height: 3.2vh;
+  border-radius: 99px;
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--panel-rim);
+  overflow: hidden;
+}
+
+.runner {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 2.2vh;
+  height: 2.2vh;
+  margin-top: -1.1vh;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 0.35vh rgba(57, 135, 229, 0.25),
+    -3vh 0 2.4vh -0.6vh rgba(57, 135, 229, 0.45);
+  will-change: transform;
+}
+
+.sync {
+  display: flex;
+  align-items: center;
+  gap: 0.8vw;
+  white-space: nowrap;
+  font-size: 1.8vh;
+  color: var(--ink-2);
+}
+
+.sync-ring {
+  width: 4.4vh;
+  height: 4.4vh;
+  transform: rotate(-90deg);
+}
+
+.sync-bg {
+  fill: none;
+  stroke: #26262a;
+  stroke-width: 4;
+}
+
+.sync-arc {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 100.53;
+}
+
+#sync-in {
+  display: inline-block;
+  min-width: 3.2ch;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  text-align: right;
+}
+
+.lower {
+  display: grid;
+  grid-template-columns: 1fr 15vw;
+  gap: 1.2vw;
+  flex: 1;
+  min-height: 0;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1vh;
+  min-width: 0;
+  min-height: 0;
+  padding: 1.5vh 1.6vh;
+  border-radius: 1.2vh;
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--panel-rim);
+}
+
+.panel > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1vw;
+}
+
+.events {
+  display: flex;
+  flex-direction: column;
+  gap: 1.3vh;
+  margin: 0;
+  padding: 0.4vh 0 0;
+  list-style: none;
+  font-size: 2.1vh;
+}
+
+.events li {
+  display: flex;
+  gap: 1vw;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.events code {
+  font-family: var(--mono);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.event-time {
+  font-family: var(--mono);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--ink-3);
+}
+
+.incidents {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1.2vh;
+}
+
+.incident-count {
+  font-family: var(--mono);
+  font-size: 9vh;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.incident-label {
+  display: flex;
+  align-items: center;
+  gap: 0.8vh;
+  font-size: 1.8vh;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.status-dot {
+  flex: none;
+  width: 1.2vh;
+  height: 1.2vh;
+  border-radius: 50%;
+}
+
+/* Right column: live sparklines. */
+.charts {
+  display: grid;
+  grid-template-rows: 1.5fr 1fr 1fr 1fr;
+  gap: 1.5vh;
+  min-height: 0;
+}
+
+.chart {
+  justify-content: space-between;
+}
+
+.chart .value {
+  font-family: var(--mono);
+  font-size: 2.3vh;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.unit {
+  font-family: var(--sans);
+  font-size: 1.4vh;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+.spark {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+
+.baseline {
+  stroke: #2a2a2e;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-empty {
+  fill: var(--ink-3);
+  font-size: 10px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6vh 1.4vw;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 1.55vh;
+}
+
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5vw;
+}
+
+.swatch {
+  width: 1.4vh;
+  height: 0.5vh;
+  border-radius: 99px;
+}
+
+.legend-label {
+  color: var(--ink-2);
+}
+
+.legend-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* Bottom rail: labels for the marker codes drawn on the canvas. */
+.rail {
+  grid-column: 1 / -1;
+  position: relative;
+}
+
+.marker-label {
+  position: fixed;
+  top: 94.22vh;
+  transform: translateY(-50%);
+  font-family: var(--mono);
+  font-size: 1.6vh;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.marker-step {
+  left: 26.2vw;
+}
+
+.marker-scene {
+  left: 42.9vw;
+}
+
+.rail-note {
+  position: fixed;
+  top: 94.22vh;
+  right: 6.5vw;
+  max-width: 44vw;
+  transform: translateY(-50%);
+  font-size: 1.5vh;
+  color: var(--ink-3);
+  text-align: right;
+}
+
+/* The sync flash covers everything except the markers. */
+.flash {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: #ffffff;
+  visibility: hidden;
+}
+
+.flash.on {
+  visibility: visible;
+}
+
+.markers {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+}

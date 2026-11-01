@@ -14,6 +14,7 @@ import { ChatIcon, ClipIcon, MicrophoneIcon, PinIcon, WaveformIcon } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { ClipMomentSource, CleanCutRemoval } from '@/lib/backend'
 import {
   formatCutLength,
@@ -75,7 +76,24 @@ export interface CleanCutTranscriptProps {
   onToggleRemoval: (id: string) => void
   onSeek: (ms: number) => void
   onToggleBlock: (block: CondensedBlock) => void
+  /** The word indexes a text selection in the transcript covers (E-14). */
+  onSelectWords?: (wordIndexes: readonly number[]) => void
   className?: string
+}
+
+const NO_WORDS: readonly number[] = []
+
+/** The words a selection covers inside `root`, by their `data-word` index. */
+function selectedWordIndexes(root: HTMLElement): readonly number[] {
+  const selection = window.getSelection?.()
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return NO_WORDS
+  const range = selection.getRangeAt(0)
+  if (!root.contains(range.commonAncestorContainer)) return NO_WORDS
+  const indexes: number[] = []
+  for (const element of root.querySelectorAll<HTMLElement>('[data-word]')) {
+    if (range.intersectsNode(element)) indexes.push(Number(element.dataset.word))
+  }
+  return indexes
 }
 
 /**
@@ -94,6 +112,7 @@ export function CleanCutTranscript({
   onToggleRemoval,
   onSeek,
   onToggleBlock,
+  onSelectWords,
   className
 }: CleanCutTranscriptProps): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null)
@@ -110,6 +129,17 @@ export function CleanCutTranscript({
     overscan: 6,
     getItemKey: (index) => items[index]?.key ?? index
   })
+
+  // A drag over the words selects them for "Cut selection".
+  useEffect(() => {
+    if (!onSelectWords) return
+    const read = (): void => {
+      const root = rootRef.current
+      onSelectWords(root ? selectedWordIndexes(root) : NO_WORDS)
+    }
+    document.addEventListener('selectionchange', read)
+    return () => document.removeEventListener('selectionchange', read)
+  }, [onSelectWords])
 
   useEffect(() => {
     if (!scrollRequest) return
@@ -133,13 +163,7 @@ export function CleanCutTranscript({
   }
 
   return (
-    // Radix lays the viewport's content out as a table, which lets one long
-    // unbreakable row widen every row; a block keeps rows to the pane width.
-    <ScrollArea
-      ref={rootRef}
-      className={cn('min-h-0 [&_[data-slot=scroll-area-viewport]>div]:block!', className)}
-      data-clean-cut="transcript"
-    >
+    <ScrollArea ref={rootRef} className={cn('min-h-0', className)} data-clean-cut="transcript">
       <div
         className="relative w-full"
         style={{ height: virtualizer.getTotalSize() }}
@@ -309,6 +333,7 @@ function renderTokens(
             token.index === activeWord && 'bg-accent-pressed'
           )}
           data-seek-ms={token.startMs}
+          data-word={token.index}
         >
           {token.text}
         </span>,
@@ -328,28 +353,39 @@ function renderTokens(
       next += 1
     }
     const selected = selectedId === state.id
+    // A cut run is a deletion to assistive technology; the keys (↑ ↓, Enter)
+    // reach every cut from the review, so the run is no fake button (E-15).
+    const Run = state.cut ? 'del' : 'span'
+    // Why it's a cut and what a click does, on hover (plan 174 S1.10).
     out.push(
-      <span
-        key={`run-${state.id}-${token.index}`}
-        aria-pressed={state.cut}
-        className={cn(
-          'rounded-[3px] decoration-2 hover:bg-accent',
-          state.cut ? STRUCK[state.tone] : SUGGESTED[state.tone],
-          selected && 'bg-accent ring-1 ring-ring/50'
-        )}
-        data-cut={state.cut ? 'on' : 'off'}
-        data-removal-id={state.id}
-        data-selected={selected || undefined}
-        role="button"
-        title={removalTitle(state.removal, state.cut)}
-      >
-        {words.map((word, position) => (
-          <span key={word.index} className={cn(word.index === activeWord && 'bg-accent-pressed')}>
-            {position > 0 ? ' ' : null}
-            {word.text}
-          </span>
-        ))}
-      </span>,
+      <Tooltip key={`run-${state.id}-${token.index}`}>
+        <TooltipTrigger
+          render={
+            <Run
+              className={cn(
+                'rounded-[3px] decoration-2 hover:bg-accent',
+                state.cut ? STRUCK[state.tone] : SUGGESTED[state.tone],
+                selected && 'bg-accent ring-1 ring-ring/50'
+              )}
+              data-cut={state.cut ? 'on' : 'off'}
+              data-removal-id={state.id}
+              data-selected={selected || undefined}
+            />
+          }
+        >
+          {words.map((word, position) => (
+            <span
+              key={word.index}
+              className={cn(word.index === activeWord && 'bg-accent-pressed')}
+              data-word={word.index}
+            >
+              {position > 0 ? ' ' : null}
+              {word.text}
+            </span>
+          ))}
+        </TooltipTrigger>
+        <TooltipContent>{removalTitle(state.removal, state.cut)}</TooltipContent>
+      </Tooltip>,
       ' '
     )
     index = next
@@ -374,30 +410,34 @@ function CutMarker({
 }): ReactElement {
   const tone = removalTone(removal.kind)
   return (
-    <Badge
-      aria-pressed={removal.enabled}
-      className={cn(
-        'mx-px align-[1px] tabular-nums hover:bg-accent',
-        removal.enabled ? 'decoration-muted-foreground' : 'opacity-70',
-        selected && 'ring-1 ring-ring/50'
-      )}
-      data-cut={removal.enabled ? 'on' : 'off'}
-      data-kind={removal.kind}
-      data-removal-id={removal.id}
-      data-selected={selected || undefined}
-      role="button"
-      title={removalTitle(removal, removal.enabled)}
-      variant={removal.enabled ? 'outline' : 'ghost'}
-    >
-      {removal.kind === 'gap' ? <WaveformIcon aria-hidden /> : null}
-      <span
-        className={cn(
-          removal.enabled ? 'line-through' : cn('underline decoration-dotted', SUGGESTED[tone])
-        )}
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Badge
+            className={cn(
+              'mx-px align-[1px] tabular-nums hover:bg-accent',
+              removal.enabled ? 'decoration-muted-foreground' : 'opacity-70',
+              selected && 'ring-1 ring-ring/50'
+            )}
+            data-cut={removal.enabled ? 'on' : 'off'}
+            data-kind={removal.kind}
+            data-removal-id={removal.id}
+            data-selected={selected || undefined}
+            variant={removal.enabled ? 'outline' : 'ghost'}
+          />
+        }
       >
-        {markerLabel(removal)}
-      </span>
-    </Badge>
+        {removal.kind === 'gap' ? <WaveformIcon aria-hidden /> : null}
+        <span
+          className={cn(
+            removal.enabled ? 'line-through' : cn('underline decoration-dotted', SUGGESTED[tone])
+          )}
+        >
+          {markerLabel(removal)}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{removalTitle(removal, removal.enabled)}</TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -405,18 +445,23 @@ function CutMarker({
 function PinMarker({ pin }: { pin: CleanCutPin }): ReactElement {
   const Glyph = PIN_ICONS[pin.kind] ?? PinIcon
   return (
-    <Badge
-      className="mx-px align-[1px] hover:bg-accent"
-      data-pin={pin.kind}
-      data-seek-ms={pin.startMs}
-      role="button"
-      title={pin.excerpt ? `${pin.label}: ${pin.excerpt}` : pin.label}
-      variant="outline"
-    >
-      <Glyph aria-hidden data-icon="inline-start" />
-      {pin.label}
-      <span className="font-normal text-subtle tabular-nums">{formatCutClock(pin.startMs)}</span>
-    </Badge>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Badge
+            className="mx-px align-[1px] hover:bg-accent"
+            data-pin={pin.kind}
+            data-seek-ms={pin.startMs}
+            variant="outline"
+          />
+        }
+      >
+        <Glyph aria-hidden data-icon="inline-start" />
+        {pin.label}
+        <span className="font-normal text-subtle tabular-nums">{formatCutClock(pin.startMs)}</span>
+      </TooltipTrigger>
+      <TooltipContent>{pin.excerpt ? `${pin.label}: ${pin.excerpt}` : pin.label}</TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -439,7 +484,7 @@ function BlockRow({
   return (
     <div
       className={cn(
-        'flex min-w-0 items-center gap-2 border-y border-border bg-foreground/[0.03] px-gutter py-1.5',
+        'flex min-w-0 items-center gap-2 border-y border-border bg-inset px-gutter py-1.5',
         block.removed && 'text-muted-foreground'
       )}
       data-block={block.kind}

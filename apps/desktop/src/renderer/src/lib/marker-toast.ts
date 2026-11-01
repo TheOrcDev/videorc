@@ -1,4 +1,4 @@
-import { toast } from '@/lib/toast'
+import { TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import type { BackendClient } from '@/backendClient'
 import type { SessionMarker } from '@/lib/backend'
 import { markerTime } from '../../../shared/session-markers'
@@ -16,6 +16,9 @@ export async function showMarkerToast(
   toast.success(`Marker saved · ${marker.label ?? 'Untitled marker'}`, {
     id: marker.id,
     description: markerTime(marker.atSeconds),
+    // Undo is a convenience, not a step the streamer must take: it times out
+    // like any toast with a description instead of staying (plan 174 S2.4).
+    duration: TOAST_WITH_DESCRIPTION_MS,
     action: {
       label: 'Undo',
       onClick: () => {
@@ -25,9 +28,13 @@ export async function showMarkerToast(
             markerId: marker.id
           })
           .then(() => toast.dismiss(marker.id))
-          .catch((error) =>
-            toast.error(error instanceof Error ? error.message : 'Could not remove marker.')
-          )
+          .catch((error: unknown) => {
+            console.warn('[markers] undo failed:', error)
+            toast.error("Couldn't undo the marker", {
+              id: marker.id,
+              description: "Delete it from the recording's Markers in Library."
+            })
+          })
       }
     }
   })

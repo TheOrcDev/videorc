@@ -166,6 +166,30 @@ describe('mapping table rows', () => {
     expect(result.layout.cameraTransform!.width).toBeCloseTo(0.25, 2)
   })
 
+  it('a PipeWire screen capture never claims to capture a known display', () => {
+    const portal = {
+      name: 'Portal',
+      kind: 'display' as const,
+      obsKind: 'pipewire-screen-capture-source'
+    }
+    const setup = setupFrom({
+      sources: [portal],
+      scenes: [{ name: 'Main', current: true, items: [item('Portal')] }]
+    })
+    const row = mapObsSetup(setup, DEVICES).report.find((entry) => entry.subject === 'Portal')
+    expect(row?.verdict).toBe('approximated')
+    expect(row?.note).toMatch(
+      /^This OBS source can capture a monitor or a window, so it starts on /
+    )
+    const noScreen = mapObsSetup(
+      setup,
+      DEVICES.filter((device) => device.kind !== 'screen')
+    ).report.find((entry) => entry.subject === 'Portal')
+    expect(noScreen?.note).toBe(
+      'This OBS source can capture a monitor or a window. Pick one in Sources.'
+    )
+  })
+
   it('portrait-cropped camera → portrait aspect', () => {
     const result = mapObsSetup(
       setupFrom({
@@ -239,7 +263,7 @@ describe('mapping table rows', () => {
       DEVICES
     )
     expect(result.stream).toMatchObject({ kind: 'rtmp-platform', platform: 'kick', hasKey: true })
-    expect(reportNotes(result, 'imported').join('\n')).toContain('Kick Manual RTMP')
+    expect(reportNotes(result, 'imported').join('\n')).toContain('into Kick, set to Stream key')
   })
 
   it('an IVS live-video.net host alone never reads as Kick', () => {
@@ -257,6 +281,66 @@ describe('mapping table rows', () => {
       DEVICES
     )
     expect(result.stream).toMatchObject({ kind: 'oauth-suggest', platform: 'twitch' })
+  })
+
+  // Plan 206: Facebook is a stream-key card, so OBS's key belongs in it and
+  // never in "connect the account".
+  it('the OBS Facebook Live service imports to the Facebook card', () => {
+    const result = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_common',
+          service: 'Facebook Live',
+          server: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(result.stream).toMatchObject({
+      kind: 'rtmp-platform',
+      platform: 'facebook',
+      serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+      hasKey: true
+    })
+    const notes = reportNotes(result).join('\n')
+    expect(notes).toContain('into Facebook, set to Stream key')
+    expect(notes).not.toContain('Connect the account')
+  })
+
+  it('a custom server on a Facebook host imports to the Facebook card', () => {
+    const result = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_custom',
+          server: 'rtmps://live-api-s.facebook.com:443/rtmp/',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(result.stream).toMatchObject({ kind: 'rtmp-platform', platform: 'facebook' })
+    expect(reportNotes(result, 'imported').join('\n')).toContain(
+      'Facebook Live: Imports the server and the stream key into Facebook'
+    )
+    // A look-alike host stays a custom server.
+    const lookalike = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_custom',
+          server: 'rtmp://facebook.com.example.net/live',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(lookalike.stream).toMatchObject({ kind: 'rtmp-custom' })
   })
 
   it('browser/text/media sources are skipped with human reasons', () => {
@@ -287,12 +371,12 @@ describe('mapping table rows', () => {
 
     const on = mapObsSetup(setup, [...DEVICES, systemAudio('available')])
     expect(on.audio.systemAudioEnabled).toBe(true)
-    expect(reportNotes(on, 'imported')).toContain('Desktop audio: → System audio (on)')
+    expect(reportNotes(on, 'imported')).toContain('Desktop audio: Turns System audio on.')
 
     const needsPermission = mapObsSetup(setup, [...DEVICES, systemAudio('permission-required')])
     expect(needsPermission.audio.systemAudioEnabled).toBe(true)
     expect(reportNotes(needsPermission, 'approximated')).toContain(
-      'Desktop audio: → System audio (on) once Screen Recording is allowed'
+      'Desktop audio: Turns System audio on, once Screen Recording is allowed.'
     )
 
     // Unsupported here (Windows before S8, Linux): nothing turns on, and the
@@ -301,7 +385,7 @@ describe('mapping table rows', () => {
       const skipped = mapObsSetup(setup, devices)
       expect(skipped.audio.systemAudioEnabled).toBeUndefined()
       expect(reportNotes(skipped, 'skipped')).toContain(
-        'Desktop audio: this computer cannot capture system audio yet'
+        "Desktop audio: This computer can't capture system audio."
       )
     }
     expect(JSON.stringify(on.report)).not.toContain('roadmap')
@@ -347,9 +431,90 @@ describe('mapping table rows', () => {
         sources: [display, bg, bg2],
         scenes: [{ name: 'S', current: true, items: [item('BG'), item('BG2'), item('Screen')] }]
       }),
-      DEVICES
+      DEVICES,
+      { slotId: 'bg-09', replaces: 'Light Mode' }
     )
     expect(result.backgroundAsset?.id).toBe('bg-managed')
+    expect(result.backgroundSlotId).toBe('bg-09')
     expect(reportNotes(result, 'skipped').join('\n')).toContain('BG2')
+  })
+
+  describe('the background line says what apply does (plan 174, C-7)', () => {
+    const managed = {
+      id: 'bg-managed',
+      name: 'BG',
+      assetPath: 'videorc-asset://background/bg-managed.png',
+      thumbnailPath: 'videorc-asset://background/bg-managed.png',
+      fileName: 'bg-managed.png'
+    }
+    const image = (managedBackground?: typeof managed) => ({
+      name: 'BG',
+      kind: 'image' as const,
+      obsKind: 'image_source',
+      ...(managedBackground ? { managedBackground } : {})
+    })
+    const map = (
+      source: ReturnType<typeof image>,
+      target: Parameters<typeof mapObsSetup>[2]
+    ): ObsImportPlanResult =>
+      mapObsSetup(
+        setupFrom({
+          sources: [display, source],
+          scenes: [{ name: 'S', current: true, items: [item('BG'), item('Screen')] }]
+        }),
+        DEVICES,
+        target
+      )
+
+    it('names the preset it replaces', () => {
+      const result = map(image(managed), { slotId: 'bg-10', replaces: 'Focus' })
+      expect(result.backgroundSlotId).toBe('bg-10')
+      expect(reportNotes(result, 'approximated')).toContain(
+        'BG: Becomes the scene background, in place of Focus in Assets.'
+      )
+    })
+
+    it('says when it goes into an empty slot', () => {
+      const result = map(image(managed), { slotId: 'bg-04', replaces: null })
+      expect(reportNotes(result, 'approximated')).toContain(
+        'BG: Becomes the scene background, in an empty slot in Assets.'
+      )
+    })
+
+    it('promises nothing it cannot apply', () => {
+      const noSlot = map(image(managed), null)
+      expect(noSlot.backgroundAsset).toBeUndefined()
+      expect(noSlot.backgroundSlotId).toBeUndefined()
+      expect(reportNotes(noSlot, 'skipped')).toContain(
+        'BG: Assets has no slot for it. Import it from Assets.'
+      )
+
+      const notCopied = map(image(), { slotId: 'bg-10', replaces: 'Focus' })
+      expect(notCopied.backgroundAsset).toBeUndefined()
+      expect(notCopied.backgroundSlotId).toBeUndefined()
+      expect(reportNotes(notCopied, 'skipped').join('\n')).toContain(
+        "BG: The image couldn't be copied."
+      )
+    })
+  })
+
+  it('writes every note as a sentence', () => {
+    const parsed = parseSceneCollection(collectionJson)
+    const result = mapObsSetup(
+      setupFrom({
+        sources: parsed.sources,
+        scenes: parsed.scenes,
+        hasDesktopAudio: true,
+        service: { type: 'rtmp_custom', server: 'rtmp://my.server/live', hasKey: false }
+      }),
+      DEVICES,
+      { slotId: 'bg-10', replaces: 'Focus' }
+    )
+    // The Output and Recording folder lines are values, not sentences.
+    for (const line of result.report.filter((entry) => entry.subject !== 'Output')) {
+      expect(line.note).toMatch(/^[A-Z"]/)
+      expect(line.note).toMatch(/[.]$/)
+      expect(line.note).not.toMatch(/;|→/)
+    }
   })
 })

@@ -45,12 +45,20 @@ export function nativePreviewStatusProvesSceneRevision(
   )
 }
 
+// Banners (plan 186) and the Buddy's layer (plan 205 S9) are program overlays
+// main places, snapshot-level like the takeover's live image, not scene
+// content: showing, moving or hiding one never bumps the scene revision, so
+// an overlay change at the same revision is never a conflicting scene.
+const PROGRAM_OVERLAY_LAYER_KINDS: ReadonlySet<string> = new Set(['banner', 'buddy'])
+
 function sceneFingerprint(scene: PreviewSurfaceSceneState): string {
-  const { updatedAt: _updatedAt, sources, ...content } = scene
+  const { updatedAt: _updatedAt, bannerCanvas: _bannerCanvas, sources, ...content } = scene
   return JSON.stringify(
     canonicalValue({
       ...content,
-      sources: sources.map(({ frameUrl: _frameUrl, ...source }) => source)
+      sources: sources
+        .filter((source) => !PROGRAM_OVERLAY_LAYER_KINDS.has(source.kind))
+        .map(({ frameUrl: _frameUrl, ...source }) => source)
     })
   )
 }

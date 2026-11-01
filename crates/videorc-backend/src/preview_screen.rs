@@ -27,7 +27,12 @@ use crate::diagnostics::{
     apply_preview_source_frame_store_stats,
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
-use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats, SurfaceBackingTrackerHandle};
+#[cfg(target_os = "windows")]
+use crate::frame_store::RetainedD3D11Texture;
+use crate::frame_store::{
+    FrameHandle, FrameStore, FrameStoreStats, RetainedIoSurface, RetainedPixelBuffer,
+    SurfaceBackingTrackerHandle,
+};
 use crate::linux_portal_capture::parse_portal_source_id;
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
@@ -40,6 +45,9 @@ use crate::screen_capture::{
     ScreenCaptureCallbackCadence, is_windows_gdigrab_desktop_screen_id,
     parse_screencapturekit_display_id, parse_screencapturekit_window_id,
     parse_windows_dxgi_output_index,
+};
+use crate::screen_privacy::{
+    ScreenFrameAdmission, ScreenPrivacyCursor, ScreenPrivacyGate, admit_screen_frame, frost_bgra,
 };
 use crate::source_registry::{
     SourceConsumerReason, SourceIdentityConfidence, SourceKey, SourceKind,
@@ -68,6 +76,97 @@ fn native_screen_preview_thread_startup_timeout() -> Duration {
         .saturating_mul(SCREEN_CAPTUREKIT_DISCOVERY_ATTEMPTS)
         .saturating_add(SCREEN_CAPTUREKIT_STREAM_START_TIMEOUT)
         .saturating_add(Duration::from_secs(5))
+}
+
+/// Starting copy. Linux status never claims a native preview (AGENTS.md):
+/// it is portal capture shown through the proof surface.
+const SCREEN_PREVIEW_STARTING_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Starting screen capture."
+} else {
+    "Starting native screen preview."
+};
+/// Status copy names the transport: Linux is portal capture shown through the
+/// proof surface, never a native preview (AGENTS.md, Linux plan 0010).
+const SCREEN_PREVIEW_IDLE_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture is not running."
+} else {
+    "Native screen preview is not running."
+};
+const SCREEN_PREVIEW_STOPPED_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture stopped."
+} else {
+    "Native screen preview stopped."
+};
+const SCREEN_PREVIEW_REUSED_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture source reused."
+} else {
+    "Native screen preview source reused."
+};
+const SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+} else {
+    "Native screen preview source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+};
+const SCREEN_PREVIEW_STARTUP_TIMEOUT_SUBJECT: &str = if cfg!(target_os = "linux") {
+    "starting screen capture"
+} else {
+    "starting native screen preview"
+};
+/// Linux portal (plan 0010): a share dialog waits on a person, not a device,
+/// so the device startup deadline does not apply to it. Videorc still stops
+/// waiting eventually, so an abandoned dialog cannot hold the source forever.
+const SHARE_DIALOG_WAIT: Duration = Duration::from_secs(10 * 60);
+/// Linux portal: once the share is granted, PipeWire's first frame is quick.
+/// A display that is asleep or off delivers none.
+const PORTAL_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(20);
+const SHARE_DIALOG_PENDING_MESSAGE: &str =
+    "Waiting for you to choose a screen in the share dialog.";
+const SESSION_START_SHARE_DIALOG_MESSAGE: &str = "Videorc is waiting for you to choose a screen in the share dialog. Choose a screen (or close the dialog), then try again.";
+
+/// Where a native screen start is (plan 0010). Only the Linux portal thread
+/// reports the consent phases; every other platform stays in `Starting`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenStartupPhase {
+    Starting,
+    AwaitingConsent,
+    AwaitingFirstFrame,
+}
+
+impl ScreenStartupPhase {
+    fn deadline(self) -> Duration {
+        match self {
+            Self::Starting => native_screen_preview_thread_startup_timeout(),
+            Self::AwaitingConsent => SHARE_DIALOG_WAIT,
+            Self::AwaitingFirstFrame => PORTAL_FIRST_FRAME_TIMEOUT,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Starting => SCREEN_PREVIEW_STARTING_MESSAGE,
+            Self::AwaitingConsent => SHARE_DIALOG_PENDING_MESSAGE,
+            // Mirrored as `SCREEN_SHARE_GRANTED_MESSAGE` in the renderer's
+            // replay-buffer-grants.ts: Clips waits for this run's grant.
+            Self::AwaitingFirstFrame => "Screen share granted. Waiting for its first frame.",
+        }
+    }
+
+    fn expired(self, waited: Duration) -> NativeScreenStartup {
+        match self {
+            Self::Starting => NativeScreenStartup::Failed(format!(
+                "Timed out after {:.0}s while {SCREEN_PREVIEW_STARTUP_TIMEOUT_SUBJECT}.",
+                waited.as_secs_f64()
+            )),
+            Self::AwaitingConsent => NativeScreenStartup::PermissionNeeded(format!(
+                "The share dialog stayed open for {} minutes, so Videorc stopped waiting. Choose your screen again to share it.",
+                waited.as_secs() / 60
+            )),
+            Self::AwaitingFirstFrame => NativeScreenStartup::SourceMissing(
+                "The screen share started but no picture is arriving. Is the display asleep or turned off?"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 fn native_preview_surface_env_enabled() -> bool {
@@ -125,6 +224,9 @@ pub type PreviewScreenSlot = Arc<tokio::sync::Mutex<PreviewScreenRuntime>>;
 #[derive(Debug)]
 pub struct PreviewScreenRuntime {
     pub status: PreviewScreenStatus,
+    // Native source retirement must not erase the exclusions needed when an
+    // armed ISO reacquires a selected source omitted from the idle layout.
+    protected_overlay_window_ids: Vec<u32>,
     /// Source-level ownership keeps surface-backed frames observable while a
     /// capture session replaces its per-session `FrameStore`.
     surface_backing_tracker: SurfaceBackingTrackerHandle,
@@ -154,6 +256,13 @@ pub struct PreviewScreenRuntime {
     native_supervisor: Arc<tokio::sync::Mutex<PreviewScreenNativeSupervisor>>,
     active: Option<NativeScreenPreviewThread>,
     poll_task: Option<JoinHandle<()>>,
+    /// The startup phase a Linux portal start reported for one generation
+    /// (plan 0010): a share dialog waiting on a person, then PipeWire's first
+    /// frame. Session start fails fast instead of queueing behind that wait.
+    startup_phase: Option<(u64, ScreenStartupPhase)>,
+    /// Trips the current start's share-dialog wait (plan 0010); taken by the
+    /// next transition ticket.
+    consent_cancel: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,9 +463,66 @@ struct NativeScreenPreviewThread {
 
 #[derive(Debug)]
 struct OwnedNativeScreenPreviewThread {
-    stop_tx: std_mpsc::Sender<()>,
+    stop_tx: std_mpsc::Sender<NativeScreenCommand>,
     join_handle: Option<thread::JoinHandle<()>>,
 }
+
+/// What the supervisor asks of a native capture thread.
+#[derive(Debug)]
+enum NativeScreenCommand {
+    Stop,
+    /// Plan 210 S3 (macOS): change the running stream's target in place.
+    /// Windows and Linux never receive one; their loops treat any command
+    /// as a stop.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Swap(ScreenSwapRequest),
+}
+
+/// Plan 210 S3: the next window or display for a running ScreenCaptureKit
+/// stream, answered on `reply` once the stream switched to it (or refused).
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct ScreenSwapRequest {
+    source: SelectedScreenSource,
+    ffmpeg_path: String,
+    video: VideoSettings,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
+    protected_overlay_window_ids: Vec<u32>,
+    /// The capture generation the stream stamps on frames of the new target.
+    generation: u64,
+    reply: std_mpsc::Sender<Result<ScreenSwapOutcome, String>>,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct ScreenSwapOutcome {
+    native_width: u32,
+    native_height: u32,
+    requested_width: u32,
+    requested_height: u32,
+    selected_fps: f64,
+    message: Option<String>,
+    /// Whether the listing's one-second discovery cache served the content.
+    content_cached: bool,
+    content_ms: u64,
+    /// Both ScreenCaptureKit updates, issued together, to their completions.
+    update_ms: u64,
+    /// When the new generation began: frames after this carry it.
+    stamped_at: Instant,
+}
+
+/// Both ScreenCaptureKit updates of a swap in place must complete within
+/// this, and the new target's first frame must follow within it again;
+/// otherwise the switch falls back to stop-then-start under the held frame.
+#[cfg(target_os = "macos")]
+const SCREEN_SWAP_UPDATE_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(target_os = "macos")]
+const SCREEN_SWAP_FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(250);
+/// A swap's bounded discovery load (when the cache is cold) plus its
+/// updates, with slack, before the supervisor stops waiting for the thread.
+#[cfg(target_os = "macos")]
+const SCREEN_SWAP_REPLY_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 #[derive(Debug, Default)]
 struct PreviewScreenNativeSupervisor {
@@ -528,22 +694,54 @@ impl PreviewScreenFrameSource {
         self.generation
     }
 
+    /// The store's newest frame, when it belongs to this source's capture
+    /// generation (plan 210 S3). A frame the next window published into the
+    /// same store is `None` here, so a compositor still on the previous
+    /// scene holds the previous window's last frame instead of drawing the
+    /// next window under that scene's layout.
     pub fn try_latest_frame_result(
         &self,
     ) -> Result<Option<FrameHandle<PreviewScreenPixelFormat>>, ()> {
         match self.shared.try_lock() {
-            Ok(guard) => Ok(guard.frame_store.latest()),
+            Ok(guard) => Ok(latest_frame_of_generation(&guard, self.generation)),
             Err(TryLockError::WouldBlock) => Err(()),
-            Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner().frame_store.latest()),
+            Err(TryLockError::Poisoned(poisoned)) => Ok(latest_frame_of_generation(
+                &poisoned.into_inner(),
+                self.generation,
+            )),
+        }
+    }
+
+    /// While the screen is hidden (plan 210 S7): the store's newest frame
+    /// only when it is the Hide screen still. A consumer that composes from
+    /// this store while hidden (the Windows D3D11 session's BGRA stand-in)
+    /// must never pick up a live frame from before the hide edge, nor one
+    /// published between the gate closing and `screen.hide` covering the
+    /// store; until the still is there it draws no screen at all. No frame
+    /// beats a live one.
+    #[cfg(any(target_os = "windows", test))]
+    pub fn try_latest_still_frame_result(
+        &self,
+    ) -> Result<Option<FrameHandle<PreviewScreenPixelFormat>>, ()> {
+        let still = |guard: &PreviewScreenShared| {
+            latest_frame_of_generation(guard, self.generation)
+                .filter(|frame| Some(frame.storage_identity()) == guard.still_identity)
+        };
+        match self.shared.try_lock() {
+            Ok(guard) => Ok(still(&guard)),
+            Err(TryLockError::WouldBlock) => Err(()),
+            Err(TryLockError::Poisoned(poisoned)) => Ok(still(&poisoned.into_inner())),
         }
     }
 
     pub fn latest_frame_blocking(&self) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
-        self.shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .frame_store
-            .latest()
+        latest_frame_of_generation(
+            &self
+                .shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            self.generation,
+        )
     }
 
     #[cfg(target_os = "windows")]
@@ -560,6 +758,140 @@ impl PreviewScreenFrameSource {
             lease: PreviewScreenDirectD3d11ConsumerLease::acquire(&self.shared),
         })
     }
+}
+
+/// The newest stored frame when it carries `generation` (plan 210 S3).
+fn latest_frame_of_generation(
+    guard: &PreviewScreenShared,
+    generation: u64,
+) -> Option<FrameHandle<PreviewScreenPixelFormat>> {
+    (guard.latest_frame_generation == generation)
+        .then(|| guard.frame_store.latest())
+        .flatten()
+}
+
+/// Plan 210 S3: the capture now delivers another window or display into the
+/// same store. Frames from here on carry `generation`, and the Hide screen
+/// gate treats it as a fresh capture: its first frame frosts itself, never
+/// publishes live. The previous target's held live frame keeps its own
+/// generation, so a show before the next frame publishes it under the scene
+/// that still names that target.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn begin_capture_generation(guard: &mut PreviewScreenShared, generation: u64) {
+    // Two targets at the same place cannot be told apart by their frames:
+    // the completion's stamp decides, and nothing is left to attribute.
+    if guard.swap_attribution.is_some_and(|attribution| {
+        attribution
+            .previous_rect
+            .is_some_and(|previous| screen_rects_match(previous, attribution.next_rect))
+    }) {
+        guard.swap_attribution = None;
+    }
+    if guard.capture_generation == generation {
+        return;
+    }
+    guard.capture_generation = generation;
+    guard.privacy_cursor = ScreenPrivacyCursor::default();
+    #[cfg(target_os = "windows")]
+    {
+        guard.d3d11_privacy_cursor = ScreenPrivacyCursor::default();
+    }
+}
+
+/// A window's or display's rectangle in screen points: x, y, width, height.
+type ScreenRect = (f64, f64, f64, f64);
+
+/// Plan 210 S3: while a swap is in flight, how to tell the two targets'
+/// frames apart. ScreenCaptureKit may deliver the next target's first frame
+/// before the update's completion handler runs, or one more frame of the
+/// previous target after it; each frame's screen rectangle says which
+/// window or display it came from, so the stamp follows the frame, not the
+/// clock. Armed before the stream updates, cleared by the first frame
+/// attributed to the next target. Two targets at the same place are told
+/// apart by the completion alone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SwapAttribution {
+    next_generation: u64,
+    next_rect: ScreenRect,
+    previous_generation: u64,
+    previous_rect: Option<ScreenRect>,
+    /// Frames of the new generation still to publish before the attribution
+    /// expires; a straggler of the previous target never arrives this late.
+    frames_left: u8,
+}
+
+const SWAP_ATTRIBUTION_FRAMES: u8 = 12;
+
+fn screen_rects_match(left: ScreenRect, right: ScreenRect) -> bool {
+    (left.0 - right.0).abs() < 0.5
+        && (left.1 - right.1).abs() < 0.5
+        && (left.2 - right.2).abs() < 0.5
+        && (left.3 - right.3).abs() < 0.5
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn arm_capture_generation(guard: &mut PreviewScreenShared, attribution: SwapAttribution) {
+    guard.swap_attribution = Some(SwapAttribution {
+        frames_left: SWAP_ATTRIBUTION_FRAMES,
+        ..attribution
+    });
+    guard.generation_began_early = false;
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn disarm_capture_generation(guard: &mut PreviewScreenShared) {
+    guard.swap_attribution = None;
+}
+
+/// The generation a frame about to be published carries, given the screen
+/// rectangle it was captured from (plan 210 S3), or `None` for a frame to
+/// discard. While a swap is armed, a frame of the next target begins the new
+/// generation at once (a fresh capture for the Hide screen gate too). A frame
+/// of the previous target is live content until the new generation began;
+/// after that it is a straggler, and publishing it would put the previous
+/// window over the next one's first frame in the depth-one store (the
+/// compositor would then hold the previous window under the new scene), so
+/// it is discarded. Without a rectangle, or with both targets at the same
+/// place, the completion's stamp decides. The attribution expires a few
+/// frames into the new generation.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn frame_capture_generation(
+    guard: &mut PreviewScreenShared,
+    screen_rect: Option<ScreenRect>,
+) -> Option<u64> {
+    let Some(attribution) = guard.swap_attribution else {
+        return Some(guard.capture_generation);
+    };
+    let (next, previous) = screen_rect
+        .map(|rect| {
+            (
+                screen_rects_match(rect, attribution.next_rect),
+                attribution
+                    .previous_rect
+                    .is_some_and(|previous| screen_rects_match(rect, previous)),
+            )
+        })
+        .unwrap_or((false, false));
+    let began = guard.capture_generation == attribution.next_generation;
+    if previous && !next {
+        return if began {
+            None
+        } else {
+            Some(attribution.previous_generation)
+        };
+    }
+    if next && !previous && !began {
+        guard.generation_began_early = true;
+        begin_capture_generation(guard, attribution.next_generation);
+    }
+    let generation = guard.capture_generation;
+    if generation == attribution.next_generation {
+        match guard.swap_attribution.as_mut() {
+            Some(attribution) if attribution.frames_left > 1 => attribution.frames_left -= 1,
+            _ => guard.swap_attribution = None,
+        }
+    }
+    Some(generation)
 }
 
 /// Refcount lease on the Windows Graphics Capture D3D11 frame store's
@@ -660,6 +992,52 @@ pub struct PreviewScreenShared {
     /// until the metrics poll decides between a restart and a failure.
     stream_stop: Option<ScreenStreamStop>,
     capture_timings: ScreenCaptureTimingWindow,
+    /// Plan 210 S7: the Hide screen gate this capture publishes through, and
+    /// each store's memory of the span it last frosted for.
+    privacy: Arc<ScreenPrivacyGate>,
+    privacy_cursor: ScreenPrivacyCursor,
+    #[cfg(target_os = "windows")]
+    d3d11_privacy_cursor: ScreenPrivacyCursor,
+    /// The latest live frame kept out of each store while hidden, so a show
+    /// publishes the current picture at once (a static screen sends nothing).
+    held_live: Option<HeldLiveFrame>,
+    #[cfg(target_os = "windows")]
+    held_live_d3d11: Option<HeldLiveFrame>,
+    /// Storage identity of the still in the CPU store, so a show never puts a
+    /// held frame over a newer live one.
+    still_identity: Option<u64>,
+    /// Live frames held back while hidden.
+    privacy_held_frames: u64,
+    /// Plan 210 S3: the capture generation stamped on the next publish (a
+    /// swap in place bumps it without replacing the store), and the
+    /// generation of the frame now in `frame_store`. The compositor draws
+    /// only frames of the generation its scene adopted, so the next window
+    /// is never drawn under the previous scene's layout, and the previous
+    /// window's last frame holds until the next window's first frame.
+    capture_generation: u64,
+    latest_frame_generation: u64,
+    /// While a swap is in flight: how to tell the two targets' frames
+    /// apart (see [`SwapAttribution`]).
+    swap_attribution: Option<SwapAttribution>,
+    /// Diagnostic: the next target's first frame came before the stream
+    /// update's completion and began its generation itself.
+    generation_began_early: bool,
+}
+
+/// Plan 210 S7: a live frame kept out of every store while the screen is
+/// hidden. It has its own type on purpose: no `latest()` reader can reach it,
+/// and only [`release_cpu_store_now`] publishes it, after the gate opens.
+#[derive(Debug, Default)]
+struct HeldLiveFrame {
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+    /// The capture generation the frame belongs to (plan 210 S3).
+    generation: u64,
+    source_iosurface: Option<RetainedIoSurface>,
+    source_pixel_buffer: Option<RetainedPixelBuffer>,
+    #[cfg(target_os = "windows")]
+    source_d3d11_texture: Option<RetainedD3D11Texture>,
 }
 
 /// `SCStreamErrorUserStopped`: the person ended sharing from the macOS menu
@@ -724,12 +1102,430 @@ fn screen_stream_stop_disposition(
 static SCREEN_STREAM_STOP_RESTARTS: StdMutex<VecDeque<Instant>> = StdMutex::new(VecDeque::new());
 
 impl PreviewScreenShared {
-    fn with_surface_backing_tracker(tracker: SurfaceBackingTrackerHandle) -> Self {
+    /// A capture session's store, publishing through the process-wide gate.
+    fn new_capture(
+        tracker: SurfaceBackingTrackerHandle,
+        privacy: Arc<ScreenPrivacyGate>,
+        generation: u64,
+    ) -> Self {
         Self {
             frame_store: FrameStore::new_with_surface_backing_tracker(1, tracker),
+            privacy,
+            capture_generation: generation,
             ..Self::default()
         }
     }
+
+    #[cfg(test)]
+    fn with_privacy(privacy: Arc<ScreenPrivacyGate>) -> Self {
+        Self {
+            privacy,
+            ..Self::default()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan 210 S7: Hide screen, held at the source
+// ---------------------------------------------------------------------------
+
+/// The one way a CPU-bytes publish point (Linux PipeWire, the Windows FFmpeg
+/// and WGC readback paths, the test publisher) puts a frame in the store.
+/// Visible, it publishes; hidden, it publishes the frosted still once per
+/// hide and holds every later live frame. Returns a buffer for the caller's
+/// next frame (the one it held last, when it fits). macOS publishes through
+/// ScreenCaptureKit's own callback, so its production build has no caller.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows", test)),
+    allow(dead_code)
+)]
+fn publish_gated_bgra_frame(
+    guard: &mut PreviewScreenShared,
+    sequence: u64,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+    captured_at: Instant,
+) -> Vec<u8> {
+    let frame_len = bytes.len();
+    let generation = guard.capture_generation;
+    match admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor) {
+        ScreenFrameAdmission::Publish => {
+            guard.held_live = None;
+            guard.frame_store.publish_with_metadata(
+                sequence,
+                width,
+                height,
+                PreviewScreenPixelFormat::Bgra8,
+                (),
+                captured_at,
+                bytes,
+            );
+            guard.latest_frame_generation = generation;
+            guard.frame_store.checkout_overwrite_buffer(frame_len)
+        }
+        ScreenFrameAdmission::Frost => {
+            let still = frost_bgra(width, height, Some(&bytes));
+            publish_cpu_still(
+                guard,
+                sequence,
+                width,
+                height,
+                still,
+                captured_at,
+                generation,
+            );
+            hold_live_frame(
+                guard,
+                HeldLiveFrame {
+                    width,
+                    height,
+                    bytes,
+                    generation,
+                    ..HeldLiveFrame::default()
+                },
+            );
+            guard.frame_store.checkout_overwrite_buffer(frame_len)
+        }
+        ScreenFrameAdmission::Hold => {
+            let previous = hold_live_frame(
+                guard,
+                HeldLiveFrame {
+                    width,
+                    height,
+                    bytes,
+                    generation,
+                    ..HeldLiveFrame::default()
+                },
+            );
+            match previous.map(|held| held.bytes) {
+                Some(buffer) if buffer.len() == frame_len => buffer,
+                _ => guard.frame_store.checkout_overwrite_buffer(frame_len),
+            }
+        }
+    }
+}
+
+fn hold_live_frame(guard: &mut PreviewScreenShared, frame: HeldLiveFrame) -> Option<HeldLiveFrame> {
+    guard.privacy_held_frames = guard.privacy_held_frames.saturating_add(1);
+    guard.held_live.replace(frame)
+}
+
+/// The frosted still into the CPU store: the bytes always, and on macOS an
+/// IOSurface of the same pixels so the Metal path keeps its zero-copy import.
+fn publish_cpu_still(
+    guard: &mut PreviewScreenShared,
+    sequence: u64,
+    width: u32,
+    height: u32,
+    still: Vec<u8>,
+    captured_at: Instant,
+    generation: u64,
+) {
+    #[cfg(target_os = "macos")]
+    let surface = crate::screen_privacy::macos::create_bgra_iosurface(width, height, &still);
+    #[cfg(not(target_os = "macos"))]
+    let surface: Option<RetainedIoSurface> = None;
+    let handle = guard.frame_store.publish_with_source_handles(
+        sequence,
+        width,
+        height,
+        PreviewScreenPixelFormat::Bgra8,
+        captured_at,
+        still,
+        surface,
+        None,
+    );
+    guard.still_identity = Some(handle.storage_identity());
+    guard.latest_frame_generation = generation;
+}
+
+/// The live pixels of a stored frame: its bytes, or on macOS a readback of
+/// its retained surface when the capture skipped the CPU copy.
+fn stored_frame_pixels(frame: &FrameHandle<PreviewScreenPixelFormat>) -> Option<Cow<'_, [u8]>> {
+    let frame_len = frame.width as usize * frame.height as usize * 4;
+    if frame.width > 0 && frame.height > 0 && frame.bytes.len() >= frame_len {
+        return Some(Cow::Borrowed(&frame.bytes[..frame_len]));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(surface) = frame.source_iosurface.as_ref()
+            && let Some(bytes) = crate::screen_privacy::macos::read_bgra_from_iosurface(
+                surface,
+                frame.width,
+                frame.height,
+            )
+        {
+            return Some(Cow::Owned(bytes));
+        }
+        if let Some(pixel_buffer) = frame.source_pixel_buffer.as_ref()
+            && let Some(bytes) = crate::screen_privacy::macos::read_bgra_from_pixel_buffer(
+                pixel_buffer,
+                frame.width,
+                frame.height,
+            )
+        {
+            return Some(Cow::Owned(bytes));
+        }
+    }
+    None
+}
+
+/// The hide RPC's synchronous half for the CPU store: frost whatever is
+/// published now, so a static screen (no new frame coming) can't keep its
+/// live picture in the store. The capture's next frame then holds. Returns
+/// whether a still was published here.
+fn frost_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
+    let view = guard.privacy.view();
+    if !view.hidden {
+        return false;
+    }
+    let Some(frame) = guard.frame_store.latest() else {
+        // Nothing published yet: the first frame frosts itself at the
+        // publish point (a fresh cursor), so there is nothing to cover.
+        return false;
+    };
+    if admit_screen_frame(view, &mut guard.privacy_cursor) != ScreenFrameAdmission::Frost {
+        return false;
+    }
+    let (width, height) = (frame.width, frame.height);
+    let still = {
+        let pixels = stored_frame_pixels(&frame);
+        frost_bgra(width, height, pixels.as_deref())
+    };
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    let sequence = guard.frames_captured;
+    // The still carries the CURRENT capture generation, not the covered
+    // frame's. They differ only while a swap is in flight (plan 210 S3: the
+    // completion stamped the next generation and the next target's first
+    // frame hasn't arrived). Every leg draws only frames of the generation
+    // its scene adopted, so a still under the previous generation would
+    // leave the previous window's last live frame on air under "Screen
+    // hidden" until the show, and the swap's first-frame wait would time
+    // out into a restart. Under the current generation the program cuts to
+    // the frost and the swap completes on it; the next target's first frame
+    // then holds (one still per hide). The covered frame is held under its
+    // own generation, so a show before that first frame publishes it only
+    // to a scene still naming its window.
+    let still_generation = guard.capture_generation;
+    let held_generation = guard.latest_frame_generation;
+    publish_cpu_still(
+        guard,
+        sequence,
+        width,
+        height,
+        still,
+        Instant::now(),
+        still_generation,
+    );
+    // The live picture stays private for the show.
+    guard.held_live = Some(HeldLiveFrame {
+        width,
+        height,
+        bytes: frame.bytes.clone(),
+        generation: held_generation,
+        source_iosurface: frame.source_iosurface.clone(),
+        source_pixel_buffer: frame.source_pixel_buffer.clone(),
+        #[cfg(target_os = "windows")]
+        source_d3d11_texture: None,
+    });
+    true
+}
+
+/// The show RPC's half for the CPU store: publish the held live frame at
+/// once, unless the capture already published a newer live one.
+fn release_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
+    if guard.privacy.view().hidden {
+        return false;
+    }
+    let Some(held) = guard.held_live.take() else {
+        return false;
+    };
+    let store_shows_still = guard
+        .frame_store
+        .latest()
+        .is_some_and(|frame| Some(frame.storage_identity()) == guard.still_identity);
+    if !store_shows_still {
+        return false;
+    }
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    let sequence = guard.frames_captured;
+    let generation = held.generation;
+    guard.frame_store.publish_with_source_handles(
+        sequence,
+        held.width,
+        held.height,
+        PreviewScreenPixelFormat::Bgra8,
+        Instant::now(),
+        held.bytes,
+        held.source_iosurface,
+        held.source_pixel_buffer,
+    );
+    guard.latest_frame_generation = generation;
+    guard.still_identity = None;
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn hold_live_d3d11_frame(
+    guard: &mut PreviewScreenShared,
+    frame: HeldLiveFrame,
+) -> Option<HeldLiveFrame> {
+    guard.privacy_held_frames = guard.privacy_held_frames.saturating_add(1);
+    guard.held_live_d3d11.replace(frame)
+}
+
+/// The frosted still of a WGC texture into the texture store, and into the
+/// CPU store when that one has no still for this span yet. When the still
+/// can't be built, the texture store is emptied: no frame beats a live one.
+#[cfg(target_os = "windows")]
+fn frost_d3d11_texture_into_store(
+    guard: &mut PreviewScreenShared,
+    sequence: u64,
+    texture: &RetainedD3D11Texture,
+    captured_at: Instant,
+) {
+    match crate::screen_privacy::d3d11::frost_texture(texture) {
+        Ok((width, height, still, frosted)) => {
+            guard.d3d11_frame_store.publish_with_d3d11_texture(
+                sequence,
+                width,
+                height,
+                PreviewScreenPixelFormat::Bgra8,
+                captured_at,
+                Vec::new(),
+                still,
+            );
+            if admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor)
+                == ScreenFrameAdmission::Frost
+            {
+                let generation = guard.capture_generation;
+                publish_cpu_still(
+                    guard,
+                    sequence,
+                    width,
+                    height,
+                    frosted,
+                    captured_at,
+                    generation,
+                );
+            }
+        }
+        Err(error) => {
+            guard.d3d11_frame_store.retire();
+            let message = format!(
+                "Hide screen could not build the D3D11 still ({error}); the texture store was emptied"
+            );
+            tracing::error!(error = %error, "{message}");
+            guard.last_error = Some(message);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn frost_d3d11_store_now(guard: &mut PreviewScreenShared) -> bool {
+    let view = guard.privacy.view();
+    if !view.hidden {
+        return false;
+    }
+    let Some(frame) = guard.d3d11_frame_store.latest() else {
+        return false;
+    };
+    let Some(texture) = frame.source_d3d11_texture.clone() else {
+        return false;
+    };
+    if admit_screen_frame(view, &mut guard.d3d11_privacy_cursor) != ScreenFrameAdmission::Frost {
+        return false;
+    }
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    let sequence = guard.frames_captured;
+    // Read before the still moves the store to the current generation: a
+    // hide during an in-flight swap keeps the covered frame under its own.
+    let held_generation = guard.latest_frame_generation;
+    frost_d3d11_texture_into_store(guard, sequence, &texture, Instant::now());
+    guard.held_live_d3d11 = Some(HeldLiveFrame {
+        width: frame.width,
+        height: frame.height,
+        generation: held_generation,
+        source_d3d11_texture: Some(texture),
+        ..HeldLiveFrame::default()
+    });
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn release_d3d11_store_now(guard: &mut PreviewScreenShared) -> bool {
+    if guard.privacy.view().hidden {
+        return false;
+    }
+    let Some(held) = guard.held_live_d3d11.take() else {
+        return false;
+    };
+    let Some(texture) = held.source_d3d11_texture else {
+        return false;
+    };
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    let sequence = guard.frames_captured;
+    guard.d3d11_frame_store.publish_with_d3d11_texture(
+        sequence,
+        held.width,
+        held.height,
+        PreviewScreenPixelFormat::Bgra8,
+        Instant::now(),
+        Vec::new(),
+        texture,
+    );
+    true
+}
+
+/// `screen.hide`: cover the active capture's stores now. The gate is already
+/// hidden, so a frame arriving before this frosts itself and this finds
+/// nothing left to do; a frame arriving after it holds. Either way exactly
+/// one still per store per hide.
+pub async fn hold_screen_now(state: &AppState) -> bool {
+    let shared = state
+        .preview_screen
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .map(|active| Arc::clone(&active.shared));
+    let Some(shared) = shared else {
+        return false;
+    };
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cpu = frost_cpu_store_now(&mut guard);
+    #[cfg(target_os = "windows")]
+    let texture = frost_d3d11_store_now(&mut guard);
+    #[cfg(not(target_os = "windows"))]
+    let texture = false;
+    cpu || texture
+}
+
+/// `screen.show`: publish the held live picture at once. Nothing restarts;
+/// the capture's next frame publishes as always.
+pub async fn release_screen_now(state: &AppState) -> bool {
+    let shared = state
+        .preview_screen
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .map(|active| Arc::clone(&active.shared));
+    let Some(shared) = shared else {
+        return false;
+    };
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cpu = release_cpu_store_now(&mut guard);
+    #[cfg(target_os = "windows")]
+    let texture = release_d3d11_store_now(&mut guard);
+    #[cfg(not(target_os = "windows"))]
+    let texture = false;
+    cpu || texture
 }
 
 #[derive(Debug, Default)]
@@ -852,7 +1648,8 @@ fn log_screen_generation(
 
 pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
     PreviewScreenRuntime {
-        status: idle_status(Some("Native screen preview is not running.".to_string())),
+        status: idle_status(Some(SCREEN_PREVIEW_IDLE_MESSAGE.to_string())),
+        protected_overlay_window_ids: Vec::new(),
         surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
         source_key: None,
@@ -869,6 +1666,8 @@ pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
         )),
         active: None,
         poll_task: None,
+        startup_phase: None,
+        consent_cancel: None,
     }
 }
 
@@ -908,6 +1707,35 @@ async fn start_preview_screen_with_restart_signal(
     layout_intent_id: Option<u64>,
     mut admission_ready: Option<oneshot::Sender<Option<PreviewScreenStartingIdentity>>>,
 ) -> PreviewScreenLayoutStart {
+    #[cfg(test)]
+    if matches!(
+        params
+            .sources
+            .screen_id
+            .as_deref()
+            .or(params.sources.window_id.as_deref()),
+        Some("screen:screencapturekit:4294967294" | "window:screencapturekit:4294967293")
+    ) {
+        if preview_screen_frame_source(&state).await.is_none() {
+            let generation = state
+                .preview_screen
+                .lock()
+                .await
+                .start_generation
+                .wrapping_add(1);
+            let selected = params
+                .sources
+                .window_id
+                .as_deref()
+                .or(params.sources.screen_id.as_deref())
+                .unwrap();
+            test_install_live_screen_generation(&state, selected, generation, 1, &params.video)
+                .await;
+        }
+        signal_screen_restart_ready(&mut restart_ready);
+        signal_screen_layout_admission(&mut admission_ready, None);
+        return PreviewScreenLayoutStart::without_admission(preview_screen_status(&state).await);
+    }
     if state.process_shutdown_requested() {
         signal_screen_restart_ready(&mut restart_ready);
         signal_screen_layout_admission(&mut admission_ready, None);
@@ -996,7 +1824,7 @@ async fn start_preview_screen_with_restart_signal(
         include_cursor,
         exclude_current_process_windows,
         updated_at: Utc::now().to_rfc3339(),
-        message: Some("Starting native screen preview.".to_string()),
+        message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
     };
     let start_lease =
         match begin_screen_start(&state, start_key.clone(), starting, layout_intent_id).await {
@@ -1125,6 +1953,11 @@ fn queue_registered_preview_screen(
 fn allocate_screen_transition_ticket(
     slot: &mut PreviewScreenRuntime,
 ) -> PreviewScreenTransitionTicket {
+    // A start waiting on a person would hold this newer transition (FIFO)
+    // until the share dialog closes: end that wait (plan 0010).
+    if let Some(consent_cancel) = slot.consent_cancel.take() {
+        consent_cancel.store(true, Ordering::SeqCst);
+    }
     slot.transition_sequence = slot.transition_sequence.wrapping_add(1).max(1);
     PreviewScreenTransitionTicket {
         sequence: slot.transition_sequence,
@@ -1175,7 +2008,11 @@ async fn await_screen_transition_completion_with_timeout(
 async fn delayed_screen_transition_status(state: &AppState) -> PreviewScreenStatus {
     let status = {
         let mut slot = state.preview_screen.lock().await;
-        if slot.status.state == PreviewScreenState::Starting {
+        // A Linux start waiting on its share dialog keeps saying so (plan 0010).
+        let consent_phase = slot.startup_phase.is_some_and(|(generation, phase)| {
+            generation == slot.start_generation && phase != ScreenStartupPhase::Starting
+        });
+        if slot.status.state == PreviewScreenState::Starting && !consent_phase {
             slot.status.updated_at = Utc::now().to_rfc3339();
             slot.status.message = Some(
                 "Screen transition is still retiring the previous native session; cleanup continues without overlapping capture."
@@ -1222,6 +2059,34 @@ async fn execute_registered_preview_screen(
     }
     publish_screen_starting_status(state, &start_lease).await;
 
+    // Plan 210 S3: another window or display for a running ScreenCaptureKit
+    // stream changes the stream's target in place; the compositor holds the
+    // previous target's last frame until the next one's first frame. Any
+    // refusal falls through to today's stop-then-start, under the same hold.
+    #[cfg(target_os = "macos")]
+    let swapped = swap_screen_in_place(
+        state,
+        supervisor,
+        ScreenSwapPlan {
+            source: &source,
+            video: &params.video,
+            ffmpeg_path: &ffmpeg_path,
+            target_fps,
+            include_cursor,
+            exclude_current_process_windows,
+            source_key: &source_key,
+            lease: &start_lease,
+            recovery: recovery.as_ref(),
+        },
+    )
+    .await;
+    #[cfg(not(target_os = "macos"))]
+    let swapped: Option<PreviewScreenStatus> = None;
+    if let Some(status) = swapped {
+        signal_screen_restart_ready(&mut restart_ready);
+        return status;
+    }
+
     detach_screen_runtime_for_native_transition(state, false).await;
     stop_supervised_screen(supervisor, Some(start_lease.generation), "restart").await;
     signal_screen_restart_ready(&mut restart_ready);
@@ -1243,11 +2108,14 @@ async fn execute_registered_preview_screen(
         .await
         .surface_backing_tracker
         .clone();
-    let shared = Arc::new(StdMutex::new(
-        PreviewScreenShared::with_surface_backing_tracker(surface_backing_tracker),
-    ));
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::new_capture(
+        surface_backing_tracker,
+        Arc::clone(&state.screen_privacy),
+        start_lease.generation,
+    )));
     let (stop_tx, stop_rx) = std_mpsc::channel();
     let (startup_tx, startup_rx) = std_mpsc::channel();
+    let consent_cancel = Arc::new(AtomicBool::new(false));
     let thread_shared = Arc::clone(&shared);
     let thread_config = NativeScreenPreviewConfig {
         source_id: source.source_id.clone(),
@@ -1259,6 +2127,7 @@ async fn execute_registered_preview_screen(
         include_cursor,
         exclude_current_process_windows,
         protected_overlay_window_ids: protected_overlay_window_ids.clone(),
+        consent_cancel: Arc::clone(&consent_cancel),
     };
 
     // This is the final cancellation-free admission check before native
@@ -1357,21 +2226,14 @@ async fn execute_registered_preview_screen(
         join_handle: Some(join_handle),
     });
 
-    let startup_timeout = native_screen_preview_thread_startup_timeout();
-    let startup = tokio::task::spawn_blocking(move || {
-        startup_rx
-            .recv_timeout(startup_timeout)
-            .unwrap_or_else(|_| {
-                NativeScreenStartup::Failed(format!(
-                    "Timed out after {:.0}s while starting native screen preview.",
-                    startup_timeout.as_secs_f64()
-                ))
-            })
-    })
-    .await
-    .unwrap_or_else(|error| {
-        NativeScreenStartup::Failed(format!("Screen startup task failed: {error}"))
-    });
+    let startup = await_native_screen_startup(
+        state,
+        &start_lease,
+        startup_rx,
+        &consent_cancel,
+        ScreenStartupPhase::deadline,
+    )
+    .await;
 
     match startup {
         NativeScreenStartup::Live {
@@ -1583,6 +2445,9 @@ async fn execute_registered_preview_screen(
                 screen_start_fallback_status(state, &start_lease, recovery.as_ref()).await
             }
         }
+        NativeScreenStartup::AwaitingConsent | NativeScreenStartup::ConsentGranted => {
+            unreachable!("startup phases are consumed by await_native_screen_startup")
+        }
         NativeScreenStartup::Failed(message) => {
             stop_supervised_screen(supervisor, Some(start_lease.generation), "failed-start").await;
             let status = failed_status(
@@ -1614,6 +2479,99 @@ async fn execute_registered_preview_screen(
             }
         }
     }
+}
+
+/// Waits for the native thread's startup outcome. The Linux portal thread
+/// first reports its consent phases; each phase has its own deadline and copy,
+/// so a share dialog waiting on a person is never a 59 s device timeout, and a
+/// granted share with no picture names the likely cause (plan 0010).
+async fn await_native_screen_startup(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    startup_rx: std_mpsc::Receiver<NativeScreenStartup>,
+    consent_cancel: &Arc<AtomicBool>,
+    deadline: fn(ScreenStartupPhase) -> Duration,
+) -> NativeScreenStartup {
+    let mut startup_rx = startup_rx;
+    let mut phase = ScreenStartupPhase::Starting;
+    let outcome = loop {
+        let wait = deadline(phase);
+        let received = match tokio::task::spawn_blocking(move || {
+            let received = startup_rx.recv_timeout(wait);
+            (startup_rx, received)
+        })
+        .await
+        {
+            Ok((receiver, received)) => {
+                startup_rx = receiver;
+                received
+            }
+            Err(error) => {
+                break NativeScreenStartup::Failed(format!("Screen startup task failed: {error}"));
+            }
+        };
+        phase = match received {
+            Ok(NativeScreenStartup::AwaitingConsent) => ScreenStartupPhase::AwaitingConsent,
+            Ok(NativeScreenStartup::ConsentGranted) => ScreenStartupPhase::AwaitingFirstFrame,
+            Ok(outcome) => break outcome,
+            Err(_) => break phase.expired(wait),
+        };
+        publish_screen_startup_phase(state, lease, phase, consent_cancel).await;
+    };
+    let mut slot = state.preview_screen.lock().await;
+    if slot
+        .startup_phase
+        .is_some_and(|(generation, _)| generation == lease.generation)
+    {
+        slot.startup_phase = None;
+        slot.consent_cancel = None;
+    }
+    outcome
+}
+
+async fn publish_screen_startup_phase(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    phase: ScreenStartupPhase,
+    consent_cancel: &Arc<AtomicBool>,
+) {
+    let status = {
+        let mut slot = state.preview_screen.lock().await;
+        if slot.start_generation != lease.generation || slot.starting.as_ref() != Some(&lease.key) {
+            // Already superseded: a newer transition is queued behind this
+            // start, so stop waiting on the person now.
+            if phase == ScreenStartupPhase::AwaitingConsent {
+                consent_cancel.store(true, Ordering::SeqCst);
+            }
+            return;
+        }
+        slot.startup_phase = Some((lease.generation, phase));
+        slot.consent_cancel =
+            (phase == ScreenStartupPhase::AwaitingConsent).then(|| Arc::clone(consent_cancel));
+        if slot.status.state != PreviewScreenState::Starting {
+            return;
+        }
+        slot.status.message = Some(phase.message().to_string());
+        slot.status.updated_at = Utc::now().to_rfc3339();
+        slot.status.clone()
+    };
+    tracing::info!(
+        generation = lease.generation,
+        phase = ?phase,
+        "screen capture startup phase"
+    );
+    state.emit_event("preview.screen.status", status);
+}
+
+/// Why a session cannot start right now: a Linux share dialog is waiting on a
+/// person. Session start drains every older source transition first, and that
+/// one has no device deadline, so Record would otherwise hold the ordered
+/// command lane until the dialog closes (plan 0010 addendum 3).
+pub(crate) async fn session_start_blocked_by_share_dialog(state: &AppState) -> Option<String> {
+    let slot = state.preview_screen.lock().await;
+    let waiting = slot.starting.is_some()
+        && slot.startup_phase == Some((slot.start_generation, ScreenStartupPhase::AwaitingConsent));
+    waiting.then(|| SESSION_START_SHARE_DIALOG_MESSAGE.to_string())
 }
 
 async fn screen_start_is_current(state: &AppState, lease: &PreviewScreenStartLease) -> bool {
@@ -1766,6 +2724,339 @@ async fn publish_screen_starting_status(state: &AppState, lease: &PreviewScreenS
     }
 }
 
+/// Plan 210 S3: whether a start can change the running capture in place
+/// instead of stopping it: another ScreenCaptureKit window or display on the
+/// same canvas. The same source restarts on purpose (recovery), and a canvas
+/// or FFmpeg change needs a new session.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn screen_swap_eligibility(
+    active: &NativeScreenPreviewThread,
+    next: &SelectedScreenSource,
+    key: &PreviewScreenStartKey,
+    native_owner_present: bool,
+) -> Result<(), &'static str> {
+    if !native_owner_present {
+        return Err("no running native capture to change");
+    }
+    if active.source.display_id.is_none() && active.source.window_id.is_none() {
+        return Err("the running capture is not a ScreenCaptureKit stream");
+    }
+    if next.display_id.is_none() && next.window_id.is_none() {
+        return Err("the next source is not a ScreenCaptureKit window or display");
+    }
+    if active.source.source_id == next.source_id {
+        return Err("the same source restarts on purpose");
+    }
+    if active.video != key.video {
+        return Err("the canvas changed");
+    }
+    if active.ffmpeg_path != key.ffmpeg_path {
+        return Err("the FFmpeg path changed");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+struct ScreenSwapPlan<'a> {
+    source: &'a SelectedScreenSource,
+    video: &'a VideoSettings,
+    ffmpeg_path: &'a str,
+    target_fps: u32,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
+    source_key: &'a SourceKey,
+    lease: &'a PreviewScreenStartLease,
+    recovery: Option<&'a PreparedScreenRecoveryAdmission>,
+}
+
+#[cfg(target_os = "macos")]
+fn screen_source_log_kind(source: &SelectedScreenSource) -> &'static str {
+    match source.source_kind {
+        PreviewScreenSourceKind::Screen => "screen",
+        PreviewScreenSourceKind::Window => "window",
+    }
+}
+
+/// Plan 210 S3: change the running ScreenCaptureKit stream's target in place
+/// (`updateContentFilter`, then `updateConfiguration` with the new size)
+/// instead of stopping it and starting another. The slot's source changes;
+/// its frame store does not, so the compositor keeps the previous window's
+/// last frame until the next window's first frame arrives, then cuts. `None`
+/// means the caller takes today's stop-then-start path, with the reason in
+/// `compositor.status`.
+#[cfg(target_os = "macos")]
+async fn swap_screen_in_place(
+    state: &AppState,
+    supervisor: &mut PreviewScreenNativeSupervisor,
+    plan: ScreenSwapPlan<'_>,
+) -> Option<PreviewScreenStatus> {
+    let requested_at = Instant::now();
+    let generation = plan.lease.generation;
+    let (shared, reply_rx, poll_task) = {
+        let mut slot = state.preview_screen.lock().await;
+        let shared = {
+            let active = slot.active.as_ref()?;
+            if let Err(reason) = screen_swap_eligibility(
+                active,
+                plan.source,
+                &plan.lease.key,
+                supervisor.active.is_some(),
+            ) {
+                drop(slot);
+                note_screen_switch_restart(state, plan.source, generation, reason).await;
+                return None;
+            }
+            Arc::clone(&active.shared)
+        };
+        let owner = supervisor.active.as_ref()?;
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let request = ScreenSwapRequest {
+            source: plan.source.clone(),
+            ffmpeg_path: plan.ffmpeg_path.to_string(),
+            video: plan.video.clone(),
+            include_cursor: plan.include_cursor,
+            exclude_current_process_windows: plan.exclude_current_process_windows,
+            protected_overlay_window_ids: plan.lease.key.protected_overlay_window_ids.clone(),
+            generation,
+            reply: reply_tx,
+        };
+        if owner
+            .stop_tx
+            .send(NativeScreenCommand::Swap(request))
+            .is_err()
+        {
+            drop(slot);
+            note_screen_switch_restart(
+                state,
+                plan.source,
+                generation,
+                "the native capture thread has exited",
+            )
+            .await;
+            return None;
+        }
+        // The metrics poll turns a Starting status Live from the store, which
+        // still holds the previous target: pause it until the next delivers.
+        slot.run_id = None;
+        let poll_task = slot.poll_task.take();
+        (shared, reply_rx, poll_task)
+    };
+    if let Some(task) = poll_task {
+        task.abort();
+    }
+    let reply =
+        tokio::task::spawn_blocking(move || reply_rx.recv_timeout(SCREEN_SWAP_REPLY_TIMEOUT)).await;
+    let outcome = match reply {
+        Ok(Ok(Ok(outcome))) => outcome,
+        Ok(Ok(Err(reason))) => {
+            note_screen_switch_restart(state, plan.source, generation, reason).await;
+            return None;
+        }
+        Ok(Err(_)) => {
+            note_screen_switch_restart(
+                state,
+                plan.source,
+                generation,
+                format!(
+                    "the native capture thread did not answer the in-place change within {} ms",
+                    SCREEN_SWAP_REPLY_TIMEOUT.as_millis()
+                ),
+            )
+            .await;
+            return None;
+        }
+        Err(_) => {
+            note_screen_switch_restart(
+                state,
+                plan.source,
+                generation,
+                "the in-place change wait task failed",
+            )
+            .await;
+            return None;
+        }
+    };
+    // The next target's first frame, within the swap budget.
+    let deadline = outcome.stamped_at + SCREEN_SWAP_FIRST_FRAME_TIMEOUT;
+    let first_frame = loop {
+        let found = {
+            let guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            latest_frame_of_generation(&guard, generation).map(|frame| {
+                (
+                    frame,
+                    guard.frames_captured,
+                    guard.dropped_frames,
+                    guard.source_fps,
+                    guard.generation_began_early,
+                )
+            })
+        };
+        if found.is_some() {
+            break found;
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    };
+    let Some((frame, frames_captured, dropped_frames, source_fps, began_early)) = first_frame
+    else {
+        note_screen_switch_restart(
+            state,
+            plan.source,
+            generation,
+            format!(
+                "the next target delivered no frame within {} ms of the in-place change",
+                SCREEN_SWAP_FIRST_FRAME_TIMEOUT.as_millis()
+            ),
+        )
+        .await;
+        return None;
+    };
+    let first_frame_ms = requested_at.elapsed().as_millis() as u64;
+    let run_id = Uuid::new_v4().to_string();
+    let status = PreviewScreenStatus {
+        state: PreviewScreenState::Live,
+        source_id: Some(plan.source.source_id.clone()),
+        source_kind: Some(plan.source.source_kind.clone()),
+        target_fps: plan.target_fps,
+        width: Some(frame.width),
+        height: Some(frame.height),
+        native_width: Some(outcome.native_width),
+        native_height: Some(outcome.native_height),
+        requested_width: Some(outcome.requested_width),
+        requested_height: Some(outcome.requested_height),
+        actual_width: Some(frame.width),
+        actual_height: Some(frame.height),
+        iosurface_available: Some(
+            frame.source_iosurface.is_some() || frame.source_pixel_buffer.is_some(),
+        ),
+        d3d11_texture_available: Some(false),
+        source_fps: source_fps.or(Some(outcome.selected_fps)),
+        frame_age_ms: Some(frame.captured_at.elapsed().as_millis() as u64),
+        frames_captured,
+        dropped_frames,
+        sequence: Some(frame.sequence),
+        include_cursor: plan.include_cursor,
+        exclude_current_process_windows: plan.exclude_current_process_windows,
+        updated_at: Utc::now().to_rfc3339(),
+        message: outcome.message.clone(),
+    };
+    let installed = {
+        let mut slot = state.preview_screen.lock().await;
+        if !claim_screen_start_if_admitted(
+            state,
+            &mut slot,
+            plan.lease,
+            plan.recovery.map(|recovery| recovery.epoch),
+        ) || slot.active.is_none()
+        {
+            false
+        } else {
+            let active = slot.active.as_mut().expect("checked above");
+            active.source = plan.source.clone();
+            active.protected_overlay_window_ids =
+                plan.lease.key.protected_overlay_window_ids.clone();
+            slot.failed_recovery_retry = None;
+            slot.status = status.clone();
+            slot.run_id = Some(run_id.clone());
+            slot.source_key = Some(plan.source_key.clone());
+            slot.active_generation = Some(generation);
+            true
+        }
+    };
+    if !installed {
+        // Superseded while the stream changed target: retire it; the newer
+        // transition starts its own capture.
+        detach_screen_runtime_for_native_transition(state, false).await;
+        stop_supervised_screen(supervisor, Some(generation), "stale-swap").await;
+        if let Some(recovery) = plan.recovery
+            && !state.capture_recovery_admission_is_current(recovery.epoch)
+        {
+            return Some(retire_superseded_screen_recovery(state, plan.lease, recovery).await);
+        }
+        return Some(preview_screen_status(state).await);
+    }
+    let poll_task = state.spawn_process_task(poll_screen_metrics(
+        state.clone(),
+        run_id.clone(),
+        Arc::clone(&shared),
+        plan.target_fps,
+    ));
+    {
+        let mut slot = state.preview_screen.lock().await;
+        if slot.run_id.as_deref() == Some(run_id.as_str()) {
+            slot.poll_task = Some(poll_task);
+        } else {
+            poll_task.abort();
+        }
+    }
+    acquire_preview_screen_source(
+        state,
+        plan.source_key.clone(),
+        SourceLifecycleStatus::Live,
+        SourceIdentityConfidence::Exact,
+    )
+    .await;
+    tracing::info!(
+        "[capture-generation] source={} generation={} reason=swap-in-place source_id={} content_ms={} content_cached={} update_ms={} first_frame_ms={} began_early={}",
+        screen_source_log_kind(plan.source),
+        generation,
+        plan.source.source_id,
+        outcome.content_ms,
+        outcome.content_cached,
+        outcome.update_ms,
+        first_frame_ms,
+        began_early,
+    );
+    crate::compositor::note_screen_switch(
+        state,
+        crate::protocol::ScreenSwitchStatus {
+            mode: crate::protocol::ScreenSwitchMode::InPlace,
+            reason: None,
+            source_id: plan.source.source_id.clone(),
+            generation,
+            first_frame_ms: Some(first_frame_ms),
+            updated_at: Utc::now().to_rfc3339(),
+        },
+    )
+    .await;
+    state.emit_event("preview.screen.status", status.clone());
+    Some(status)
+}
+
+/// Plan 210 S3: the switch takes today's stop-then-start path; say why.
+#[cfg(target_os = "macos")]
+async fn note_screen_switch_restart(
+    state: &AppState,
+    source: &SelectedScreenSource,
+    generation: u64,
+    reason: impl Into<String>,
+) {
+    let reason = reason.into();
+    tracing::info!(
+        "[capture-generation] source={} generation={} reason=swap-fallback source_id={} detail={:?}",
+        screen_source_log_kind(source),
+        generation,
+        source.source_id,
+        reason,
+    );
+    crate::compositor::note_screen_switch(
+        state,
+        crate::protocol::ScreenSwitchStatus {
+            mode: crate::protocol::ScreenSwitchMode::Restart,
+            reason: Some(reason),
+            source_id: source.source_id.clone(),
+            generation,
+            first_frame_ms: None,
+            updated_at: Utc::now().to_rfc3339(),
+        },
+    )
+    .await;
+}
+
 async fn detach_screen_runtime_for_native_transition(state: &AppState, clear_starting: bool) {
     let poll_task = {
         let mut slot = state.preview_screen.lock().await;
@@ -1874,7 +3165,7 @@ async fn stop_owned_native_screen(
     generation: Option<u64>,
     reason: &'static str,
 ) {
-    let _ = active.stop_tx.send(());
+    let _ = active.stop_tx.send(NativeScreenCommand::Stop);
     if let Some(join_handle) = active.join_handle.take() {
         join_screen_capture_thread(join_handle, generation, reason).await;
     }
@@ -2655,7 +3946,7 @@ fn queue_public_screen_stop(
         let status = {
             let mut slot = supervisor_state.preview_screen.lock().await;
             if slot.status == admitted_status && slot.starting.is_none() {
-                let status = idle_status(Some("Native screen preview stopped.".to_string()));
+                let status = idle_status(Some(SCREEN_PREVIEW_STOPPED_MESSAGE.to_string()));
                 slot.status = status.clone();
                 status
             } else {
@@ -2691,6 +3982,15 @@ fn queue_supervised_screen_stop(
         let _ = completion_tx.send(());
     });
     completion_rx
+}
+
+pub(crate) async fn source_iso_protected_overlay_window_ids(state: &AppState) -> Vec<u32> {
+    state
+        .preview_screen
+        .lock()
+        .await
+        .protected_overlay_window_ids
+        .clone()
 }
 
 pub async fn preview_screen_status(state: &AppState) -> PreviewScreenStatus {
@@ -2780,12 +4080,17 @@ pub(crate) fn available_frame_source_locked(
         .flatten()
 }
 
+/// The frame source names what the running capture delivers: its own
+/// source and generation. `slot.source_key` moves to the next source at
+/// admission, before the stream does (plan 210 S3), and a compositor that
+/// adopted it then would draw nothing under a scene still naming the
+/// previous source.
 pub(crate) fn frame_source_locked(slot: &PreviewScreenRuntime) -> Option<PreviewScreenFrameSource> {
     let active = slot.active.as_ref()?;
     let generation = slot.active_generation?;
     Some(PreviewScreenFrameSource {
         shared: Arc::clone(&active.shared),
-        source_key: slot.source_key.clone(),
+        source_key: Some(source_key_for_source(&active.source)),
         generation,
     })
 }
@@ -2806,7 +4111,7 @@ pub fn try_preview_screen_frame_source(
     };
     Ok(Some(PreviewScreenFrameSource {
         shared: Arc::clone(&active.shared),
-        source_key: slot.source_key.clone(),
+        source_key: Some(source_key_for_source(&active.source)),
         generation,
     }))
 }
@@ -2824,7 +4129,11 @@ pub(crate) async fn test_install_live_screen_generation(
 ) {
     let source = SelectedScreenSource {
         source_id: source_id.to_string(),
-        source_kind: PreviewScreenSourceKind::Screen,
+        source_kind: if source_id.starts_with("window:") {
+            PreviewScreenSourceKind::Window
+        } else {
+            PreviewScreenSourceKind::Screen
+        },
         callback_cadence: if source_id.starts_with("screen:screencapturekit:") {
             ScreenCaptureCallbackCadence::Authoritative
         } else {
@@ -2834,15 +4143,24 @@ pub(crate) async fn test_install_live_screen_generation(
         window_id: None,
     };
     let source_key = source_key_for_source(&source);
-    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
-    shared.lock().unwrap().frame_store.publish(
-        sequence,
-        video.width,
-        video.height,
-        PreviewScreenPixelFormat::Bgra8,
-        Instant::now(),
-        vec![0; video.width as usize * video.height as usize * 4],
-    );
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::with_privacy(
+        Arc::clone(&state.screen_privacy),
+    )));
+    {
+        // Through the gate, like a real first frame: a fixture installed while
+        // hidden starts frosted.
+        let mut guard = shared.lock().unwrap();
+        guard.capture_generation = generation.max(1);
+        guard.frames_captured = sequence;
+        publish_gated_bgra_frame(
+            &mut guard,
+            sequence,
+            video.width,
+            video.height,
+            vec![0; video.width as usize * video.height as usize * 4],
+            Instant::now(),
+        );
+    }
     let mut slot = state.preview_screen.lock().await;
     slot.start_generation = generation.max(1);
     slot.active_generation = Some(slot.start_generation);
@@ -2851,7 +4169,7 @@ pub(crate) async fn test_install_live_screen_generation(
     slot.starting_layout_intent_id = None;
     slot.status.state = PreviewScreenState::Live;
     slot.status.source_id = Some(source_id.to_string());
-    slot.status.source_kind = Some(PreviewScreenSourceKind::Screen);
+    slot.status.source_kind = Some(source.source_kind.clone());
     slot.status.target_fps = video.fps;
     slot.status.width = Some(video.width);
     slot.status.height = Some(video.height);
@@ -2874,6 +4192,44 @@ pub(crate) async fn test_install_live_screen_generation(
     });
 }
 
+/// Test-only: publish arbitrary BGRA bytes through the installed fixture
+/// capture's real publish point (the Hide screen gate included). Returns
+/// false without a live fixture.
+#[cfg(test)]
+pub(crate) async fn test_publish_screen_bgra(
+    state: &AppState,
+    sequence: u64,
+    bytes: Vec<u8>,
+    captured_at: Instant,
+) -> bool {
+    let (width, height, shared) = {
+        let slot = state.preview_screen.lock().await;
+        let Some(active) = slot.active.as_ref() else {
+            return false;
+        };
+        (
+            active.video.width,
+            active.video.height,
+            Arc::clone(&active.shared),
+        )
+    };
+    assert_eq!(bytes.len(), width as usize * height as usize * 4);
+    let mut shared = shared.lock().unwrap();
+    shared.frames_captured = sequence;
+    publish_gated_bgra_frame(&mut shared, sequence, width, height, bytes, captured_at);
+    true
+}
+
+/// Test-only: live frames the fixture capture held back while hidden.
+#[cfg(test)]
+pub(crate) async fn test_privacy_held_frames(state: &AppState) -> u64 {
+    let slot = state.preview_screen.lock().await;
+    slot.active
+        .as_ref()
+        .map(|active| active.shared.lock().unwrap().privacy_held_frames)
+        .unwrap_or(0)
+}
+
 /// Paint an installed fixture capture without a native producer. The frame's
 /// identity, generation and publication still use the real capture store.
 #[cfg(test)]
@@ -2882,20 +4238,36 @@ pub(crate) async fn test_publish_screen_pixels(
     sequence: u64,
     pixel: [u8; 4],
     captured_at: Instant,
-) {
-    let slot = state.preview_screen.lock().await;
-    let active = slot.active.as_ref().expect("installed screen fixture");
-    let mut shared = active.shared.lock().unwrap();
-    let width = active.video.width;
-    let height = active.video.height;
-    shared.frame_store.publish(
-        sequence,
-        width,
-        height,
-        PreviewScreenPixelFormat::Bgra8,
-        captured_at,
-        pixel.repeat((width * height) as usize),
-    );
+) -> [u64; 4] {
+    let began = Instant::now();
+    let (width, height, shared) = {
+        let slot = state.preview_screen.lock().await;
+        let Some(active) = slot.active.as_ref() else {
+            return [0; 4];
+        };
+        (
+            active.video.width,
+            active.video.height,
+            Arc::clone(&active.shared),
+        )
+    };
+    let admitted = Instant::now();
+    let pixels = pixel.repeat((width * height) as usize);
+    // Match native callbacks: publishing owns a generation's shared store,
+    // independently of the source admission authority, and goes through the
+    // Hide screen gate (plan 210 S7).
+    let allocated = Instant::now();
+    let mut shared = shared.lock().unwrap();
+    let locked = Instant::now();
+    shared.frames_captured = sequence;
+    publish_gated_bgra_frame(&mut shared, sequence, width, height, pixels, captured_at);
+    let published = Instant::now();
+    [
+        admitted.duration_since(began).as_micros() as u64,
+        allocated.duration_since(admitted).as_micros() as u64,
+        locked.duration_since(allocated).as_micros() as u64,
+        published.duration_since(locked).as_micros() as u64,
+    ]
 }
 
 #[cfg(test)]
@@ -2957,7 +4329,7 @@ pub(crate) async fn test_install_starting_screen_generation(
         include_cursor: true,
         exclude_current_process_windows: false,
         updated_at: Utc::now().to_rfc3339(),
-        message: Some("Starting native screen preview.".to_string()),
+        message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
     };
     PreviewScreenStartingIdentity {
         source_key,
@@ -2981,17 +4353,24 @@ pub(crate) async fn test_advance_live_screen_generation(state: &AppState, sequen
     let protected_overlay_window_ids = active.protected_overlay_window_ids.clone();
     let width = slot.status.width.unwrap_or(video.width).max(1);
     let height = slot.status.height.unwrap_or(video.height).max(1);
-    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
-    shared.lock().unwrap().frame_store.publish(
-        sequence,
-        width,
-        height,
-        PreviewScreenPixelFormat::Bgra8,
-        Instant::now(),
-        vec![0; width as usize * height as usize * 4],
-    );
-    slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
-    let generation = slot.start_generation;
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::with_privacy(
+        Arc::clone(&state.screen_privacy),
+    )));
+    let generation = slot.start_generation.wrapping_add(1).max(1);
+    {
+        let mut guard = shared.lock().unwrap();
+        guard.capture_generation = generation;
+        guard.frames_captured = sequence;
+        publish_gated_bgra_frame(
+            &mut guard,
+            sequence,
+            width,
+            height,
+            vec![0; width as usize * height as usize * 4],
+            Instant::now(),
+        );
+    }
+    slot.start_generation = generation;
     slot.active_generation = Some(generation);
     slot.status.state = PreviewScreenState::Live;
     slot.status.frames_captured = sequence;
@@ -3008,6 +4387,48 @@ pub(crate) async fn test_advance_live_screen_generation(state: &AppState, sequen
         protected_overlay_window_ids,
     });
     generation
+}
+
+/// Test-only: retire the installed fixture capture the way the
+/// stop-then-start path does before its new session exists.
+#[cfg(test)]
+pub(crate) async fn test_detach_live_screen(state: &AppState) {
+    detach_screen_runtime_for_native_transition(state, false).await;
+}
+
+/// Test-only: change the installed fixture capture's source in place, the
+/// way a ScreenCaptureKit swap does (plan 210 S3): the same store, a new
+/// generation stamped on frames from here on, the gate's cursor fresh.
+#[cfg(test)]
+pub(crate) async fn test_swap_live_screen_generation(
+    state: &AppState,
+    source_id: &str,
+    generation: u64,
+) {
+    let mut slot = state.preview_screen.lock().await;
+    let source = SelectedScreenSource {
+        source_id: source_id.to_string(),
+        source_kind: if source_id.starts_with("window:") {
+            PreviewScreenSourceKind::Window
+        } else {
+            PreviewScreenSourceKind::Screen
+        },
+        callback_cadence: if source_id.starts_with("screen:screencapturekit:") {
+            ScreenCaptureCallbackCadence::Authoritative
+        } else {
+            ScreenCaptureCallbackCadence::DamageDriven
+        },
+        display_id: None,
+        window_id: None,
+    };
+    let active = slot.active.as_mut().expect("test live screen");
+    begin_capture_generation(&mut active.shared.lock().unwrap(), generation);
+    active.source = source.clone();
+    slot.start_generation = generation;
+    slot.active_generation = Some(generation);
+    slot.source_key = Some(source_key_for_source(&source));
+    slot.status.source_id = Some(source_id.to_string());
+    slot.status.source_kind = Some(source.source_kind);
 }
 
 pub async fn latest_preview_screen_png(
@@ -3611,6 +5032,7 @@ async fn begin_screen_start(
     if layout_intent_id.is_some_and(|intent_id| intent_id < state.latest_layout_intent_id()) {
         return PreviewScreenStartRegistration::RejectedSuperseded(slot.status.clone());
     }
+    slot.protected_overlay_window_ids = start_key.protected_overlay_window_ids.clone();
     if let Some(reused) = reuse_current_screen_source_locked(&mut slot, &start_key) {
         registry.acquire(start_key.source_key.clone(), SourceConsumerReason::Preview);
         registry.set_status(start_key.source_key.clone(), SourceLifecycleStatus::Live);
@@ -3778,10 +5200,9 @@ fn reuse_current_screen_source_locked(
     let mut status = slot.status.clone();
     status.updated_at = Utc::now().to_rfc3339();
     status.message = Some(if ids_changed {
-        "Native screen preview source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
-            .to_string()
+        SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE.to_string()
     } else {
-        "Native screen preview source reused.".to_string()
+        SCREEN_PREVIEW_REUSED_MESSAGE.to_string()
     });
     slot.status = status.clone();
     let (include_cursor, exclude_current_process_windows) = slot
@@ -4217,10 +5638,21 @@ struct NativeScreenPreviewConfig {
     include_cursor: bool,
     exclude_current_process_windows: bool,
     protected_overlay_window_ids: Vec<u32>,
+    /// Set when a newer screen transition is admitted while this start waits
+    /// on its share dialog (plan 0010). Transitions run in FIFO order, so a
+    /// queued stop or source change could otherwise wait for the person.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    consent_cancel: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
 enum NativeScreenStartup {
+    /// Linux portal: the share dialog is about to wait on a person (plan 0010).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    AwaitingConsent,
+    /// Linux portal: the share was granted; PipeWire's first frame is next.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ConsentGranted,
     Live {
         native_width: u32,
         native_height: u32,
@@ -4239,7 +5671,7 @@ enum NativeScreenStartup {
 fn run_native_screen_preview(
     config: NativeScreenPreviewConfig,
     shared: Arc<StdMutex<PreviewScreenShared>>,
-    stop_rx: std_mpsc::Receiver<()>,
+    stop_rx: std_mpsc::Receiver<NativeScreenCommand>,
     startup_tx: std_mpsc::Sender<NativeScreenStartup>,
 ) {
     let _ = config.ffmpeg_path.as_str();
@@ -4286,7 +5718,7 @@ mod linux {
     pub fn run_native_screen_preview(
         config: NativeScreenPreviewConfig,
         shared: Arc<StdMutex<PreviewScreenShared>>,
-        stop_rx: std_mpsc::Receiver<()>,
+        stop_rx: std_mpsc::Receiver<NativeScreenCommand>,
         startup_tx: std_mpsc::Sender<NativeScreenStartup>,
     ) {
         let Some(source_type) = parse_portal_source_id(&config.source_id) else {
@@ -4318,10 +5750,20 @@ mod linux {
             has_restore_token = saved_token.is_some(),
             "portal screen capture: requesting consent"
         );
+        // Without a restore token the portal shows its share dialog, which
+        // waits on a person: report that phase so the waiter neither applies
+        // the device deadline nor lets Record queue behind it (plan 0010).
+        if saved_token.is_none() {
+            let _ = startup_tx.send(NativeScreenStartup::AwaitingConsent);
+        }
+        // The consent wait is cancellable: a stop (source change, shutdown,
+        // an abandoned dialog) closes the portal session instead of waiting
+        // for the person, so the supervisor's join stays bounded.
         let mut outcome = runtime.block_on(start_portal_session(
             source_type,
             saved_token.clone(),
             config.include_cursor,
+            stop_requested(&stop_rx, &config.consent_cancel),
         ));
         // A refused token (revoked elsewhere, another session) shows the
         // picker once instead of failing forever.
@@ -4332,16 +5774,27 @@ mod linux {
             )
         {
             let _ = store.forget(&config.source_id);
+            let _ = startup_tx.send(NativeScreenStartup::AwaitingConsent);
             outcome = runtime.block_on(start_portal_session(
                 source_type,
                 None,
                 config.include_cursor,
+                stop_requested(&stop_rx, &config.consent_cancel),
             ));
         }
         let grant = match outcome {
             PortalStart::Granted(grant) => grant,
+            PortalStart::Abandoned => {
+                tracing::info!("portal screen capture: consent wait stopped by Videorc");
+                let _ = startup_tx.send(NativeScreenStartup::PermissionNeeded(
+                    "Videorc closed the share dialog because the screen source changed. Choose your screen again to share it."
+                        .to_string(),
+                ));
+                return;
+            }
             PortalStart::Denied(state) => {
                 let message = state.message();
+                tracing::warn!(%message, "portal screen capture: not shared");
                 let _ = startup_tx.send(match state.lifecycle_status() {
                     SourceLifecycleStatus::PermissionNeeded => {
                         NativeScreenStartup::PermissionNeeded(message)
@@ -4362,6 +5815,7 @@ mod linux {
             size = ?grant.size,
             "portal screen capture: granted"
         );
+        let _ = startup_tx.send(NativeScreenStartup::ConsentGranted);
 
         let revoked = Arc::clone(&grant.revoked);
         let startup = std::cell::RefCell::new(Some(startup_tx.clone()));
@@ -4423,11 +5877,31 @@ mod linux {
         }
     }
 
+    /// Resolves once the supervisor asks this capture to stop (or drops the
+    /// sender). Polled from the portal runtime, so it can race the consent
+    /// wait without a second thread.
+    pub(super) async fn stop_requested(
+        stop_rx: &std_mpsc::Receiver<NativeScreenCommand>,
+        consent_cancel: &AtomicBool,
+    ) {
+        loop {
+            if consent_cancel.load(Ordering::SeqCst) {
+                return;
+            }
+            match stop_rx.try_recv() {
+                Ok(_) | Err(std_mpsc::TryRecvError::Disconnected) => return,
+                Err(std_mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
     fn publish_bgra_frame(
         shared: &Arc<StdMutex<PreviewScreenShared>>,
         width: u32,
         height: u32,
-        bgra: &[u8],
+        bgra: &mut Vec<u8>,
     ) {
         let callback_started_at = Instant::now();
         let mut guard = shared
@@ -4448,23 +5922,18 @@ mod linux {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        let mut buffer = guard.frame_store.checkout_overwrite_buffer(bgra.len());
-        buffer.clear();
-        buffer.extend_from_slice(bgra);
+        let frame_len = bgra.len();
+        // Plan 191: publish the converted frame itself and hand the stream the
+        // store's checked-out buffer as its next conversion target, instead of
+        // copying every frame into that buffer under this lock. Plan 210 S7:
+        // through the Hide screen gate.
+        let buffer = std::mem::take(bgra);
         let publish_started_at = Instant::now();
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            (),
-            now,
-            buffer,
-        );
+        *bgra = publish_gated_bgra_frame(&mut guard, sequence, width, height, buffer, now);
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
-            .record_valid_frame(0.0, 0.0, publish_ms, bgra.len() as u64);
+            .record_valid_frame(0.0, 0.0, publish_ms, frame_len as u64);
     }
 }
 
@@ -4481,7 +5950,7 @@ mod windows {
     pub fn run_native_screen_preview(
         config: NativeScreenPreviewConfig,
         shared: Arc<StdMutex<PreviewScreenShared>>,
-        stop_rx: std_mpsc::Receiver<()>,
+        stop_rx: std_mpsc::Receiver<NativeScreenCommand>,
         startup_tx: std_mpsc::Sender<NativeScreenStartup>,
     ) {
         let mut graphics_capture_fallback_reason = None;
@@ -4603,7 +6072,7 @@ mod windows {
     fn run_graphics_capture_preview(
         config: &NativeScreenPreviewConfig,
         shared: &Arc<StdMutex<PreviewScreenShared>>,
-        stop_rx: &std_mpsc::Receiver<()>,
+        stop_rx: &std_mpsc::Receiver<NativeScreenCommand>,
         startup_tx: &std_mpsc::Sender<NativeScreenStartup>,
     ) -> Result<(), String> {
         let source = parse_windows_dxgi_source_id(&config.source_id).ok_or_else(|| {
@@ -4628,7 +6097,7 @@ mod windows {
 
         loop {
             match stop_rx.try_recv() {
-                Ok(()) | Err(std_mpsc::TryRecvError::Disconnected) => return Ok(()),
+                Ok(_) | Err(std_mpsc::TryRecvError::Disconnected) => return Ok(()),
                 Err(std_mpsc::TryRecvError::Empty) => {}
             }
             let frame = match capture.recv_timeout(Duration::from_millis(50)) {
@@ -4751,27 +6220,51 @@ mod windows {
             .last_error = Some(error);
     }
 
+    /// Half a 60 Hz vblank: the most a frame may arrive before its slot and
+    /// still be admitted. Capture stamps jitter by a few hundred microseconds
+    /// and `SetMinUpdateInterval` is best-effort, so a gate with no tolerance
+    /// rejects a frame stamped 333_2xx after the last one at 30 fps and
+    /// admits the next at ~666_6xx: bursts of 15 fps on a healthy source.
+    const CADENCE_EARLY_TOLERANCE_100NS: i64 = 80_000;
+
+    /// Admits frames on a fixed grid of the target interval. The grid, not
+    /// the last admitted stamp, sets the next slot, so the early tolerance
+    /// never compounds: on a 75, 144 or 165 Hz display a 30 fps target stays
+    /// 30 fps instead of admitting every frame that clears the tolerance.
     struct WindowsCaptureCadenceGate {
         interval_100ns: i64,
-        last_admitted_100ns: Option<i64>,
+        next_due_100ns: Option<i64>,
     }
 
     impl WindowsCaptureCadenceGate {
         fn new(fps: u32) -> Self {
             Self {
                 interval_100ns: 10_000_000_i64 / i64::from(fps.max(1)),
-                last_admitted_100ns: None,
+                next_due_100ns: None,
             }
         }
 
         fn admit(&mut self, timestamp_100ns: i64) -> bool {
-            if let Some(last) = self.last_admitted_100ns
-                && timestamp_100ns.saturating_sub(last) < self.interval_100ns
-            {
+            let due = self.next_due_100ns.unwrap_or(timestamp_100ns);
+            if timestamp_100ns < due.saturating_sub(self.early_tolerance_100ns()) {
                 return false;
             }
-            self.last_admitted_100ns = Some(timestamp_100ns);
+            // A frame a whole interval past its slot (a stall) restarts the
+            // grid from itself, so the frames after it are not a catch-up
+            // burst.
+            let next_due = if timestamp_100ns >= due.saturating_add(self.interval_100ns) {
+                timestamp_100ns
+            } else {
+                due
+            };
+            self.next_due_100ns = Some(next_due.saturating_add(self.interval_100ns));
             true
+        }
+
+        /// Never more than a quarter of the interval, so a high target fps
+        /// keeps rejecting duplicates.
+        fn early_tolerance_100ns(&self) -> i64 {
+            CADENCE_EARLY_TOLERANCE_100NS.min(self.interval_100ns / 4)
         }
     }
 
@@ -4806,12 +6299,12 @@ mod windows {
     fn spawn_stop_killer(
         child: Arc<StdMutex<Child>>,
         done: Arc<AtomicBool>,
-        stop_rx: std_mpsc::Receiver<()>,
+        stop_rx: std_mpsc::Receiver<NativeScreenCommand>,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             while !done.load(Ordering::Acquire) {
                 match stop_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(()) => {
+                    Ok(_) => {
                         let _ = child
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -4853,16 +6346,8 @@ mod windows {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            (),
-            now,
-            bytes,
-        );
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+        // Plan 210 S7: through the Hide screen gate.
+        let next_buffer = publish_gated_bgra_frame(&mut guard, sequence, width, height, bytes, now);
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
@@ -4896,15 +6381,46 @@ mod windows {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        guard.d3d11_frame_store.publish_with_d3d11_texture(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            now,
-            Vec::new(),
-            texture,
-        );
+        // Plan 210 S7: the texture store has its own cursor; the still is a
+        // texture on the capture's device, so the direct D3D11 recording and
+        // the D3D11 compositor keep reading textures.
+        match admit_screen_frame(guard.privacy.view(), &mut guard.d3d11_privacy_cursor) {
+            ScreenFrameAdmission::Publish => {
+                guard.held_live_d3d11 = None;
+                guard.d3d11_frame_store.publish_with_d3d11_texture(
+                    sequence,
+                    width,
+                    height,
+                    PreviewScreenPixelFormat::Bgra8,
+                    now,
+                    Vec::new(),
+                    texture,
+                );
+            }
+            ScreenFrameAdmission::Frost => {
+                frost_d3d11_texture_into_store(&mut guard, sequence, &texture, now);
+                hold_live_d3d11_frame(
+                    &mut guard,
+                    HeldLiveFrame {
+                        width,
+                        height,
+                        source_d3d11_texture: Some(texture),
+                        ..HeldLiveFrame::default()
+                    },
+                );
+            }
+            ScreenFrameAdmission::Hold => {
+                hold_live_d3d11_frame(
+                    &mut guard,
+                    HeldLiveFrame {
+                        width,
+                        height,
+                        source_d3d11_texture: Some(texture),
+                        ..HeldLiveFrame::default()
+                    },
+                );
+            }
+        }
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
@@ -4926,16 +6442,9 @@ mod windows {
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            (),
-            Instant::now(),
-            bytes,
-        );
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+        // Plan 210 S7: through the Hide screen gate.
+        let next_buffer =
+            publish_gated_bgra_frame(&mut guard, sequence, width, height, bytes, Instant::now());
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard.capture_timings.record_valid_frame(
             0.0,
@@ -4985,6 +6494,53 @@ mod windows {
         }
 
         #[test]
+        fn graphics_capture_cadence_gate_tolerates_a_slightly_early_frame() {
+            // 30 fps from a 60 Hz display: every other vblank, stamped a few
+            // hundred microseconds early, must still pass as 30 fps.
+            let mut gate = WindowsCaptureCadenceGate::new(30);
+            assert!(gate.admit(0));
+            assert!(!gate.admit(166_667));
+            assert!(gate.admit(333_100));
+            assert!(!gate.admit(499_800));
+            assert!(gate.admit(666_300));
+            // Much too early is still a duplicate.
+            assert!(!gate.admit(666_300 + 250_000));
+
+            // At 120 fps the tolerance shrinks so the gate keeps rejecting
+            // duplicates inside the 83_333 interval.
+            let mut fast = WindowsCaptureCadenceGate::new(120);
+            assert!(fast.admit(0));
+            assert!(!fast.admit(60_000));
+            assert!(fast.admit(63_000));
+        }
+
+        #[test]
+        fn graphics_capture_cadence_gate_holds_the_target_on_any_refresh_rate() {
+            // The tolerance must not compound: a display whose refresh is not
+            // a multiple of the target still yields the target, never more.
+            for refresh_hz in [60_i64, 75, 90, 120, 144, 165, 240] {
+                let mut gate = WindowsCaptureCadenceGate::new(30);
+                let admitted = (0..refresh_hz * 10)
+                    .filter(|frame| gate.admit(frame * 10_000_000 / refresh_hz))
+                    .count();
+                assert!(
+                    (299..=301).contains(&admitted),
+                    "{refresh_hz} Hz admitted {admitted} frames in 10 s at 30 fps"
+                );
+            }
+        }
+
+        #[test]
+        fn graphics_capture_cadence_gate_restarts_its_grid_after_a_stall() {
+            let mut gate = WindowsCaptureCadenceGate::new(30);
+            assert!(gate.admit(0));
+            // Half a second with no frames, then 60 Hz again: no burst.
+            assert!(gate.admit(5_000_000));
+            assert!(!gate.admit(5_166_667));
+            assert!(gate.admit(5_333_333));
+        }
+
+        #[test]
         fn direct_recording_caps_only_the_cpu_preview_readback() {
             assert!(should_read_back_cpu_preview(
                 false,
@@ -5021,7 +6577,7 @@ mod macos {
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::ProtocolObject;
     use objc2::{AnyThread, DefinedClass, define_class, msg_send};
-    use objc2_core_foundation::{CFDictionary, CFNumber, CFType};
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFType, CGRect};
     use objc2_core_graphics::{
         CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayMode, CGPreflightScreenCaptureAccess,
     };
@@ -5035,7 +6591,8 @@ mod macos {
     use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
     use objc2_screen_capture_kit::{
         SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-        SCStreamDelegate, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
+        SCStreamDelegate, SCStreamFrameInfoScreenRect, SCStreamFrameInfoStatus, SCStreamOutput,
+        SCStreamOutputType, SCWindow,
     };
 
     use super::*;
@@ -5227,11 +6784,11 @@ mod macos {
     pub fn run_native_screen_preview(
         config: NativeScreenPreviewConfig,
         shared: Arc<StdMutex<PreviewScreenShared>>,
-        stop_rx: std_mpsc::Receiver<()>,
+        stop_rx: std_mpsc::Receiver<NativeScreenCommand>,
         startup_tx: std_mpsc::Sender<NativeScreenStartup>,
     ) {
         autoreleasepool(|_| match start_stream(config, Arc::clone(&shared)) {
-            Ok(session) => {
+            Ok(mut session) => {
                 let _ = startup_tx.send(NativeScreenStartup::Live {
                     native_width: session.native_width,
                     native_height: session.native_height,
@@ -5240,9 +6797,17 @@ mod macos {
                     width: session.width,
                     height: session.height,
                     selected_fps: session.selected_fps,
-                    message: session.message,
+                    message: session.message.clone(),
                 });
-                let _ = stop_rx.recv();
+                // Plan 210 S3: the stream serves until it is stopped, changing
+                // its target in place on request. Each swap drains its own
+                // pool, or the content, filter and configuration of every
+                // past target would live until the stop.
+                // A Stop, or a dropped supervisor, ends the loop.
+                while let Ok(NativeScreenCommand::Swap(request)) = stop_rx.recv() {
+                    let outcome = autoreleasepool(|_| swap_stream(&mut session, &request, &shared));
+                    let _ = request.reply.send(outcome);
+                }
                 stop_stream(&session.stream);
                 unsafe {
                     let _ = session.stream.removeStreamOutput_type_error(
@@ -5272,6 +6837,8 @@ mod macos {
         height: u32,
         selected_fps: f64,
         message: Option<String>,
+        /// The target's rectangle in screen points, for swap attribution.
+        screen_rect: Option<ScreenRect>,
     }
 
     fn start_stream(
@@ -5339,28 +6906,7 @@ mod macos {
         let start_handler = start_capture(&stream, &shared);
 
         let selected_fps = f64::from(capture_request.requested_fps);
-        let message = Some(format!(
-            "Native {} preview running at {}x{} from {}x{} source and {:.0} fps. Cursor {}, Videorc windows excluded {}.",
-            match config.source_kind {
-                PreviewScreenSourceKind::Screen => "screen",
-                PreviewScreenSourceKind::Window => "window",
-            },
-            capture_request.requested_width,
-            capture_request.requested_height,
-            capture_request.native_width,
-            capture_request.native_height,
-            selected_fps,
-            if config.include_cursor {
-                "visible"
-            } else {
-                "hidden"
-            },
-            if config.exclude_current_process_windows {
-                "yes"
-            } else {
-                "no"
-            }
-        ));
+        let message = Some(session_message(&config, &capture_request, selected_fps));
 
         Ok(ScreenSession {
             stream,
@@ -5377,6 +6923,7 @@ mod macos {
             height: capture_request.requested_height,
             selected_fps,
             message,
+            screen_rect: selected.screen_rect,
         })
     }
 
@@ -5384,6 +6931,17 @@ mod macos {
         filter: Retained<SCContentFilter>,
         source_width: u32,
         source_height: u32,
+        /// The target's rectangle in screen points (plan 210 S3).
+        screen_rect: Option<ScreenRect>,
+    }
+
+    fn screen_rect_of(frame: &CGRect) -> ScreenRect {
+        (
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        )
     }
 
     fn select_content(
@@ -5425,10 +6983,12 @@ mod macos {
                 let logical_height = positive_u32(unsafe { display.height() });
                 let (source_width, source_height) =
                     display_capture_dimensions(display_id, logical_width, logical_height);
+                let display_frame = unsafe { display.frame() };
                 Ok(SelectedContent {
                     source_width,
                     source_height,
                     filter,
+                    screen_rect: Some(screen_rect_of(&display_frame)),
                 })
             }
             PreviewScreenSourceKind::Window => {
@@ -5485,6 +7045,7 @@ mod macos {
                     source_width: points_to_pixels(frame.size.width, scale),
                     source_height: points_to_pixels(frame.size.height, scale),
                     filter,
+                    screen_rect: Some(screen_rect_of(&frame)),
                 })
             }
         }
@@ -5534,6 +7095,16 @@ mod macos {
     fn load_shareable_content_once(
         query: ShareableContentQuery,
     ) -> Result<Retained<SCShareableContent>, NativeScreenStartup> {
+        load_shareable_content_once_within(query, SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT)
+    }
+
+    /// One discovery call, answered within `timeout` or reported as the
+    /// discovery timeout. A swap in place (plan 210 S3) uses a short one:
+    /// its fallback loads content on its own thread with the full budget.
+    fn load_shareable_content_once_within(
+        query: ShareableContentQuery,
+        timeout: Duration,
+    ) -> Result<Retained<SCShareableContent>, NativeScreenStartup> {
         enum ShareableContentResult {
             Content(ShareableContentTransfer),
             Error(String),
@@ -5574,7 +7145,7 @@ mod macos {
             }
         }
 
-        match rx.recv_timeout(SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok(ShareableContentResult::Content(content)) => {
                 let content = content.consume().ok_or_else(|| {
                     NativeScreenStartup::Failed(
@@ -5660,12 +7231,218 @@ mod macos {
         let _ = rx.recv_timeout(Duration::from_secs(2));
     }
 
+    fn session_message(
+        config: &NativeScreenPreviewConfig,
+        capture_request: &PreviewScreenCaptureRequest,
+        selected_fps: f64,
+    ) -> String {
+        format!(
+            "Native {} preview running at {}x{} from {}x{} source and {:.0} fps. Cursor {}, Videorc windows excluded {}.",
+            match config.source_kind {
+                PreviewScreenSourceKind::Screen => "screen",
+                PreviewScreenSourceKind::Window => "window",
+            },
+            capture_request.requested_width,
+            capture_request.requested_height,
+            capture_request.native_width,
+            capture_request.native_height,
+            selected_fps,
+            if config.include_cursor {
+                "visible"
+            } else {
+                "hidden"
+            },
+            if config.exclude_current_process_windows {
+                "yes"
+            } else {
+                "no"
+            }
+        )
+    }
+
+    /// Plan 210 S3: change the running stream's target in place. The content
+    /// comes from the listing's one-second discovery cache when the renderer
+    /// resolved the window just before (no second round trip), else from a
+    /// bounded fresh load. Both updates are issued together and awaited
+    /// under one deadline. The new generation is stamped only after both
+    /// completed, so a frame of the new target is never stamped with the
+    /// old generation; a frame of the old target delivered after that is
+    /// the race the switch probe counts as a wrong-layout frame.
+    fn swap_stream(
+        session: &mut ScreenSession,
+        request: &ScreenSwapRequest,
+        shared: &Arc<StdMutex<PreviewScreenShared>>,
+    ) -> Result<ScreenSwapOutcome, String> {
+        let started_at = Instant::now();
+        let config = NativeScreenPreviewConfig {
+            source_id: request.source.source_id.clone(),
+            source_kind: request.source.source_kind.clone(),
+            display_id: request.source.display_id,
+            window_id: request.source.window_id,
+            ffmpeg_path: request.ffmpeg_path.clone(),
+            video: request.video.clone(),
+            include_cursor: request.include_cursor,
+            exclude_current_process_windows: request.exclude_current_process_windows,
+            protected_overlay_window_ids: request.protected_overlay_window_ids.clone(),
+            consent_cancel: Arc::new(AtomicBool::new(false)),
+        };
+        let (content, content_cached) =
+            match crate::screen_capture::macos::recent_shareable_content() {
+                Some(content) => (content, true),
+                None => (
+                    load_shareable_content_once_within(
+                        ShareableContentQuery::FullOnScreenContent,
+                        SCREEN_SWAP_UPDATE_TIMEOUT,
+                    )
+                    .map_err(startup_failure_reason)?,
+                    false,
+                ),
+            };
+        let content_ms = started_at.elapsed().as_millis() as u64;
+        let selected = select_content(&content, &config).map_err(startup_failure_reason)?;
+        let capture_request = select_preview_screen_capture_request(
+            &config.source_kind,
+            selected.source_width,
+            selected.source_height,
+            &config.video,
+            config.include_cursor,
+            config.exclude_current_process_windows,
+        );
+        tracing::info!(
+            "[videorc-capture-sizing] kind={:?} native={}x{} requested={}x{} session={}x{} scales_to_fit={} swap=true",
+            config.source_kind,
+            capture_request.native_width,
+            capture_request.native_height,
+            capture_request.requested_width,
+            capture_request.requested_height,
+            config.video.width,
+            config.video.height,
+            capture_request.scales_to_fit,
+        );
+        let stream_config = unsafe { SCStreamConfiguration::new() };
+        configure_stream(&stream_config, &capture_request);
+        let (filter_tx, filter_rx) = std_mpsc::channel::<Result<(), String>>();
+        let filter_handler = RcBlock::new(move |error: *mut NSError| {
+            let _ = filter_tx.send(if error.is_null() {
+                Ok(())
+            } else {
+                Err(error_description(error))
+            });
+        });
+        let (config_tx, config_rx) = std_mpsc::channel::<Result<(), String>>();
+        let config_handler = RcBlock::new(move |error: *mut NSError| {
+            let _ = config_tx.send(if error.is_null() {
+                Ok(())
+            } else {
+                Err(error_description(error))
+            });
+        });
+        if let Some(next_rect) = selected.screen_rect {
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous_generation = guard.capture_generation;
+            arm_capture_generation(
+                &mut guard,
+                SwapAttribution {
+                    next_generation: request.generation,
+                    next_rect,
+                    previous_generation,
+                    previous_rect: session.screen_rect,
+                    frames_left: 0,
+                },
+            );
+        }
+        let update_started_at = Instant::now();
+        unsafe {
+            session
+                .stream
+                .updateContentFilter_completionHandler(&selected.filter, Some(&filter_handler));
+            session
+                .stream
+                .updateConfiguration_completionHandler(&stream_config, Some(&config_handler));
+        }
+        let deadline = update_started_at + SCREEN_SWAP_UPDATE_TIMEOUT;
+        if let Err(reason) = await_stream_update(&filter_rx, deadline, "content filter")
+            .and_then(|()| await_stream_update(&config_rx, deadline, "configuration"))
+        {
+            disarm_capture_generation(
+                &mut shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            return Err(reason);
+        }
+        let update_ms = update_started_at.elapsed().as_millis() as u64;
+        let stamped_at = {
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            begin_capture_generation(&mut guard, request.generation);
+            Instant::now()
+        };
+        session.screen_rect = selected.screen_rect;
+        let selected_fps = f64::from(capture_request.requested_fps);
+        let message = session_message(&config, &capture_request, selected_fps);
+        session._filter = selected.filter;
+        session._configuration = stream_config;
+        session.native_width = capture_request.native_width;
+        session.native_height = capture_request.native_height;
+        session.requested_width = capture_request.requested_width;
+        session.requested_height = capture_request.requested_height;
+        session.width = capture_request.requested_width;
+        session.height = capture_request.requested_height;
+        session.selected_fps = selected_fps;
+        session.message = Some(message.clone());
+        Ok(ScreenSwapOutcome {
+            native_width: capture_request.native_width,
+            native_height: capture_request.native_height,
+            requested_width: capture_request.requested_width,
+            requested_height: capture_request.requested_height,
+            selected_fps,
+            message: Some(message),
+            content_cached,
+            content_ms,
+            update_ms,
+            stamped_at,
+        })
+    }
+
+    fn startup_failure_reason(startup: NativeScreenStartup) -> String {
+        match startup {
+            NativeScreenStartup::PermissionNeeded(message)
+            | NativeScreenStartup::SourceMissing(message)
+            | NativeScreenStartup::Failed(message) => message,
+            NativeScreenStartup::AwaitingConsent
+            | NativeScreenStartup::ConsentGranted
+            | NativeScreenStartup::Live { .. } => "unexpected startup phase".to_string(),
+        }
+    }
+
+    fn await_stream_update(
+        rx: &std_mpsc::Receiver<Result<(), String>>,
+        deadline: Instant,
+        what: &str,
+    ) -> Result<(), String> {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!(
+                "ScreenCaptureKit refused the {what} update: {error}"
+            )),
+            Err(_) => Err(format!(
+                "ScreenCaptureKit did not complete the {what} update within {} ms",
+                SCREEN_SWAP_UPDATE_TIMEOUT.as_millis()
+            )),
+        }
+    }
+
     fn copy_sample_buffer(
         sample_buffer: &CMSampleBuffer,
         shared: &Arc<StdMutex<PreviewScreenShared>>,
     ) {
         let callback_started_at = Instant::now();
         let frame_status = sample_buffer_frame_status(sample_buffer);
+        let screen_rect = sample_buffer_screen_rect(sample_buffer);
         if !record_screen_capture_callback_status(shared, callback_started_at, frame_status) {
             // Keep the latest complete frame published. ScreenCaptureKit uses
             // idle and transition statuses for static content; clearing or
@@ -5788,6 +7565,13 @@ mod macos {
         let mut guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Plan 210 S3: frames carry their capture generation. While a swap
+        // is in flight the frame's screen rectangle says which target it
+        // came from; a straggler of the previous target after the next
+        // one began is discarded, never published over its first frame.
+        let Some(generation) = frame_capture_generation(&mut guard, screen_rect) else {
+            return;
+        };
         let now = Instant::now();
         guard.frames_captured = guard.frames_captured.saturating_add(1);
         guard.frames_in_window = guard.frames_in_window.saturating_add(1);
@@ -5800,16 +7584,66 @@ mod macos {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_source_handles(
-            sequence,
-            width,
-            height,
-            PreviewScreenPixelFormat::Bgra8,
-            now,
-            bytes,
-            source_iosurface,
-            source_pixel_buffer,
-        );
+        // Plan 210 S7: the Hide screen gate, decided under the store's lock at
+        // the publish itself. A held frame keeps exactly what a live publish
+        // would have published (handles, and bytes unless the copy is
+        // skipped), so a show can publish it at once.
+        match admit_screen_frame(guard.privacy.view(), &mut guard.privacy_cursor) {
+            ScreenFrameAdmission::Publish => {
+                guard.held_live = None;
+                guard.frame_store.publish_with_source_handles(
+                    sequence,
+                    width,
+                    height,
+                    PreviewScreenPixelFormat::Bgra8,
+                    now,
+                    bytes,
+                    source_iosurface,
+                    source_pixel_buffer,
+                );
+                guard.latest_frame_generation = generation;
+            }
+            ScreenFrameAdmission::Frost => {
+                let still = {
+                    let pixels: Option<Cow<'_, [u8]>> = if bytes.len() >= frame_bytes {
+                        Some(Cow::Borrowed(&bytes[..frame_bytes]))
+                    } else {
+                        crate::screen_privacy::macos::read_bgra_from_pixel_buffer(
+                            &crate::frame_store::RetainedPixelBuffer::new(pixel_buffer.clone()),
+                            width,
+                            height,
+                        )
+                        .map(Cow::Owned)
+                    };
+                    frost_bgra(width, height, pixels.as_deref())
+                };
+                publish_cpu_still(&mut guard, sequence, width, height, still, now, generation);
+                hold_live_frame(
+                    &mut guard,
+                    HeldLiveFrame {
+                        width,
+                        height,
+                        bytes,
+                        generation,
+                        source_iosurface,
+                        source_pixel_buffer,
+                    },
+                );
+            }
+            ScreenFrameAdmission::Hold => {
+                hold_live_frame(
+                    &mut guard,
+                    HeldLiveFrame {
+                        width,
+                        height,
+                        bytes,
+                        generation,
+                        source_iosurface,
+                        source_pixel_buffer,
+                    },
+                );
+            }
+        }
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard.capture_timings.record_valid_frame(
             pixel_buffer_lock_ms,
@@ -5840,6 +7674,36 @@ mod macos {
         let key = unsafe { &*(std::ptr::from_ref(SCStreamFrameInfoStatus).cast::<CFType>()) };
         let value = unsafe { dictionary.get_unchecked(key) }?;
         value.downcast_ref::<CFNumber>()?.as_i64()
+    }
+
+    /// The screen rectangle this frame was captured from
+    /// (`SCStreamFrameInfoScreenRect`, macOS 14+), for plan 210 S3's swap
+    /// attribution. Bounded like the status read: one dictionary, four
+    /// numbers, no copies.
+    fn sample_buffer_screen_rect(sample_buffer: &CMSampleBuffer) -> Option<ScreenRect> {
+        let attachments = unsafe { sample_buffer.sample_attachments_array(false) }?;
+        if attachments.is_empty() {
+            return None;
+        }
+        // SAFETY: as in `sample_buffer_frame_status_raw`; the rect value is a
+        // CGRect dictionary representation keyed by X, Y, Width and Height.
+        let dictionaries = unsafe { attachments.cast_unchecked::<CFDictionary<CFType, CFType>>() };
+        let dictionary = unsafe { dictionaries.get_unchecked(0) };
+        let key = unsafe { &*(std::ptr::from_ref(SCStreamFrameInfoScreenRect).cast::<CFType>()) };
+        let value = unsafe { dictionary.get_unchecked(key) }?;
+        let rect = unsafe {
+            value
+                .downcast_ref::<CFDictionary>()?
+                .cast_unchecked::<CFType, CFType>()
+        };
+        let field = |name: &str| -> Option<f64> {
+            let name = NSString::from_str(name);
+            let name_key = unsafe { &*(std::ptr::from_ref::<NSString>(&name).cast::<CFType>()) };
+            unsafe { rect.get_unchecked(name_key) }?
+                .downcast_ref::<CFNumber>()?
+                .as_f64()
+        };
+        Some((field("X")?, field("Y")?, field("Width")?, field("Height")?))
     }
 
     fn find_display(content: &SCShareableContent, display_id: u32) -> Option<Retained<SCDisplay>> {
@@ -6318,6 +8182,639 @@ mod tests {
         }
     }
 
+    // --- Plan 210 S7: Hide screen at the publish point ---
+
+    const PRIVACY_W: u32 = 64;
+    const PRIVACY_H: u32 = 36;
+
+    /// Vertical stripes two pixels wide: structure the frost removes.
+    fn privacy_stripes(phase: usize) -> Vec<u8> {
+        let mut bytes = vec![0_u8; (PRIVACY_W * PRIVACY_H * 4) as usize];
+        for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
+            let x = index % PRIVACY_W as usize;
+            let value = if (x / 2 + phase) % 2 == 0 { 255 } else { 0 };
+            px[..3].fill(value);
+            px[3] = 255;
+        }
+        bytes
+    }
+
+    fn privacy_white() -> Vec<u8> {
+        vec![0xff; (PRIVACY_W * PRIVACY_H * 4) as usize]
+    }
+
+    /// Mid-grey with no stripe left, away from the mirrored borders: the
+    /// still, not a live frame. Every pixel is opaque.
+    fn assert_frosted_stripes(bytes: &[u8]) {
+        assert_eq!(bytes.len(), (PRIVACY_W * PRIVACY_H * 4) as usize);
+        assert!(bytes.chunks_exact(4).all(|px| px[3] == 0xff));
+        for y in 0..PRIVACY_H as usize {
+            let row: Vec<&[u8]> = bytes
+                [y * PRIVACY_W as usize * 4..(y + 1) * PRIVACY_W as usize * 4]
+                .chunks_exact(4)
+                .collect();
+            for px in &row[8..PRIVACY_W as usize - 8] {
+                assert!(
+                    (100..=160).contains(&px[0]) && (100..=160).contains(&px[1]),
+                    "not the frost: {px:?}"
+                );
+            }
+            for pair in row[8..PRIVACY_W as usize - 8].windows(2) {
+                assert!(
+                    pair[0][0].abs_diff(pair[1][0]) <= 4,
+                    "a stripe edge survived"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_screen_publishes_one_frosted_still_then_holds_live_frames() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        let live = shared.frame_store.latest().unwrap();
+        assert_eq!(live.bytes, privacy_stripes(0));
+
+        // The hide RPC frosts the store at once: a static screen sends nothing.
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        let still = shared.frame_store.latest().unwrap();
+        assert_ne!(still.storage_identity(), live.storage_identity());
+        assert!(still.sequence > live.sequence);
+        assert_frosted_stripes(&still.bytes);
+        #[cfg(target_os = "macos")]
+        assert!(
+            still.source_iosurface.is_some(),
+            "the still is IOSurface-backed for the Metal path"
+        );
+        assert!(!frost_cpu_store_now(&mut shared), "one still per hide");
+
+        // Live frames while hidden are held, never published.
+        for sequence in 2..5 {
+            shared.frames_captured = sequence;
+            publish_gated_bgra_frame(
+                &mut shared,
+                sequence,
+                PRIVACY_W,
+                PRIVACY_H,
+                privacy_white(),
+                Instant::now(),
+            );
+            let latest = shared.frame_store.latest().unwrap();
+            assert_eq!(latest.storage_identity(), still.storage_identity());
+        }
+        assert_eq!(shared.privacy_held_frames, 3);
+
+        // Show publishes the held live frame at once; the next frame is live.
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared));
+        assert_eq!(shared.frame_store.latest().unwrap().bytes, privacy_white());
+        shared.frames_captured = 5;
+        publish_gated_bgra_frame(
+            &mut shared,
+            5,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(1),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().bytes,
+            privacy_stripes(1)
+        );
+
+        // A second hide builds a new still from the latest live picture.
+        gate.hide(
+            crate::protocol::ScreenPrivacyReason::PasswordManager,
+            "t2".into(),
+        );
+        assert!(frost_cpu_store_now(&mut shared));
+        let second = shared.frame_store.latest().unwrap();
+        assert_ne!(second.storage_identity(), still.storage_identity());
+        assert_frosted_stripes(&second.bytes);
+        shared.frames_captured = 6;
+        publish_gated_bgra_frame(
+            &mut shared,
+            6,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().storage_identity(),
+            second.storage_identity()
+        );
+    }
+
+    #[test]
+    fn a_capture_started_while_hidden_frosts_its_first_frame() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        // The hide found nothing to cover: nothing is published yet.
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        assert!(!frost_cpu_store_now(&mut shared));
+        assert!(shared.frame_store.latest().is_none());
+        // The swapped-in source's first frame is frosted, never live.
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        let still = shared.frame_store.latest().unwrap();
+        assert_frosted_stripes(&still.bytes);
+        shared.frames_captured = 2;
+        publish_gated_bgra_frame(
+            &mut shared,
+            2,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().storage_identity(),
+            still.storage_identity()
+        );
+        assert_eq!(shared.privacy_held_frames, 2);
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared));
+        assert_eq!(shared.frame_store.latest().unwrap().bytes, privacy_white());
+    }
+
+    /// Plan 210 S3 under S7: a swap in place is a fresh capture for the
+    /// gate. The next target's first frame frosts itself, carries the new
+    /// generation (so the switch completes), and its live pixels wait for
+    /// the show.
+    #[test]
+    fn a_swap_while_hidden_frosts_the_next_targets_first_frame() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.capture_generation = 1;
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        assert_eq!(shared.latest_frame_generation, 1);
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        assert_eq!(shared.latest_frame_generation, 1);
+
+        begin_capture_generation(&mut shared, 2);
+        shared.frames_captured = 3;
+        publish_gated_bgra_frame(
+            &mut shared,
+            3,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        let still = shared.frame_store.latest().unwrap();
+        assert_frosted_stripes(&still.bytes);
+        assert_eq!(shared.latest_frame_generation, 2);
+        assert_eq!(shared.held_live.as_ref().unwrap().generation, 2);
+        // One still per hide: the next frame holds.
+        shared.frames_captured = 4;
+        publish_gated_bgra_frame(
+            &mut shared,
+            4,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(1),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().storage_identity(),
+            still.storage_identity()
+        );
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared));
+        assert_eq!(
+            shared.frame_store.latest().unwrap().bytes,
+            privacy_stripes(1)
+        );
+        assert_eq!(shared.latest_frame_generation, 2);
+    }
+
+    /// The other order (plan 210 D5 under D8): the swap's completion has
+    /// stamped the next generation, and the hide lands before the next
+    /// target's first frame. Every leg draws only frames of the generation
+    /// its scene adopted, so the still must carry the CURRENT generation:
+    /// the program cuts to the frost (and the swap's first-frame wait
+    /// completes on it) instead of holding the previous window's last live
+    /// frame while the Studio says "Screen hidden". The previous window's
+    /// live frame is held under its own generation; the next target's
+    /// frames hold under theirs.
+    #[test]
+    fn a_hide_during_an_in_flight_swap_frosts_under_the_current_generation() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.capture_generation = 1;
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        begin_capture_generation(&mut shared, 2);
+        assert_eq!(shared.latest_frame_generation, 1);
+
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        let still = latest_frame_of_generation(&shared, 2)
+            .expect("the still carries the current generation, so the switch cuts to it");
+        assert_frosted_stripes(&still.bytes);
+        assert_eq!(shared.latest_frame_generation, 2);
+        assert!(latest_frame_of_generation(&shared, 1).is_none());
+        assert_eq!(
+            shared.held_live.as_ref().unwrap().generation,
+            1,
+            "the previous window's live frame keeps its own generation"
+        );
+
+        // The next target's first frame holds: one still per hide, nothing
+        // restarts.
+        shared.frames_captured = 3;
+        publish_gated_bgra_frame(
+            &mut shared,
+            3,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        assert_eq!(
+            shared.frame_store.latest().unwrap().storage_identity(),
+            still.storage_identity()
+        );
+        assert_eq!(shared.held_live.as_ref().unwrap().generation, 2);
+        assert_eq!(shared.privacy_held_frames, 1);
+
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared));
+        assert_eq!(shared.frame_store.latest().unwrap().bytes, privacy_white());
+        assert_eq!(shared.latest_frame_generation, 2);
+    }
+
+    /// The Windows D3D11 session composes from this store while hidden. Its
+    /// read answers only the still: never the live frame from before the
+    /// hide edge (the gate closes before `screen.hide` covers the store),
+    /// and nothing once the show released the live picture.
+    #[test]
+    fn a_hidden_consumer_reads_only_the_still_from_the_store() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::with_privacy(
+            Arc::clone(&gate),
+        )));
+        shared.lock().unwrap().capture_generation = 1;
+        let source = PreviewScreenFrameSource {
+            shared: Arc::clone(&shared),
+            source_key: None,
+            generation: 1,
+        };
+        {
+            let mut guard = shared.lock().unwrap();
+            guard.frames_captured = 1;
+            publish_gated_bgra_frame(
+                &mut guard,
+                1,
+                PRIVACY_W,
+                PRIVACY_H,
+                privacy_stripes(0),
+                Instant::now(),
+            );
+        }
+        assert!(source.try_latest_frame_result().unwrap().is_some());
+        assert!(source.try_latest_still_frame_result().unwrap().is_none());
+
+        // The gate closed; the store still holds the live frame.
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(
+            source.try_latest_still_frame_result().unwrap().is_none(),
+            "a live frame from before the hide edge is never the still"
+        );
+        assert!(frost_cpu_store_now(&mut shared.lock().unwrap()));
+        let still = source
+            .try_latest_still_frame_result()
+            .unwrap()
+            .expect("the still");
+        assert_frosted_stripes(&still.bytes);
+        assert_eq!(
+            source
+                .try_latest_frame_result()
+                .unwrap()
+                .unwrap()
+                .storage_identity(),
+            still.storage_identity()
+        );
+
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared.lock().unwrap()));
+        assert!(source.try_latest_still_frame_result().unwrap().is_none());
+        assert_eq!(
+            source.try_latest_frame_result().unwrap().unwrap().bytes,
+            privacy_stripes(0)
+        );
+    }
+
+    /// A show between the swap and the next target's first frame publishes
+    /// the previous target's held live frame under its own generation: the
+    /// scene still naming it draws it; one naming the next target waits.
+    #[test]
+    fn a_show_before_the_next_targets_first_frame_keeps_its_generation() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.capture_generation = 1;
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        begin_capture_generation(&mut shared, 2);
+        gate.show();
+        assert!(release_cpu_store_now(&mut shared));
+        assert_eq!(shared.frame_store.latest().unwrap().bytes, privacy_white());
+        assert_eq!(shared.latest_frame_generation, 1);
+        assert!(latest_frame_of_generation(&shared, 2).is_none());
+        assert!(latest_frame_of_generation(&shared, 1).is_some());
+    }
+
+    /// Plan 210 S3: a frame's screen rectangle attributes it to a target
+    /// while a swap is in flight, whichever side of the completion it lands.
+    #[test]
+    fn swap_attribution_stamps_frames_by_their_screen_rectangle() {
+        let alpha = (40.0, 40.0, 1280.0, 720.0);
+        let beta = (200.0, 230.0, 1280.0, 720.0);
+        let mut shared = PreviewScreenShared::default();
+        shared.capture_generation = 1;
+        arm_capture_generation(
+            &mut shared,
+            SwapAttribution {
+                next_generation: 2,
+                next_rect: beta,
+                previous_generation: 1,
+                previous_rect: Some(alpha),
+                frames_left: 0,
+            },
+        );
+        let attribution = |next: u64, next_rect, previous_rect| SwapAttribution {
+            next_generation: next,
+            next_rect,
+            previous_generation: next - 1,
+            previous_rect: Some(previous_rect),
+            frames_left: 0,
+        };
+        // Before the completion: the previous target's frames keep 1 ...
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(1));
+        assert_eq!(shared.capture_generation, 1);
+        // ... a frame without a rectangle takes the stamp of the moment ...
+        assert_eq!(frame_capture_generation(&mut shared, None), Some(1));
+        // ... and the next target's first frame begins its generation itself.
+        assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(2));
+        assert_eq!(shared.capture_generation, 2);
+        assert!(shared.generation_began_early);
+        // A straggler of the previous target is discarded, not published
+        // over the next target's first frame.
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), None);
+        // The completion then changes nothing.
+        begin_capture_generation(&mut shared, 2);
+        assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(2));
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), None);
+
+        // The other order: the completion first, then a straggler of the
+        // previous target, discarded; the next target's frames carry 3.
+        let mut shared = PreviewScreenShared::default();
+        shared.capture_generation = 2;
+        arm_capture_generation(&mut shared, attribution(3, alpha, beta));
+        begin_capture_generation(&mut shared, 3);
+        assert_eq!(shared.capture_generation, 3);
+        assert!(!shared.generation_began_early);
+        assert_eq!(frame_capture_generation(&mut shared, Some(beta)), None);
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(3));
+        // The attribution expires a few frames into the new generation.
+        for _ in 0..SWAP_ATTRIBUTION_FRAMES {
+            assert_eq!(frame_capture_generation(&mut shared, None), Some(3));
+        }
+        assert!(shared.swap_attribution.is_none());
+        assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(3));
+
+        // Two targets at the same place: the completion alone decides.
+        let mut shared = PreviewScreenShared::default();
+        shared.capture_generation = 3;
+        arm_capture_generation(&mut shared, attribution(4, alpha, alpha));
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(3));
+        begin_capture_generation(&mut shared, 4);
+        assert!(shared.swap_attribution.is_none());
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(4));
+        // A refused swap leaves no attribution behind.
+        arm_capture_generation(&mut shared, attribution(5, beta, alpha));
+        disarm_capture_generation(&mut shared);
+        assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(4));
+    }
+
+    #[test]
+    fn a_swap_in_place_needs_another_screencapturekit_target_on_the_same_canvas() {
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 64,
+            height: 36,
+            fps: 30,
+            bitrate_kbps: 2000,
+        };
+        let window = |id: u32| SelectedScreenSource {
+            source_id: format!("window:screencapturekit:{id}"),
+            source_kind: PreviewScreenSourceKind::Window,
+            callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
+            display_id: None,
+            window_id: Some(id),
+        };
+        let active = NativeScreenPreviewThread {
+            shared: Arc::new(StdMutex::new(PreviewScreenShared::default())),
+            source: window(1),
+            ffmpeg_path: "ffmpeg".to_string(),
+            video: video.clone(),
+            include_cursor: true,
+            exclude_current_process_windows: false,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let key = |video: &VideoSettings| PreviewScreenStartKey {
+            source_key: SourceKey::window("window:screencapturekit:2"),
+            ffmpeg_path: "ffmpeg".to_string(),
+            video: video.clone(),
+            target_fps: video.fps,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        assert_eq!(
+            screen_swap_eligibility(&active, &window(2), &key(&video), true),
+            Ok(())
+        );
+        let display = SelectedScreenSource {
+            source_id: "screen:screencapturekit:5".to_string(),
+            source_kind: PreviewScreenSourceKind::Screen,
+            callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+            display_id: Some(5),
+            window_id: None,
+        };
+        assert_eq!(
+            screen_swap_eligibility(&active, &display, &key(&video), true),
+            Ok(())
+        );
+        assert_eq!(
+            screen_swap_eligibility(&active, &window(2), &key(&video), false),
+            Err("no running native capture to change")
+        );
+        assert_eq!(
+            screen_swap_eligibility(&active, &window(1), &key(&video), true),
+            Err("the same source restarts on purpose")
+        );
+        let portrait = VideoSettings {
+            width: 36,
+            height: 64,
+            ..video.clone()
+        };
+        assert_eq!(
+            screen_swap_eligibility(&active, &window(2), &key(&portrait), true),
+            Err("the canvas changed")
+        );
+        let portal = SelectedScreenSource {
+            source_id: "window:portal:1".to_string(),
+            source_kind: PreviewScreenSourceKind::Window,
+            callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
+            display_id: None,
+            window_id: None,
+        };
+        assert_eq!(
+            screen_swap_eligibility(&active, &portal, &key(&video), true),
+            Err("the next source is not a ScreenCaptureKit window or display")
+        );
+    }
+
+    #[test]
+    fn show_never_puts_a_held_frame_over_a_newer_live_one() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let mut shared = PreviewScreenShared::with_privacy(Arc::clone(&gate));
+        shared.frames_captured = 1;
+        publish_gated_bgra_frame(
+            &mut shared,
+            1,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(0),
+            Instant::now(),
+        );
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared));
+        shared.frames_captured = 2;
+        publish_gated_bgra_frame(
+            &mut shared,
+            2,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_white(),
+            Instant::now(),
+        );
+        gate.show();
+        // The capture publishes a live frame before the show RPC's release.
+        shared.frames_captured = 3;
+        publish_gated_bgra_frame(
+            &mut shared,
+            3,
+            PRIVACY_W,
+            PRIVACY_H,
+            privacy_stripes(1),
+            Instant::now(),
+        );
+        assert!(!release_cpu_store_now(&mut shared));
+        assert_eq!(
+            shared.frame_store.latest().unwrap().bytes,
+            privacy_stripes(1)
+        );
+        // And a show with nothing held changes nothing.
+        assert!(!release_cpu_store_now(&mut shared));
+    }
+
+    #[tokio::test]
+    async fn hold_and_release_cover_the_installed_capture_through_the_state() {
+        let state = test_state();
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: PRIVACY_W,
+            height: PRIVACY_H,
+            fps: 30,
+            bitrate_kbps: 2000,
+        };
+        test_install_live_screen_generation(&state, "screen:fixture", 1, 1, &video).await;
+        assert!(test_publish_screen_bgra(&state, 2, privacy_stripes(0), Instant::now()).await);
+        let source = preview_screen_frame_source(&state).await.unwrap();
+        assert_eq!(
+            source.latest_frame_blocking().unwrap().bytes,
+            privacy_stripes(0)
+        );
+
+        assert!(!hold_screen_now(&state).await, "visible: nothing to hold");
+        state
+            .screen_privacy
+            .hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(hold_screen_now(&state).await);
+        let still = source.latest_frame_blocking().unwrap();
+        assert_frosted_stripes(&still.bytes);
+        assert!(test_publish_screen_bgra(&state, 3, privacy_white(), Instant::now()).await);
+        assert_eq!(
+            source.latest_frame_blocking().unwrap().storage_identity(),
+            still.storage_identity()
+        );
+        assert_eq!(test_privacy_held_frames(&state).await, 1);
+
+        state.screen_privacy.show();
+        assert!(release_screen_now(&state).await);
+        assert_eq!(
+            source.latest_frame_blocking().unwrap().bytes,
+            privacy_white()
+        );
+
+        // A new generation installed while hidden starts frosted.
+        state.screen_privacy.hide(
+            crate::protocol::ScreenPrivacyReason::PasswordManager,
+            "t".into(),
+        );
+        test_install_live_screen_generation(&state, "screen:other", 2, 1, &video).await;
+        let swapped = preview_screen_frame_source(&state).await.unwrap();
+        let first = swapped.latest_frame_blocking().unwrap();
+        assert!(
+            first.bytes.chunks_exact(4).all(|px| px[3] == 0xff),
+            "the swapped source's first frame is the still, not the zero frame"
+        );
+        state.screen_privacy.show();
+    }
+
     fn test_video_with_dimensions(width: u32, height: u32) -> VideoSettings {
         VideoSettings {
             preset: VideoPreset::Record4k30,
@@ -6370,8 +8867,39 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Starting native screen preview.".to_string()),
+            message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn source_iso_screen_retirement_preserves_admitted_overlay_exclusions() {
+        let state = test_state();
+        let video = test_video();
+        test_install_live_screen_generation(
+            &state,
+            "screen:screencapturekit:4294967294",
+            1,
+            1,
+            &video,
+        )
+        .await;
+        let mut key = test_screen_start_key(
+            SourceKey::screen("screen:screencapturekit:4294967294"),
+            &video,
+        );
+        key.ffmpeg_path = resolve_ffmpeg_path(None);
+        key.protected_overlay_window_ids = vec![17, 42];
+        let status = preview_screen_status(&state).await;
+        let admission = begin_screen_start(&state, key, status, None).await;
+        assert!(matches!(
+            admission,
+            PreviewScreenStartRegistration::Reused(_)
+        ));
+        stop_preview_screen(&state).await;
+        assert_eq!(
+            source_iso_protected_overlay_window_ids(&state).await,
+            vec![17, 42]
+        );
     }
 
     fn test_screen_start_key(
@@ -8310,6 +10838,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             protected_overlay_window_ids: Vec::new(),
+            consent_cancel: Arc::new(AtomicBool::new(false)),
         };
         let backend = windows_screen_preview_backend(&config).unwrap();
         let (width, height) = windows_screen_preview_output_dimensions(&config);
@@ -8346,6 +10875,7 @@ mod tests {
             include_cursor: false,
             exclude_current_process_windows: false,
             protected_overlay_window_ids: Vec::new(),
+            consent_cancel: Arc::new(AtomicBool::new(false)),
         };
         let backend = windows_screen_preview_backend(&config).unwrap();
         let args = windows_screen_preview_ffmpeg_args(&backend, 1280, 720, 30, false);
@@ -8600,6 +11130,305 @@ mod tests {
         assert!(timeout > Duration::from_secs(5));
     }
 
+    /// Plan 0010: a registered Starting generation for the phased waiter tests.
+    async fn started_screen_lease(state: &AppState) -> PreviewScreenStartLease {
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:portal:monitor");
+        let start_key = PreviewScreenStartKey {
+            source_key: source_key.clone(),
+            ffmpeg_path: "ffmpeg".to_string(),
+            video: video.clone(),
+            target_fps: video.fps,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let mut starting = idle_status(None);
+        starting.state = PreviewScreenState::Starting;
+        starting.source_id = Some(source_key.id.clone());
+        starting.source_kind = Some(PreviewScreenSourceKind::Screen);
+        starting.message = Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string());
+        match begin_screen_start(state, start_key, starting, None).await {
+            PreviewScreenStartRegistration::Started { lease, .. } => lease,
+            other => panic!("expected a started screen generation, got {other:?}"),
+        }
+    }
+
+    fn short_startup_deadlines(phase: ScreenStartupPhase) -> Duration {
+        match phase {
+            ScreenStartupPhase::Starting => Duration::from_millis(400),
+            ScreenStartupPhase::AwaitingConsent => Duration::from_secs(5),
+            ScreenStartupPhase::AwaitingFirstFrame => Duration::from_millis(200),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_share_dialog_outlives_the_device_deadline_and_ends_with_its_real_answer() {
+        // Plan 0010: the picker answered (cancelled) after the device deadline.
+        // The outcome is the portal's own answer, not a startup timeout, and
+        // Record is refused fast while the dialog is open.
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let (tx, rx) = std_mpsc::channel();
+        tx.send(NativeScreenStartup::AwaitingConsent).unwrap();
+        let answer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(900));
+            tx.send(NativeScreenStartup::PermissionNeeded(
+                "Screen sharing was cancelled in the desktop portal dialog.".to_string(),
+            ))
+            .unwrap();
+        });
+        let waiter = {
+            let state = state.clone();
+            let lease = lease.clone();
+            tokio::spawn(async move {
+                await_native_screen_startup(
+                    &state,
+                    &lease,
+                    rx,
+                    &Arc::new(AtomicBool::new(false)),
+                    short_startup_deadlines,
+                )
+                .await
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while session_start_blocked_by_share_dialog(&state)
+            .await
+            .is_none()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the consent phase was never published"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let status = preview_screen_status(&state).await;
+        assert_eq!(status.state, PreviewScreenState::Starting);
+        assert_eq!(
+            status.message.as_deref(),
+            Some(SHARE_DIALOG_PENDING_MESSAGE)
+        );
+
+        let outcome = waiter.await.unwrap();
+        answer.join().unwrap();
+        assert!(
+            matches!(&outcome, NativeScreenStartup::PermissionNeeded(message) if message.contains("cancelled")),
+            "{outcome:?}"
+        );
+        assert_eq!(session_start_blocked_by_share_dialog(&state).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_granted_share_without_a_first_frame_names_the_sleeping_display() {
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let (tx, rx) = std_mpsc::channel();
+        tx.send(NativeScreenStartup::ConsentGranted).unwrap();
+        let outcome = await_native_screen_startup(
+            &state,
+            &lease,
+            rx,
+            &Arc::new(AtomicBool::new(false)),
+            short_startup_deadlines,
+        )
+        .await;
+        drop(tx);
+        assert!(
+            matches!(&outcome, NativeScreenStartup::SourceMissing(message) if message.contains("asleep")),
+            "{outcome:?}"
+        );
+        assert_eq!(session_start_blocked_by_share_dialog(&state).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_device_start_keeps_the_single_startup_deadline() {
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let (tx, rx) = std_mpsc::channel::<NativeScreenStartup>();
+        let outcome = await_native_screen_startup(
+            &state,
+            &lease,
+            rx,
+            &Arc::new(AtomicBool::new(false)),
+            short_startup_deadlines,
+        )
+        .await;
+        drop(tx);
+        let NativeScreenStartup::Failed(message) = outcome else {
+            panic!("expected the startup timeout");
+        };
+        assert!(message.starts_with("Timed out after"), "{message}");
+        assert_eq!(
+            cfg!(target_os = "linux"),
+            !message.contains("native"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn linux_screen_startup_copy_never_claims_a_native_preview() {
+        for phase in [
+            ScreenStartupPhase::Starting,
+            ScreenStartupPhase::AwaitingConsent,
+            ScreenStartupPhase::AwaitingFirstFrame,
+        ] {
+            let expired = match phase.expired(phase.deadline()) {
+                NativeScreenStartup::Failed(message)
+                | NativeScreenStartup::PermissionNeeded(message)
+                | NativeScreenStartup::SourceMissing(message) => message,
+                other => panic!("unexpected {other:?}"),
+            };
+            if cfg!(target_os = "linux") {
+                assert!(!phase.message().contains("native"), "{phase:?}");
+                assert!(!expired.contains("native"), "{expired}");
+            }
+        }
+        if cfg!(target_os = "linux") {
+            for copy in [
+                SCREEN_PREVIEW_IDLE_MESSAGE,
+                SCREEN_PREVIEW_STOPPED_MESSAGE,
+                SCREEN_PREVIEW_REUSED_MESSAGE,
+                SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE,
+            ] {
+                assert!(!copy.contains("ative"), "{copy}");
+            }
+        }
+        assert_eq!(SHARE_DIALOG_WAIT, Duration::from_secs(600));
+        assert!(matches!(
+            ScreenStartupPhase::AwaitingConsent.expired(SHARE_DIALOG_WAIT),
+            NativeScreenStartup::PermissionNeeded(message) if message.contains("10 minutes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn record_fails_fast_while_a_share_dialog_holds_the_source_transition() {
+        // Plan 0010 addendum 3: the screen start that opened the dialog holds
+        // a source-transition guard until the person answers. Session start
+        // must refuse with the reason, not wait (it held the ordered lane).
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let transition = state.source_transition_fence.begin();
+        publish_screen_startup_phase(
+            &state,
+            &lease,
+            ScreenStartupPhase::AwaitingConsent,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        let refused = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::recording::test_admit_session_start_and_release(&state),
+        )
+        .await
+        .expect("session start waited behind the share dialog")
+        .expect_err("session start was admitted while the share dialog was open");
+        assert!(refused.to_string().contains("share dialog"), "{refused}");
+
+        // Once the dialog is answered the phase moves on and the drained
+        // transition admits the start as before.
+        publish_screen_startup_phase(
+            &state,
+            &lease,
+            ScreenStartupPhase::AwaitingFirstFrame,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        drop(transition);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::recording::test_admit_session_start_and_release(&state),
+        )
+        .await
+        .expect("session start never drained the finished transition")
+        .expect("session start refused after the dialog was answered");
+    }
+
+    #[tokio::test]
+    async fn a_newer_screen_transition_ends_a_share_dialog_wait() {
+        // Plan 0010: transitions run FIFO. A stop (scene without the screen,
+        // another source) queued behind a start that waits on its share
+        // dialog would otherwise wait for the person too.
+        let state = test_state();
+        let lease = started_screen_lease(&state).await;
+        let consent_cancel = Arc::new(AtomicBool::new(false));
+        publish_screen_startup_phase(
+            &state,
+            &lease,
+            ScreenStartupPhase::AwaitingConsent,
+            &consent_cancel,
+        )
+        .await;
+        assert!(!consent_cancel.load(Ordering::SeqCst));
+        {
+            let mut slot = state.preview_screen.lock().await;
+            let _ticket = allocate_screen_transition_ticket(&mut slot);
+        }
+        assert!(consent_cancel.load(Ordering::SeqCst));
+
+        // A device phase is never cancelled this way: only the person-wait.
+        let first_frame = Arc::new(AtomicBool::new(false));
+        publish_screen_startup_phase(
+            &state,
+            &lease,
+            ScreenStartupPhase::AwaitingFirstFrame,
+            &first_frame,
+        )
+        .await;
+        {
+            let mut slot = state.preview_screen.lock().await;
+            let _ticket = allocate_screen_transition_ticket(&mut slot);
+        }
+        assert!(!first_frame.load(Ordering::SeqCst));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stop_ends_the_portal_consent_wait() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (stop_tx, stop_rx) = std_mpsc::channel();
+        let started = Instant::now();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            stop_tx.send(NativeScreenCommand::Stop).unwrap();
+        });
+        runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                linux::stop_requested(&stop_rx, &AtomicBool::new(false)),
+            )
+            .await
+            .expect("stop never ended the consent wait");
+        });
+        stopper.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // A newer transition's cancel flag ends it too.
+        let (_stop_tx, stop_rx) = std_mpsc::channel::<NativeScreenCommand>();
+        let cancelled = AtomicBool::new(true);
+        runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                linux::stop_requested(&stop_rx, &cancelled),
+            )
+            .await
+            .expect("the consent cancel flag never ended the consent wait");
+        });
+
+        // A dropped sender (supervisor gone) ends it too.
+        let (stop_tx, stop_rx) = std_mpsc::channel::<NativeScreenCommand>();
+        drop(stop_tx);
+        runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                linux::stop_requested(&stop_rx, &AtomicBool::new(false)),
+            )
+            .await
+            .expect("a dropped stop sender never ended the consent wait");
+        });
+    }
+
     #[tokio::test]
     async fn duplicate_screen_start_waits_for_in_flight_start() {
         let state = test_state();
@@ -8635,7 +11464,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Starting native screen preview.".to_string()),
+            message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
         };
 
         assert!(matches!(
@@ -8678,7 +11507,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Native screen preview source reused.".to_string()),
+            message: Some(SCREEN_PREVIEW_REUSED_MESSAGE.to_string()),
         };
         set_screen_status(&state, live.clone()).await;
 
@@ -8724,7 +11553,7 @@ mod tests {
             include_cursor: true,
             exclude_current_process_windows: false,
             updated_at: Utc::now().to_rfc3339(),
-            message: Some("Starting native screen preview.".to_string()),
+            message: Some(SCREEN_PREVIEW_STARTING_MESSAGE.to_string()),
         };
 
         let lease = match begin_screen_start(&state, start_key, starting, None).await {
@@ -8913,7 +11742,7 @@ mod tests {
         assert_eq!(slot.run_id.as_deref(), Some("run-1"));
         assert_eq!(
             status.message.as_deref(),
-            Some("Native screen preview source reused.")
+            Some(SCREEN_PREVIEW_REUSED_MESSAGE)
         );
     }
 

@@ -34,7 +34,7 @@ describe('youtubeThumbnailFailure', () => {
       accountId: 'acct',
       broadcastId: 'b1'
     })
-    expect(parsed?.message).toBe('The thumbnail was not set. The stream is not affected.')
+    expect(parsed?.message).toBe("The thumbnail wasn't set. The stream isn't affected.")
     expect(parsed?.retryable).toBe(false)
   })
 })

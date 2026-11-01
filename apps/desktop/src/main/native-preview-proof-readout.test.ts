@@ -72,7 +72,7 @@ describe('proof preview readout', () => {
   it('keeps one label when live source and compositor callbacks interleave', () => {
     const runtime = proofRuntime()
     const label = runtime.compositor()
-    expect(label).toBe('native compositor: screen + camera')
+    expect(label).toBe('proof compositor: screen + camera')
     for (let frame = 0; frame < 3; frame++) {
       expect(runtime.sourceFrame()).toBe(label)
       expect(runtime.compositor()).toBe(label)
@@ -81,17 +81,38 @@ describe('proof preview readout', () => {
 
   it('shows source liveness before the compositor starts and after it stops', () => {
     const runtime = proofRuntime()
-    expect(runtime.sourceFrame()).toBe('native scene + screen image')
+    expect(runtime.sourceFrame()).toBe('proof scene + screen image')
     runtime.compositor()
-    expect(runtime.compositor('stopped')).toBe('native scene + screen image')
+    expect(runtime.compositor('stopped')).toBe('proof scene + screen image')
   })
 
   it('reports waiting or synthetic content after the compositor stops without live pixels', () => {
     const runtime = proofRuntime()
     runtime.compositor()
     runtime.context.layers.clear()
-    expect(runtime.compositor('stopped')).toBe('native scene waiting for source')
+    expect(runtime.compositor('stopped')).toBe('proof scene waiting for source')
     runtime.context.scene = { sources: [] }
-    expect(runtime.compositor('stopped')).toBe('native synthetic surface')
+    expect(runtime.compositor('stopped')).toBe('proof synthetic surface')
+  })
+
+  // Linux plan 0012: Linux and Windows users see this surface as their real
+  // preview, so the harness label is hidden unless a smoke or debug run asks.
+  it('hides the harness label from users and never calls the proof surface native', () => {
+    const readoutCss = documentSource.slice(
+      documentSource.indexOf('#readout {'),
+      documentSource.indexOf('body.proof-readout #readout')
+    )
+    expect(readoutCss).toContain('visibility: hidden')
+    expect(documentSource).toContain(
+      "nativePreviewProofReadoutVisible() ? ' class=\"proof-readout\"' : ''"
+    )
+    const runtime = proofRuntime()
+    for (const label of [
+      runtime.compositor(),
+      runtime.sourceFrame(),
+      runtime.compositor('stopped')
+    ]) {
+      expect(label).not.toMatch(/native/i)
+    }
   })
 })

@@ -21,7 +21,7 @@ vi.mock('@/hooks/use-studio', () => ({
 
 let root: Root
 let container: HTMLDivElement
-const onOpenOrcleReport = vi.fn((_sessionId: string) => undefined)
+const onOpenBuddyReport = vi.fn((_sessionId: string) => undefined)
 const onOpenCleanCut = vi.fn((_sessionId: string) => undefined)
 
 function session(overrides: Partial<CleanCutSession>): CleanCutSession {
@@ -92,13 +92,15 @@ const SESSIONS: CleanCutSession[] = [
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  onOpenOrcleReport.mockClear()
+  onOpenBuddyReport.mockClear()
   onOpenCleanCut.mockClear()
   mocked.recording = { state: 'idle' }
   mocked.core = {
     sessions: SESSIONS,
     sessionsNextCursor: null,
     sessionsLoadingMore: false,
+    sessionDetails: {},
+    loadSessionDetails: vi.fn(async () => undefined),
     loadMoreSessions: vi.fn(),
     sessionStorageTotals: null,
     settings: {},
@@ -106,6 +108,7 @@ beforeEach(() => {
     deleteSessions: vi.fn(),
     renameSession: vi.fn(),
     noiseCleanupJobs: [],
+    cleanCutJobs: [],
     connection: null,
     ensureSessionPoster: vi.fn(async () => false),
     assessRecording: vi.fn(),
@@ -139,7 +142,7 @@ async function render(focusSessionId: string | null = null): Promise<void> {
     openStudioPanel: vi.fn(),
     closeStudioPanel: vi.fn(),
     openSettings: vi.fn(),
-    openOrcle: vi.fn()
+    openBuddy: vi.fn()
   }
   await act(async () =>
     root.render(
@@ -149,7 +152,7 @@ async function render(focusSessionId: string | null = null): Promise<void> {
         createElement(
           TooltipProvider,
           null,
-          createElement(LibraryTab, { onOpenOrcleReport, onOpenCleanCut, focusSessionId })
+          createElement(LibraryTab, { onOpenBuddyReport, onOpenCleanCut, focusSessionId })
         )
       )
     )
@@ -166,9 +169,7 @@ async function openMenu(sessionId: string): Promise<HTMLElement[]> {
   const trigger = row(sessionId).querySelector(
     'button[aria-label="Session actions"]'
   ) as HTMLElement
-  await act(async () =>
-    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-  )
+  await act(async () => trigger.click())
   return [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
 }
 
@@ -182,23 +183,23 @@ function labels(items: HTMLElement[]): string[] {
   return items.map((item) => item.textContent?.trim() ?? '')
 }
 
-describe('Library → Clean cut (plan 119 S14)', () => {
-  it('opens the Orcle tab on an eligible recording, right after Play and the report', async () => {
+describe('Library → Clean cut (plan 119 S14; plan 174 S3.13)', () => {
+  it('opens the Buddy tab on an eligible recording, right after Play and the report', async () => {
     await render()
     const recording = await openMenu('tutorial')
-    expect(labels(recording).slice(0, 2)).toEqual(['Play', 'Clean cut'])
+    expect(labels(recording).slice(0, 2)).toEqual(['Play', 'Make a clean cut…'])
     await act(async () => recording[1].click())
     expect(onOpenCleanCut).toHaveBeenCalledExactlyOnceWith('tutorial')
 
     const streamed = await openMenu('stream')
-    expect(labels(streamed).slice(0, 3)).toEqual(['Play', 'Orcle report', 'Clean cut'])
+    expect(labels(streamed).slice(0, 3)).toEqual(['Play', 'Buddy report', 'Make a clean cut…'])
     await closeMenu()
   })
 
   it('offers no Clean cut where the backend would refuse one', async () => {
     await render()
     for (const id of ['stream-only', 'short', 'imported', 'cut', 'condensed']) {
-      expect(labels(await openMenu(id)), id).not.toContain('Clean cut')
+      expect(labels(await openMenu(id)), id).not.toContain('Make a clean cut…')
       await closeMenu()
     }
   })
@@ -218,16 +219,16 @@ describe('Library → Clean cut (plan 119 S14)', () => {
     await render()
     const items = await openMenu('cut')
     expect(labels(items)).toContain('Show source recording')
-    expect(labels(items)).not.toContain('Clean noise')
+    expect(labels(items)).not.toContain('Reduce noise')
     await act(async () =>
       items.find((item) => item.textContent?.trim() === 'Show source recording')!.click()
     )
     await closeMenu()
-    expect(row('tutorial').className).toContain('ring-1')
+    expect(row('tutorial').dataset.revealed).toBe('true')
   })
 
   it('focuses the row Clean cut asked for', async () => {
     await render('condensed')
-    expect(row('condensed').className).toContain('ring-1')
+    expect(row('condensed').dataset.revealed).toBe('true')
   })
 })

@@ -1,50 +1,71 @@
-import {
-  BugIcon,
-  DownloadIcon,
-  RefreshIcon,
-  SpinnerIcon,
-  SuccessIcon,
-  WarningIcon
-} from '@/components/icons'
+import { ExternalLinkIcon, RefreshIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
+import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { DisabledReason } from '@/components/ui/disabled-reason'
+import { FieldGroup, SettingsRow } from '@/components/ui/field'
+import { Progress } from '@/components/ui/progress'
+import { Spinner } from '@/components/ui/spinner'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { useUpdater } from '@/hooks/use-updater'
-import type { UpdateStatus } from '@/lib/backend'
-import { isActiveRecordingState } from '@/lib/format'
+import { updateRowView, type UpdateRowControl } from '@/lib/about-update-view'
+import { NO_VALUE } from '@/lib/format'
+import { sessionOwnsTransport } from '../../../../shared/capture-state'
+import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import { releaseTrackLabel } from '@/lib/release-track'
-import { isUpdateInstallable } from '@/lib/update-ui'
+import {
+  openVideorcWebLink,
+  VIDEORC_SOURCE_CODE_URL,
+  VIDEORC_WEB_LINKS
+} from '@/lib/videorc-web-links'
+
+/**
+ * Where Videorc lives on the web (plan 174 I-21). "Contact support" waits for
+ * a support address the app does not have yet (an owner call, S3.18).
+ */
+const ABOUT_LINKS: ReadonlyArray<{ title: string; context: string; url: string }> = [
+  { title: 'Website', context: 'videorc.com', url: VIDEORC_WEB_LINKS.home },
+  { title: 'Privacy policy', context: '', url: VIDEORC_WEB_LINKS.privacy },
+  { title: 'Terms of service', context: '', url: VIDEORC_WEB_LINKS.terms },
+  { title: 'Source code and licenses', context: 'AGPL-3.0', url: VIDEORC_SOURCE_CODE_URL }
+]
 
 /** Settings → About: the version and its updates, and getting help. */
 export function AboutSettings({ onShowWhatsNew }: { onShowWhatsNew: () => void }): ReactElement {
-  const { exportSupportBundle, supportBundleExportPending } = useStudioCore()
-
   return (
     <>
       <AboutAndUpdates onShowWhatsNew={onShowWhatsNew} />
 
       <PanelSection description="Get help or report a problem." title="Support">
-        <div className="flex flex-col gap-2">
-          <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={supportBundleExportPending}
-              size="sm"
-              variant="outline"
-              onClick={() => void exportSupportBundle()}
-            >
-              <BugIcon data-icon="inline-start" />
-              {supportBundleExportPending ? 'Exporting…' : 'Export support bundle'}
+        <FieldGroup variant="grouped">
+          {/* The support bundle's one home is Health (plan 174 S3.18, I-1, D9);
+              About sends the streamer there. */}
+          <SettingsRow
+            description="Export it from Health: redacted logs and Health's checks in one file, to send with a problem report."
+            label="Support bundle"
+          >
+            <Button type="button" variant="outline" onClick={openHealth}>
+              {OPEN_HEALTH_LABEL}
             </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Reporting a problem? Export a support bundle (redacted logs + diagnostics) to share with
-            us.
-          </p>
-        </div>
+          </SettingsRow>
+        </FieldGroup>
+        <GroupedList label="Links">
+          {ABOUT_LINKS.map((link) => (
+            <ListRow
+              key={link.title}
+              as="button"
+              context={link.context || undefined}
+              statusIcons={<ExternalLinkIcon aria-hidden />}
+              title={link.title}
+              onClick={() => openVideorcWebLink(link.url)}
+            />
+          ))}
+        </GroupedList>
       </PanelSection>
     </>
   )
@@ -54,156 +75,108 @@ function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): Re
   const { runtimeInfo } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const { status, check, install } = useUpdater()
-  const captureActive = isActiveRecordingState(recording.state)
+  // Plan 181: the default ring never holds an update back (main treats it as idle too).
+  const view = updateRowView(status, sessionOwnsTransport(recording))
 
   return (
-    <PanelSection
-      description="Check for new versions of Videorc and install them."
-      title="About & updates"
-    >
-      <div className="flex flex-col gap-4">
-        {/* The app's identity, like a macOS About panel: the icon, the name,
-            and the version with its release track. The PNG carries its own
-            rounded tile and transparent margin, so it needs no mask or shadow. */}
-        <div className="flex items-center gap-3">
-          <img alt="" className="size-16 shrink-0" src={logoUrl} />
-          <div className="flex min-w-0 flex-col gap-1">
-            <span className="text-sm font-semibold text-foreground">Videorc</span>
-            <span className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span>
-                Version <span className="font-mono">{runtimeInfo?.version ?? '-'}</span>
-              </span>
-              {runtimeInfo ? (
-                <Badge variant="outline">
-                  {releaseTrackLabel(runtimeInfo.platform, runtimeInfo.isPackaged)}
-                </Badge>
-              ) : null}
+    <PanelSection description="Your version of Videorc and its updates." title="About & updates">
+      {/* The app's identity, like a macOS About panel: the icon, the name,
+          and the version with its release track. The PNG carries its own
+          rounded tile and transparent margin, so it needs no mask or shadow. */}
+      <div className="flex items-center gap-3">
+        <img alt="" className="size-16 shrink-0" src={logoUrl} />
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="text-sm font-semibold text-foreground">Videorc</span>
+          <span className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              Version <span className="font-mono">{runtimeInfo?.version ?? NO_VALUE}</span>
             </span>
-          </div>
+            {runtimeInfo ? (
+              <Badge variant="outline">
+                {releaseTrackLabel(runtimeInfo.platform, runtimeInfo.isPackaged)}
+              </Badge>
+            ) : null}
+          </span>
         </div>
-        <UpdateControl
-          captureActive={captureActive}
-          status={status}
-          onCheck={check}
-          onInstall={install}
-        />
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-sm text-muted-foreground">Release notes</span>
-          <Button size="sm" variant="outline" onClick={onShowWhatsNew}>
-            What&apos;s new
-          </Button>
-        </div>
+        <Button variant="outline" onClick={onShowWhatsNew}>
+          What&apos;s new…
+        </Button>
       </div>
+
+      {view.kind === 'error' ? (
+        // Plan 174 I-20: a failed update is an Alert with its one fix, never
+        // the updater's raw text in a warning line.
+        <Alert data-testid="update-error" variant="warning">
+          <AlertTitle>{view.title}</AlertTitle>
+          <AlertDescription>{view.description}</AlertDescription>
+          <AlertAction>
+            <Button size="xs" variant="outline" onClick={check}>
+              Try again
+            </Button>
+          </AlertAction>
+        </Alert>
+      ) : (
+        <FieldGroup variant="grouped">
+          <SettingsRow description={view.description} label="Updates">
+            {view.control ? (
+              <UpdateControl control={view.control} onCheck={check} onInstall={install} />
+            ) : null}
+          </SettingsRow>
+        </FieldGroup>
+      )}
     </PanelSection>
   )
 }
 
 function UpdateControl({
-  status,
-  captureActive,
+  control,
   onCheck,
   onInstall
 }: {
-  status: UpdateStatus
-  captureActive: boolean
+  control: UpdateRowControl
   onCheck: () => void
   onInstall: () => void
 }): ReactElement {
-  switch (status.phase) {
-    case 'unsupported':
+  switch (control.kind) {
+    case 'check':
       return (
-        <p className="text-xs text-muted-foreground">
-          {status.reason === 'windows-feed-unpublished'
-            ? 'No Windows update is published for you yet. Sign in to get Windows Alpha pilot updates automatically, or download the newest build from your account page.'
-            : 'Automatic updates aren’t available for this build yet. Grab new versions from the downloads page.'}
-        </p>
+        <Button variant="outline" onClick={onCheck}>
+          <RefreshIcon data-icon="inline-start" />
+          {control.label}
+        </Button>
       )
     case 'checking':
       return (
-        <Button disabled className="w-fit" size="sm" variant="outline">
-          <SpinnerIcon className="animate-spin" data-icon="inline-start" />
-          Checking for updates…
+        <Button disabled variant="outline">
+          <Spinner aria-hidden data-icon="inline-start" />
+          Checking…
         </Button>
       )
-    case 'available':
+    case 'progress':
       return (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <DownloadIcon className="size-4 shrink-0" />
-          <span>Version {status.version} available. Starting download…</span>
-        </div>
+        <Progress
+          aria-label="Update download"
+          className="w-32 shrink-0 self-center"
+          value={control.percent}
+        />
       )
-    case 'downloading':
+    case 'install':
       return (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>Downloading update…</span>
-            <span className="font-mono">{status.percent}%</span>
-          </div>
-          <div
-            aria-label="Update download progress"
-            aria-valuemax={100}
-            aria-valuemin={0}
-            aria-valuenow={status.percent}
-            className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-            role="progressbar"
-          >
-            <div
-              className="h-full rounded-full bg-primary transition-[width] duration-200"
-              style={{ width: `${status.percent}%` }}
-            />
-          </div>
-        </div>
-      )
-    case 'downloaded':
-      return (
-        <div className="flex flex-col gap-2">
-          <Button
-            className="w-fit"
-            disabled={!isUpdateInstallable(status, captureActive)}
-            size="sm"
-            onClick={onInstall}
-          >
+        <DisabledReason reason={control.disabledReason}>
+          <Button disabled={control.disabledReason !== null} onClick={onInstall}>
             <RefreshIcon data-icon="inline-start" />
-            Restart &amp; install {status.version}
+            {control.label}
           </Button>
-          <p className="text-xs text-muted-foreground">
-            {captureActive
-              ? 'Finish your recording first. Installing restarts Videorc.'
-              : 'Videorc will restart to finish updating.'}
-          </p>
-        </div>
+        </DisabledReason>
       )
-    case 'not-available':
+    case 'link':
       return (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <SuccessIcon className="size-3.5 shrink-0 text-success" weight="fill" />
-            <span>You’re on the latest version ({status.currentVersion}).</span>
-          </div>
-          <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-            <RefreshIcon data-icon="inline-start" />
-            Check again
-          </Button>
-        </div>
-      )
-    case 'error':
-      return (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-start gap-1.5 text-xs text-warning-foreground dark:text-warning">
-            <WarningIcon className="size-3.5 shrink-0" weight="fill" />
-            <span>Couldn’t check for updates: {status.message}</span>
-          </div>
-          <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-            <RefreshIcon data-icon="inline-start" />
-            Try again
-          </Button>
-        </div>
-      )
-    default:
-      return (
-        <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-          <RefreshIcon data-icon="inline-start" />
-          Check for updates
+        <Button
+          variant="outline"
+          onClick={() => openVideorcWebLink(VIDEORC_WEB_LINKS[control.link])}
+        >
+          {control.label}
+          <ExternalLinkIcon data-icon="inline-end" />
         </Button>
       )
   }

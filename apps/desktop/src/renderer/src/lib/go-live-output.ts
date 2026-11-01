@@ -13,6 +13,7 @@ import type {
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
   StreamingSettings,
+  VideoPreset,
   VideoSettings
 } from '../../../shared/backend'
 import {
@@ -25,6 +26,8 @@ import {
   type CaptureConfig,
   type ProviderStreamOutputPlanOptions
 } from './capture'
+import { formatVideoQuality } from './format-video'
+import { streamOutputCheckFailureMessage } from './stream-output-check-message'
 import { isUntrustedPerformanceCheckResult, outputLabel, outputVerdict } from './performance-check'
 
 // Everything a livestream start decides about its own output (plan 090):
@@ -35,7 +38,7 @@ import { isUntrustedPerformanceCheckResult, outputLabel, outputVerdict } from '.
 /**
  * The one profile a record+stream session can share when the host cannot run
  * a separate encoded stream role: the recording takes the destinations'
- * profile. Null when the destinations disagree with each other (the backend
+ * profile, whether that is above or below its own. Null when the destinations disagree with each other (the backend
  * resolves each destination from its own settings, so a recording override
  * alone cannot make that session share one encode) or when simulcast owns the
  * auxiliary role.
@@ -61,7 +64,12 @@ export function sharedEncodeFallbackVideo(
     Math.min(first.width, first.height) < Math.min(recording.width, recording.height)
   )
     return null
-  const shared = resolveProviderStreamOutputPlan(recording, streaming, {
+  // The recording follows the destinations for this session, up or down
+  // (plan 0016): planning with the saved recording would keep it as a shared
+  // candidate, so a recording below the stream (Linux's default 720p record +
+  // 1080p stream, or only a lower bitrate) made every shared plan the
+  // recording's and Go Live was refused with no setting that could fix it.
+  const shared = resolveProviderStreamOutputPlan({ ...first }, streaming, {
     ...options,
     separateEncodedOutputRoleAvailable: false
   }).streamVideo
@@ -133,6 +141,21 @@ export type SoftwareStreamAdvice =
   | {
       /** The stream goes out at the largest output that held steady. */
       kind: 'step-down'
+      /**
+       * `encoder`: the CPU encoder can't keep up. `go-live-headroom`: the
+       * compositor runs on the CPU and the check found no room for the
+       * stream beside the recording, so an untouched default steps down.
+       */
+      reason: 'encoder' | 'go-live-headroom'
+      requested: VideoSettings
+      video: VideoSettings
+    }
+  | {
+      /**
+       * A stream size the user picked that the CPU compositor has no
+       * measured headroom for while live: warn, never move it.
+       */
+      kind: 'go-live-heavy'
       requested: VideoSettings
       video: VideoSettings
     }
@@ -192,9 +215,96 @@ export function softwareStreamAdvice({
   // recording preset of that size uses.
   return {
     kind: 'step-down',
+    reason: 'encoder',
     requested: streamVideo,
     video: { ...recommended, bitrateKbps: Math.min(recommended.bitrateKbps, 6000) }
   }
+}
+
+const pixelRate = (video: Pick<VideoSettings, 'width' | 'height' | 'fps'>): number =>
+  pixels(video) * video.fps
+
+/**
+ * Go Live composes the stream beside the recording, and on a CPU compositor
+ * that measured about twice a Record of the same size (retest 152: 1080p30
+ * Record held 30 fps on an i7-8750H, 1080p30 Go Live ran at 14). The check
+ * measures a Record only, so a stream size counts as held while live only
+ * when a rung of at least this much more work passed.
+ */
+export const GO_LIVE_CPU_COMPOSITOR_HEADROOM = 1.5
+
+/** Where an untouched stream lands on a CPU compositor without headroom. */
+const GO_LIVE_CPU_COMPOSITOR_DEFAULT: VideoPreset = 'tutorial-720p30'
+
+/**
+ * Nobody picked a stream quality: the shipped default (`tutorial-1080p30`;
+ * a pick in Livestream saves a `stream-safe-*` preset) and no destination
+ * with its own quality.
+ */
+export function streamQualityUntouched(streaming: StreamingSettings): boolean {
+  return (
+    streaming.defaultOutputPreset === 'tutorial-1080p30' &&
+    streaming.targets.every((target) => !target.enabled || target.outputPreset === undefined)
+  )
+}
+
+/**
+ * Go Live on a CPU compositor (Linux, Windows' CPU fallback). The stream
+ * steps down to 720p30 (or the smaller output that held steady) unless the
+ * check proved headroom for it; a quality the user picked is only warned
+ * about. Encoder-agnostic: the compositor is the bottleneck here. A check
+ * where not even the floor held still steps down, to the floor: every
+ * larger rung measured worse, so 1080p is the worst choice left.
+ */
+export function cpuCompositorStreamAdvice({
+  streamVideo,
+  streaming,
+  state
+}: {
+  streamVideo: VideoSettings
+  streaming: StreamingSettings
+  state: PerformanceCheckState | undefined
+}): SoftwareStreamAdvice | null {
+  const result = state?.result
+  if (
+    !result ||
+    state.stale ||
+    isUntrustedPerformanceCheckResult(result) ||
+    streamVideo.width < streamVideo.height ||
+    !result.rungs.some(
+      (rung) => rung.compositorBackend === 'cpu' || rung.compositorBackend === 'cpu-fallback'
+    ) ||
+    result.rungs.some(
+      (rung) =>
+        rung.verdict === 'passed' &&
+        pixelRate(rung.video) >= GO_LIVE_CPU_COMPOSITOR_HEADROOM * pixelRate(streamVideo)
+    )
+  ) {
+    return null
+  }
+  const fallback = videoPresets[GO_LIVE_CPU_COMPOSITOR_DEFAULT]
+  const recommended = videoPresets[result.recommended.preset]
+  const target =
+    recommended && recommended.preset !== 'custom' && pixelRate(recommended) < pixelRate(fallback)
+      ? recommended
+      : fallback
+  if (pixelRate(streamVideo) <= pixelRate(target)) {
+    return null
+  }
+  const video = { ...target, bitrateKbps: Math.min(target.bitrateKbps, 6000) }
+  return streamQualityUntouched(streaming)
+    ? { kind: 'step-down', reason: 'go-live-headroom', requested: streamVideo, video }
+    : { kind: 'go-live-heavy', requested: streamVideo, video }
+}
+
+/** Everything the measured machine says about a stream about to start. */
+export function streamPerformanceAdvice(options: {
+  streamVideo: VideoSettings
+  encodeBackend: EncodeBackend | undefined
+  streaming: StreamingSettings
+  state: PerformanceCheckState | undefined
+}): SoftwareStreamAdvice | null {
+  return softwareStreamAdvice(options) ?? cpuCompositorStreamAdvice(options)
 }
 
 /**
@@ -271,9 +381,7 @@ async function probeForSession(
   }
   const result = await deps.request(params)
   if (!streamOutputTopologyResultMatchesRequest(result, params)) {
-    throw new Error(
-      'Backend returned a livestream output verdict for a different output configuration.'
-    )
+    throw new Error('The livestream check came back for different settings. Check again.')
   }
   deps.sessionResults.set(requestKey, result)
   return result
@@ -320,11 +428,7 @@ export async function settleGoLiveSessionOutput(
         interrupted = true
         continue
       }
-      return blocked(
-        `Livestream output check failed: ${
-          error instanceof Error ? error.message : 'the output path could not be verified.'
-        }`
-      )
+      return blocked(`Livestream output check failed: ${streamOutputCheckFailureMessage(error)}`)
     }
     if (streamOutputTopologySplitRejected(result)) {
       deps.noteRejectedSplit(streamOutputTopologyProbeRequestKey(request.params))
@@ -333,20 +437,25 @@ export async function settleGoLiveSessionOutput(
       }
       continue
     }
-    const advice = simulcastArmed({ ...config, streaming })
-      ? null
-      : softwareStreamAdvice({
-          streamVideo: request.params.streamProfile,
-          encodeBackend: result.effectiveEncodeBackend,
-          state: deps.performanceCheck
-        })
-    if (
-      advice?.kind === 'step-down' &&
+    const recording4k =
       deps.captureConfig.recordEnabled &&
       Math.min(deps.captureConfig.video.width, deps.captureConfig.video.height) >= 2160
-    ) {
+    let advice = simulcastArmed({ ...config, streaming })
+      ? null
+      : streamPerformanceAdvice({
+          streamVideo: request.params.streamProfile,
+          encodeBackend: result.effectiveEncodeBackend,
+          streaming,
+          state: deps.performanceCheck
+        })
+    // A headroom step-down is a default, not a necessity: it never refuses a
+    // 4K recording that ran before.
+    if (advice?.kind === 'step-down' && advice.reason === 'go-live-headroom' && recording4k) {
+      advice = null
+    }
+    if (advice?.kind === 'step-down' && recording4k) {
       return blocked(
-        'This computer cannot preserve the selected 4K recording while streaming. Choose Full HD recording or turn off streaming.'
+        "This computer can't preserve the selected 4K recording while streaming. Choose 1080p recording or turn off streaming."
       )
     }
     if (advice?.kind === 'step-down' && !steppedDown) {
@@ -410,7 +519,7 @@ export async function settleGoLiveSessionOutput(
       belowFloor: advice?.kind === 'below-floor' ? advice.floor : null
     }
   }
-  return blocked('Livestream output check did not settle. Try Go Live again.')
+  return blocked("Livestream output check didn't settle. Try Go Live again.")
 }
 
 /** The one notice a session shows when its output differs from the saved settings. */
@@ -419,16 +528,25 @@ export function goLiveSessionOutputNotice(
 ): { title: string; description: string } | null {
   if (output.steppedDown) {
     return {
-      title: `Streaming at ${outputLabel(output.steppedDown.video)}.`,
-      description: `This computer can't encode ${outputLabel(output.steppedDown.requested)} in real time, so this session uses the largest output that held steady in its performance check.`
+      title: `Streaming at ${outputLabel(output.steppedDown.video)}`,
+      description: goLiveStepDownDescription(output.steppedDown)
     }
   }
   if (output.sharedFallbackVideo) {
     const shared = output.sharedFallbackVideo
     return {
       title: 'Recording will match the stream.',
-      description: `This computer can't encode a separate recording while streaming, so both use ${shared.width}×${shared.height}, ${shared.fps} fps, ${shared.bitrateKbps} kbps.`
+      description: `This computer can't encode a separate recording while streaming, so both use ${formatVideoQuality(shared, { bitrate: true })}.`
     }
   }
   return null
+}
+
+/** Why a session streams below its saved quality, in one sentence. */
+export function goLiveStepDownDescription(
+  advice: Extract<SoftwareStreamAdvice, { kind: 'step-down' }>
+): string {
+  return advice.reason === 'go-live-headroom'
+    ? `Going live takes about twice the work of a recording on this computer, so this session streams at ${outputLabel(advice.video)}. Pick ${outputLabel(advice.requested)} in Livestream → Output quality to stream at it anyway.`
+    : `This computer can't encode ${outputLabel(advice.requested)} in real time, so this session uses the largest output that held steady in its performance check.`
 }

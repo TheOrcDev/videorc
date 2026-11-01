@@ -3,15 +3,30 @@ import { defaultCaptureConfig, reconcileSourceSelection } from './capture'
 import {
   hydrateSceneLibrary,
   hydrateWorkingScene,
+  normalizeSavedBackground,
   normalizeSceneVisual,
   resolveSavedBackground,
+  sameSceneAudio,
   sameSceneVisual,
+  sceneAudio,
+  sceneMicrophone,
+  galleryPresetIsActive,
+  sceneGalleryReason,
   sceneNameError,
+  sceneSourceGaps,
+  orientationSwitchPreset,
   sceneSourceProblems,
+  sceneSourcesTurnedOff,
   snapshotBackground,
   sourceVisibilityFromScene
 } from './scene-presets'
-import { createDefaultRegistry, applySlot, effectiveSceneBackground } from './background-assets'
+import {
+  createDefaultRegistry,
+  effectiveSceneBackground,
+  liveSceneBackground
+} from './background-assets'
+import { applySlot } from './background-library'
+import { sceneSourceOffBlockedReason } from './start-blocked-copy'
 
 const visual = () =>
   normalizeSceneVisual({
@@ -209,6 +224,22 @@ describe('scene presets', () => {
     expect(checkpoint.visual.sources.cameraId).toBeUndefined()
     expect(sameSceneVisual(entry.visual, checkpoint.visual)).toBe(true)
   })
+  it('retains a screen set to None through persisted scenes (plan 0002)', () => {
+    const none = normalizeSceneVisual({ ...visual(), sources: { captureOff: true } })
+    expect(none.sources.captureOff).toBe(true)
+    const entry = { ...saved(), visual: none }
+    const library = hydrateSceneLibrary(JSON.parse(JSON.stringify({ version: 1, scenes: [entry] })))
+    expect(library.library.scenes[0].visual.sources.captureOff).toBe(true)
+    expect(() => normalizeSceneVisual({ ...visual(), sources: { captureOff: 'yes' } })).toThrow(
+      'Invalid screen None intent'
+    )
+    // A chosen screen wins over a stale None, and a legacy scene is never None.
+    expect(
+      normalizeSceneVisual({ ...visual(), sources: { screenId: 'screen:1', captureOff: true } })
+        .sources.captureOff
+    ).toBe(false)
+    expect(normalizeSceneVisual({ ...visual(), sources: {} }).sources.captureOff).toBe(false)
+  })
   it('normalizes On and legacy absent flags equally without treating a missing ID as Off', () => {
     const on = visual()
     expect(on.sources.cameraOff).toBe(false)
@@ -241,7 +272,7 @@ describe('scene presets', () => {
     })
     expect(missing.sources.cameraOff).toBe(false)
     expect(sceneSourceProblems(missing, devices)).toEqual([
-      'Camera unavailable. Choose a replacement.'
+      'Camera unavailable. Choose a replacement in Sources.'
     ])
     expect(reconcileSourceSelection(missing.sources, devices).cameraId).toBe('cam')
   })
@@ -289,5 +320,277 @@ describe('scene presets', () => {
     target.sources.windowId = undefined
     target.sources.screenId = 'missing-screen'
     expect(sceneSourceProblems(target, devices)).toHaveLength(1)
+  })
+})
+
+describe('scene gallery reason line (plan 174 S3.3, B-20)', () => {
+  const screen = {
+    id: 'screen',
+    name: 'Display',
+    kind: 'screen' as const,
+    status: 'available' as const
+  }
+  const cam = { id: 'cam', name: 'Camera', kind: 'camera' as const, status: 'available' as const }
+
+  it('tells a camera turned off from a camera that is gone', () => {
+    const off = visual()
+    off.layout.layoutPreset = 'camera-only'
+    off.sources.cameraId = undefined
+    expect(sceneSourceGaps(off, [screen, cam])).toEqual([{ source: 'camera', state: 'off' }])
+    const gone = visual()
+    gone.layout.layoutPreset = 'camera-only'
+    expect(sceneSourceGaps(gone, [screen])).toEqual([{ source: 'camera', state: 'unavailable' }])
+    const fine = visual()
+    fine.layout.layoutPreset = 'screen-camera'
+    expect(sceneSourceGaps(fine, [screen, cam])).toEqual([])
+  })
+
+  it('says why in one line, naming the scenes each missing source blocks', () => {
+    const cameraOff = [{ source: 'camera', state: 'off' }] as const
+    expect(sceneGalleryReason([])).toBeNull()
+    expect(
+      sceneGalleryReason([
+        { label: 'Screen + camera', gaps: cameraOff },
+        { label: 'Camera only', gaps: cameraOff },
+        { label: 'Side by side', gaps: cameraOff }
+      ])
+    ).toBe(
+      'Camera is off. Choose one in Sources to use Screen + camera, Camera only, and Side by side.'
+    )
+    expect(
+      sceneGalleryReason([
+        { label: 'Camera only', gaps: [{ source: 'camera', state: 'unavailable' }] },
+        { label: 'Screen only', gaps: [{ source: 'screen', state: 'off' }] }
+      ])
+    ).toBe(
+      "Your camera isn't available. Choose another in Sources to use Camera only. No screen is chosen. Choose one in Sources to use Screen only."
+    )
+  })
+
+  it('blocks a start when the scene shows a source turned off on purpose (retest 150)', () => {
+    // Screen None while Screen + camera stays the active scene.
+    const noScreen = visual()
+    noScreen.layout.layoutPreset = 'screen-camera'
+    noScreen.sources.screenId = undefined
+    noScreen.sources.captureOff = true
+    expect(sceneSourcesTurnedOff(noScreen, [cam])).toEqual({ screen: true, camera: false })
+    expect(sceneSourceOffBlockedReason(sceneSourcesTurnedOff(noScreen, [cam]))).toBe(
+      'This scene shows a screen, but Screen is set to None. Choose a screen in Sources, or pick a scene without one.'
+    )
+    // Camera Off while Camera only stays the active scene.
+    const noCamera = visual()
+    noCamera.layout.layoutPreset = 'camera-only'
+    noCamera.sources.cameraId = undefined
+    noCamera.sources.cameraOff = true
+    expect(sceneSourceOffBlockedReason(sceneSourcesTurnedOff(noCamera, [screen]))).toBe(
+      'This scene shows a camera, but Camera is off. Turn it on in Sources, or pick a scene without one.'
+    )
+    const both = {
+      ...noScreen,
+      sources: { ...noScreen.sources, cameraId: undefined, cameraOff: true }
+    }
+    expect(sceneSourceOffBlockedReason(sceneSourcesTurnedOff(both, []))).toContain('both are off')
+    // A scene without the turned-off source starts.
+    const cameraOnly = {
+      ...noScreen,
+      layout: { ...noScreen.layout, layoutPreset: 'camera-only' as const }
+    }
+    expect(sceneSourceOffBlockedReason(sceneSourcesTurnedOff(cameraOnly, [cam]))).toBeNull()
+    // Never chosen, or chosen and gone, is not "turned off": no new block.
+    const neverChosen = visual()
+    neverChosen.sources.screenId = undefined
+    expect(sceneSourcesTurnedOff(neverChosen, [cam])).toEqual({ screen: false, camera: false })
+    expect(sceneSourcesTurnedOff(visual(), [])).toEqual({ screen: false, camera: false })
+    expect(sceneSourceOffBlockedReason({ screen: false, camera: false })).toBeNull()
+  })
+
+  it('marks no preset card active while the layout is Freeform (retest 150)', () => {
+    const layout = { layoutPreset: 'camera-only' as const, arrangementMode: 'preset' as const }
+    expect(galleryPresetIsActive(layout, 'camera-only', null)).toBe(true)
+    expect(galleryPresetIsActive(layout, 'screen-only', null)).toBe(false)
+    // Freeform keeps the last preset's name underneath: no card is on air.
+    expect(
+      galleryPresetIsActive({ ...layout, arrangementMode: 'freeform' }, 'camera-only', null)
+    ).toBe(false)
+    // A saved scene applied: the saved row is the active one.
+    expect(galleryPresetIsActive(layout, 'camera-only', 'saved-1')).toBe(false)
+  })
+
+  it('a scene refused for a source turned off says so, not "unavailable" (retest 150)', () => {
+    const noScreen = visual()
+    noScreen.layout.layoutPreset = 'screen-camera'
+    noScreen.sources.screenId = undefined
+    noScreen.sources.captureOff = true
+    expect(sceneSourceProblems(noScreen, [cam])).toEqual([
+      'No screen is chosen. Choose one in Sources to use this scene.'
+    ])
+    const noCamera = visual()
+    noCamera.layout.layoutPreset = 'camera-only'
+    noCamera.sources.cameraId = undefined
+    expect(sceneSourceProblems(noCamera, [screen])).toEqual([
+      'Camera is off. Turn it on in Sources to use this scene.'
+    ])
+  })
+
+  it('an orientation switch lands on a scene the sources can show (retest 150)', () => {
+    const vertical = [
+      'vertical-camera-top',
+      'vertical-screen-only',
+      'vertical-camera-only'
+    ] as const
+    const cameraOnly = (preset: string) => preset === 'vertical-camera-only'
+    // Screen None: the remembered screen scene would be refused.
+    expect(orientationSwitchPreset('vertical-camera-top', vertical, cameraOnly)).toBe(
+      'vertical-camera-only'
+    )
+    // The remembered scene wins whenever it works.
+    expect(orientationSwitchPreset('vertical-camera-top', vertical, () => true)).toBe(
+      'vertical-camera-top'
+    )
+    // Nothing works: keep the remembered one, its refusal says why.
+    expect(orientationSwitchPreset('vertical-camera-top', vertical, () => false)).toBe(
+      'vertical-camera-top'
+    )
+  })
+
+  it('never says a camera turned off is unavailable', () => {
+    const line = sceneGalleryReason([
+      { label: 'Camera only', gaps: [{ source: 'camera', state: 'off' }] }
+    ])
+    expect(line).not.toContain('unavailable')
+    expect(line).not.toContain('replacement')
+  })
+})
+
+describe('saved scenes keep live backgrounds (plan 190)', () => {
+  it('round-trips a live background through a saved scene', () => {
+    const live = liveSceneBackground('side-rays', {
+      look: 'moonlight',
+      motion: 'normal',
+      dimPercent: 15,
+      visibilityPercent: 30
+    })
+    const saved = snapshotBackground(live)
+    expect(saved).not.toHaveProperty('fileName')
+    expect(saved?.live).toStrictEqual({ id: 'side-rays', look: 'moonlight', motion: 'normal' })
+    expect(resolveSavedBackground(JSON.parse(JSON.stringify(saved)))).toStrictEqual(live)
+  })
+
+  it('restores the shader from the poster id when a spec is missing or wrong', () => {
+    const live = liveSceneBackground('silk', {
+      look: 'champagne',
+      motion: 'calm',
+      dimPercent: 0,
+      visibilityPercent: 20
+    })
+    const { live: _spec, ...withoutSpec } = snapshotBackground(live)!
+    expect(normalizeSavedBackground(withoutSpec)?.live).toStrictEqual({
+      id: 'silk',
+      look: 'champagne',
+      motion: 'calm'
+    })
+    expect(
+      normalizeSavedBackground({
+        ...withoutSpec,
+        live: { id: 'plasma-wave', look: 'x', motion: 'normal' }
+      })?.live
+    ).toStrictEqual({ id: 'silk', look: 'champagne', motion: 'normal' })
+  })
+})
+
+describe('saved scenes keep the microphone and system audio (owner, 2026-10-27)', () => {
+  const microphones = [
+    {
+      id: 'mic:1',
+      name: 'Microphone 1',
+      kind: 'microphone' as const,
+      status: 'available' as const
+    },
+    {
+      id: 'mic:2',
+      name: 'Microphone 2',
+      kind: 'microphone' as const,
+      status: 'unavailable' as const
+    }
+  ]
+  it('round-trips the microphone and System audio through the library', () => {
+    const audio = sceneAudio(
+      { microphoneId: 'mic:1', microphoneName: 'Microphone 1', microphoneOff: true },
+      { systemAudioEnabled: true }
+    )
+    // A chosen microphone wins over a stale None, like the camera.
+    expect(audio).toStrictEqual({
+      microphoneId: 'mic:1',
+      microphoneName: 'Microphone 1',
+      microphoneOff: false,
+      systemAudioEnabled: true
+    })
+    const state = hydrateSceneLibrary(
+      JSON.parse(JSON.stringify({ version: 1, scenes: [{ ...saved(), audio }] }))
+    )
+    expect(state.library.scenes[0].audio).toStrictEqual(audio)
+    expect(state.error).toBeNull()
+  })
+  it('keeps a scene saved before scenes kept audio, with no opinion on audio', () => {
+    const state = hydrateSceneLibrary(JSON.parse(JSON.stringify({ version: 1, scenes: [saved()] })))
+    expect(state.library.scenes[0]).not.toHaveProperty('audio')
+    expect(
+      sameSceneAudio(undefined, sceneAudio({ microphoneId: 'mic:2' }, { systemAudioEnabled: true }))
+    ).toBe(true)
+  })
+  it.each([
+    null,
+    'on',
+    { microphoneOff: 'yes', systemAudioEnabled: true },
+    { microphoneOff: false }
+  ])('rejects an untrusted scene audio %j', (audio) => {
+    const state = hydrateSceneLibrary({ version: 1, scenes: [{ ...saved(), audio }] })
+    expect(state.library.scenes).toHaveLength(0)
+    expect(state.error).toBeTruthy()
+  })
+  it('marks the scene modified when the microphone or System audio changes', () => {
+    const saved = sceneAudio({ microphoneId: 'mic:1' }, { systemAudioEnabled: false })
+    expect(
+      sameSceneAudio(
+        saved,
+        sceneAudio(
+          { microphoneId: 'mic:1', microphoneName: 'Renamed' },
+          { systemAudioEnabled: false }
+        )
+      )
+    ).toBe(true)
+    expect(
+      sameSceneAudio(saved, sceneAudio({ microphoneId: 'mic:2' }, { systemAudioEnabled: false }))
+    ).toBe(false)
+    expect(
+      sameSceneAudio(saved, sceneAudio({ microphoneOff: true }, { systemAudioEnabled: false }))
+    ).toBe(false)
+    expect(
+      sameSceneAudio(saved, sceneAudio({ microphoneId: 'mic:1' }, { systemAudioEnabled: true }))
+    ).toBe(false)
+    // No microphone was ever chosen: only System audio counts.
+    const unchosen = sceneAudio({}, { systemAudioEnabled: false })
+    expect(
+      sameSceneAudio(unchosen, sceneAudio({ microphoneId: 'mic:2' }, { systemAudioEnabled: false }))
+    ).toBe(true)
+  })
+  it('switches to None or an available microphone, and keeps the current one otherwise', () => {
+    const audio = (sources: Parameters<typeof sceneAudio>[0]) =>
+      sceneAudio(sources, { systemAudioEnabled: false })
+    expect(
+      sceneMicrophone(audio({ microphoneId: 'mic:1', microphoneName: 'Microphone 1' }), microphones)
+    ).toStrictEqual({
+      microphoneId: 'mic:1',
+      microphoneName: 'Microphone 1',
+      microphoneOff: false
+    })
+    expect(sceneMicrophone(audio({ microphoneOff: true }), microphones)).toStrictEqual({
+      microphoneId: undefined,
+      microphoneName: undefined,
+      microphoneOff: true
+    })
+    expect(sceneMicrophone(audio({ microphoneId: 'mic:2' }), microphones)).toBeNull()
+    expect(sceneMicrophone(audio({ microphoneId: 'mic:gone' }), microphones)).toBeNull()
+    expect(sceneMicrophone(audio({}), microphones)).toBeNull()
   })
 })

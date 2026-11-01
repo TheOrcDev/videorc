@@ -699,3 +699,17 @@ function settle(promise) {
     (reason) => ({ status: 'rejected', reason })
   )
 }
+
+test('local ACK wait ignores a frame that is not JSON and still takes the real ACK', async (t) => {
+  const observed = await withFixture(t, async (fixture) => {
+    const wait = createRemoteAckWait(fixture.remote, { timeoutMs: ORIGINAL_TIMEOUT_MS })
+    const outcome = settle(wait.promise)
+    fixture.remote.emit('message', 'not json {')
+    fixture.remote.emit('message', '"a bare string"')
+    fixture.ack()
+    return { outcome: await outcome, listeners: fixture.remote.listenerCount('message') }
+  })
+
+  assert.equal(observed.outcome.status, 'fulfilled')
+  assert.equal(observed.listeners, 0)
+})

@@ -6,6 +6,7 @@ import {
   DEFAULT_SETTINGS_TAB,
   SETTINGS_TABS,
   isSettingsTabId,
+  migrateSettingsTabId,
   openSettingsTab,
   readLastSettingsTab,
   writeLastSettingsTab
@@ -39,10 +40,9 @@ const throwingStorage: Storage = {
 }
 
 describe('SETTINGS_TABS', () => {
-  it('lists the six tabs in strip order', () => {
+  it('lists the five tabs in strip order', () => {
     expect(SETTINGS_TABS.map((tab) => tab.id)).toEqual([
       'general',
-      'recording',
       'permissions',
       'shortcuts',
       'remote',
@@ -50,7 +50,6 @@ describe('SETTINGS_TABS', () => {
     ])
     expect(SETTINGS_TABS.map((tab) => tab.label)).toEqual([
       'General',
-      'Recording',
       'Permissions',
       'Shortcuts',
       'Remote',
@@ -58,7 +57,8 @@ describe('SETTINGS_TABS', () => {
     ])
   })
 
-  it('has no Orcle tab: its settings live in the Orcle tab (plan 119)', () => {
+  it('has no Buddy tab: its settings live in the Buddy tab (plan 119)', () => {
+    // 'orcle' is the old tab id older apps saved (plan 170 D22).
     expect(SETTINGS_TABS.map((tab) => tab.id)).not.toContain('orcle')
     expect(isSettingsTabId('orcle')).toBe(false)
   })
@@ -80,6 +80,26 @@ describe('isSettingsTabId', () => {
   })
 })
 
+describe('migrateSettingsTabId (plan 174 S3.6, D5)', () => {
+  it('keeps a current tab as is', () => {
+    for (const tab of SETTINGS_TABS) {
+      expect(migrateSettingsTabId(tab.id)).toBe(tab.id)
+    }
+  })
+
+  it('reads the removed Recording tab as General', () => {
+    expect(isSettingsTabId('recording')).toBe(false)
+    expect(migrateSettingsTabId('recording')).toBe('general')
+  })
+
+  it('reads anything else as no tab', () => {
+    expect(migrateSettingsTabId('orcle')).toBeNull()
+    expect(migrateSettingsTabId('toString')).toBeNull()
+    expect(migrateSettingsTabId(null)).toBeNull()
+    expect(migrateSettingsTabId(7)).toBeNull()
+  })
+})
+
 describe('readLastSettingsTab', () => {
   it('returns the stored tab', () => {
     const storage = memoryStorage({ [STORAGE_KEYS.settingsTab]: 'shortcuts' })
@@ -95,8 +115,13 @@ describe('readLastSettingsTab', () => {
     expect(readLastSettingsTab(storage)).toBe('general')
   })
 
-  it('falls back to General when the remembered tab is the removed Orcle tab (plan 119)', () => {
+  it('falls back to General when the remembered tab is the removed Buddy tab (plan 119)', () => {
     const storage = memoryStorage({ [STORAGE_KEYS.settingsTab]: 'orcle' })
+    expect(readLastSettingsTab(storage)).toBe('general')
+  })
+
+  it('reopens on General when the remembered tab is the removed Recording tab (S3.6)', () => {
+    const storage = memoryStorage({ [STORAGE_KEYS.settingsTab]: 'recording' })
     expect(readLastSettingsTab(storage)).toBe('general')
   })
 

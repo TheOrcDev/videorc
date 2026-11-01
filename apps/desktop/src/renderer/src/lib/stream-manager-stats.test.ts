@@ -23,6 +23,7 @@ import {
   formatMoneyShort,
   statItems,
   supportersUnit,
+  withLiveFollows,
   type StatId,
   type StatItemModel
 } from './stream-manager-stats'
@@ -151,7 +152,7 @@ describe('stats bar items (plan 057)', () => {
     ])
   })
 
-  it('puts the clock, viewers and health first, in that order', () => {
+  it('puts the clock and viewers first, in that order', () => {
     const dashboard = reduceDashboardViewers(healthy(), sample(40, 1234), at(40))
     const items = statItems({
       dashboard,
@@ -160,7 +161,7 @@ describe('stats bar items (plan 057)', () => {
       providers: [provider('twitch'), provider('x')],
       nowMs: T0 + 3_725_000
     })
-    expect(ids(items).slice(0, 3)).toEqual(['session', 'viewers', 'health'])
+    expect(ids(items).slice(0, 2)).toEqual(['session', 'viewers'])
     expect(find(items, 'session')).toMatchObject({
       value: '1:02:05',
       badge: 'live',
@@ -178,14 +179,27 @@ describe('stats bar items (plan 057)', () => {
       nowMs: T0 + 5_000
     })
     // X shares no tips or subs: no Supporters or Tips stat, never a fake 0.
-    expect(ids(items)).toEqual(['session', 'viewers', 'health', 'chat'])
+    expect(ids(items)).toEqual(['session', 'viewers', 'chat'])
     expect(find(items, 'viewers')).toMatchObject({
       value: '–',
       tone: 'subtle',
       description: 'No viewer count yet'
     })
-    // No sample yet: health holds its place with a dash, not a zero.
-    expect(find(items, 'health')).toMatchObject({ value: '–', tone: 'neutral' })
+  })
+
+  it('shows no chat pace while no platform reads chat, with the reason (plan 174 H-10)', () => {
+    const offline = { ...provider('twitch'), state: 'reconnecting' as const }
+    const items = statItems({
+      dashboard: live(),
+      viewerSample: null,
+      messages: [],
+      providers: [offline],
+      nowMs: T0 + 5_000
+    })
+    const chat = find(items, 'chat')
+    expect(chat).toMatchObject({ value: '–', tone: 'subtle', description: "Chat isn't connected" })
+    expect(chat?.unit).toBeUndefined()
+    expect(chat?.value).not.toBe('0')
   })
 
   it('reports viewers with the peak on hover, greyed once stale', () => {
@@ -242,93 +256,9 @@ describe('stats bar items (plan 057)', () => {
     expect(viewers?.value).toBe('12')
     expect(viewers?.details).toEqual([
       { label: 'Twitch', value: '12', platform: 'twitch' },
-      { label: 'Kick', value: 'waiting', platform: 'kick' },
+      { label: 'Kick', value: 'Waiting', platform: 'kick' },
       { label: 'Peak', value: '12' }
     ])
-  })
-
-  it('is quiet when healthy: the bitrate, with the rest on hover', () => {
-    const health = find(
-      statItems({
-        dashboard: healthy(),
-        viewerSample: null,
-        messages: [],
-        providers: [],
-        nowMs: T0 + 40_000
-      }),
-      'health'
-    )
-    expect(health).toMatchObject({
-      value: '6,012 kbps',
-      tone: 'good',
-      description: 'Stream health: 6,012 kbps, 60 fps, no dropped frames'
-    })
-    expect(health?.details).toEqual([
-      { label: 'Bitrate', value: '6,012 kbps' },
-      { label: 'Frame rate', value: '60 fps' },
-      { label: 'Dropped frames', value: 'None' },
-      { label: 'Twitch', value: 'Live', platform: 'twitch', dot: 'good' },
-      { label: 'X', value: 'Live', platform: 'x', dot: 'good' }
-    ])
-  })
-
-  it('names the most urgent problem instead of the bitrate', () => {
-    const reading = (dashboard: LiveDashboardState, nowMs = T0 + 40_000) =>
-      find(
-        statItems({ dashboard, viewerSample: null, messages: [], providers: [], nowMs }),
-        'health'
-      )
-    const dropping = reduceDashboardHealth(
-      healthy(),
-      { sessionId: 's', bitrateKbps: 5900, fps: 60, droppedFrames: 12, createdAt: at(35) },
-      at(35)
-    )
-    expect(reading(dropping)).toMatchObject({ value: '12 dropped/min', tone: 'warning' })
-
-    let sagging = healthy()
-    for (let second = 32; second < 60; second += 2) {
-      sagging = reduceDashboardHealth(
-        sagging,
-        { sessionId: 's', bitrateKbps: 6000, fps: 60, droppedFrames: 0, createdAt: at(second) },
-        at(second)
-      )
-    }
-    sagging = reduceDashboardHealth(
-      sagging,
-      { sessionId: 's', bitrateKbps: 2100, fps: 60, droppedFrames: 0, createdAt: at(60) },
-      at(60)
-    )
-    expect(reading(sagging, T0 + 61_000)).toMatchObject({ value: 'Low bitrate', tone: 'warning' })
-
-    const connecting = withTargets(healthy(), [
-      { targetId: 'twitch', platform: 'twitch', label: 'Twitch', state: 'live' },
-      { targetId: 'x', platform: 'x', label: 'X', state: 'connecting' }
-    ])
-    expect(reading(connecting)).toMatchObject({ value: 'Connecting', tone: 'warning' })
-
-    const failed = withTargets(dropping, [
-      { targetId: 'twitch', platform: 'twitch', label: 'Twitch', state: 'live' },
-      { targetId: 'x', platform: 'x', label: 'X', state: 'failed', message: 'Server closed' }
-    ])
-    // A failed destination outranks dropped frames.
-    expect(reading(failed)).toMatchObject({
-      value: 'X failed',
-      tone: 'error',
-      description: 'Stream health: X failed'
-    })
-    expect(reading(failed)?.details.at(-1)).toEqual({
-      label: 'X',
-      value: 'Failed',
-      platform: 'x',
-      dot: 'error',
-      note: 'Server closed'
-    })
-
-    const twoFailed = withTargets(healthy(), [
-      { targetId: 'twitch', platform: 'twitch', label: 'Twitch', state: 'failed' },
-      { targetId: 'x', platform: 'x', label: 'X', state: 'failed' }
-    ])
-    expect(reading(twoFailed)).toMatchObject({ value: '2 failed', tone: 'error' })
   })
 
   it('sums followers as a number and a unit, and says why one is missing on hover', () => {
@@ -643,8 +573,10 @@ describe('stats bar items (plan 057)', () => {
         providers: [provider('twitch')],
         nowMs: T0
       })
-      expect(find(items, 'supporters')).toMatchObject({ value: '–' })
-      expect(find(items, 'tips')).toMatchObject({ value: '–' })
+      // Unmeasured subs and tips are not in the bar at all (plan 174 V-8):
+      // never a run of placeholders, and never a retained row's count.
+      expect(find(items, 'supporters')).toBeUndefined()
+      expect(find(items, 'tips')).toBeUndefined()
       expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '–' })
     }
   })
@@ -663,7 +595,7 @@ describe('stats bar items (plan 057)', () => {
     expect(tips).toMatchObject({ value: '0', unit: 'tips', tone: 'subtle' })
   })
 
-  it('shows a recording-only session as a clock without viewers or health', () => {
+  it('shows a recording-only session as a clock without viewers', () => {
     const recording = reduceDashboardRecording(
       emptyLiveDashboardState(at(0)),
       { state: 'recording', sessionId: 's', startedAt: at(0) },
@@ -681,17 +613,12 @@ describe('stats bar items (plan 057)', () => {
   })
 
   // Plan 095 S5: Go Live records too, and the backend reports record+stream as
-  // `recording`. Its stream URL puts it ON AIR, with health and viewers.
-  it('shows Go Live (record+stream) as ON AIR with viewers and stream health', () => {
-    const goLive = reduceDashboardRecording(
+  // `recording`. Its stream URL puts it ON AIR, with viewers.
+  it('shows Go Live (record+stream) as ON AIR with viewers', () => {
+    const dashboard = reduceDashboardRecording(
       emptyLiveDashboardState(at(0)),
       { state: 'recording', sessionId: 's', startedAt: at(0), streamUrl: 'rtmp://x/***' },
       at(0)
-    )
-    const dashboard = reduceDashboardHealth(
-      goLive,
-      { sessionId: 's', bitrateKbps: 6000, fps: 60, droppedFrames: 0, createdAt: at(30) },
-      at(30)
     )
     const items = statItems({
       dashboard,
@@ -700,14 +627,13 @@ describe('stats bar items (plan 057)', () => {
       providers: [provider('twitch')],
       nowMs: T0 + 723_000
     })
-    expect(ids(items).slice(0, 3)).toEqual(['session', 'viewers', 'health'])
+    expect(ids(items).slice(0, 2)).toEqual(['session', 'viewers'])
     expect(find(items, 'session')).toMatchObject({
       value: '12:03',
       badge: 'live',
       description: 'On air for 12:03'
     })
     expect(find(items, 'viewers')).toMatchObject({ value: '–' })
-    expect(find(items, 'health')).toMatchObject({ value: '6,000 kbps', tone: 'good' })
   })
 
   it('summarises a finished session in History', () => {
@@ -732,6 +658,100 @@ describe('stats bar items (plan 057)', () => {
       unit: 'peak',
       description: 'Peak 30 viewers, average 20'
     })
-    expect(ids(items)).not.toContain('health')
+  })
+})
+
+describe('live followers between audience reads', () => {
+  // Twitch read 100 followers at 10 s; X is shown but not counted live.
+  function polled(total: number, readAt: number): LiveDashboardState {
+    return reduceDashboardAudience(
+      live(),
+      {
+        sessionId: 's',
+        updatedAt: at(readAt),
+        platforms: [
+          {
+            platform: 'twitch',
+            metric: 'followers',
+            capability: 'available',
+            total,
+            baseline: 100,
+            delta: total - 100,
+            at: at(readAt)
+          }
+        ]
+      },
+      at(readAt)
+    )
+  }
+  const follow = (id: string, seconds: number, platform: StreamPlatform = 'twitch') =>
+    message({
+      id,
+      platform,
+      receivedAt: at(seconds),
+      eventType: 'follow',
+      messageText: '',
+      details: { kind: 'follow' }
+    })
+  const followers = (dashboard: LiveDashboardState, messages: LiveChatMessage[]) =>
+    find(
+      statItems({
+        dashboard,
+        viewerSample: null,
+        messages,
+        providers: [provider('twitch')],
+        nowMs: T0 + 60_000
+      }),
+      'followers'
+    )
+
+  it('counts a follow the moment it reaches Activity, before the next read', () => {
+    expect(followers(polled(100, 10), [])).toMatchObject({ value: '100' })
+    expect(followers(polled(100, 10), [follow('f1', 20)])).toMatchObject({
+      value: '101',
+      delta: '+1',
+      description: '101 followers, +1 this stream'
+    })
+    expect(followers(polled(100, 10), [follow('f1', 20), follow('f2', 25)])?.value).toBe('102')
+  })
+
+  it('counts one follow once, however often its message arrives', () => {
+    const repeated = [follow('f1', 20), follow('f1', 20), follow('f1', 21)]
+    expect(followers(polled(100, 10), repeated)).toMatchObject({ value: '101', delta: '+1' })
+  })
+
+  it('lets the next read win: a follow it already includes is not added again', () => {
+    const messages = [follow('f1', 20), follow('f2', 40)]
+    // The read at 30 s includes f1; f2 arrived after it.
+    expect(followers(polled(101, 30), messages)).toMatchObject({ value: '102', delta: '+2' })
+    // The read at 50 s includes both and is the count.
+    expect(followers(polled(102, 50), messages)).toMatchObject({ value: '102', delta: '+2' })
+    // A read that disagrees still wins over the events it postdates.
+    expect(followers(polled(100, 50), messages)).toMatchObject({ value: '100' })
+  })
+
+  it('leaves the count alone without a total to add to', () => {
+    const kick = reduceDashboardAudience(
+      live(),
+      {
+        sessionId: 's',
+        updatedAt: at(10),
+        platforms: [
+          { platform: 'kick', metric: 'followers', capability: 'delta-only', delta: 1, at: at(10) },
+          { platform: 'x', metric: 'followers', capability: 'pending' }
+        ]
+      },
+      at(10)
+    )
+    const messages = [follow('k1', 20, 'kick'), follow('x1', 20, 'x')]
+    expect(withLiveFollows(kick.audience, messages)).toBe(kick.audience)
+    // A deleted follow and a chat message are not follows.
+    const twitch = polled(100, 10)
+    expect(
+      withLiveFollows(twitch.audience, [
+        { ...follow('f1', 20), isDeleted: true },
+        message({ receivedAt: at(20) })
+      ])
+    ).toBe(twitch.audience)
   })
 })

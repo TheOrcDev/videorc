@@ -85,13 +85,28 @@ const chooseCameraOff = async () => {
 const refreshDevices = () =>
   evaluate(`
   await openTab('sources');
-  const button = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+  // Scoped to the Sources page: Livestream → Upcoming has its own Refresh,
+  // which stays mounted (and may be throttled) once that page was visited.
+  const sourcesPage = () => document.querySelector('[data-videorc-sources-page]') ?? document;
+  const findRefresh = () =>
+    [...sourcesPage().querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+  // The Sources page is lazy and an earlier refresh may still be running
+  // (ogre, 2026-10-12): wait for an enabled button instead of failing at once.
+  const readyBy = Date.now() + ${timeoutMs};
+  let button = findRefresh();
+  while ((!button || button.disabled) && Date.now() < readyBy) {
+    await sleep(25);
+    button = findRefresh();
+  }
   if (!button || button.disabled) throw new Error('Device refresh unavailable.');
   button.click();
-  await new Promise(requestAnimationFrame);
+  // A frame, or 100 ms when none comes: a window that isn't painting (screen
+  // off, hidden) never runs requestAnimationFrame, and this whole eval hung
+  // for its 120 s timeout (ogre, DPMS off, 2026-10-13).
+  await new Promise((resolve) => { requestAnimationFrame(() => resolve()); setTimeout(resolve, 100); });
   const deadline = Date.now() + ${timeoutMs};
   while (Date.now() < deadline) {
-    const refreshed = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+    const refreshed = [...sourcesPage().querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
     if (refreshed && !refreshed.disabled) return true;
     await sleep(25);
   }
@@ -184,7 +199,7 @@ try {
     )
     for (let pass = 0; pass < 2; pass++) {
       const theme = await evaluate(
-        `await waitFor('button[aria-label="Actions for Smoke A"]'); const card = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.includes('Smoke A')); card?.scrollIntoView({block: 'center'}); await new Promise(requestAnimationFrame); return document.documentElement.classList.contains('dark') ? 'dark' : 'light'`
+        `await waitFor('button[aria-label="Actions for Smoke A"]'); const card = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.includes('Smoke A')); card?.scrollIntoView({block: 'center'}); await new Promise((resolve) => { requestAnimationFrame(() => resolve()); setTimeout(resolve, 100); }); return document.documentElement.classList.contains('dark') ? 'dark' : 'light'`
       )
       const capture = await requestSmokeCommand(
         smoke,
@@ -226,10 +241,16 @@ try {
     false
   )
   assert.equal((await state()).activeId, first.id)
+  // Plan 210 D3: an edit made while a saved scene is on saves into it, so
+  // the checkpoint is never "modified" and the library carries the edit.
   await evaluate(`window.__videorcSmokeScenePresets.layout({cameraZoom: 145}); return true`)
   await waitFor(
-    (current) => current.canSave && current.modified && current.visual.layout.cameraZoom === 145,
-    'modified working checkpoint'
+    (current) =>
+      current.canSave &&
+      !current.modified &&
+      current.visual.layout.cameraZoom === 145 &&
+      current.scenes.find((scene) => scene.id === first.id)?.visual.layout.cameraZoom === 145,
+    'auto-saved working checkpoint'
   )
   await evaluate(`window.__videorcSmokeScenePresets.removeBackground('bg-03'); return true`)
   await waitFor(
@@ -360,9 +381,10 @@ try {
       const select = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === ${JSON.stringify('Select ')} + ${JSON.stringify(camera.name)});
       if (!select || select.disabled) throw new Error('Camera inspector selection unavailable');
       select.click();
+      // The id is on the Switch's hidden checkbox input (Base UI).
       const toggle = await waitFor(${JSON.stringify('[id="source-visible-' + camera.id + '"]')});
       if (toggle.disabled) throw new Error('Camera visibility control unavailable');
-      if ((toggle.getAttribute('aria-checked') === 'true') !== ${visible}) toggle.click();
+      if (toggle.checked !== ${visible}) toggle.click();
       return true;
     `)
     const confirmed = await waitFor(
@@ -377,7 +399,14 @@ try {
     assert.equal(confirmed.visual.sources.cameraOff, false, 'Visibility became Camera Off')
     return confirmed
   }
-  assert.equal((await setCameraVisible(false)).modified, true)
+  // Plan 210 D3: hiding the camera saves into the scene on stream.
+  const autoSavedHidden = await setCameraVisible(false)
+  assert.equal(autoSavedHidden.modified, false)
+  assert.equal(
+    autoSavedHidden.scenes.find((scene) => scene.id === visibleCamera.id).visual.layout
+      .sourceVisibility.camera,
+    false
+  )
   assert.equal(
     await evaluate(
       `return window.__videorcSmokeScenePresets.save('Hidden camera', ${JSON.stringify(visibleCamera.id)})`
@@ -390,17 +419,35 @@ try {
   await waitFor(
     (current) =>
       current.canSave &&
-      current.modified &&
+      !current.modified &&
       current.visual.layout.cameraZoom === 110 &&
-      !current.visual.layout.sourceVisibility.camera,
-    'hidden camera Save-as framing'
+      !current.visual.layout.sourceVisibility.camera &&
+      current.scenes.find((scene) => scene.id === visibleCamera.id)?.visual.layout.cameraZoom ===
+        110,
+    'hidden camera framing saved into the scene'
   )
   assert.equal(
     await evaluate(`return window.__videorcSmokeScenePresets.save('Hidden camera copy')`),
     true
   )
   const hiddenCopy = (await state()).scenes.find((scene) => scene.name === 'Hidden camera copy')
-  assert.equal((await setCameraVisible(true)).modified, true)
+  // Plan 210 D3: leave the copy first (a layout leaves a saved scene), so
+  // showing the camera saves into no scene and both stay hidden for the
+  // live apply below.
+  await evaluate(
+    `window.__videorcSmokeScenePresets.layout({layoutPreset: 'camera-only'}); return true`
+  )
+  await waitFor(
+    (current) => current.canSave && current.activeId === null && !current.pendingLayout,
+    'left the hidden copy'
+  )
+  const shown = await setCameraVisible(true)
+  assert.equal(shown.modified, false)
+  for (const id of [hiddenCopy.id, hiddenCamera.id])
+    assert.equal(
+      shown.scenes.find((scene) => scene.id === id).visual.layout.sourceVisibility.camera,
+      false
+    )
   assert.equal(
     await evaluate(
       `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(hiddenCamera.id)})`
@@ -427,7 +474,34 @@ try {
   assert.equal(hiddenRestart.visual.sources.cameraId, selectedCameraId)
   assert.equal(hiddenRestart.visual.sources.cameraOff, false)
 
+  // Preview smoke mode (VIDEORC_SMOKE_PREVIEW_MOTION, needed for the command
+  // server) makes the renderer stop the preview camera whenever its camera
+  // effect runs, which an apply triggers. On Linux a recording needs live
+  // camera preview frames to start, so the stop ~0.8 s after an apply
+  // refused the take ("the camera preview source(s) produced no frames";
+  // ogre 2026-10-13). Let the apply settle, then make sure the camera is live
+  // with fresh frames before starting.
+  const ensureCameraPreviewLive = async (visual) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const deadline = Date.now() + timeoutMs
+    let status = null
+    while (Date.now() < deadline) {
+      status = await request(ws, timeoutMs, 'preview.camera.status')
+      if (status.state === 'live' && status.framesCaptured > 0 && (status.frameAgeMs ?? 0) < 1000)
+        return status
+      if (status.state !== 'starting') {
+        await request(ws, timeoutMs, 'preview.camera.start', {
+          sources: visual.sources,
+          layout: visual.layout,
+          video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 }
+        })
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    throw new Error(`Camera preview never went live before recording: ${JSON.stringify(status)}`)
+  }
   const recordCameraVisibility = async (visual, liveTargetId) => {
+    await ensureCameraPreviewLive(visual)
     const recordingDirectory = await requestSmokeCommand(
       smoke,
       'authorize-smoke-resource',

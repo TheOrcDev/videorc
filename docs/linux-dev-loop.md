@@ -181,7 +181,7 @@ Do not enable AMD VAAPI / renderD129 for this smoke.
 
 ## Packaged run (L6 / Plan 0008)
 
-`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate. Public updater promotion and the videorc-web download button are still owed.
+`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate. Public updater promotion and the videorc-web download button are still owed. Hold the Linux Discord announcement until that public download exists (`pnpm release:notify:discord <releaseId> --dry-run` first; never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`).
 
 ## Verify gates that work on Linux
 

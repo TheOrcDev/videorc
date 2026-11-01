@@ -27,6 +27,9 @@ import {
   verifyCaptureDecayD3PublishedReleaseRoutes
 } from './capture-decay-published-release.mjs'
 import { assembleCaptureDecayD3PublicationReceipt } from './capture-decay-publication-receipt-assembly.mjs'
+import { symlinkSkipReason } from './test-symlink-support.mjs'
+
+const symlinkSkip = symlinkSkipReason()
 
 import {
   CAPTURE_DECAY_D3_ACCEPTANCE_PROFILE,
@@ -791,45 +794,49 @@ describe('immutable evidence bundle loading', () => {
     }
   })
 
-  it('rejects exact-byte checkpoint and sidecar substitutions through symlinks', async () => {
-    const substitutions = [
-      'run-1/capture-decay-soak.json',
-      'run-1/capture-decay-soak.csv',
-      'run-4/capture-decay-debug-runner-provenance.json',
-      'run-4/recovery.mp4'
-    ]
+  it(
+    'rejects exact-byte checkpoint and sidecar substitutions through symlinks',
+    { skip: symlinkSkip },
+    async () => {
+      const substitutions = [
+        'run-1/capture-decay-soak.json',
+        'run-1/capture-decay-soak.csv',
+        'run-4/capture-decay-debug-runner-provenance.json',
+        'run-4/recovery.mp4'
+      ]
 
-    for (const [index, relativePath] of substitutions.entries()) {
-      const directory = await mkdtemp(join(tmpdir(), 'videorc-d3-evidence-symlink-'))
-      const outsideDirectory = await mkdtemp(join(tmpdir(), 'videorc-d3-evidence-outside-'))
-      try {
-        const manifest = await writeEvidenceBundle(directory, validEvidence())
-        const manifestPath = join(directory, 'manifest.json')
-        await writeFile(manifestPath, canonical(manifest))
+      for (const [index, relativePath] of substitutions.entries()) {
+        const directory = await mkdtemp(join(tmpdir(), 'videorc-d3-evidence-symlink-'))
+        const outsideDirectory = await mkdtemp(join(tmpdir(), 'videorc-d3-evidence-outside-'))
+        try {
+          const manifest = await writeEvidenceBundle(directory, validEvidence())
+          const manifestPath = join(directory, 'manifest.json')
+          await writeFile(manifestPath, canonical(manifest))
 
-        const artifactPath = join(directory, relativePath)
-        const outsidePath = join(outsideDirectory, `substitution-${index}`)
-        await rename(artifactPath, outsidePath)
-        await symlink(outsidePath, artifactPath)
+          const artifactPath = join(directory, relativePath)
+          const outsidePath = join(outsideDirectory, `substitution-${index}`)
+          await rename(artifactPath, outsidePath)
+          await symlink(outsidePath, artifactPath)
 
-        await assert.rejects(
-          () =>
-            loadAndValidateCaptureDecayD3Evidence({
-              manifestPath,
-              expectedCandidate: candidate,
-              expectedPublicationDestinationBindingSha256: destinationBindingSha256,
-              nowMs
-            }),
-          hasCode('evidence-artifact-symlink'),
-          relativePath
-        )
-      } finally {
-        await Promise.all(
-          [directory, outsideDirectory].map((path) => rm(path, { recursive: true, force: true }))
-        )
+          await assert.rejects(
+            () =>
+              loadAndValidateCaptureDecayD3Evidence({
+                manifestPath,
+                expectedCandidate: candidate,
+                expectedPublicationDestinationBindingSha256: destinationBindingSha256,
+                nowMs
+              }),
+            hasCode('evidence-artifact-symlink'),
+            relativePath
+          )
+        } finally {
+          await Promise.all(
+            [directory, outsideDirectory].map((path) => rm(path, { recursive: true, force: true }))
+          )
+        }
       }
     }
-  })
+  )
 
   it('requires the complete ledger and rejects a failed soak inside the selected streak', async () => {
     const missingDirectory = await mkdtemp(join(tmpdir(), 'videorc-d3-ledger-missing-'))
@@ -1847,33 +1854,37 @@ describe('pending -> accepted -> satisfied publication state', () => {
     })
   })
 
-  it('rejects symlinked accepted records before parsing their target bytes', async () => {
-    const accepted = buildAccepted(validate(validEvidence()))
-    await withAcceptanceGitRepository(accepted, async ({ recordPath, repoRoot }) => {
-      const targetPath = join(repoRoot, 'attacker-controlled-accepted.json')
-      await writeFile(targetPath, canonical(accepted))
-      await rm(recordPath)
-      await symlink(targetPath, recordPath)
+  it(
+    'rejects symlinked accepted records before parsing their target bytes',
+    { skip: symlinkSkip },
+    async () => {
+      const accepted = buildAccepted(validate(validEvidence()))
+      await withAcceptanceGitRepository(accepted, async ({ recordPath, repoRoot }) => {
+        const targetPath = join(repoRoot, 'attacker-controlled-accepted.json')
+        await writeFile(targetPath, canonical(accepted))
+        await rm(recordPath)
+        await symlink(targetPath, recordPath)
 
-      await assert.rejects(
-        readCaptureDecayD3AcceptanceRecord(recordPath, {
-          repoRoot,
-          requireHeadMatch: true
-        }),
-        hasCode('record-file-type')
-      )
+        await assert.rejects(
+          readCaptureDecayD3AcceptanceRecord(recordPath, {
+            repoRoot,
+            requireHeadMatch: true
+          }),
+          hasCode('record-file-type')
+        )
 
-      await rm(recordPath)
-      await mkdir(recordPath)
-      await assert.rejects(
-        readCaptureDecayD3AcceptanceRecord(recordPath, {
-          repoRoot,
-          requireHeadMatch: true
-        }),
-        hasCode('record-file-type')
-      )
-    })
-  })
+        await rm(recordPath)
+        await mkdir(recordPath)
+        await assert.rejects(
+          readCaptureDecayD3AcceptanceRecord(recordPath, {
+            repoRoot,
+            requireHeadMatch: true
+          }),
+          hasCode('record-file-type')
+        )
+      })
+    }
+  )
 
   it('rejects accepted bytes and executable mode that differ from the HEAD blob', async () => {
     const accepted = buildAccepted(validate(validEvidence()))

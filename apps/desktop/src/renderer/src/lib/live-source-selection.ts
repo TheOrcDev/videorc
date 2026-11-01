@@ -15,6 +15,9 @@ export interface LiveSourceSelectionState {
   outputPending?: boolean
 }
 
+/** The source a failed switch was for. */
+export type SourceSwitchTarget = Pick<SourceSwitchParams, 'kind' | 'deviceId'>
+
 /** One synchronous admission fence shared by every source picker. */
 export class LiveSourceSelectionController {
   private proofTimer: ReturnType<typeof setTimeout> | null = null
@@ -46,14 +49,15 @@ export class LiveSourceSelectionController {
       changed: (state: LiveSourceSelectionState) => void
       confirmed: (snapshot: SessionSources) => void
       requestId: () => string
-      failed?: (requestId: string, message: string) => void
+      /** `source` names what the streamer asked for, so the toast can too (plan 174 S2.4). */
+      failed?: (requestId: string, message: string, source: SourceSwitchTarget) => void
     }
   ) {}
 
-  private reportFailure(requestId: string, message: string): void {
+  private reportFailure(requestId: string, message: string, source: SourceSwitchTarget): void {
     if (this.lastFailureRequest === requestId) return
     this.lastFailureRequest = requestId
-    this.options.failed?.(requestId, message)
+    this.options.failed?.(requestId, message, source)
   }
 
   dispose(): void {
@@ -69,12 +73,24 @@ export class LiveSourceSelectionController {
     this.state = { snapshot: null, pending: null, checking: false, error: null }
   }
 
-  setSession(sessionId: string | null | undefined, state: RecordingState): void {
-    const identity = ['recording', 'streaming', 'starting'].includes(state)
+  setSession(
+    sessionId: string | null | undefined,
+    state: RecordingState,
+    replayOnly = false
+  ): void {
+    // A buffer-only Clips session (plan 181) is a real backend capture, but
+    // the pickers treat it as idle: Linux mid-session refusals describe a
+    // session the streamer does not see. A source change persists and the
+    // ring re-arms.
+    const effectiveState = replayOnly ? 'idle' : state
+    const identity = ['recording', 'streaming', 'starting'].includes(effectiveState)
       ? (sessionId ?? null)
       : null
-    if (identity === this.sessionId && state === this.sessionState) return
-    if (identity !== this.sessionId || !['recording', 'streaming', 'starting'].includes(state)) {
+    if (identity === this.sessionId && effectiveState === this.sessionState) return
+    if (
+      identity !== this.sessionId ||
+      !['recording', 'streaming', 'starting'].includes(effectiveState)
+    ) {
       this.clearProofTimer()
       this.proofRequest = null
       this.proofReads = 0
@@ -88,13 +104,15 @@ export class LiveSourceSelectionController {
       this.attempts = 0
       this.publish({ snapshot: null, pending: null, checking: false, error: null })
     }
-    this.sessionState = state
+    this.sessionState = effectiveState
   }
 
   reason(kind: SessionSourceKind): string | null {
     if (this.sessionState === 'idle' || this.sessionState === 'failed') return null
-    if (this.sessionState === 'starting') return 'Sources are available after the session starts.'
-    if (this.sessionState === 'stopping') return 'The session is stopping.'
+    // The streamer's words for the session's edges (plan 174 S2.3a): never "session".
+    if (this.sessionState === 'starting')
+      return 'Sources can change once the recording or livestream has started.'
+    if (this.sessionState === 'stopping') return 'Stopping…'
     if (this.state.pending || this.state.checking)
       return this.state.checking ? (this.state.error ?? 'Checking source…') : 'Changing source…'
     const capability = this.state.snapshot?.capabilities.find((item) => item.kind === kind)
@@ -120,7 +138,7 @@ export class LiveSourceSelectionController {
       snapshot.pending?.kind ?? (completed || !this.requestId ? null : this.state.pending)
     const error = completed
       ? operation.stage !== 'applied'
-        ? (operation.reason ?? 'The source could not be changed.')
+        ? (operation.reason ?? "The source couldn't be changed.")
         : null
       : this.state.checking && !this.requestId
         ? null
@@ -128,7 +146,8 @@ export class LiveSourceSelectionController {
     if (completed && operation.stage === 'failed') {
       this.reportFailure(
         operation.requestId,
-        operation.reason ?? 'The source could not be changed.'
+        operation.reason ?? "The source couldn't be changed.",
+        { kind: operation.kind, deviceId: operation.deviceId }
       )
     }
     if (completed) {
@@ -159,7 +178,7 @@ export class LiveSourceSelectionController {
             : undefined,
       error:
         outputPending && this.proofReads >= 20
-          ? 'The source changed, but output could not be confirmed. Retry status.'
+          ? "The source changed, but Videorc couldn't confirm the output. Check again."
           : !outputPending && this.state.outputPending
             ? null
             : error
@@ -212,7 +231,7 @@ export class LiveSourceSelectionController {
           this.publish({
             ...this.state,
             checking: true,
-            error: 'The backend could not confirm source status. Retry status to reconnect.'
+            error: "Videorc couldn't check your sources. Check again to reconnect."
           })
       })
       .finally(() => {
@@ -247,7 +266,7 @@ export class LiveSourceSelectionController {
     if (epoch === this.epoch && this.state.checking && !this.state.error) {
       this.publish({
         ...this.state,
-        error: 'The source change could not be confirmed. Retry status to reconnect.'
+        error: "Videorc couldn't confirm the source change. Check again to reconnect."
       })
     }
   }
@@ -287,7 +306,8 @@ export class LiveSourceSelectionController {
         if (code !== 'source-switch-stopping' && code !== 'source-switch-inactive-session') {
           this.reportFailure(
             request.requestId,
-            error instanceof Error ? error.message : 'The source change was rejected.'
+            error instanceof Error ? error.message : 'The source change was rejected.',
+            { kind: request.kind, deviceId: request.deviceId }
           )
         }
         await this.refresh()
@@ -297,7 +317,7 @@ export class LiveSourceSelectionController {
           checking: true,
           error:
             this.attempts >= 3
-              ? 'The source change could not be confirmed. Retry status to reconnect.'
+              ? "Videorc couldn't confirm the source change. Check again to reconnect."
               : null
         })
       }
@@ -350,7 +370,7 @@ export class LiveSourceSelectionController {
           ...this.state,
           pending: null,
           checking: false,
-          error: 'Protected windows could not be checked.',
+          error: "Protected windows couldn't be checked.",
           errorKind: kind
         })
       }

@@ -7,6 +7,7 @@ import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
 import { CohostQuestionRow } from '@/components/cohost-question-row'
 import { Command } from '@/components/ui/command'
 import type { CohostFlag, CohostQuestion, CohostState } from '@/lib/backend'
+import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
@@ -76,7 +77,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(onTopic).toContain('data-slot="cohost-on-topic"')
+    expect(onTopic).toContain('data-testid="cohost-on-topic"')
     expect(onTopic).toContain('On topic')
     const plain = renderRow(
       createElement(CohostQuestionRow, {
@@ -87,7 +88,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(plain).not.toContain('data-slot="cohost-on-topic"')
+    expect(plain).not.toContain('data-testid="cohost-on-topic"')
   })
 
   it('reads as one dense line: question, askers, age', () => {
@@ -148,7 +149,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('Answered from your Orcle notes')
+    expect(markup).toContain('Answered from About you')
     expect(markup).toContain('On stream')
   })
 })
@@ -165,7 +166,7 @@ describe('CohostQuestionRow spotlight', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('data-slot="cohost-talking-about"')
+    expect(markup).toContain('data-testid="cohost-talking-about"')
     expect(markup).toContain('Talking about this')
     expect(markup).toContain('data-variant="outline"')
 
@@ -259,7 +260,9 @@ describe('CohostPane', () => {
     expect(markup).toContain('>Dismiss<')
     expect(markup).toContain('data-slot="cohost-recap"')
     expect(markup).toContain('So far: unboxed the parts.')
-    expect(markup).toContain('Post to chat')
+    // Plan 174 F-23: the button says what the click does: it only pre-fills.
+    expect(markup).toContain('Edit in chat box')
+    expect(markup).not.toContain('Post to chat')
     // A live recap card replaces the draft button; nothing sends from here.
     expect(markup).not.toContain('Draft a recap')
     expect(markup).not.toContain('>Send<')
@@ -336,7 +339,6 @@ describe('CohostPane', () => {
   it('names the empty state instead of showing nothing', () => {
     const markup = renderPane({ state: state({ questions: [], flags: [] }) })
     expect(markup).toContain('Reading chat. Questions will appear here.')
-    expect(markup).toContain('reading chat')
   })
 
   it('replaces itself with a one-line upsell for a Basic account', () => {
@@ -344,21 +346,32 @@ describe('CohostPane', () => {
       gate: {
         allowed: false,
         featureId: 'live-cohost',
-        reason: 'Orcle requires Videorc Premium.',
+        reason: 'Buddy requires Videorc Premium.',
         upgradeUrl: 'https://www.videorc.com/premium'
       },
       onUpgrade: () => undefined
     })
+    // Plan 174 F-14: a flush locked Alert with its one action, never a
+    // hand-rolled notice box.
     expect(markup).toContain('data-slot="cohost-notice"')
-    expect(markup).toContain('Orcle requires Videorc Premium.')
+    expect(markup).toMatch(/data-slot="alert"[^>]*data-variant="locked"/)
+    expect(markup).toContain('Buddy requires Videorc Premium.')
     expect(markup).toContain('View Premium')
-    expect(markup).not.toContain('data-slot="cohost-pane"')
+    expect(markup).not.toContain('Premium Alpha')
+    expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
-  it('asks for cloud-AI consent instead of quietly doing nothing', () => {
+  it('asks for cloud-AI consent with the whole disclosure and a way to the dialog', () => {
     const markup = renderPane({ consented: false, onEnableConsent: () => undefined })
-    expect(markup).toContain('Turn on cloud AI')
-    expect(markup).not.toContain('data-slot="cohost-pane"')
+    expect(markup).toContain('data-slot="cohost-consent"')
+    expect(markup).toContain('Buddy needs cloud AI')
+    // Plan 174 S0.2: every cloud use, wrapping, never a truncated line with
+    // the rest in a tooltip; the action opens the consent dialog.
+    for (const use of CLOUD_AI_USES) expect(markup).toContain(use.replaceAll("'", '&#x27;'))
+    expect(markup).toContain(CLOUD_AI_KEEPS.replaceAll("'", '&#x27;'))
+    expect(markup).not.toContain('truncate')
+    expect(markup).toContain('Allow cloud AI…')
+    expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
   it('renders nothing at all when the streamer turned co-host off', () => {
@@ -370,16 +383,19 @@ describe('CohostPane', () => {
       onShowOnStream: () => undefined,
       state: state({ questions: [question({ priority: 'high' })] })
     })
-    expect(markup).toContain('data-slot="cohost-pane"')
+    expect(markup).toContain('data-testid="cohost-pane"')
     expect(markup).toContain('data-slot="cohost-actions"')
     for (const label of ['Reply', 'Show on stream', 'Answered', 'Dismiss']) {
       expect(markup).toContain(label)
     }
-    // Plan 140: Orcle can now remove a comment, but only when asked.
+    // Plan 140: Buddy can remove a comment, but only when asked; plan 211 D6:
+    // it never posts on its own.
     expect(markup).not.toContain('Nothing sends without you.')
-    expect(markup).toContain('Orcle never acts on its own.')
-    expect(markup).toContain(
-      'title="Orcle never acts on its own. It removes a comment only when you tell it to."'
+    expect(markup).toContain('Never posts on its own.')
+    // The whole sentence is the line's tooltip, never a native title (S1.10).
+    expect(markup).not.toContain('title="Buddy never posts')
+    expect(markup).toMatch(
+      /<span(?=[^>]*data-slot="cohost-acts-on-ask")(?=[^>]*data-base-ui-tooltip-trigger)/
     )
   })
 
@@ -390,18 +406,41 @@ describe('CohostPane', () => {
     })
     expect(markup).toContain('@container/cohost-pane')
     expect(markup).toMatch(/<div class="[^"]*flex-wrap[^"]*" data-slot="cohost-actions"/)
-    for (const title of ['Reply (R)', 'Show on stream (H)', 'Answered (A)', 'Dismiss (⌫)']) {
-      expect(markup).toContain(`title="${title}"`)
+    // Off macOS (this test's host) the keys read as words (plan 174 I-18).
+    // Each action is a ShortcutTooltip trigger, never a native title (S1.10).
+    for (const [label, key] of [
+      ['Reply', 'R'],
+      ['Show on stream', 'H'],
+      ['Answered', 'A'],
+      ['Dismiss', 'Backspace']
+    ]) {
+      expect(markup).toMatch(
+        new RegExp(
+          `<span[^>]*data-base-ui-tooltip-trigger[^>]*><button[^>]*>${label}<kbd[^>]*>${key}</kbd>`
+        )
+      )
     }
+    expect(markup).not.toContain('title="Reply')
     // Every key chip carries the narrow-tier class; none is unconditional.
     const chips = markup.match(/<kbd[^>]*>/g) ?? []
     expect(chips.length).toBeGreaterThan(0)
     for (const chip of chips) expect(chip).toContain('@max-[400px]/cohost-pane:hidden')
   })
 
-  it('keeps the chat mood in the status tooltip when the mood label folds', () => {
+  it('says the chat mood in plain words, never only in a tooltip (plan 174 S1.10)', () => {
     const markup = renderPane({ state: state({ mood: 'hype' }) })
-    expect(markup).toContain('Chat mood: Chat is hyped')
+    expect(markup).toContain('Chat is hyped')
+    expect(markup).not.toContain('Chat mood:')
+  })
+
+  it('shows viewer-reported problems as a warning Alert row (plan 174 F-7)', () => {
+    const markup = renderPane({
+      state: state({
+        alerts: [{ kind: 'audio', viewers: 3, active: true, lastSeenAt: new Date().toISOString() }]
+      })
+    })
+    expect(markup).toMatch(/data-variant="warning"[^>]*data-testid="cohost-alert"/)
+    expect(markup).toContain('Chat says: no audio · 3 viewers')
   })
 
   it('offers jump + dismiss when a flag is the only row', () => {
@@ -416,29 +455,40 @@ describe('CohostPane', () => {
 
   it('surfaces a partial tick and the chat mood without colouring them', () => {
     const markup = renderPane({ state: state({ mood: 'hype', partial: true }) })
-    expect(markup).toContain('Partial')
+    expect(markup).toContain('Partial pass')
     expect(markup).toContain('Chat is hyped')
+    expect(markup).not.toContain('text-warning')
+  })
+
+  it('is a flex column whose list takes the height: no duplicate header, no collapse (F-8)', () => {
+    const markup = renderPane({ state: state({ questions: [question()] }) })
+    expect(markup).toMatch(/data-testid="cohost-pane"/)
+    expect(markup).toMatch(/class="[^"]*min-h-0 flex-1 flex-col[^"]*" data-testid="cohost-pane"/)
+    expect(markup).not.toContain('data-slot="collapsible')
+    expect(markup).not.toContain('>Buddy<')
+    expect(markup).not.toContain('Alpha')
+    // The rows are 32 px (plan 174 F-8), never palette-scale.
+    expect(markup).toMatch(/class="[^"]*h-row[^"]*"[^>]*data-cohost-row="question"/)
   })
 
   it("names the failed tick in the server's words as the chip tooltip and a secondary line", () => {
-    const detail = 'ai-gateway-error (HTTP 502): The Orcle tick failed on every configured model.'
+    const detail = 'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
     const markup = renderPane({
       state: state({
         status: 'error',
         reason: 'gateway-error',
         detail: {
           code: 'ai-gateway-error',
-          message: 'The Orcle tick failed on every configured model.',
+          message: 'The Buddy tick failed on every configured model.',
           status: 502
         }
       })
     })
-    expect(markup).toContain('data-slot="cohost-pane-status"')
-    expect(markup).toContain('>error<')
-    expect(markup).toContain('data-tone="destructive"')
+    // The status word and its dot live in the pane header (cohost-status);
+    // here the failed tick keeps its own line.
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
-    expect(markup).toContain('once Orcle is reading chat again')
+    expect(markup).toContain('once Buddy is reading chat again')
     expect(markup).not.toContain('Reading chat. Questions')
     // Monochrome: only the presence DOT carries the error accent; the label and
     // the detail line stay chrome.
@@ -448,34 +498,14 @@ describe('CohostPane', () => {
     expect(healthy).not.toContain('data-slot="cohost-error-detail"')
     expect(healthy).toContain('Reading chat. Questions will appear here.')
   })
-  it('mirrors the working shimmer in the segment header while chat is queued', () => {
+  it('follows the real work in its empty state while chat is queued', () => {
     const reading = renderPane({ state: state({ pendingMessages: 4 }) })
-    expect(reading).toContain('data-slot="cohost-typing-dots"')
-    expect(reading).toContain('>reading 4 new…<')
     // The empty state stops claiming "Listening —" while there is real work.
     expect(reading).toContain('Reading 4 new messages…')
     expect(reading).not.toContain('Reading chat. Questions')
 
     const thinking = renderPane({ state: state({ tickInFlight: true, pendingMessages: 4 }) })
-    expect(thinking).toContain('typing-dot-fast')
-    expect(thinking).toContain('>thinking…<')
     expect(thinking).toContain('Thinking about the last batch…')
-  })
-
-  it('shows the presence dot for every state, live-green only while listening', () => {
-    expect(renderPane({ state: state() })).toContain('data-tone="live"')
-    expect(renderPane({ state: state({ status: 'off', sessionId: null }) })).toContain(
-      'data-tone="muted"'
-    )
-  })
-
-  it('flashes the grouped delta in place of the count', () => {
-    const markup = renderPane({
-      flash: 'grouped 2 questions',
-      state: state({ questions: [question()] })
-    })
-    expect(markup).toContain('grouped 2 questions')
-    expect(markup).not.toContain('>1 q<')
   })
 })
 
@@ -485,19 +515,19 @@ describe('the one-time listening card (plan 068 D3)', () => {
       createElement(CohostListenPrompt, { enabled, listen, onTurnOn: () => undefined })
     )
 
-  it('asks an Orcle user with listening off', () => {
+  it('asks a Buddy user with listening off', () => {
     const markup = renderPrompt(true, false)
     expect(markup).toContain('data-slot="cohost-listen-prompt"')
-    expect(markup).toContain('Orcle can hear you while you&#x27;re live')
+    expect(markup).toContain('Buddy can hear you while you&#x27;re live')
     // The consent names the cloud step and what is (not) kept (plan 068 D3).
-    expect(markup).toContain('goes to Videorc&#x27;s cloud speech-to-text to be turned into text')
+    expect(markup).toContain('goes to Videorc&#x27;s cloud speech-to-text and comes back as text')
     expect(markup).toContain('Videorc servers don&#x27;t keep it.')
     expect(markup).toContain('The transcript is saved with your recording on')
     expect(markup).toContain('>Turn on<')
     expect(markup).toContain('>Not now<')
   })
 
-  it('stays away when listening is on or unknown, or Orcle cannot run', () => {
+  it('stays away when listening is on or unknown, or Buddy cannot run', () => {
     expect(renderPrompt(true, true)).toBe('')
     expect(renderPrompt(true, undefined)).toBe('')
     expect(renderPrompt(false, false)).toBe('')

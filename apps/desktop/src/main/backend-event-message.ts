@@ -1,6 +1,8 @@
 import type {
+  Banner,
   CompositorFrameReady,
   CompositorStatus,
+  OverlayLayout,
   PreviewSurfaceStatus,
   RecordingStatus,
   ServerEvent,
@@ -13,10 +15,22 @@ import {
   validateCompositorFrameReadyPayload
 } from '../shared/backend-rpc-contract'
 
+/**
+ * Feeds whose bad payload must never retire the main socket: that socket also
+ * carries capture state and the preview present pump. Their payloads pass
+ * through unvalidated here and their handler validates them at use, dropping
+ * a bad one with a warning (plan 186: the banner list for the proof surface).
+ */
+export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set([
+  'banners.changed',
+  'overlays.layout'
+])
+
 /** The privileged main-process socket uses the same bounded wire contract as the renderer. */
 export function parseMainBackendWireMessage(raw: string): ServerResponse | ServerEvent {
   const message = parseBackendWireMessage(raw)
   if ('id' in message) return message
+  if (MAIN_ISOLATED_BACKEND_EVENTS.has(message.event)) return message
   return {
     event: message.event,
     payload:
@@ -48,4 +62,24 @@ export function parseMainCompositorStatusEvent(payload: unknown): CompositorStat
 
 export function parseMainCompositorFrameReadyEvent(payload: unknown): CompositorFrameReady {
   return validateCompositorFrameReadyPayload(payload)
+}
+
+/** `banners.list` reply: the full list, strictly validated (plan 186). */
+export function parseMainBannerList(payload: unknown): Banner[] {
+  return validateBackendRpcResult('banners.list', payload) as Banner[]
+}
+
+/** `banners.changed` event: the full list, strictly validated (plan 186). */
+export function parseMainBannersChangedEvent(payload: unknown): Banner[] {
+  return validateBackendEventPayload('banners.changed', payload) as Banner[]
+}
+
+/** `overlays.layout.get` result: the proof surface's Buddy switches (plan 205 S9). */
+export function parseMainOverlayLayout(payload: unknown): OverlayLayout {
+  return validateBackendRpcResult('overlays.layout.get', payload) as OverlayLayout
+}
+
+/** `overlays.layout` event: the whole layout, strictly validated. */
+export function parseMainOverlayLayoutEvent(payload: unknown): OverlayLayout {
+  return validateBackendEventPayload('overlays.layout', payload) as OverlayLayout
 }

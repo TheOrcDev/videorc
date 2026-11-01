@@ -13,6 +13,7 @@ export class LazyLiveSourceSelectionController {
   private disposed = false
   private sessionId: string | null | undefined
   private sessionState: RecordingState = 'idle'
+  private replayOnly = false
 
   constructor(
     private readonly options: ConstructorParameters<Module['LiveSourceSelectionController']>[0],
@@ -28,7 +29,7 @@ export class LazyLiveSourceSelectionController {
       .then((module) => {
         if (this.disposed || epoch !== this.epoch) return null
         const controller = new module.LiveSourceSelectionController(this.options)
-        controller.setSession(this.sessionId, this.sessionState)
+        controller.setSession(this.sessionId, this.sessionState, this.replayOnly)
         this.controller = controller
         return controller
       })
@@ -39,15 +40,24 @@ export class LazyLiveSourceSelectionController {
     return loading
   }
 
-  setSession(sessionId: string | null | undefined, state: RecordingState): void {
-    const identity = ['recording', 'streaming', 'starting'].includes(state)
+  setSession(
+    sessionId: string | null | undefined,
+    state: RecordingState,
+    replayOnly = false
+  ): void {
+    const effectiveState = replayOnly ? 'idle' : state
+    const identity = ['recording', 'streaming', 'starting'].includes(effectiveState)
       ? (sessionId ?? null)
       : null
-    const changed = identity !== this.sessionId || state !== this.sessionState
+    const changed =
+      identity !== this.sessionId ||
+      effectiveState !== this.sessionState ||
+      replayOnly !== this.replayOnly
     this.disposed = false
     this.sessionId = identity
-    this.sessionState = state
-    if (this.controller) this.controller.setSession(identity, state)
+    this.sessionState = effectiveState
+    this.replayOnly = replayOnly
+    if (this.controller) this.controller.setSession(identity, effectiveState, replayOnly)
     else if (changed)
       this.options.changed({ snapshot: null, pending: null, checking: false, error: null })
   }
@@ -73,7 +83,7 @@ export class LazyLiveSourceSelectionController {
           snapshot: null,
           pending: null,
           checking: true,
-          error: 'Source controls could not load. Retry status.'
+          error: "Source controls couldn't load. Check again."
         })
     }
   }
@@ -93,7 +103,7 @@ export class LazyLiveSourceSelectionController {
           snapshot: null,
           pending: null,
           checking: true,
-          error: 'Source controls could not load. Retry status.'
+          error: "Source controls couldn't load. Check again."
         })
     }
   }
@@ -112,5 +122,6 @@ export class LazyLiveSourceSelectionController {
     this.loading = null
     this.sessionId = null
     this.sessionState = 'idle'
+    this.replayOnly = false
   }
 }

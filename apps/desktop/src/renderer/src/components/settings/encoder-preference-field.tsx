@@ -18,7 +18,8 @@ const OPTIONS: ReadonlyArray<{ value: WindowsH264EncoderPreference; label: strin
 ]
 
 /**
- * Settings → Recording, Windows PCs with Intel graphics only (plan 090 C5).
+ * The Output page (Settings → Recording until plan 174 S3.6), Windows PCs
+ * with Intel graphics only (plan 090 C5).
  * Chooses the encoder for the fallback path Videorc uses when its normal
  * hardware encoder can't start. Opt-in while Quick Sync is in beta: Automatic
  * keeps the software fallback.
@@ -43,14 +44,17 @@ export function EncoderPreferenceField({
           </div>
           <p className="text-xs text-muted-foreground">
             {state.envOverride
-              ? 'Set by VIDEORC_WINDOWS_H264_ENCODER for this run.'
+              ? 'Set by a launch setting for this run.'
               : "Used only when this PC's hardware encoder can't start. Intel Quick Sync encodes on the Intel graphics chip instead of the processor, and falls back to software if its own check fails."}
           </p>
         </div>
         <Select
           disabled={state.envOverride}
+          items={OPTIONS}
           value={state.preference}
-          onValueChange={(value) => onChange(value as WindowsH264EncoderPreference)}
+          onValueChange={(value) => {
+            if (value !== null) onChange(value)
+          }}
         >
           <SelectTrigger className="w-44 shrink-0" id="encoder-preference">
             <SelectValue />

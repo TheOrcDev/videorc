@@ -56,8 +56,10 @@ Use `0.9.46-alpha.1` instead.
 ## 2. Build the private candidate
 
 Merge the candidate source to protected `main`, then dispatch **Build Windows
-Alpha Candidate** from the current `main` commit and provide `release_id`. The
-workflow has two trust-separated jobs:
+Alpha Candidate** from the current `main` commit and provide `release_id`.
+On a coordinated release, dispatch this the moment the version PR lands; do
+not wait for the local macOS build or upload. Watch the run with
+`gh run watch`. The workflow has two trust-separated jobs:
 
 1. The `unsigned` job has only `contents: read`, no protected environment, and
    no OIDC permission. It checks out `github.sha` with credentials disabled,
@@ -342,7 +344,12 @@ Before changing the web state, verify:
 - macOS DMG and `latest-mac.yml` are unchanged.
 
 Authorize the web `public` state only after the public promotion and production
-smoke pass. Publish held GitHub, Discord, email, and social drafts afterward.
+smoke pass. Publish held GitHub, email, and social drafts afterward. Preview
+the Windows Alpha Discord post with
+`pnpm release:notify:discord <releaseId> --dry-run`, then send with
+`pnpm release:notify:discord <releaseId>`. Do this only after public
+promotion. If the Alpha entry also names Linux, hold that post until the
+Linux download is public too. Never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
 
 The protected promotion workflow reads the further origins from the
 `windows-alpha-release` environment:

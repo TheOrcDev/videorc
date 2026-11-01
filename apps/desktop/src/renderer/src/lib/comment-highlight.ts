@@ -72,7 +72,12 @@ export interface HighlightMetrics {
  * the same type size as its 1920x1080 horizontal twin instead of shrinking to
  * a width-based size that is unreadable on a phone. `canvasHeight` omitted
  * means landscape. */
-export function highlightMetrics(canvasWidth: number, canvasHeight?: number): HighlightMetrics {
+export function highlightMetrics(
+  canvasWidth: number,
+  canvasHeight?: number,
+  /** The placed rect's width in pixels (plan 164); omitted keeps the fraction. */
+  maxCardWidthPx?: number
+): HighlightMetrics {
   const portrait = canvasHeight !== undefined && canvasHeight > canvasWidth
   const longEdge = portrait ? canvasHeight : canvasWidth
   const textFontPx = Math.max(20, Math.round(longEdge / 48))
@@ -80,7 +85,11 @@ export function highlightMetrics(canvasWidth: number, canvasHeight?: number): Hi
   const avatarPx = Math.round(textFontPx * 1.5)
   const identityGapPx = Math.round(textFontPx * 0.5)
   const widthFraction = portrait ? MAX_PORTRAIT_CARD_WIDTH_FRACTION : MAX_CARD_WIDTH_FRACTION
-  const maxTextWidthPx = Math.floor(canvasWidth * widthFraction) - paddingPx * 2
+  const maxCardPx =
+    maxCardWidthPx !== undefined && Number.isFinite(maxCardWidthPx) && maxCardWidthPx > 0
+      ? Math.floor(Math.min(maxCardWidthPx, canvasWidth))
+      : Math.floor(canvasWidth * widthFraction)
+  const maxTextWidthPx = maxCardPx - paddingPx * 2
   return {
     nameFontPx: Math.round(textFontPx * 0.95),
     textFontPx,
@@ -141,13 +150,20 @@ export interface HighlightLayout {
   cardHeightPx: number
 }
 
-export interface CommentHighlightPlatformBadge {
-  label: string
-  color: string
-  /** Glyph colour; white unless the brand colour is too light for it. */
-  ink?: string
-  glyph: 'play' | 'twitch' | 'kick' | 'x' | 'dot'
-}
+export type CommentHighlightPlatformBadge =
+  | {
+      label: string
+      color: string
+      /** Glyph colour; white unless the brand colour is too light for it. */
+      ink?: string
+      glyph: 'twitch' | 'kick' | 'dot'
+    }
+  /** YouTube is never redrawn (plan 165, Google's ToS report III.F.2a): the
+   * card shows YouTube's own icon file on the identity row, at least 20 px
+   * tall, instead of a badge over the avatar. X likewise shows the mark from
+   * X's partner kit there (plan 167). */
+  | { label: 'YouTube'; glyph: 'youtube-icon' }
+  | { label: 'X'; glyph: 'x-mark' }
 
 /** Small stream-safe brand mark painted over the avatar. The adjacent identity
  * line carries the platform name as text, so the card never relies on color or
@@ -157,13 +173,13 @@ export function commentHighlightPlatformBadge(
 ): CommentHighlightPlatformBadge | null {
   switch (platform) {
     case 'youtube':
-      return { label: 'YouTube', color: '#FF0033', glyph: 'play' }
+      return { label: 'YouTube', glyph: 'youtube-icon' }
     case 'twitch':
       return { label: 'Twitch', color: '#9146FF', glyph: 'twitch' }
     case 'kick':
       return { label: 'Kick', color: '#53FC18', ink: '#0B1A05', glyph: 'kick' }
     case 'x':
-      return { label: 'X', color: '#111111', glyph: 'x' }
+      return { label: 'X', glyph: 'x-mark' }
     case 'custom':
       return { label: 'Custom', color: '#52525B', glyph: 'dot' }
     default:
@@ -171,8 +187,16 @@ export function commentHighlightPlatformBadge(
   }
 }
 
-export function commentHighlightIdentity(authorName: string, platform?: StreamPlatform): string {
+/** The identity line: "Twitch · name". When the card draws YouTube's or X's
+ * own mark beside the name (`markShown`), the mark is the attribution and the
+ * line is just the name; if the mark could not be loaded the word stays. */
+export function commentHighlightIdentity(
+  authorName: string,
+  platform?: StreamPlatform,
+  markShown = false
+): string {
   const author = authorName.trim() || 'Viewer'
+  if (markShown && (platform === 'youtube' || platform === 'x')) return author
   const platformLabel = commentHighlightPlatformBadge(platform)?.label ?? null
   return platformLabel ? `${platformLabel} · ${author}` : author
 }
@@ -201,10 +225,11 @@ export function layoutCommentHighlight(params: {
   text: string
   canvasWidth: number
   canvasHeight?: number
+  maxCardWidthPx?: number
   platform?: StreamPlatform
   measure: HighlightTextMeasurer
 }): HighlightLayout | null {
-  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight)
+  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight, params.maxCardWidthPx)
   if (metrics.maxTextWidthPx <= 0) {
     return null
   }

@@ -1,3 +1,7 @@
+// Synthetic child launches must not contend with real app smokes on this host.
+process.env.VIDEORC_SMOKE_HOST_LOCK = '0'
+process.env.VIDEORC_SMOKE_MEMORY_CHECK = '0'
+
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
@@ -21,6 +25,7 @@ import {
   devBackendPrebuildSpec,
   devAppSpawnSpec,
   launchDevApp,
+  releaseBackendFakeOriginRefusal,
   macosAppBundlePath,
   macosLaunchServicesAppSpawnSpec,
   performanceAppSpawnSpec,
@@ -49,9 +54,12 @@ const SMOKE_ENV_KEYS = [
   'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR',
   'VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED',
   'VIDEORC_DISABLE_BACKEND_REAP',
+  'VIDEORC_USAGE_STATS',
+  'VIDEORC_SMOKE_SKIP_FIRST_RUN',
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
-  'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN'
+  'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN',
+  'VIDEORC_SMOKE_TRASH_DIR'
 ]
 
 test('macOS real-source launch uses the exact app bundle through LaunchServices', () => {
@@ -66,6 +74,7 @@ test('macOS real-source launch uses the exact app bundle through LaunchServices'
       HOME: '/Users/probe',
       PATH: '/usr/bin:/bin',
       VIDEORC_APP_DATA_DIR: '/private/tmp/state/app-data',
+      VIDEORC_SMOKE_SKIP_FIRST_RUN: '1',
       VIDEORC_PACKAGED_SMOKE_TEST: '1',
       VIDEORC_SMOKE_COMMAND_CAPABILITY: 'capability'
     },
@@ -94,6 +103,7 @@ test('macOS real-source launch uses the exact app bundle through LaunchServices'
     '/private/tmp/launch.stderr.log'
   ])
   assert.ok(spec.args.includes('VIDEORC_APP_DATA_DIR=/private/tmp/state/app-data'))
+  assert.ok(spec.args.includes('VIDEORC_SMOKE_SKIP_FIRST_RUN=1'))
   assert.ok(spec.args.includes('VIDEORC_PACKAGED_SMOKE_TEST=1'))
   assert.ok(spec.args.includes('VIDEORC_SMOKE_COMMAND_CAPABILITY=capability'))
   assert.ok(spec.args.includes(`VIDEORC_SMOKE_APP_OWNERSHIP_PATH=${appOwnership.path}`))
@@ -322,9 +332,24 @@ test('smokeAppEnv enables ledger reaping by default for isolated smoke launches'
     const env = smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: stateDir })
 
     assert.equal(env.VIDEORC_DISABLE_BACKEND_REAP, '0')
+    assert.equal(env.VIDEORC_USAGE_STATS, '0')
     assert.equal(env.VIDEORC_SMOKE_PRINT_BACKEND_READY, '1')
     assert.equal(env.VIDEORC_APP_DATA_DIR, resolve(stateDir, 'app-data'))
     assert.equal(env.VIDEORC_USER_DATA_DIR, resolve(stateDir, 'user-data'))
+  })
+})
+
+test('smokeAppEnv suppresses first-run setup unless the caller explicitly opts in', () => {
+  withCleanSmokeEnv(() => {
+    const base = { VIDEORC_SMOKE_STATE_DIR: '/tmp/videorc-smoke-state' }
+    assert.equal(smokeAppEnv(base).VIDEORC_SMOKE_SKIP_FIRST_RUN, '1')
+    // A parent shell must not accidentally make every smoke show setup.
+    process.env.VIDEORC_SMOKE_SKIP_FIRST_RUN = '0'
+    assert.equal(smokeAppEnv(base).VIDEORC_SMOKE_SKIP_FIRST_RUN, '1')
+    assert.equal(
+      smokeAppEnv({ ...base, VIDEORC_SMOKE_SKIP_FIRST_RUN: '0' }).VIDEORC_SMOKE_SKIP_FIRST_RUN,
+      '0'
+    )
   })
 })
 
@@ -400,6 +425,33 @@ test('smokeAppEnv accepts explicit state paths only inside the current smoke roo
           VIDEORC_RECORDINGS_DIR: '/real/profile/recordings'
         }),
       /VIDEORC_RECORDINGS_DIR must be inside/
+    )
+  })
+})
+
+test('smokeAppEnv keeps the smoke Trash stand-in inside the run, never inherited', () => {
+  withCleanSmokeEnv(() => {
+    process.env.VIDEORC_SMOKE_TRASH_DIR = '/old/smoke/trash'
+    const stateDir = '/tmp/videorc-current-smoke'
+
+    assert.equal(
+      smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: stateDir }).VIDEORC_SMOKE_TRASH_DIR,
+      undefined
+    )
+    assert.equal(
+      smokeAppEnv({
+        VIDEORC_SMOKE_STATE_DIR: stateDir,
+        VIDEORC_SMOKE_TRASH_DIR: resolve(stateDir, 'trash')
+      }).VIDEORC_SMOKE_TRASH_DIR,
+      resolve(stateDir, 'trash')
+    )
+    assert.throws(
+      () =>
+        smokeAppEnv({
+          VIDEORC_SMOKE_STATE_DIR: stateDir,
+          VIDEORC_SMOKE_TRASH_DIR: '/Users/someone/.Trash'
+        }),
+      /VIDEORC_SMOKE_TRASH_DIR must be inside/
     )
   })
 })
@@ -946,4 +998,35 @@ test('dev backend prebuild failures name the compile race instead of GPU noise',
     error: new Error('spawnSync cargo ENOENT')
   })
   assert.match(missing, /could not start/)
+})
+
+test('a fake API origin refuses the release dev backend, which would call the real service', async () => {
+  const fake = { VIDEORC_DISCORD_API_BASE_URL: 'http://127.0.0.1:4555' }
+  const refusal = releaseBackendFakeOriginRefusal(fake, { VIDEORC_DEV_BACKEND_PROFILE: 'release' })
+  assert.match(refusal, /VIDEORC_DISCORD_API_BASE_URL only works with the debug backend/)
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      {
+        VIDEORC_DEV_BACKEND_PROFILE: 'release',
+        VIDEORC_YOUTUBE_API_BASE_URL: 'http://127.0.0.1:1'
+      },
+      {}
+    ),
+    /VIDEORC_YOUTUBE_API_BASE_URL/
+  )
+  // Debug backend, or no fake origin: launch as before.
+  assert.equal(releaseBackendFakeOriginRefusal(fake, {}), null)
+  assert.equal(
+    releaseBackendFakeOriginRefusal(fake, { VIDEORC_DEV_BACKEND_PROFILE: 'debug' }),
+    null
+  )
+  assert.equal(
+    releaseBackendFakeOriginRefusal({}, { VIDEORC_DEV_BACKEND_PROFILE: 'release' }),
+    null
+  )
+  // launchDevApp refuses before spawning anything.
+  await assert.rejects(
+    launchDevApp({ env: { ...fake, VIDEORC_DEV_BACKEND_PROFILE: 'release' }, timeoutMs: 1000 }),
+    /only works with the debug backend/
+  )
 })

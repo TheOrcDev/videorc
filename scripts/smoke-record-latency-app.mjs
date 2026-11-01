@@ -56,11 +56,12 @@ import {
   waitForRemoteDescribe
 } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
-import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import {
   analyzeStartupResolution,
   writeStartupReports
 } from './lib/startup-resolution-analyzer.mjs'
+import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const { values: args } = parseArgs({
@@ -82,6 +83,11 @@ const { values: args } = parseArgs({
     // Plan 069 S4: seed System audio On so every cycle also starts the
     // system-audio capture after publication. The budgets must not move.
     'system-audio': { type: 'boolean', default: false },
+    // Plan 181 (redesign R2): the ring runs by default, so every Record hands
+    // over from a buffer-only session and carries the ring, and after every
+    // Stop the renderer re-arms it. --no-replay-buffer turns the switch off
+    // first for the bare baseline. Both are reported against the same budgets.
+    'no-replay-buffer': { type: 'boolean', default: false },
     debug: { type: 'boolean', default: false }
   },
   strict: true
@@ -119,6 +125,8 @@ const expectedHeight =
   optionalPositiveInteger(args['expect-height'], 'expect-height') ?? videoProfile.height
 const enforce = args.enforce
 const systemAudio = args['system-audio']
+const replayBuffer = !args['no-replay-buffer']
+const REPLAY_BUFFER_SECONDS = 30
 const debug = args.debug || process.env.VIDEORC_RECORD_LATENCY_DEBUG === '1'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 // The startup analyzer inspects the first two seconds of the file.
@@ -179,7 +187,7 @@ async function seedRendererVideoProfile(smoke) {
         const seeded = { ...current, video: params.video, layout, recordEnabled: true, streamEnabled: false };
         if (params.systemAudio) seeded.audio = { ...(current.audio ?? {}), systemAudioEnabled: true };
         localStorage.setItem(key, JSON.stringify(seeded));
-        setTimeout(() => location.reload(), 50);
+        ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       video: videoProfile,
@@ -211,6 +219,16 @@ async function describeRendererFailure(smoke) {
   } catch {
     return ''
   }
+}
+
+/** Plan 181: the ring must be on (a buffer-only session) before a cycle. */
+async function waitForReplayBufferOn(label) {
+  await waitForBackendState(
+    renderer,
+    'replay.status',
+    (ring) => ring?.state === 'on' && ring?.replayOnly === true,
+    `replay buffer on for ${label}`
+  )
 }
 
 async function waitForBackendState(ws, method, predicate, label) {
@@ -441,10 +459,52 @@ try {
   await waitForRemoteDescribe(remote, { timeoutMs })
   log(`remote surface paired; running ${cycles} record cycle(s) of ${recordingMs}ms`)
 
+  // The Output switch's own path, through the renderer's smoke hook: on at
+  // the measured length (the default already armed it), or off for the bare
+  // baseline.
+  await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
+  const switched = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `return window.__videorcSmokeSetReplayBuffer?.(${replayBuffer}, ${REPLAY_BUFFER_SECONDS}) ?? null`
+    },
+    { timeoutMs }
+  )
+  if (switched?.result !== true) fail('the renderer has no clip buffer smoke hook')
+  if (replayBuffer) {
+    await waitForReplayBufferOn('the first buffer-only session')
+    log(`clip buffer on (${REPLAY_BUFFER_SECONDS} s); every Record hands over from it`)
+  } else {
+    await waitForBackendState(
+      renderer,
+      'replay.status',
+      (ring) => ring?.state === 'off',
+      'the ring off for the bare baseline'
+    )
+    await waitForBackendState(
+      renderer,
+      'recording.status',
+      (status) => status?.state === 'idle',
+      'an idle backend for the bare baseline'
+    )
+    log('clip buffer off: the bare Record baseline')
+  }
+
   const measured = []
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
     if (cycleIndex > 0) await sleep(nextCycleDelayMs({ idleGapMs }))
+    // With the ring on, a cycle starts from a running buffer-only session,
+    // exactly as a gamer's Record does; the re-arm after the previous Stop
+    // must have landed first or the handover is not what is measured.
+    if (replayBuffer) await waitForReplayBufferOn(`cycle ${cycleIndex + 1}'s buffer-only session`)
     measured.push(await runCycle({ cycleIndex, renderer, remote, recorder, smoke }))
+  }
+  if (replayBuffer) {
+    await waitForReplayBufferOn('the re-armed buffer after the last Stop')
+    const ring = await request(renderer, timeoutMs, 'replay.status')
+    if (ring?.replayOnly !== true)
+      fail(`the ring after the last Stop is not buffer-only: ${JSON.stringify(ring)}`)
   }
 
   const summary = summarizeRecordCycles(measured)
@@ -480,7 +540,8 @@ try {
       intendedFps,
       expectedWidth,
       expectedHeight,
-      systemAudio
+      systemAudio,
+      replayBuffer
     },
     systemAudioEvidence: systemAudio ? systemAudioEvidence : undefined,
     budgets,

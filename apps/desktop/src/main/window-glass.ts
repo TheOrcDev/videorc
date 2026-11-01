@@ -1,20 +1,24 @@
-// One window material for every Videorc window (plan 050, D1; plan 091).
+// One window material for every Videorc window (plan 050, D1; plan 091;
+// plan 208).
 //
-// Real macOS vibrancy: an NSVisualEffectView blurring what sits behind the
-// window. A 2026-09-23 region-capture probe showed it transmits on Electron 39
-// / macOS 26 in the real Videorc window; the June 2026 "materials paint
-// opaque" premise no longer reproduces. Since plan 091 the material is clear
-// glass: the native addon re-classes Electron's own vibrancy view and strips
-// AppKit's tint, wallpaper tinting and saturation boost, leaving a neutral
-// 60 pt blur (Ghostex's look), so the renderer's covers decide the whole
-// tone. `VIDEORC_GLASS_STYLE=material` keeps AppKit's own look as the A/B
-// control for one release. Every window's chrome (material, style, backing,
-// title bar, traffic lights) is decided here and nowhere else, so the windows
-// stay one family and a future material (e.g. macOS 26's NSGlassEffectView,
-// not exposed by Electron 39) is a one-file change.
+// Every window is opaque on the theme's solid base, the same on macOS,
+// Windows and Linux. Nothing of the desktop shows through. Plan 208 painted a
+// frosted still of Liquid Chrome (the chrome ground) under the coats; the
+// owner took it out on 2026-10-29, so the solid palette is the default.
+//
+// The plan 091 clear glass stays reachable for one release (D9) as
+// `VIDEORC_GLASS=clear`: real macOS vibrancy (an NSVisualEffectView blurring
+// what sits behind the window; a 2026-09-23 region-capture probe showed it
+// transmits on Electron 39 / macOS 26) that the native addon re-classes and
+// strips of AppKit's tint, wallpaper tinting and saturation boost, leaving a
+// neutral 60 pt blur (Ghostex's look); Windows 11 takes Mica there.
+// `VIDEORC_GLASS_STYLE=material` keeps AppKit's own look under it. Every
+// window's chrome (material, backing, title bar, traffic lights) is decided
+// here and nowhere else, so the windows stay one family.
 
 import type { BrowserWindow, BrowserWindowConstructorOptions } from 'electron'
 
+import type { WindowGround } from '../shared/window-ground'
 import { DARK_WINDOW_PALETTE, LIGHT_WINDOW_PALETTE } from './window-palette'
 
 export type GlassWindowRole = 'main' | 'chat' | 'captions' | 'notes' | 'preview'
@@ -27,7 +31,8 @@ export type GlassMode =
   | { kind: 'mica' }
   | {
       kind: 'solid'
-      reason:
+      reason: /** The product default: an opaque window on the theme's solid base. */
+        | 'default'
         | 'disabled'
         | 'platform'
         | 'appearance-unpinned'
@@ -37,7 +42,10 @@ export type GlassMode =
 
 export interface GlassEnvironment {
   platform: NodeJS.Platform
-  /** `VIDEORC_GLASS`: `0` paints the solid palette; a material name overrides the material. */
+  /**
+   * `VIDEORC_GLASS`: unset (or `0`) paints the solid palette; `clear` (or a
+   * material name) is the plan 091 clear glass or Mica (plan 208, D9).
+   */
   glass?: string
   /** Legacy `VIDEORC_GLASS_VIBRANCY`, honoured as an alias for one release. */
   legacyVibrancy?: string
@@ -102,9 +110,9 @@ function glassMaterialFrom(value: string | undefined): GlassMaterial | null {
 export type GlassStyle = 'clear' | 'material'
 
 /**
- * Clear glass is the default (plan 091, S1). `VIDEORC_GLASS_STYLE=material`
- * keeps the plan 050 look, AppKit's own tint and saturation, as the A/B
- * control for one release.
+ * Under `VIDEORC_GLASS=clear` the clear style is the default (plan 091, S1).
+ * `VIDEORC_GLASS_STYLE=material` keeps the plan 050 look, AppKit's own tint
+ * and saturation, as the A/B control for one release.
  */
 export const DEFAULT_GLASS_STYLE: GlassStyle = 'clear'
 
@@ -117,14 +125,28 @@ export function resolveGlassStyle(value: string | undefined): GlassStyle {
   return trimmed === 'clear' || trimmed === 'material' ? trimmed : DEFAULT_GLASS_STYLE
 }
 
+/**
+ * The window material for this launch. The solid palette is the default on
+ * every platform: an opaque window needs no GPU compositor (software
+ * rendering keeps it) and no Mica paint check. `VIDEORC_GLASS=0` asks for it
+ * by name; `VIDEORC_GLASS=clear`, or a material name, takes the plan 091 path
+ * with its own platform rules (plan 208, D9).
+ */
 export function resolveGlassMode(environment: GlassEnvironment): GlassMode {
   const disabled = environment.glass?.trim() === '0' || environment.legacyVibrancy?.trim() === '0'
+  if (disabled) {
+    return { kind: 'solid', reason: 'disabled' }
+  }
+  const clearRequested =
+    environment.glass?.trim().toLowerCase() === 'clear' ||
+    glassMaterialFrom(environment.glass) !== null ||
+    glassMaterialFrom(environment.legacyVibrancy) !== null
+  if (!clearRequested) {
+    return { kind: 'solid', reason: 'default' }
+  }
   if (environment.platform === 'win32') {
     // Mica (plan 050, D7): it tints from the wallpaper without a live blur, so
     // it stays cheap on the low-end iGPUs Windows testers use.
-    if (disabled) {
-      return { kind: 'solid', reason: 'disabled' }
-    }
     if ((environment.windowsBuild ?? 0) < WINDOWS_MICA_MIN_BUILD) {
       return { kind: 'solid', reason: 'platform' }
     }
@@ -138,9 +160,6 @@ export function resolveGlassMode(environment: GlassEnvironment): GlassMode {
   }
   if (environment.platform !== 'darwin') {
     return { kind: 'solid', reason: 'platform' }
-  }
-  if (disabled) {
-    return { kind: 'solid', reason: 'disabled' }
   }
   const material =
     glassMaterialFrom(environment.glass) ??
@@ -180,10 +199,12 @@ export function trafficLightPosition(role: GlassWindowRole): { x: number; y: num
 export const DARK_ALWAYS_ROLES: ReadonlySet<GlassWindowRole> = new Set(['preview'])
 
 /**
- * A dark-always window whose appearance cannot be pinned paints the solid
- * palette: its material would otherwise follow a light app theme and put dark
- * text tokens on light glass. Windows has no per-window appearance pin, so
- * there the dark-always windows are always solid.
+ * Under the clear glass (plan 208, D9) a dark-always window whose appearance
+ * cannot be pinned paints the solid palette: its material would otherwise
+ * follow a light app theme and put dark text tokens on light glass. Windows
+ * has no per-window appearance pin, so there the dark-always windows are
+ * always solid. A solid dark-always window paints the dark base whatever the
+ * app theme (`solidWindowBase`).
  */
 export function glassModeForRole(
   role: GlassWindowRole,
@@ -196,18 +217,68 @@ export function glassModeForRole(
   return mode
 }
 
+/**
+ * What a window in this mode sits on: the OS glass or the solid base. Passed
+ * to the renderer before its first paint (shared/window-ground.ts).
+ */
+export function windowGroundForMode(mode: GlassMode): WindowGround {
+  switch (mode.kind) {
+    case 'material':
+    case 'mica':
+      return 'glass'
+    case 'solid':
+      return 'solid'
+  }
+}
+
 export function solidWindowBase(role: GlassWindowRole, dark: boolean): string {
   return (DARK_ALWAYS_ROLES.has(role) || dark ? DARK_WINDOW_PALETTE : LIGHT_WINDOW_PALETTE).base
+}
+
+/**
+ * The Windows Preview's caption buttons, drawn by Windows over the right end
+ * of its own strip (a Window Controls Overlay) in the strip's colours.
+ */
+export const WINDOWS_PREVIEW_TITLE_BAR_OVERLAY = Object.freeze({
+  color: DARK_WINDOW_PALETTE.base,
+  symbolColor: DARK_WINDOW_PALETTE.textSecondary,
+  height: WINDOW_HEADER_HEIGHT.preview
+})
+
+/**
+ * Docked, the Preview has no strip and ignores the mouse, and Electron cannot
+ * remove a Window Controls Overlay once the window exists: the caption
+ * buttons go fully transparent instead, so none sit over the docked video.
+ */
+export const WINDOWS_PREVIEW_DOCKED_TITLE_BAR_OVERLAY = Object.freeze({
+  color: 'rgba(0, 0, 0, 0)',
+  symbolColor: 'rgba(0, 0, 0, 0)'
+})
+
+// The Preview promises that a grab anywhere in its strip or video moves it.
+// A framed Windows window cannot keep that promise: Electron's WinFrameView
+// hands a framed window's hit test to the client view, so
+// `-webkit-app-region: drag` never becomes HTCAPTION and only the OS title bar
+// drags. Like macOS's hiddenInset, the Windows Preview drops the OS title bar
+// and keeps its caption buttons on the strip; the resize edges stay.
+function platformChrome(
+  role: GlassWindowRole,
+  platform: NodeJS.Platform
+): BrowserWindowConstructorOptions {
+  if (platform === 'darwin') {
+    return { titleBarStyle: 'hiddenInset', trafficLightPosition: trafficLightPosition(role) }
+  }
+  if (platform === 'win32' && role === 'preview') {
+    return { titleBarStyle: 'hidden', titleBarOverlay: { ...WINDOWS_PREVIEW_TITLE_BAR_OVERLAY } }
+  }
+  return {}
 }
 
 export function windowGlassOptions(
   role: GlassWindowRole,
   context: { platform: NodeJS.Platform; mode: GlassMode; dark: boolean }
 ): BrowserWindowConstructorOptions {
-  const chrome: BrowserWindowConstructorOptions =
-    context.platform === 'darwin'
-      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: trafficLightPosition(role) }
-      : {}
+  const chrome = platformChrome(role, context.platform)
   if (context.mode.kind === 'mica') {
     // The web contents must be transparent for the backdrop to show through;
     // the body's window coat does the rest. The native frame stays.
@@ -220,6 +291,9 @@ export function windowGlassOptions(
     // is not focused (followWindow paints flat gray).
     return { ...chrome, vibrancy: context.mode.material, visualEffectState: 'active' }
   }
+  // The solid palette: an opaque window on the theme's solid base, no
+  // vibrancy, no backdrop material, so first paint is already the theme's
+  // tone, never bright.
   return { ...chrome, backgroundColor: solidWindowBase(role, context.dark) }
 }
 

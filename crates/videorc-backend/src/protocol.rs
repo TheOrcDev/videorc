@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::overlay_layout::OverlayRect;
 use crate::repair::GateStatus;
 use crate::source_registry::SourceRegistrySnapshot;
 use crate::streaming::StreamingSettings;
@@ -222,6 +223,10 @@ pub struct DeviceList {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<DeviceApp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
     pub id: String,
     pub name: String,
     pub kind: DeviceKind,
@@ -232,6 +237,51 @@ pub struct Device {
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceApp {
+    pub bundle_id: String,
+    pub name: String,
+    pub pid: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveAppWindowParams {
+    pub bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefer_window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ResolveAppWindowResult {
+    Found {
+        ok: bool,
+        #[serde(rename = "windowId")]
+        window_id: String,
+        title: String,
+        width: u32,
+        height: u32,
+    },
+    Unavailable {
+        ok: bool,
+        reason: AppWindowUnavailableReason,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppWindowUnavailableReason {
+    NotRunning,
+    NoWindow,
+    Minimized,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -272,6 +322,12 @@ pub struct RecordingStatus {
     pub duration_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The session exists only for the replay buffer (plan 181): it writes
+    /// no file and streams nowhere, so no surface may call it "Recording" or
+    /// "On air", and Record or Go Live hand over to a real session. Absent
+    /// on the wire for every other session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -668,9 +724,104 @@ pub struct EffectiveSceneBackground {
     /// classic look.
     #[serde(default = "default_background_visibility_percent")]
     pub visibility_percent: f64,
+    /// Plan 190: the shader a live background runs. The background's
+    /// `asset_id` is then that look's poster (`live-<id>-<look>`), so every
+    /// path that can't animate draws the poster unchanged. Absent for a
+    /// picture, and kept off the wire (`skip_serializing_if`) because the
+    /// renderer's optional contract fields reject `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveBackgroundSpec>,
 }
 
 pub const DEFAULT_BACKGROUND_VISIBILITY_PERCENT: f64 = 20.0;
+
+/// The ten live backgrounds, from React Bits: five from plan 190 and five
+/// more from plan 194.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundId {
+    Silk,
+    SideRays,
+    PlasmaWave,
+    LiquidChrome,
+    LineWaves,
+    Beams,
+    ColorBends,
+    Dither,
+    Ferrofluid,
+    GhostFibers,
+}
+
+/// Calm runs at half the React Bits speed, Normal at the React Bits speed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundMotion {
+    #[default]
+    Calm,
+    Normal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveBackgroundSpec {
+    pub id: LiveBackgroundId,
+    pub look: String,
+    #[serde(default)]
+    pub motion: LiveBackgroundMotion,
+}
+
+/// How a live background is being drawn right now.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundRendering {
+    /// The shader at its full internal size.
+    Shader,
+    /// The shader at half its internal size (the budget guard's first step).
+    Half,
+    /// The poster, with a reason.
+    Still,
+}
+
+/// Why a live background shows its poster instead of the shader.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundStillReason {
+    /// `VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1` (debug builds only).
+    Forced,
+    /// The legacy FFmpeg graph (4K60, bridge off) is static.
+    LegacyGraph,
+    /// The CPU compositor fallback has no GPU renderer (Windows, macOS).
+    CpuFallback,
+    /// No usable GPU API (Linux: no EGL/GLES libraries or no render node).
+    NoGpu,
+    /// The only GPU is a software rasteriser (llvmpipe, SwiftShader, WARP).
+    SoftwareGpu,
+    /// Linux: the render node is quarantined (`linux_vaapi.rs`).
+    QuarantinedNode,
+    /// The shader failed to compile or link.
+    ShaderCompileFailed,
+    /// The budget guard stepped down to the poster.
+    GpuBudget,
+}
+
+/// Plan 190: the live background on this compositor run, when one is applied.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveBackgroundStatus {
+    pub id: LiveBackgroundId,
+    /// The look being drawn (the first look when `requested_look` is unknown).
+    pub look: String,
+    pub rendering: LiveBackgroundRendering,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<LiveBackgroundStillReason>,
+    /// The live background's own render time p95 over the guard's last
+    /// window: GPU time where the API reports it, else the render thread's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95_ms: Option<f64>,
+    /// A look this build doesn't know; the first look renders instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_look: Option<String>,
+}
 
 fn default_background_visibility_percent() -> f64 {
     DEFAULT_BACKGROUND_VISIBILITY_PERCENT
@@ -1008,8 +1159,32 @@ pub struct OutputSettings {
     /// instead of removing it after a committed export. Off by default.
     #[serde(default)]
     pub keep_original_mkv: bool,
+    /// Optional separate Screen (+ system audio) and Camera (+ mic) local
+    /// recordings beside the composed Combined take (Plan 157).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separate_source_recordings: Option<SeparateSourceRecordingsSettings>,
     pub video: VideoSettings,
     pub rtmp: RtmpSettings,
+}
+
+/// Opt-in ISO takes from one Record session. Defaults keep Combined on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeparateSourceRecordingsSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// When true (default), also keep the composed Combined master.
+    #[serde(default = "default_true")]
+    pub keep_combined: bool,
+}
+
+impl Default for SeparateSourceRecordingsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keep_combined: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1099,10 +1274,143 @@ pub struct StartSessionParams {
     /// only: never load-bearing for the start itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_at_ms: Option<u64>,
+    /// The replay buffer (plan 181): keep the last `seconds` of this
+    /// session's program as a rolling segment ring beside its outputs. A
+    /// session with no file and no stream targets but `replay` is a
+    /// buffer-only session: it composes like a record-only session, creates
+    /// no Library row and reports `replayOnly` on its status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayParams>,
     /// In-process only: never read from or written to the wire, so a client
     /// cannot start a hidden session.
     #[serde(skip)]
     pub purpose: SessionPurpose,
+}
+
+impl StartSessionParams {
+    /// A session whose only output is the replay ring (plan 181).
+    pub fn replay_only(&self) -> bool {
+        self.replay.is_some() && !self.output.record_enabled && !self.output.stream_enabled
+    }
+}
+
+/// The replay buffer's request (plan 181): how many seconds the ring keeps.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayParams {
+    pub seconds: u32,
+    /// The ring runs by default whenever Videorc is open (owner redesign,
+    /// R2), so a buffer-only start nobody asked for says so: on a software
+    /// encoder path the backend refuses it with `replay-software-encoder`
+    /// and the Output page explains, and while the scene's camera has no
+    /// frame yet with `replay-sources-not-ready` (the renderer waits for the
+    /// camera). A start the user chose carries `false` and runs anywhere.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
+}
+
+/// Where the replay buffer is, for `replay.state` and `replay.status`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplayBufferState {
+    Off,
+    Starting,
+    On,
+    Error,
+}
+
+/// `replay.state`: emitted on every change and once a second while the
+/// buffer is on, with how much it holds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayStateEvent {
+    pub state: ReplayBufferState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The ring's target length.
+    pub seconds: u32,
+    /// What the ring holds right now, capped at `seconds`.
+    pub buffered_seconds: f64,
+    /// True when the session exists only for the buffer (no file, no stream).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Segment files in the ring after the last prune pass (diagnostics and
+    /// the replay smoke's disk bound: never above `ceil(N/2) + 3`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_files: Option<u32>,
+}
+
+/// `replay.save` answers at once; the save runs on its own task and reports
+/// through `replay.saved` or `replay.saveFailed` (plan 181 S3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveAccepted {
+    pub save_id: String,
+    pub session_id: String,
+    /// A save was already running: this press waits behind it, and a third
+    /// press while one is queued is absorbed into the same queued save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queued: bool,
+    /// The length this save will take (plan 199): the press's 30 or 60 s,
+    /// clamped to the ring, or the longer of the two when the press joined a
+    /// queued save.
+    pub seconds: u32,
+}
+
+/// `replay.save` params (plan 199). Absent or `null` params mean `{}`, and
+/// no `seconds` is today's 30-second clip.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveParams {
+    /// 30 or 60; anything else is refused with `invalid-clip-length`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u32>,
+}
+
+/// `clip.mark` params (plan 199): the same shape as [`ReplaySaveParams`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMarkParams {
+    /// 30 or 60; anything else is refused with `invalid-clip-length`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u32>,
+}
+
+/// `replay.saved`: the MP4 is on disk, probed and in Library.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySavedEvent {
+    pub save_id: String,
+    pub session_id: String,
+    /// The Library row.
+    pub replay_session_id: String,
+    pub path: String,
+    /// The requested length: the press's 30 or 60 s (plan 199), clamped to
+    /// the ring.
+    pub seconds: u32,
+    /// What the file actually holds: shorter than `seconds` while the buffer
+    /// was still filling.
+    pub covered_seconds: f64,
+    /// False when the buffer held less than `seconds`.
+    pub complete: bool,
+    /// What `clip.mark` routed here (plan 181 S8), else `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ClipMarkSource>,
+}
+
+/// `replay.saveFailed`: why a save produced no file. `reason` is a stable
+/// code (`off`, `empty`, `probe`, `ffmpeg`, `disk`, `io`); `message` is
+/// what the toast says.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveFailedEvent {
+    pub save_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub reason: String,
+    pub message: String,
 }
 
 /// Why a session exists. `PerformanceCheck` sessions are benchmark runs owned
@@ -1555,6 +1863,9 @@ pub struct AudioLevelsEvent {
     pub microphone: Option<AudioLevelReading>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_audio: Option<AudioLevelReading>,
+    /// Plan 189: the soundboard's sounds as mixed (after every gain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sounds: Option<AudioLevelReading>,
     /// The mix written to the recording and the stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub master: Option<AudioLevelReading>,
@@ -1732,8 +2043,15 @@ pub struct StreamOutputTopologyProbeResult {
     pub effective_bridge_output: StreamOutputBridge,
     pub effective_encode_backend: EncodeBackend,
     pub probe_state: StreamOutputTopologyProbeState,
+    /// Why the topology fell back: only for a rejected or unsupported probe,
+    /// or when the effective bridge differs from the requested one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    /// Why the raw path uses this encoder (OpenH264 chosen explicitly, VAAPI
+    /// rejected, Quick Sync check failed). Informational in every probe state;
+    /// it never makes a passed or not-required topology a fallback (plan 0015).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_selection_reason: Option<String>,
 }
 
 /// Outcome of the Linux VAAPI render-node policy for one `/dev/dri/renderD*`
@@ -1787,6 +2105,10 @@ pub struct PerformanceCheckRunParams {
     pub ceiling_width: u32,
     pub ceiling_height: u32,
     pub ceiling_fps: u32,
+    /// Plan 200 D4: the next take would also write the Screen and Camera
+    /// files, so the check counts their encoders in its budget.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub separate_source_recordings: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1845,10 +2167,18 @@ pub struct PerformanceCheckProgress {
     pub video: VideoSettings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PerformanceCheckNotRecorded {
+    HostBusy,
+}
+
 /// `performance.check.get` result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceCheckState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_not_recorded: Option<PerformanceCheckNotRecorded>,
     pub running: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<PerformanceCheckResult>,
@@ -3491,6 +3821,37 @@ pub struct CompositorFramePipelineStatus {
     pub yuv_frames_converted: u64,
     pub immutable_texture_uploads: u64,
     pub immutable_texture_reuses: u64,
+    /// Plan 190: live background shader programs built on this run, and the
+    /// scratch bytes they hold. Both stay 0 while no live background shows
+    /// (the zero-cost-when-off contract), and 0 is left off the wire, so a
+    /// run without one sends exactly what it sent before plan 190.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub live_background_programs: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub live_background_scratch_bytes: u64,
+    /// Plan 205 S6: the Preview presents its own picture, the program leg,
+    /// because the program differs from the primary leg (Clips at idle, or
+    /// a split record + stream, with a stream-only item). False is left off
+    /// the wire, so a run without one sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preview_program_leg: bool,
+    /// Plan 212 S2: frames composed from a scene with a test-pattern source
+    /// that the packaged backstop refused to hand the Preview. 0 is left off
+    /// the wire, so a run without one sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub preview_synthetic_refused: u64,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Small latest-wins event used by native preview presentation. Full
@@ -3575,9 +3936,59 @@ pub struct CompositorStatus {
     /// renderer's optional contract fields reject `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor_draft: Option<SceneEditorDraftStatus>,
+    /// Plan 190: the applied live background and how it is drawn. Absent
+    /// while the scene has no live background.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_background: Option<LiveBackgroundStatus>,
+    /// Plan 210 S3: how the last screen or window switch changed the
+    /// capture, and why the in-place change was not used when it wasn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_switch: Option<ScreenSwitchStatus>,
+    /// Plan 212 S2: the Preview is holding its last program frame while a
+    /// performance check runs; not a broken Preview. Left off the wire when
+    /// there is no hold, so the strict renderer contract sees exactly what it
+    /// saw before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_hold: Option<PreviewHoldReason>,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Why the Preview holds its picture (plan 212 S2). `PerformanceCheck` is
+/// the check's hold, with its words in the Preview; `SyntheticRefused` is
+/// the packaged backstop keeping the last program frame instead of a frame
+/// composed from a test-pattern scene, with no words of its own.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewHoldReason {
+    PerformanceCheck,
+    SyntheticRefused,
+}
+
+/// Plan 210 S3: how the last screen or window switch changed the capture.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenSwitchStatus {
+    pub mode: ScreenSwitchMode,
+    /// Why the running stream was not changed in place (`restart` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub source_id: String,
+    pub generation: u64,
+    /// Switch request to the new source's first frame, when it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_frame_ms: Option<u64>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenSwitchMode {
+    /// The running ScreenCaptureKit stream changed its target.
+    InPlace,
+    /// The stream was stopped and another started.
+    Restart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3967,6 +4378,18 @@ pub struct SessionListItem {
     pub finalization_progress_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalization_error: Option<String>,
+    /// Plan 157: every file of one separate-source take shares the Combined
+    /// session's id here; absent on ordinary rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_id: Option<String>,
+    /// `combined`, `screen` or `camera` (plan 157); absent on ordinary rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_role: Option<String>,
+    /// A take Videorc stopped in the middle of (crash, killed backend, power
+    /// loss): `recovered` once its MKV was finalized to an MP4 on the next
+    /// start, `failed` when that did not work. Absent on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption_recovery: Option<String>,
 }
 
 /// Progress of a background recording finalization job.
@@ -3987,6 +4410,10 @@ pub struct RecordingFinalizationEvent {
     pub file_size_bytes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Set when this job finished the recovery of an interrupted take
+    /// (`recovered` | `failed`), so the Library row updates without a reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption_recovery: Option<String>,
     pub updated_at: String,
 }
 
@@ -4584,6 +5011,39 @@ pub struct ScreenIdParams {
     pub screen_id: String,
 }
 
+/// Who hid the screen (plan 210 D9/D11): the streamer, or the password-manager
+/// list acting on their behalf. Only the streamer's own surfaces show it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenPrivacyReason {
+    You,
+    PasswordManager,
+}
+
+/// Hide screen state (plan 210 S7), in memory only and cleared at launch.
+/// `screen.privacy.get` returns it, `screen.privacy.changed` carries it on
+/// every hide and show. Absent fields are omitted, never `null`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenPrivacy {
+    pub hidden: bool,
+    /// RFC 3339, the moment of the hide; present only while hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ScreenPrivacyReason>,
+    /// Why `screen.hide` would be refused right now (a legacy FFmpeg session
+    /// reads the display through FFmpeg itself); absent when it would work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenHideParams {
+    pub reason: ScreenPrivacyReason,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenameScreenParams {
@@ -4595,6 +5055,260 @@ pub struct RenameScreenParams {
 #[serde(rename_all = "camelCase")]
 pub struct ReorderScreensParams {
     pub screen_ids: Vec<String>,
+}
+
+/// A banner on the wire (plan 186, pinned 2026-10-20 in
+/// `protocol-fixtures/high-risk-contracts.json` → `banner`). Only basenames
+/// cross the wire: the renderer builds `videorc-asset://banner/<imageFile>`.
+/// The two timer fields are the only optionals and are omitted when off,
+/// never `null` (the serde null trap).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Banner {
+    pub id: String,
+    pub name: String,
+    pub image_file: String,
+    pub thumbnail_file: String,
+    pub width: u32,
+    pub height: u32,
+    pub has_alpha: bool,
+    pub sort_order: i64,
+    pub shown: bool,
+    pub horizontal: OverlayRect,
+    pub vertical: OverlayRect,
+    pub show_on_stream: bool,
+    pub show_in_recording: bool,
+    pub opacity: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hide_after_sec: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_every_min: Option<u32>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `banners.importImage` after main's `sourceCapability` has been resolved to
+/// a path (the same exchange `screens.importImage` makes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBannerImageParams {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BannerIdParams {
+    pub id: String,
+}
+
+/// `banners.hide`: no `id` hides every banner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HideBannerParams {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderBannersParams {
+    pub ids: Vec<String>,
+}
+
+/// `banners.update`: every field but `id` is optional and leaves the stored
+/// value alone when absent. A timer of `0` turns that timer off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBannerParams {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub horizontal: Option<OverlayRect>,
+    #[serde(default)]
+    pub vertical: Option<OverlayRect>,
+    #[serde(default)]
+    pub show_on_stream: Option<bool>,
+    #[serde(default)]
+    pub show_in_recording: Option<bool>,
+    #[serde(default)]
+    pub opacity: Option<f64>,
+    #[serde(default)]
+    pub hide_after_sec: Option<u32>,
+    #[serde(default)]
+    pub repeat_every_min: Option<u32>,
+}
+
+/// How a press plays a sound (plan 189): the audiocn pad modes. Play once
+/// restarts on a second press (D7); Play/stop and Loop stop a playing sound;
+/// While held plays until release.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SoundMode {
+    #[default]
+    OneShot,
+    Toggle,
+    Loop,
+    Hold,
+}
+
+/// A soundboard sound on the wire (plan 189, pinned in
+/// `protocol-fixtures/high-risk-contracts.json` → `sound`). Only the basename
+/// crosses the wire: the monitor builds `videorc-asset://sound/<file>`.
+/// `hotkey` and `starter` are the only optionals and are omitted when absent,
+/// never `null` (the serde null trap).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Sound {
+    pub id: String,
+    pub name: String,
+    /// `<id>.wav` in the managed `Sounds` dir: 48 kHz stereo s16, trimmed.
+    pub file: String,
+    pub duration_ms: u32,
+    /// Integrated loudness measured at import (BS.1770-4).
+    pub loudness_lufs: f64,
+    /// The auto-level gain (D5): toward -18 LUFS, at most +12 dB, peak at or
+    /// under -1 dBFS.
+    pub level_db: f64,
+    /// The streamer's trim, whole dB, -24..+6.
+    pub volume_db: i32,
+    pub mode: SoundMode,
+    /// `"1"`..`"9"`, unique across sounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
+    /// The starter slug (`"airhorn"`); absent for the streamer's own sounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter: Option<String>,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `sounds.list` and `sounds.changed`: the whole soundboard.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardState {
+    pub sounds: Vec<Sound>,
+    /// The soundboard's level on Sources, whole dB, -24..+12.
+    pub volume_db: i32,
+    /// "Hear sounds yourself": the main window's monitor plays while
+    /// recording or live.
+    pub monitor: bool,
+    pub starters_seeded: bool,
+}
+
+/// A starter sound being seeded or restored through `sounds.import`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundStarterImport {
+    pub slug: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
+}
+
+/// `sounds.import` after main's `sourceCapability` has been resolved to a
+/// path (the same exchange `banners.importImage` makes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSoundParams {
+    pub path: String,
+    #[serde(default)]
+    pub starter: Option<SoundStarterImport>,
+}
+
+/// `sounds.update`: every field but `id` is optional and leaves the stored
+/// value alone when absent. `hotkey: ""` clears the key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSoundParams {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub volume_db: Option<i32>,
+    #[serde(default)]
+    pub mode: Option<SoundMode>,
+    #[serde(default)]
+    pub hotkey: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderSoundsParams {
+    pub ids: Vec<String>,
+}
+
+/// `sounds.delete`, `sounds.play` and `sounds.press`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundIdParams {
+    pub id: String,
+}
+
+/// `sounds.stop`: no `id` stops every sound.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopSoundParams {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// `sounds.settings`: only the fields to change.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardSettingsParams {
+    #[serde(default)]
+    pub volume_db: Option<i32>,
+    #[serde(default)]
+    pub monitor: Option<bool>,
+    #[serde(default)]
+    pub starters_seeded: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundPlayResult {
+    pub voice_id: String,
+    /// The sound went into a running session's mix.
+    pub on_air: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundPressResult {
+    /// Omitted when the press stopped the sound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_id: Option<String>,
+    pub on_air: bool,
+}
+
+/// One playing sound.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundVoice {
+    pub voice_id: String,
+    pub sound_id: String,
+    /// Wall clock, epoch ms, when the press arrived.
+    pub started_at_ms: u64,
+    pub duration_ms: u32,
+    pub r#loop: bool,
+    /// In a running session's mix; false means only the monitor plays it.
+    pub on_air: bool,
+}
+
+/// `sounds.playback` and the `sounds.stop` result: every playing sound,
+/// oldest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundsPlayback {
+    pub voices: Vec<SoundVoice>,
+    /// A recording or stream is running that sounds can't reach: its audio
+    /// doesn't go through the session bus (a Linux microphone FFmpeg had to
+    /// open directly), so a press is heard only here (release test 147, plan
+    /// 0001). Omitted when false, never `false` or null on the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_without_sounds: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4694,6 +5408,30 @@ pub struct CohostAuthorParams {
     pub author_key: String,
 }
 
+/// `cohost.utterance.approve` / `cohost.utterance.dismiss` (plan 164 S-D2):
+/// a proposed card by its id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtteranceParams {
+    pub session_id: String,
+    pub utterance_id: String,
+}
+
+/// `cohost.utterance.say` (plan 164 D7): the streamer's own line for the
+/// Buddy, 1 to 200 characters; `state` defaults to `talk`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSayParams {
+    /// The live-chat session the line may be posted to. Empty or absent:
+    /// no session, so the line is bubble-only (the overlay is free; the Say
+    /// box works while recording without chat).
+    #[serde(default)]
+    pub session_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::cohost::CohostUtteranceState>,
+}
+
 /// `cohost.settings.set`: every field optional; absent fields are unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -4711,15 +5449,43 @@ pub struct CohostSettingsPatch {
     /// Replaces the whole list; the engine normalises it (trim, <= 10 x 120).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<String>>,
-    /// Orcle hears the microphone while live (plan 068 D2).
+    /// Buddy hears the microphone while live (plan 068 D2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<bool>,
-    /// Voice commands need "Orcle" first (plan 140 S3).
+    /// Voice commands need "Buddy" first (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_word_required: Option<bool>,
     /// How a voice removal is confirmed (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remove_confirm: Option<crate::live_chat_moderation::RemoveConfirmMode>,
+    /// The whole persona (plan 164 S-A2); the engine validates and trims it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<crate::cohost::CohostPersona>,
+    /// The whole automatic chat block (plan 164 S-A2), validated likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_chat: Option<crate::cohost::CohostAutoChat>,
+}
+
+/// Why a Buddy look picture failed (plan 169), in the web's code and the
+/// tile's words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+impl CohostAvatarErrorDetail {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+
+    pub fn new_owned(code: String, message: String) -> Self {
+        Self { code, message }
+    }
 }
 
 /// `cohost.command.choose` (plan 140 S3): pick one comment from the chooser
@@ -4739,7 +5505,7 @@ pub struct CohostCommandParams {
     pub command_id: String,
 }
 
-// --- Orcle report (plan 119 S1; mirrored in shared/backend.ts) ---
+// --- Buddy report (plan 119 S1; mirrored in shared/backend.ts) ---
 
 /// The report format this build writes and reads. A stored report with any
 /// other version reads as unavailable, never as an error.
@@ -4766,7 +5532,7 @@ pub struct CohostReportSavedEvent {
     pub session_id: String,
 }
 
-/// What became of a question Orcle caught. The latest outcome wins; a
+/// What became of a question Buddy caught. The latest outcome wins; a
 /// restore puts it back to `open`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -4799,7 +5565,7 @@ pub struct CohostReportQuestion {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportQuestions {
-    /// Distinct question ids Orcle surfaced.
+    /// Distinct question ids Buddy surfaced.
     #[serde(default)]
     pub total: u64,
     #[serde(default)]
@@ -4892,9 +5658,132 @@ pub struct CohostReportGreetings {
     /// The streamer pressed Greeted.
     #[serde(default)]
     pub manual: u64,
+    /// Plan 192 D7: automatic greetings the Buddy did not send, by reason.
+    /// Omitted while every count is zero (and on reports from before it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<CohostReportGreetingsSkipped>,
+}
+
+/// Plan 192 D7: why automatic greetings were not sent this session. Each key
+/// is omitted while zero; the lane writes the counts as they happen, like
+/// posts, so a session without a tick still gets them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportGreetingsSkipped {
+    /// The kind's line is switched off.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub no_line: u64,
+    /// Automatic chat, or greetings, is off.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub mode_off: u64,
+    /// The row was older than the fresh window (a replay).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stale: u64,
+    /// The viewer already got this kind of greeting on this destination.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub deduped: u64,
+    /// Waited in a cooldown bucket (sent later, collapsed).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub held: u64,
+    /// No destination could take it, or the send failed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub destination_failed: u64,
+    /// YouTube calls were paused by the quota breaker (plan 094).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub youtube_paused: u64,
+    /// Plan 211 D9: Bubble mode, and Buddy was on no output, so nobody would
+    /// have seen the line.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub no_bubble: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl CohostReportGreetingsSkipped {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn merged_with(self, later: Self) -> Self {
+        Self {
+            no_line: self.no_line.saturating_add(later.no_line),
+            mode_off: self.mode_off.saturating_add(later.mode_off),
+            stale: self.stale.saturating_add(later.stale),
+            deduped: self.deduped.saturating_add(later.deduped),
+            held: self.held.saturating_add(later.held),
+            destination_failed: self
+                .destination_failed
+                .saturating_add(later.destination_failed),
+            youtube_paused: self.youtube_paused.saturating_add(later.youtube_paused),
+            no_bubble: self.no_bubble.saturating_add(later.no_bubble),
+        }
+    }
 }
 
 /// One alert kind viewers raised, with the most distinct viewers who said it
+/// Plan 164 D10: one automatic send, written when it lands (or fails), so
+/// the report says what the Buddy posted as the streamer and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPost {
+    /// The utterance id.
+    pub id: String,
+    pub at: String,
+    pub trigger: crate::cohost::CohostUtteranceTriggerKind,
+    pub text: String,
+    /// The platforms the send reached, or was meant to.
+    #[serde(default)]
+    pub destinations: Vec<crate::streaming::StreamPlatform>,
+    pub result: CohostReportPostResult,
+    /// Plan 192 S2.2: who wrote a greeting, the AI or the line. Omitted on
+    /// manual, answer and banter posts and on rows from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CohostReportPostSource>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportPostResult {
+    Sent,
+    Partial,
+    Failed,
+}
+
+/// Plan 192 S2.2: where a greeting's words came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportPostSource {
+    Ai,
+    Line,
+}
+
+/// Posts kept per report, newest kept.
+pub const COHOST_REPORT_POSTS_CAP: usize = 200;
+
+/// Plan 211 D11: one line Buddy said in its bubble on stream, written when
+/// it actually showed (a queued line that was dropped is not "said"). The
+/// streamer's own Say line is recorded too, with trigger `manual`. `posts`
+/// stays chat-only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportSaid {
+    /// The utterance id.
+    pub id: String,
+    /// When it showed.
+    pub at: String,
+    pub trigger: crate::cohost::CohostUtteranceTriggerKind,
+    /// The text as shown (clipped to the bubble's cap).
+    pub text: String,
+    /// Who wrote a greeting, the AI or the line. Omitted on other lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CohostReportPostSource>,
+}
+
+/// Lines said on stream kept per report, newest kept.
+pub const COHOST_REPORT_SAID_CAP: usize = 200;
+
 /// at once and whether it was ever corroborated (two viewers within 60 s).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -4905,7 +5794,7 @@ pub struct CohostReportAlert {
     pub first_seen_at: String,
 }
 
-/// Recaps are never posted by Orcle, so posting leaves no count.
+/// Recaps are never posted by Buddy, so posting leaves no count.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportRecap {
@@ -4943,7 +5832,7 @@ pub struct CohostReportCommands {
     /// A removal that failed or ended unknown, or a refused request.
     #[serde(default)]
     pub failed: u64,
-    /// No comment matched, or Orcle didn't catch what was said.
+    /// No comment matched, or Buddy didn't catch what was said.
     #[serde(default)]
     pub not_found: u64,
 }
@@ -4966,7 +5855,7 @@ impl CohostReportCommands {
     }
 }
 
-/// What Orcle caught in one stream, saved on this computer when the session
+/// What Buddy caught in one stream, saved on this computer when the session
 /// ends and deleted with the recording (plan 119 decision 6). Counts and the
 /// question log; never raw chat or drafts. Every optional field is omitted,
 /// never null; the blocks always ride and default on read.
@@ -4977,7 +5866,7 @@ pub struct CohostSessionReport {
     pub session_id: String,
     pub started_at: String,
     pub ended_at: String,
-    /// Orcle sessions folded into this report: turning Orcle off and on
+    /// Buddy sessions folded into this report: turning Buddy off and on
     /// mid-stream adds one.
     #[serde(default)]
     pub segments: u32,
@@ -5004,6 +5893,15 @@ pub struct CohostSessionReport {
     /// a report from before voice commands reads and writes unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<CohostReportCommands>,
+    /// Plan 164 D10: what the Buddy posted as the streamer, oldest first, at
+    /// most 200. Omitted while empty, so older reports read unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posts: Vec<CohostReportPost>,
+    /// Plan 211 D11: what Buddy said in its bubble on stream (the streamer's
+    /// Say lines too), oldest first, at most 200. Omitted while empty, so
+    /// older reports read unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub said: Vec<CohostReportSaid>,
 }
 
 impl CohostSessionReport {
@@ -5014,7 +5912,7 @@ impl CohostSessionReport {
         (report.version == COHOST_SESSION_REPORT_VERSION).then_some(report)
     }
 
-    /// Fold a later report of the same session into this one (Orcle turned
+    /// Fold a later report of the same session into this one (Buddy turned
     /// off and on mid-stream, or a replacing start): counts add up, questions
     /// union by id with the later outcome winning, open promises union by
     /// text, and the span covers both.
@@ -5116,6 +6014,11 @@ impl CohostSessionReport {
             .on_stream
             .saturating_add(later.greetings.on_stream);
         greetings.manual = greetings.manual.saturating_add(later.greetings.manual);
+        greetings.skipped = match (greetings.skipped.take(), later.greetings.skipped) {
+            (Some(base), Some(later)) => Some(base.merged_with(later)),
+            (base, later) => base.or(later),
+        }
+        .filter(|skipped| !skipped.is_empty());
 
         for alert in later.alerts {
             match self
@@ -5141,7 +6044,86 @@ impl CohostSessionReport {
             (Some(base), Some(later)) => Some(base.merged_with(later)),
             (base, later) => base.or(later),
         };
+        for post in later.posts {
+            if self.posts.iter().any(|existing| existing.id == post.id) {
+                continue;
+            }
+            self.posts.push(post);
+        }
+        while self.posts.len() > COHOST_REPORT_POSTS_CAP {
+            self.posts.remove(0);
+        }
+        for said in later.said {
+            if self.said.iter().any(|existing| existing.id == said.id) {
+                continue;
+            }
+            self.said.push(said);
+        }
+        while self.said.len() > COHOST_REPORT_SAID_CAP {
+            self.said.remove(0);
+        }
         self
+    }
+
+    /// A report that carries nothing but `post` (plan 164 D10): folded into
+    /// the session's report, or kept alone when the tick session never ran
+    /// (greetings are free). `segments: 0` says so.
+    pub fn post_only(session_id: &str, post: CohostReportPost) -> Self {
+        Self {
+            posts: vec![post.clone()],
+            ..Self::empty(session_id, &post.at)
+        }
+    }
+
+    /// Plan 211 D11: a report that carries nothing but one `said` line,
+    /// folded into the session's report as the line shows (like
+    /// `post_only`).
+    pub fn said_only(session_id: &str, said: CohostReportSaid) -> Self {
+        Self {
+            said: vec![said.clone()],
+            ..Self::empty(session_id, &said.at)
+        }
+    }
+
+    /// Plan 192 D7: a report that carries only greeting skip counts, to fold
+    /// into the session's report as they happen (like `post_only`).
+    pub fn greeting_skips_only(
+        session_id: &str,
+        skipped: CohostReportGreetingsSkipped,
+        at: &str,
+    ) -> Self {
+        Self {
+            greetings: CohostReportGreetings {
+                skipped: Some(skipped).filter(|skipped| !skipped.is_empty()),
+                ..CohostReportGreetings::default()
+            },
+            ..Self::empty(session_id, at)
+        }
+    }
+
+    /// A report with nothing in it, spanning one instant: what the merge
+    /// folds a partial write into (`segments` 0, so it never counts as a
+    /// Buddy session of its own).
+    fn empty(session_id: &str, at: &str) -> Self {
+        Self {
+            version: COHOST_SESSION_REPORT_VERSION,
+            session_id: session_id.to_string(),
+            started_at: at.to_string(),
+            ended_at: at.to_string(),
+            segments: 0,
+            stream_title: None,
+            messages_seen: 0,
+            shown_on_stream: 0,
+            questions: CohostReportQuestions::default(),
+            flags: CohostReportFlags::default(),
+            promises: CohostReportPromises::default(),
+            greetings: CohostReportGreetings::default(),
+            alerts: Vec::new(),
+            recap: CohostReportRecap::default(),
+            commands: None,
+            posts: Vec::new(),
+            said: Vec::new(),
+        }
     }
 }
 
@@ -5175,7 +6157,7 @@ pub struct CohostReportChat {
 }
 
 /// `cohost.report.get` / `cohost.report.latest`: the saved report (null when
-/// Orcle left none), the session's moments (computed on read, never stored)
+/// Buddy left none), the session's moments (computed on read, never stored)
 /// and its chat totals.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -5189,7 +6171,7 @@ pub struct CohostReportPayload {
 }
 
 /// A moment worth a clip: a clip mark or a chat peak, snapped to the
-/// captions. Computed on read for the Orcle report, never stored.
+/// captions. Computed on read for the Buddy report, never stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMoment {
@@ -5234,6 +6216,11 @@ pub struct ClipMark {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phrase: Option<String>,
     pub created_at: String,
+    /// How far back the moment reaches (plan 199 D8): the press's clip
+    /// length, 30 or 60. `None` for every mark made before plan 199, which
+    /// reads as 30 s. Omitted, never null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_seconds: Option<u32>,
 }
 
 /// `clip.marked` event and the `clip.mark` reply: where the mark landed and
@@ -5275,6 +6262,14 @@ pub struct AiCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entitlement_token: Option<String>,
     pub features: AiCapabilitiesFeatures,
+    /// The Buddy routes (plan 164): the tick contract the web speaks and
+    /// whether avatar generation is on. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohost: Option<AiCapabilitiesCohost>,
+    /// Plan 209 S19, contract part F: Buddy's tool planner. Older servers
+    /// omit it, which reads as off: the old wake-word path stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buddy: Option<AiCapabilitiesBuddy>,
     pub generated_at: String,
     pub limits: AiCapabilitiesLimits,
     pub models: AiCapabilitiesModels,
@@ -5282,6 +6277,91 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `buddy` from `GET /api/ai/capabilities` (plan 209 S19): `act` is 1 when
+/// this user may call `POST /api/ai/buddy/act`, 0 otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesBuddy {
+    #[serde(default)]
+    pub act: u32,
+}
+
+impl AiCapabilities {
+    /// Whether the planner may be asked: only an explicit `buddy.act: 1`.
+    pub fn buddy_act_enabled(&self) -> bool {
+        self.buddy.as_ref().is_some_and(|buddy| buddy.act == 1)
+    }
+}
+
+/// `cohost` from `GET /api/ai/capabilities` (plan 164): every field
+/// defaults so a partial block never breaks the load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCohost {
+    /// The newest tick prompt version the web accepts (4 adds the persona).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick: Option<u32>,
+    /// Plan 192 D4: the greet route (`/api/ai/cohost/greet`) version; 1
+    /// when it is on, 0 when switched off or Buddy is off for the user.
+    /// Older servers omit it: the AI never writes greetings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub greet: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AiCapabilitiesAvatar>,
+    /// Pet creation (plan 168, Phase F): on, and this month's creations.
+    /// Older servers omit it: the creator stays off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pet: Option<AiCapabilitiesPet>,
+    /// The account Buddy library (plan 170 D9). Older servers omit it: the
+    /// library is off and the look falls back to the plan 169 route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buddy_library: Option<AiCapabilitiesBuddyLibrary>,
+}
+
+/// `cohost.buddyLibrary` from `GET /api/ai/capabilities` (plan 170 D9):
+/// `enabled` when signed in and the web's library store is configured
+/// (creating still follows `avatar.enabled`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesBuddyLibrary {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub limit: u32,
+    /// Plan 172 D8: alive packs and imports sync (the web's S3 storage is
+    /// configured). Older servers omit it: nothing uploads.
+    #[serde(default)]
+    pub alive: bool,
+}
+
+// --- Buddy pets (plan 168, Phase F) ---
+/// `cohost.pet` from `GET /api/ai/capabilities`. Basic accounts get
+/// `{ enabled: false, creationsRemainingThisMonth: 0, monthlyLimit: 0 }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesPet {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub creations_remaining_this_month: u32,
+    #[serde(default)]
+    pub monthly_limit: u32,
+}
+// --- end Buddy pets (plan 168, Phase F) ---
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesAvatar {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub remaining_today: u32,
+    #[serde(default)]
+    pub daily_limit: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5356,7 +6436,7 @@ pub struct AiCapabilitiesFeatures {
     #[serde(default)]
     pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
-    /// The Orcle command route is on and its model configured (plan 140 S8,
+    /// The Buddy command route is on and its model configured (plan 140 S8,
     /// contract part E). Older servers omit it: the parser stays off.
     #[serde(default)]
     pub cohost_command_enabled: bool,
@@ -5643,6 +6723,58 @@ impl ServerEvent {
 
 #[cfg(test)]
 mod tests {
+    /// Plan 189: the soundboard wire shapes match the pinned fixtures exactly,
+    /// in both directions, and absent optionals are omitted, never null.
+    #[test]
+    fn soundboard_wire_shapes_match_the_pinned_fixtures() {
+        use super::{SoundMode, SoundPressResult, SoundboardState, SoundsPlayback};
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/high-risk-contracts.json"
+        ))
+        .unwrap();
+        let fixture = &fixtures["sound"];
+        for name in ["minimal", "starter"] {
+            let sound: super::Sound = serde_json::from_value(fixture[name].clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&sound).unwrap(),
+                fixture[name],
+                "{name}"
+            );
+        }
+        let minimal: super::Sound = serde_json::from_value(fixture["minimal"].clone()).unwrap();
+        assert_eq!(minimal.mode, SoundMode::Toggle);
+        assert_eq!(minimal.hotkey, None);
+        let mut board = fixture["state"].clone();
+        board["sounds"] = serde_json::json!([fixture["starter"], fixture["minimal"]]);
+        let state: SoundboardState = serde_json::from_value(board.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&state).unwrap(), board);
+        let playback: SoundsPlayback = serde_json::from_value(fixture["playback"].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&playback).unwrap(),
+            fixture["playback"]
+        );
+        assert!(playback.voices[1].r#loop);
+        assert!(!playback.session_without_sounds);
+        let without: SoundsPlayback =
+            serde_json::from_value(fixture["playbackWithoutSounds"].clone()).unwrap();
+        assert!(without.session_without_sounds);
+        assert_eq!(
+            serde_json::to_value(&without).unwrap(),
+            fixture["playbackWithoutSounds"]
+        );
+        let stopped: SoundPressResult =
+            serde_json::from_value(fixture["pressStopped"].clone()).unwrap();
+        assert_eq!(stopped.voice_id, None);
+        assert_eq!(
+            serde_json::to_value(&stopped).unwrap(),
+            fixture["pressStopped"]
+        );
+        assert_eq!(
+            serde_json::to_value(SoundMode::OneShot).unwrap(),
+            serde_json::json!("oneShot")
+        );
+    }
+
     #[test]
     fn audio_level_readings_floor_silence_and_omit_missing_sources() {
         use super::{
@@ -5674,6 +6806,7 @@ mod tests {
             session_id: Some("session-1".into()),
             microphone: Some(sine),
             system_audio: None,
+            sounds: None,
             master: None,
             master_clipped_samples: 0,
         };
@@ -5971,6 +7104,7 @@ mod tests {
                 saturation_percent: 110.0,
                 vignette_percent: 30.0,
                 visibility_percent: 20.0,
+                live: None,
             }),
             ..plain
         };
@@ -5979,6 +7113,65 @@ mod tests {
         assert!(json.contains("\"fit\":\"fit\""));
         let restored: Scene = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, scene);
+    }
+
+    /// Plan 194: every live background id (the plan 190 five and the five
+    /// more) is its catalogue's kebab-case wire id and survives a scene
+    /// background round trip; an unknown id is refused, so the apply fails
+    /// on the existing error path.
+    #[test]
+    fn live_background_ids_round_trip_on_the_wire() {
+        use crate::live_background::{ALL_LIVE_BACKGROUNDS, css_id, looks};
+        let expected = [
+            "silk",
+            "side-rays",
+            "plasma-wave",
+            "liquid-chrome",
+            "line-waves",
+            "beams",
+            "color-bends",
+            "dither",
+            "ferrofluid",
+            "ghost-fibers",
+        ];
+        assert_eq!(ALL_LIVE_BACKGROUNDS.len(), expected.len());
+        for (id, wire) in ALL_LIVE_BACKGROUNDS.into_iter().zip(expected) {
+            assert_eq!(serde_json::to_value(id).unwrap(), serde_json::json!(wire));
+            assert_eq!(css_id(id), wire);
+            let look = looks(id)[0].id;
+            let background = EffectiveSceneBackground {
+                asset_id: format!("live-{wire}-{look}"),
+                managed_asset_path: format!("/bundled/live-{wire}-{look}.webp"),
+                fit: BackgroundFit::Fill,
+                scale: 100.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur_px: 0.0,
+                dim_percent: 10.0,
+                saturation_percent: 100.0,
+                vignette_percent: 0.0,
+                visibility_percent: 20.0,
+                live: Some(LiveBackgroundSpec {
+                    id,
+                    look: look.to_string(),
+                    motion: LiveBackgroundMotion::Normal,
+                }),
+            };
+            let json = serde_json::to_string(&background).unwrap();
+            assert!(
+                json.contains(&format!("\"live\":{{\"id\":\"{wire}\",\"look\":\"{look}\"")),
+                "{json}"
+            );
+            let restored: EffectiveSceneBackground = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, background);
+        }
+        let unknown = r#"{"id":"lava-lamp","look":"default","motion":"calm"}"#;
+        assert!(serde_json::from_str::<LiveBackgroundSpec>(unknown).is_err());
+        // Motion defaults to Calm when a saved spec omits it.
+        let calm: LiveBackgroundSpec =
+            serde_json::from_str(r#"{"id":"ghost-fibers","look":"violet"}"#).unwrap();
+        assert_eq!(calm.id, LiveBackgroundId::GhostFibers);
+        assert_eq!(calm.motion, LiveBackgroundMotion::Calm);
     }
 
     #[test]
@@ -6025,6 +7218,7 @@ mod tests {
                 saturation_percent: 100.0,
                 vignette_percent: 0.0,
                 visibility_percent: 20.0,
+                live: None,
             }),
             protected_overlay_window_ids: Vec::new(),
         };
@@ -6448,6 +7642,94 @@ mod tests {
     }
 
     #[test]
+    fn shared_high_risk_contract_fixture_matches_replay_buffer_shapes() {
+        // Plan 181: the ring request, the buffer-only status mark, the state
+        // event in every state, and the save envelopes.
+        let params = shared_high_risk_contract_fixture_value("/replay/params");
+        let replay: ReplayParams = serde_json::from_value(params.clone()).unwrap();
+        assert_eq!(replay.seconds, 30);
+        assert_eq!(serde_json::to_value(replay).unwrap(), params);
+
+        let status_wire = shared_high_risk_contract_fixture_value("/replay/replayOnlyStatus");
+        let status: RecordingStatus = serde_json::from_value(status_wire.clone()).unwrap();
+        assert!(status.replay_only);
+        assert_eq!(serde_json::to_value(&status).unwrap(), status_wire);
+        // Every other session omits the mark on the wire.
+        let plain = shared_high_risk_contract_fixture_value("/recordingStatus/wire");
+        let plain_status: RecordingStatus = serde_json::from_value(plain).unwrap();
+        assert!(!plain_status.replay_only);
+        assert!(
+            serde_json::to_value(&plain_status)
+                .unwrap()
+                .get("replayOnly")
+                .is_none()
+        );
+
+        // The request: `auto` rides the wire only when true (redesign R2).
+        let params_wire = shared_high_risk_contract_fixture_value("/replay/params");
+        let params: ReplayParams = serde_json::from_value(params_wire.clone()).unwrap();
+        assert!(!params.auto);
+        assert_eq!(serde_json::to_value(params).unwrap(), params_wire);
+        let auto_wire = shared_high_risk_contract_fixture_value("/replay/paramsAuto");
+        let auto: ReplayParams = serde_json::from_value(auto_wire.clone()).unwrap();
+        assert!(auto.auto);
+        assert_eq!(serde_json::to_value(auto).unwrap(), auto_wire);
+
+        for pointer in ["/replay/stateOn", "/replay/stateOff", "/replay/stateError"] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let event: ReplayStateEvent = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(event).unwrap(), wire, "{pointer}");
+        }
+        for pointer in ["/replay/saveAccepted", "/replay/saveAcceptedMinimal"] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let accepted: ReplaySaveAccepted = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(accepted).unwrap(), wire, "{pointer}");
+        }
+        // Plan 199: the accepted save names its length, always.
+        let accepted: ReplaySaveAccepted = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/replay/saveAcceptedMinimal"),
+        )
+        .unwrap();
+        assert_eq!(accepted.seconds, 30);
+        assert!(
+            serde_json::from_value::<ReplaySaveAccepted>(serde_json::json!({
+                "saveId": "save-fixture",
+                "sessionId": "replay-session-fixture"
+            }))
+            .is_err(),
+            "seconds is required on the accepted save"
+        );
+        // Plan 199: `replay.save` and `clip.mark` take an optional length;
+        // no length never rides the wire as null.
+        for (pointer, seconds) in [
+            ("/replay/saveParams", None),
+            ("/replay/saveParamsLong", Some(60)),
+        ] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let params: ReplaySaveParams = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(params.seconds, seconds, "{pointer}");
+            assert_eq!(serde_json::to_value(params).unwrap(), wire, "{pointer}");
+        }
+        for (pointer, seconds) in [
+            ("/clip/markParams", None),
+            ("/clip/markParamsLong", Some(60)),
+        ] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let params: ClipMarkParams = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(params.seconds, seconds, "{pointer}");
+            assert_eq!(serde_json::to_value(params).unwrap(), wire, "{pointer}");
+        }
+        let saved_wire = shared_high_risk_contract_fixture_value("/replay/savedEvent");
+        let saved: ReplaySavedEvent = serde_json::from_value(saved_wire.clone()).unwrap();
+        assert_eq!(saved.source, Some(ClipMarkSource::Manual));
+        assert_eq!(serde_json::to_value(saved).unwrap(), saved_wire);
+        let failed_wire = shared_high_risk_contract_fixture_value("/replay/saveFailedEvent");
+        let failed: ReplaySaveFailedEvent = serde_json::from_value(failed_wire.clone()).unwrap();
+        assert_eq!(failed.reason, "probe");
+        assert_eq!(serde_json::to_value(failed).unwrap(), failed_wire);
+    }
+
+    #[test]
     fn shared_high_risk_contract_fixture_matches_stopped_compositor_nullability() {
         let wire = shared_high_risk_contract_fixture_value("/compositorStatus/stoppedWire");
         let status: CompositorStatus = serde_json::from_value(wire.clone()).unwrap();
@@ -6555,6 +7837,28 @@ mod tests {
             messages[9].fragments[0].image_url.as_deref(),
             Some("https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif")
         );
+        // Plan 162: Activity-only Twitch Power-up and channel point rows.
+        assert_eq!(messages[10].event_type, LiveChatEventType::PowerUp);
+        assert_eq!(
+            messages[10].details,
+            Some(LiveChatEventDetails::PowerUp {
+                bits: 50,
+                power_up: crate::live_chat::PowerUpKind::GigantifyAnEmote,
+                emote_name: Some("orcdevBONK".to_string()),
+                title: None,
+            })
+        );
+        assert_eq!(messages[11].event_type, LiveChatEventType::Redemption);
+        assert_eq!(
+            messages[11].details,
+            Some(LiveChatEventDetails::Redemption {
+                reward: crate::live_chat::RedemptionKind::Custom,
+                channel_points: 500,
+                title: Some("Hydrate".to_string()),
+                emote_name: None,
+                points_name: Some("Orc Gold".to_string()),
+            })
+        );
         assert!(messages[0].author_affiliation.is_none());
         assert_eq!(
             messages[7]
@@ -6590,6 +7894,11 @@ mod tests {
         assert_eq!(marks[0].source, ClipMarkSource::Voice);
         assert_eq!(marks[0].phrase.as_deref(), Some("clip that"));
         assert_eq!(marks[1].phrase, None);
+        // Plan 199 D8: a mark made before the plan has no length on the
+        // wire; a 1-min press carries its 60.
+        assert_eq!(marks[0].lookback_seconds, None);
+        assert_eq!(marks[1].lookback_seconds, None);
+        assert_eq!(marks[2].lookback_seconds, Some(60));
         assert_eq!(serde_json::to_value(marks).unwrap(), marks_wire);
     }
 
@@ -6755,6 +8064,129 @@ mod tests {
         );
     }
 
+    /// Plan 192 D7 and S2.2: the report carries greeting skip counts and
+    /// who wrote each greeting; zero counts, the empty block and the source
+    /// of a manual post are omitted; rows from before parse.
+    #[test]
+    fn shared_high_risk_contract_fixture_report_carries_greeting_skips_and_post_sources() {
+        let report_wire = shared_high_risk_contract_fixture_value("/cohost/reportPayload/report");
+        let report = CohostSessionReport::from_stored_json(&report_wire.to_string()).unwrap();
+        assert_eq!(
+            report.greetings.skipped,
+            Some(CohostReportGreetingsSkipped {
+                no_line: 1,
+                held: 4,
+                youtube_paused: 2,
+                no_bubble: 3,
+                ..CohostReportGreetingsSkipped::default()
+            })
+        );
+        assert_eq!(report.posts.len(), 3);
+        assert_eq!(report.posts[0].source, Some(CohostReportPostSource::Ai));
+        assert_eq!(report.posts[1].source, Some(CohostReportPostSource::Line));
+        assert_eq!(report.posts[2].source, None);
+        // Plan 211 D11: what Buddy said in its bubble rides beside the posts,
+        // with a greeting's source and none on a manual line.
+        assert_eq!(report.said.len(), 2);
+        assert_eq!(
+            report.said[0],
+            CohostReportSaid {
+                id: "utt-4-fixture".to_string(),
+                at: "2026-08-22T10:08:00Z".to_string(),
+                trigger: crate::cohost::CohostUtteranceTriggerKind::Greeting,
+                text: "Welcome, Ada!".to_string(),
+                source: Some(CohostReportPostSource::Line),
+            }
+        );
+        assert_eq!(
+            report.said[1].trigger,
+            crate::cohost::CohostUtteranceTriggerKind::Manual
+        );
+        assert_eq!(report.said[1].source, None);
+        assert_eq!(serde_json::to_value(&report).unwrap(), report_wire);
+        // A said line folds in like a post; the same id is kept once.
+        let folded = report.clone().merged_with(CohostSessionReport::said_only(
+            "session-fixture",
+            CohostReportSaid {
+                id: "utt-6-fixture".to_string(),
+                at: "2026-08-22T10:10:00Z".to_string(),
+                trigger: crate::cohost::CohostUtteranceTriggerKind::Answer,
+                text: "@Ada It's Rust today.".to_string(),
+                source: None,
+            },
+        ));
+        assert_eq!(folded.said.len(), 3);
+        assert_eq!(folded.said[2].id, "utt-6-fixture");
+        assert_eq!(
+            report.clone().merged_with(report.clone()).said.len(),
+            2,
+            "the same lines twice are kept once"
+        );
+        let only = CohostSessionReport::said_only("s", report.said[1].clone());
+        assert_eq!(only.segments, 0);
+        assert!(only.posts.is_empty());
+        assert_eq!(
+            serde_json::to_value(&only).unwrap()["said"][0]["trigger"],
+            "manual"
+        );
+
+        let at = "2026-08-22T10:00:00Z";
+        let empty = CohostSessionReport::greeting_skips_only(
+            "s",
+            CohostReportGreetingsSkipped::default(),
+            at,
+        );
+        assert_eq!(empty.greetings.skipped, None);
+        assert!(
+            serde_json::to_value(&empty).unwrap()["greetings"]
+                .get("skipped")
+                .is_none()
+        );
+        let one = CohostReportGreetingsSkipped {
+            deduped: 3,
+            ..CohostReportGreetingsSkipped::default()
+        };
+        assert_eq!(
+            serde_json::to_value(one).unwrap(),
+            serde_json::json!({ "deduped": 3 })
+        );
+        let merged = CohostSessionReport::greeting_skips_only("s", one, at).merged_with(
+            CohostSessionReport::greeting_skips_only(
+                "s",
+                CohostReportGreetingsSkipped {
+                    deduped: 1,
+                    stale: 2,
+                    ..CohostReportGreetingsSkipped::default()
+                },
+                at,
+            ),
+        );
+        assert_eq!(
+            merged.greetings.skipped,
+            Some(CohostReportGreetingsSkipped {
+                deduped: 4,
+                stale: 2,
+                ..CohostReportGreetingsSkipped::default()
+            })
+        );
+        assert_eq!(merged.segments, 0, "partial writes are not sessions");
+        let old_post: CohostReportPost = serde_json::from_value(serde_json::json!({
+            "id": "u",
+            "at": at,
+            "trigger": "greeting",
+            "text": "hi",
+            "result": "sent"
+        }))
+        .unwrap();
+        assert_eq!(old_post.source, None);
+        assert!(
+            serde_json::to_value(&old_post)
+                .unwrap()
+                .get("source")
+                .is_none()
+        );
+    }
+
     #[test]
     fn shared_high_risk_contract_fixture_matches_cohost_dtos() {
         let start_wire = shared_high_risk_contract_fixture_value("/cohost/startParams");
@@ -6812,7 +8244,7 @@ mod tests {
             errored.detail,
             Some(crate::cohost::CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Orcle tick failed on every configured model.".to_string(),
+                message: "The Buddy tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -6890,7 +8322,7 @@ mod tests {
             Some(crate::cohost::CohostListening {
                 state: crate::cohost::CohostListeningState::Blocked,
                 reason_code: Some("listen-monthly-quota-exhausted".to_string()),
-                message: Some("Orcle's listening allowance for this month is used up.".to_string()),
+                message: Some("Buddy's listening allowance for this month is used up.".to_string()),
                 remaining_seconds: Some(0),
             })
         );
@@ -7099,6 +8531,11 @@ mod tests {
             payload_wire["report"].get("commands").is_none(),
             "omitted, never null"
         );
+        // Plan 211 D11: a report from before `said` reads unchanged and
+        // writes no `said` key; the payload's report carries two lines.
+        assert!(report.said.is_empty());
+        assert!(report_wire.get("said").is_none());
+        assert_eq!(minimal.said.len(), 2);
     }
 
     #[test]
@@ -7110,7 +8547,7 @@ mod tests {
         let mut without = base.clone();
         without.commands = None;
 
-        // Orcle off and on mid-stream: the counts add up.
+        // Buddy off and on mid-stream: the counts add up.
         let merged = base.clone().merged_with(base.clone());
         let doubled = merged.commands.unwrap();
         assert_eq!(doubled.highlighted, counted.highlighted * 2);
@@ -7318,6 +8755,7 @@ mod tests {
             }],
         };
         let state = PerformanceCheckState {
+            last_run_not_recorded: None,
             running: false,
             result: Some(result.clone()),
             stale: false,
@@ -7331,6 +8769,7 @@ mod tests {
         let decoded: PerformanceCheckState = serde_json::from_str(&text).unwrap();
         assert_eq!(decoded.result, Some(result));
         let idle = serde_json::to_string(&PerformanceCheckState {
+            last_run_not_recorded: None,
             running: true,
             result: None,
             stale: false,
@@ -7386,6 +8825,7 @@ mod tests {
             effective_encode_backend: EncodeBackend::SoftwareOpenH264,
             probe_state: StreamOutputTopologyProbeState::Rejected,
             fallback_reason: Some("hardware profile rejected".to_string()),
+            encoder_selection_reason: None,
         };
         let wire = serde_json::to_value(result).unwrap();
         assert_eq!(

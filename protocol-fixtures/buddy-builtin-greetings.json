@@ -1,0 +1,26 @@
+{
+  "$comment": "Plan 192: Buddy's built-in greeting lines, used when the user has no line of their own for a kind. Rust (cohost_greetings::BUILTIN_GREETINGS) and TS (BUDDY_BUILTIN_GREETINGS) each assert they equal this file. `first-time` and `returning` are the welcomes (greetings.welcomes); the rest are Activity kinds (templates[]).",
+  "version": 1,
+  "lines": [
+    { "kind": "first-time", "text": "Hi {name}, welcome to the stream!", "state": "talk" },
+    { "kind": "returning", "text": "Welcome back, {name}!", "state": "talk" },
+    { "kind": "follow", "text": "Welcome, {name}! Thanks for the follow.", "state": "talk" },
+    { "kind": "sub", "text": "{name} joined the ranks. Thank you!", "state": "laugh" },
+    { "kind": "resub", "text": "{name} is back in the ranks. Thank you!", "state": "laugh" },
+    { "kind": "sub-gift", "text": "Thanks for the gift sub, {name}!", "state": "laugh" },
+    {
+      "kind": "community-sub-gift",
+      "text": "{name} gifted subs to the chat. Thank you!",
+      "state": "laugh"
+    },
+    { "kind": "membership", "text": "Welcome to the members, {name}!", "state": "laugh" },
+    { "kind": "cheer", "text": "Thanks for the bits, {name}!", "state": "talk" },
+    { "kind": "kicks", "text": "Thanks for the Kicks, {name}!", "state": "talk" },
+    { "kind": "super-chat", "text": "Thanks for the Super Chat, {name}!", "state": "talk" },
+    { "kind": "super-sticker", "text": "Thanks for the Super Sticker, {name}!", "state": "talk" },
+    { "kind": "raid", "text": "{name} is raiding! Welcome, everyone!", "state": "laugh" },
+    { "kind": "watch-streak", "text": "{name}, thanks for the watch streak!", "state": "talk" },
+    { "kind": "power-up", "text": "Thanks for the power-up, {name}!", "state": "talk" },
+    { "kind": "redemption", "text": "Thanks for redeeming, {name}!", "state": "talk" }
+  ]
+}

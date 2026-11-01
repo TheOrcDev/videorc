@@ -91,6 +91,12 @@ pub enum LiveChatEventType {
     /// A new follower (Twitch `channel.follow`, only with the opt-in scope).
     /// The Stream Manager lists it under Activity and never in chat.
     Follow,
+    /// A Twitch Power-up paid with bits (`channel.bits.use`, plan 162).
+    /// Activity only, like a follow: a gigantified emote's own chat message
+    /// stays an ordinary chat row.
+    PowerUp,
+    /// A Twitch channel point redemption (plan 162). Activity only.
+    Redemption,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -225,6 +231,34 @@ pub enum LiveChatEventDetails {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_points_awarded: Option<u64>,
     },
+    /// A Twitch Power-up paid with bits (plan 162). `emote_name` is the
+    /// gigantified emote, when there is one; `title` is a Custom Power-up's
+    /// own name ("Meow, Mao", plan 163).
+    #[serde(rename_all = "camelCase")]
+    PowerUp {
+        bits: u64,
+        power_up: PowerUpKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emote_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// A Twitch channel point redemption (plan 162). `title` is a custom
+    /// reward's title; automatic rewards have none and the window names them.
+    /// `emote_name` is the emote an automatic reward unlocked. `points_name`
+    /// is what the channel calls its points ("Orc Gold", plan 163), absent
+    /// when the channel kept Twitch's default or the name could not be read.
+    #[serde(rename_all = "camelCase")]
+    Redemption {
+        reward: RedemptionKind,
+        channel_points: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emote_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        points_name: Option<String>,
+    },
     /// A new follower. `handle` is the @-mentionable login (Twitch
     /// `user_login`, X and Kick `username`) when it differs from, or is
     /// missing from, the display name (plan 071, S5).
@@ -242,6 +276,32 @@ pub enum MembershipKind {
     Milestone,
     Gift,
     GiftReceived,
+}
+
+/// Which Twitch Power-up a viewer paid bits for (`channel.bits.use`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PowerUpKind {
+    Celebration,
+    GigantifyAnEmote,
+    MessageEffect,
+    /// A Power-up the channel made itself (`custom_power_up`).
+    Custom,
+}
+
+/// Which channel point reward a viewer redeemed: the channel's own custom
+/// reward, or one of Twitch's automatic rewards.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RedemptionKind {
+    Custom,
+    HighlightedMessage,
+    SubOnlyMessage,
+    RandomEmoteUnlock,
+    ChosenEmoteUnlock,
+    ModifiedEmoteUnlock,
+    /// An automatic reward Twitch added after this build.
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -280,6 +340,47 @@ pub struct LiveChatAuthorAffiliation {
     pub url: Option<String>,
 }
 
+/// The verified check a platform shows beside an author's name: X's Premium
+/// (blue), Verified Organization (gold) or government (gray) check (plan 167).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LiveChatAuthorVerified {
+    Blue,
+    Business,
+    Government,
+}
+
+impl LiveChatAuthorVerified {
+    /// X's `verified_type`. `none`, empty and unknown values show no check:
+    /// never a check X did not send.
+    pub fn from_x_verified_type(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "blue" => Some(Self::Blue),
+            "business" => Some(Self::Business),
+            "government" => Some(Self::Government),
+            _ => None,
+        }
+    }
+
+    /// The stored word, the same as the wire value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blue => "blue",
+            Self::Business => "business",
+            Self::Government => "government",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "blue" => Some(Self::Blue),
+            "business" => Some(Self::Business),
+            "government" => Some(Self::Government),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -301,6 +402,9 @@ pub struct LiveChatMessage {
     /// The organization badge next to the author's name (X affiliation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_affiliation: Option<LiveChatAuthorAffiliation>,
+    /// The verified check next to the author's name (X `verified_type`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_verified: Option<LiveChatAuthorVerified>,
     #[serde(default)]
     pub author_roles: Vec<String>,
     pub published_at: String,
@@ -325,6 +429,12 @@ pub struct LiveChatMessage {
     /// intro, or the first message from an author no earlier session saw.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first_message: bool,
+    /// The author's first message this session (plan 192 S1.2), set beside
+    /// `first_message` by local bookkeeping only. Never on the wire or in
+    /// SQLite: it lives for one delivery, so the Buddy can welcome a
+    /// returning chatter.
+    #[serde(skip)]
+    pub first_in_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -580,6 +690,20 @@ pub fn chat_capability(
                 moderate_state_for_scope(account, crate::kick_chat::KICK_CHAT_MODERATE_SCOPE);
             capability
         }
+        // A stream-key Facebook live can't be read: comments need the Page
+        // sign-in that waits on Meta's review (plan 206 S9).
+        StreamPlatform::Facebook => ChatCapability {
+            platform,
+            state: ChatCapabilityState::Unsupported,
+            read: CommentsReadState::Unavailable,
+            write: CommentsWriteState::Unavailable,
+            moderate: Some(CommentsModerateState::Unsupported),
+            chat_read_available: false,
+            required_scope: None,
+            account_id: None,
+            account_label: None,
+            message: FACEBOOK_COMMENTS_UNAVAILABLE.to_string(),
+        },
         StreamPlatform::Tiktok | StreamPlatform::Instagram => ChatCapability {
             platform,
             state: ChatCapabilityState::Unsupported,
@@ -695,8 +819,14 @@ fn scope_capability(
     }
 }
 
+/// Facebook's row in a session that streams to it with a key.
+pub const FACEBOOK_COMMENTS_UNAVAILABLE: &str =
+    "Facebook comments need Facebook sign-in, which isn't available yet.";
+
 /// Chat capability for every native platform (YouTube, Twitch, X, Kick), preferring a connected
-/// account over stale saved rows. Custom RTMP has no platform comments and is omitted.
+/// account over stale saved rows. Custom RTMP has no platform comments and is omitted, and so
+/// are the key-only destinations (Facebook, TikTok, Instagram): a session that streams to one
+/// gets its unsupported row from its destination instead.
 pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
     chat_capabilities_with_quota(accounts, false)
 }
@@ -984,6 +1114,10 @@ pub struct LiveChatCoordinator {
     /// What Settings shows: the last 7TV outcome in this app run. Outlives
     /// sessions, so "Loads when you go live" only shows before the first.
     seventv_status: crate::seventv::SevenTvStatus,
+    /// Fake destinations that echo an accepted post back into chat
+    /// (`FakeChatConfig::echo_sends`), each with its echo task's inbox;
+    /// session-scoped like `senders`.
+    fake_echo: HashMap<String, tokio::sync::mpsc::UnboundedSender<LiveChatMessage>>,
 }
 
 /// Minimal authoritative answer needed at the comment-card commit edge. Do
@@ -1067,6 +1201,7 @@ impl LiveChatCoordinator {
             seventv_endpoint: (!cfg!(test)).then(|| crate::seventv::SEVENTV_GQL_URL.to_string()),
             seventv_task: None,
             seventv_status: crate::seventv::SevenTvStatus::default(),
+            fake_echo: HashMap::new(),
         }
     }
 
@@ -1183,6 +1318,12 @@ impl LiveChatCoordinator {
     /// True once a session has been started (or left a transcript) — drives whether
     /// `current_status` returns the live view versus the setup-time capability snapshot.
     /// The active chat session id, if a session is running.
+    /// The session's destinations as last installed (plan 164 Phase D reads
+    /// their write state).
+    pub(crate) fn providers(&self) -> &[LiveChatProviderState] {
+        &self.providers
+    }
+
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
@@ -1211,6 +1352,7 @@ impl LiveChatCoordinator {
         self.messages_received = 0;
         self.reconnect_count = 0;
         self.senders.clear();
+        self.fake_echo.clear();
         self.chatters_seen.clear();
         self.seventv_indexes = Arc::default();
     }
@@ -1228,6 +1370,7 @@ impl LiveChatCoordinator {
         }
         self.session_id = None;
         self.senders.clear();
+        self.fake_echo.clear();
         self.seventv_indexes = Arc::default();
     }
 
@@ -1266,6 +1409,7 @@ impl LiveChatCoordinator {
                 message.author_avatar_url = existing.author_avatar_url.clone();
                 message.author_badges = existing.author_badges.clone();
                 message.author_affiliation = existing.author_affiliation.clone();
+                message.author_verified = existing.author_verified;
                 message.author_roles = existing.author_roles.clone();
                 message.published_at = existing.published_at.clone();
                 message.received_at = existing.received_at.clone();
@@ -1749,10 +1893,21 @@ pub struct FakeChatConfig {
     /// "Test Viewer N", so a smoke can say a name ("coders_x", plan 140 S9).
     #[serde(default)]
     pub authors: Vec<String>,
+    /// Message texts to rotate through (`texts[seq % len]`) instead of "Fake
+    /// chat message #N", so a smoke can seed a line (plan 209 S9 reads an
+    /// injection attempt back as `viewerText`).
+    #[serde(default)]
+    pub texts: Vec<String>,
     /// A scripted removal outcome for this destination (plan 140 S9). Absent:
     /// the removal mirrors `send` (sent removes, failed fails, timeout hangs).
     #[serde(default)]
     pub delete: Option<FakeChatDeleteBehavior>,
+    /// Echo every post this fake destination accepts back into chat as the
+    /// streamer's own message, the way YouTube and Twitch show your post in
+    /// their chat (plan 209 S12). Lets a smoke read an agent's post back.
+    /// Off by default, so the smokes that count rows are unchanged.
+    #[serde(default)]
+    pub echo_sends: bool,
 }
 
 /// What a fake destination answers a removal with (plan 140 S9's smoke).
@@ -1868,7 +2023,10 @@ where
                 .kick
                 .as_ref()
                 .and_then(|config| config.target_id.clone()),
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => None,
+            StreamPlatform::Facebook
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => None,
         };
         let configured_target_id = configured_target_id.or_else(|| {
             params
@@ -1936,6 +2094,15 @@ where
             };
         }
         if fake.platform != StreamPlatform::X {
+            if fake.echo_sends {
+                let (inbox, posts) = tokio::sync::mpsc::unbounded_channel();
+                coordinator.fake_echo.insert(destination_id.clone(), inbox);
+                coordinator.attach_task(tokio::spawn(run_fake_echo(
+                    state.clone(),
+                    session_generation,
+                    posts,
+                )));
+            }
             coordinator.register_sender(destination_id, fake_sender(&fake));
         }
         coordinator.attach_task(handle);
@@ -1961,6 +2128,15 @@ where
             };
         }
         if fake.platform != StreamPlatform::X {
+            if fake.echo_sends {
+                let (inbox, posts) = tokio::sync::mpsc::unbounded_channel();
+                coordinator.fake_echo.insert(destination_id.clone(), inbox);
+                coordinator.attach_task(tokio::spawn(run_fake_echo(
+                    state.clone(),
+                    session_generation,
+                    posts,
+                )));
+            }
             coordinator.register_sender(destination_id, fake_sender(&fake));
         }
         coordinator.attach_task(handle);
@@ -2018,6 +2194,7 @@ where
                     client_id: config.client_id.clone(),
                     broadcaster_user_id: config.broadcaster_user_id.clone(),
                     api_base_url: config.api_base_url.clone(),
+                    target_id: config.target_id.clone(),
                     token_source: config.token_source.clone(),
                 });
         let kick_viewers =
@@ -2029,6 +2206,27 @@ where
                     api_base_url: config.overrides.kick_api_base_url.clone(),
                     token_source: config.token_source.clone(),
                 });
+        // Plan 161: YouTube's own word on whether it receives the stream,
+        // on the same lifecycle (Twitch's rides the viewer poll).
+        if let Some(watch) = params.youtube.as_ref().and_then(|config| {
+            config.broadcast_id.clone().map(|broadcast_id| {
+                crate::platform_stream_watch::YouTubeIngestWatchConfig {
+                    access_token: config.access_token.clone(),
+                    broadcast_id,
+                    target_id: config.target_id.clone(),
+                    api_base_url: config.api_base_url.clone(),
+                    token_source: config.token_source.clone(),
+                }
+            })
+        }) {
+            let handle = tokio::spawn(crate::platform_stream_watch::run_youtube_ingest_watch(
+                state.clone(),
+                params.session_id.clone(),
+                watch,
+            ));
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.attach_task(handle);
+        }
         if youtube_viewers.is_some() || twitch_viewers.is_some() || kick_viewers.is_some() {
             let handle = tokio::spawn(crate::viewer_stats::run_viewer_sampler(
                 state.clone(),
@@ -2461,11 +2659,12 @@ async fn execute_send_live_chat_message(
         return Ok(existing);
     }
 
-    let (providers, senders) = {
+    let (providers, senders, echo_destinations) = {
         let coordinator = state.live_chat.lock().await;
         if coordinator.session_id.as_deref() != Some(params.session_id.as_str()) {
             return Err("The Comments session changed before this message could send.".to_string());
         }
+        let echo_destinations = coordinator.fake_echo.clone();
         let providers = coordinator
             .providers
             .iter()
@@ -2481,7 +2680,7 @@ async fn execute_send_live_chat_message(
             .iter()
             .map(|provider| (provider.id.clone(), coordinator.sender(&provider.id)))
             .collect::<HashMap<_, _>>();
-        (providers, senders)
+        (providers, senders, echo_destinations)
     };
     if params.destination_ids.is_some() && providers.is_empty() {
         return Err("Pick at least one destination to send to.".to_string());
@@ -2581,10 +2780,43 @@ async fn execute_send_live_chat_message(
         .save_chat_send_operation(&operation)
         .map_err(|error| format!("Could not persist send result: {error}"))?;
     state.emit_event("liveChat.sendOperation", operation.clone());
+    // A fake destination with `echoSends` shows the accepted post in chat,
+    // as the platform would (plan 209 S12's smoke reads it back). Its own
+    // task delivers it: delivery reaches Buddy's auto-chat pump, which posts
+    // through this function.
+    for delivery in operation
+        .destinations
+        .iter()
+        .filter(|delivery| delivery.phase == DestinationDeliveryPhase::Sent)
+    {
+        let Some(inbox) = echo_destinations.get(&delivery.destination_id) else {
+            continue;
+        };
+        let Some(provider) = providers
+            .iter()
+            .find(|provider| provider.id == delivery.destination_id)
+        else {
+            continue;
+        };
+        let echo = fake_echo_message(
+            &operation.session_id,
+            provider,
+            delivery
+                .provider_message_id
+                .as_deref()
+                .unwrap_or(&operation.id),
+            &operation.text,
+        );
+        let _ = inbox.send(echo);
+    }
+    // Plan 164 D10: a Buddy send is the streamer's account, so its echo is
+    // theirs (noted above), but it is never "the streamer replied": no
+    // question closes and nobody is greeted by it.
     if matches!(
         operation.phase,
         CommentsSendOperationPhase::Sent | CommentsSendOperationPhase::Partial
-    ) {
+    ) && !crate::cohost::is_buddy_operation(state, &operation.id).await
+    {
         crate::cohost::note_own_send_delivered(
             state,
             &operation.session_id,
@@ -2814,7 +3046,7 @@ pub async fn stop_live_chat(state: &AppState) -> LiveChatSnapshot {
     .await
 }
 
-/// `session.stop`: the chat session ends with the capture. Orcle stops too,
+/// `session.stop`: the chat session ends with the capture. Buddy stops too,
 /// but a listen-only transcription task drains with the capture so the
 /// stream's last words still reach its SRT and Clip that (plan 068 review).
 pub async fn stop_live_chat_for_capture_end(state: &AppState) -> LiveChatSnapshot {
@@ -3091,6 +3323,9 @@ async fn mark_first_time_chatters(
             {
                 continue;
             }
+            // Plan 192 S1.2: the first row of each fresh author this session,
+            // first-time or not, so the Buddy can welcome them back.
+            message.first_in_session = true;
             if !returning.contains(&key) {
                 message.first_message = true;
             }
@@ -3108,7 +3343,7 @@ async fn mark_first_time_chatters(
 }
 
 /// Turn 7TV emote names into image fragments (plan 089) before the buffer,
-/// SQLite, the renderer, the phone and Orcle see the message, so they all
+/// SQLite, the renderer, the phone and Buddy see the message, so they all
 /// agree. A pure lookup in the session's loaded index, outside every fence;
 /// it never touches the network.
 async fn decorate_seventv_emotes(
@@ -3513,6 +3748,16 @@ async fn run_fake_connector(
     .await;
 }
 
+/// The fake activity rows for the greeting tests (plan 164 S-D1).
+#[cfg(test)]
+pub(crate) fn fake_events_for_tests(
+    session_id: &str,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+) -> Vec<LiveChatMessage> {
+    fake_events(session_id, platform, target_id)
+}
+
 /// Build one deterministic fake message. Shared by the fake connector and the unit tests.
 /// One of each activity event a platform has, shaped as its connector would
 /// normalize it (plan 055 smoke; the parsers' own tests pin the real payloads).
@@ -3634,6 +3879,44 @@ fn fake_events(
                 "new_friend followed",
                 None,
             ),
+            // Plan 162: Activity-only rows, shaped as the connector makes them.
+            event(
+                "channel.bits.use:power_up",
+                "party_starter",
+                LiveChatEventType::PowerUp,
+                LiveChatEventDetails::PowerUp {
+                    bits: 300,
+                    power_up: PowerUpKind::Celebration,
+                    emote_name: None,
+                    title: None,
+                },
+                "party_starter used a Celebration",
+                None,
+            ),
+            {
+                let mut redemption = event(
+                    "channel.channel_points_custom_reward_redemption.add",
+                    "hydration_hero",
+                    LiveChatEventType::Redemption,
+                    LiveChatEventDetails::Redemption {
+                        reward: RedemptionKind::Custom,
+                        channel_points: 500,
+                        title: Some("Hydrate".to_string()),
+                        emote_name: None,
+                        // Plan 163: a channel's own name for its points.
+                        points_name: Some("Diamonds".to_string()),
+                    },
+                    "hydration_hero redeemed Hydrate",
+                    None,
+                );
+                redemption.fragments = vec![LiveChatMessageFragment {
+                    fragment_type: "text".to_string(),
+                    text: "drink some water!".to_string(),
+                    image_url: None,
+                    zero_width: false,
+                }];
+                redemption
+            },
         ],
         StreamPlatform::Kick => vec![
             event(
@@ -3748,10 +4031,54 @@ fn fake_message_for(config: &FakeChatConfig, session_id: &str, seq: u32) -> Live
         message.author_id = Some(format!("fake-author-{}", author.to_lowercase()));
         message.author_name = author.clone();
     }
+    if !config.texts.is_empty() {
+        message.message_text = config.texts[seq as usize % config.texts.len()].clone();
+    }
     message
 }
 
-fn fake_message(
+/// A fake destination's echo task (plan 209 S12): delivers each accepted post
+/// back into chat until the session drops its inbox.
+async fn run_fake_echo(
+    state: AppState,
+    session_generation: u64,
+    mut posts: tokio::sync::mpsc::UnboundedReceiver<LiveChatMessage>,
+) {
+    while let Some(message) = posts.recv().await {
+        let _ = try_deliver_message(&state, session_generation, message).await;
+    }
+}
+
+/// A fake destination's echo of an accepted post: the streamer's own row,
+/// with the provider id the fake send returned (plan 209 S12).
+fn fake_echo_message(
+    session_id: &str,
+    provider: &LiveChatProviderState,
+    provider_message_id: &str,
+    text: &str,
+) -> LiveChatMessage {
+    let mut message = fake_message(
+        session_id,
+        provider.platform,
+        provider.target_id.as_deref(),
+        0,
+    );
+    message.provider_message_id = provider_message_id.to_string();
+    message.id = live_chat_message_id(
+        session_id,
+        provider.platform,
+        provider.target_id.as_deref(),
+        provider_message_id,
+    );
+    message.author_id = Some("fake-broadcaster".to_string());
+    message.author_name = "You".to_string();
+    message.author_roles = vec!["broadcaster".to_string()];
+    message.author_verified = None;
+    message.message_text = text.to_string();
+    message
+}
+
+pub(crate) fn fake_message(
     session_id: &str,
     platform: StreamPlatform,
     target_id: Option<&str>,
@@ -3781,7 +4108,16 @@ fn fake_message(
         details: None,
         reply: None,
         first_message: false,
+        first_in_session: false,
         author_affiliation: None,
+        // Fake X chat shows each of X's checks and an unverified viewer, so
+        // the dev Stream Manager and the smokes see all of them (plan 167).
+        author_verified: match (platform, seq % 4) {
+            (StreamPlatform::X, 0) => Some(LiveChatAuthorVerified::Blue),
+            (StreamPlatform::X, 1) => Some(LiveChatAuthorVerified::Business),
+            (StreamPlatform::X, 2) => Some(LiveChatAuthorVerified::Government),
+            _ => None,
+        },
     }
 }
 
@@ -4783,14 +5119,14 @@ mod tests {
         let messages = completed
             .expect("all three exact fake provider end events must arrive")
             .expect("fixture events must not lag");
-        assert_eq!(messages.len(), 14);
+        assert_eq!(messages.len(), 16);
         assert_eq!(
             messages
                 .iter()
                 .filter_map(|message| message["id"].as_str())
                 .collect::<HashSet<_>>()
                 .len(),
-            14
+            16
         );
         assert!(response.ok);
         let wire = serde_json::to_string(&response).unwrap();
@@ -4805,8 +5141,8 @@ mod tests {
         assert_eq!(
             reduced,
             serde_json::json!({
-                "status": "available", "messageCount": 14, "chatters": 7,
-                "supporters": 7, "follows": 2, "raids": 1, "bits": 1500,
+                "status": "available", "messageCount": 16, "chatters": 7,
+                "supporters": 7, "follows": 2, "raids": 1, "bits": 1800,
                 "tips": [{ "currency": "USD", "amountMicros": 5_000_000 },
                          { "currency": "EUR", "amountMicros": 2_000_000 }]
             })
@@ -4848,12 +5184,13 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(value["messageCount"], 14);
+        assert_eq!(value["messageCount"], 16);
         assert_eq!(value["chatters"], 7);
         assert_eq!(value["supporters"], 7);
         assert_eq!(value["follows"], 2);
         assert_eq!(value["raids"], 1);
-        assert_eq!(value["bits"], 1500);
+        // Plan 162: the fake Celebration's 300 bits count; Hydrate's points do not.
+        assert_eq!(value["bits"], 1800);
         assert_eq!(
             value["tips"],
             serde_json::json!([{ "currency":"USD", "amountMicros":5_000_000 }, { "currency":"EUR", "amountMicros":2_000_000 }])
@@ -6981,6 +7318,36 @@ mod tests {
     }
 
     #[test]
+    fn facebook_stream_key_destination_says_comments_need_sign_in() {
+        let capability = chat_capability(StreamPlatform::Facebook, None);
+        assert_eq!(capability.state, ChatCapabilityState::Unsupported);
+        assert!(!capability.chat_read_available);
+        assert_eq!(capability.message, FACEBOOK_COMMENTS_UNAVAILABLE);
+        // Only a session that streams to Facebook carries its row.
+        assert!(
+            chat_capabilities(&[])
+                .iter()
+                .all(|capability| capability.platform != StreamPlatform::Facebook)
+        );
+        let providers = session_provider_rows(
+            &[],
+            &[],
+            &[LiveChatDestinationStart {
+                target_id: "facebook".to_string(),
+                platform: StreamPlatform::Facebook,
+                read: None,
+                write: None,
+                preparation_error: None,
+            }],
+        );
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].target_id.as_deref(), Some("facebook"));
+        assert_eq!(providers[0].read, CommentsReadState::Unavailable);
+        assert_eq!(providers[0].write, CommentsWriteState::Unavailable);
+        assert_eq!(providers[0].message, FACEBOOK_COMMENTS_UNAVAILABLE);
+    }
+
+    #[test]
     fn live_chat_message_round_trips_with_camel_case_and_kebab_event_type() {
         let message = LiveChatMessage {
             id: live_chat_message_id(
@@ -7014,7 +7381,9 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            first_in_session: false,
             author_affiliation: None,
+            author_verified: None,
         };
         assert_eq!(message.id, "session-1:youtube:target-1:abc123");
         let json = serde_json::to_value(&message).unwrap();
@@ -7117,12 +7486,12 @@ mod tests {
         );
     }
 
-    /// Plan 068 review, finding 2: `session.stop` retires chat and Orcle, but
+    /// Plan 068 review, finding 2: `session.stop` retires chat and Buddy, but
     /// a listen-only transcription task drains with the capture (its last
     /// words reach the SRT and Clip that); with no capture running, or on an
     /// explicit `liveChat.stop`, it ends at once.
     #[tokio::test]
-    async fn session_stop_lets_orcles_listen_task_drain_with_the_capture() {
+    async fn session_stop_lets_the_buddy_listen_task_drain_with_the_capture() {
         let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         *state.recording.lock().await =

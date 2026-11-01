@@ -1,5 +1,6 @@
 import type {
   LiveChatMessage,
+  LiveChatProviderState,
   ModerationOperation,
   ModerationPhase,
   StreamPlatform
@@ -13,7 +14,7 @@ import {
 
 // Chat removal, the renderer's view (plan 140, S6). Everything here is a pure
 // derivation of the chat row and the backend's `ModerationOperation`, so the
-// row chip, Orcle's removal card, its result line and the main-window toast
+// row chip, Buddy's removal card, its result line and the main-window toast
 // cannot disagree. The backend owns every timer (`confirmBy`, `executeAt`);
 // the views only count down to them.
 
@@ -100,7 +101,44 @@ export function removeFromChatAvailable(
   return !operation || moderationOperationTerminal(operation)
 }
 
-// --- Orcle's removal card --------------------------------------------------
+/**
+ * Why "Remove from chat" is off for this row (plan 174 S3.16a, H-11): the
+ * account behind the message's platform lacks the permission to delete
+ * there (the backend's `moderate` state), so the item is offered disabled
+ * with the fix instead of failing after the click. X grants it through
+ * Authorize X Live, every other platform through a reconnect. Null when the
+ * row can be removed, or when nothing says it cannot.
+ */
+export function removeFromChatBlockedReason(
+  message: Pick<LiveChatMessage, 'platform' | 'targetId'>,
+  providers: readonly Pick<LiveChatProviderState, 'platform' | 'targetId' | 'moderate'>[]
+): string | null {
+  const same = providers.filter((provider) => provider.platform === message.platform)
+  const provider =
+    same.find((candidate) => message.targetId && candidate.targetId === message.targetId) ?? same[0]
+  if (provider?.moderate !== 'missing-scope') return null
+  return message.platform === 'x'
+    ? 'Authorize X Live to remove messages'
+    : `Reconnect ${CHAT_PLATFORM_LABELS[message.platform]} to remove messages`
+}
+
+/** How long a manual removal waits for Undo before it runs (plan 174 D20). */
+export const REMOVE_UNDO_MS = 3_000
+
+/** The "Removing… · Undo" toast for a manual removal (plan 174 D20). */
+export function removalUndoToast(message: Pick<LiveChatMessage, 'id' | 'authorName'>): {
+  id: string
+  title: string
+  action: string
+} {
+  return {
+    id: `chat-removal-undo:${message.id}`,
+    title: `Removing ${message.authorName}'s message`,
+    action: 'Undo'
+  }
+}
+
+// --- Buddy's removal card --------------------------------------------------
 
 export const REMOVAL_CARD_TITLE = 'Remove from chat?'
 export const REMOVAL_CARD_REMOVING = 'Removing…'
@@ -137,17 +175,23 @@ export interface RemovalCardView {
   confirmLabel: string
 }
 
+/** The removals that show a card: Buddy's voice commands, and an AI
+ * agent's (plan 209 S12), which waits on YouTube for the streamer's click. */
+function removalHasCard(operation: Pick<ModerationOperation, 'source'>): boolean {
+  return operation.source === 'orcle-voice' || operation.source === 'agent'
+}
+
 /**
- * The card for one Orcle voice removal: while it waits for an answer, and
- * while it runs once answered. Manual removals never have a card; the menu
- * click was the consent. YouTube is always confirm-first.
+ * The card for one Buddy voice removal, or an agent's: while it waits for an
+ * answer, and while it runs once answered. Manual removals never have a card;
+ * the menu click was the consent. YouTube is always confirm-first.
  */
 export function removalCardView(
   operation: ModerationOperation,
   nowMs: number,
   answering = false
 ): RemovalCardView | null {
-  if (operation.source !== 'orcle-voice') return null
+  if (!removalHasCard(operation)) return null
   if (operation.phase !== 'pending-confirm' && operation.phase !== 'executing') return null
   const countdown = operation.confirmMode === 'countdown' && !operation.requiresExplicitConfirm
   const base = {
@@ -198,7 +242,7 @@ export function removalCardView(
 export const REMOVAL_RESULT_VISIBLE_MS = 6_000
 
 const REMOVAL_RESULT_FALLBACK: Partial<Record<ModerationPhase, string>> = {
-  cancelled: 'Cancelled. Nothing was removed.',
+  cancelled: 'Canceled. Nothing was removed.',
   expired: 'No answer. Nothing was removed.',
   removed: 'Removed.',
   'hidden-locally': 'Hidden in Videorc. Viewers may still see it.',
@@ -213,12 +257,12 @@ export interface RemovalResultView {
   text: string
 }
 
-/** The brief line a finished Orcle removal leaves where its card was. */
+/** The brief line a finished Buddy (or agent) removal leaves where its card was. */
 export function removalResultView(
   operation: ModerationOperation,
   nowMs: number
 ): RemovalResultView | null {
-  if (operation.source !== 'orcle-voice' || !moderationOperationTerminal(operation)) return null
+  if (!removalHasCard(operation) || !moderationOperationTerminal(operation)) return null
   const endedAt = Date.parse(operation.updatedAt)
   // Recent on either side of now: a skewed stamp never pins the line.
   if (!Number.isFinite(endedAt) || Math.abs(nowMs - endedAt) >= REMOVAL_RESULT_VISIBLE_MS) {

@@ -1,15 +1,20 @@
 import type { DeviceStatus, LayoutPreset } from '@/lib/backend'
-import { systemAudioTarget } from '@/lib/system-audio'
+import { layoutPresetLabel } from '@/lib/layout-labels'
+import { soundboard, type SoundboardSnapshot, type SoundboardStore } from '@/lib/soundboard-store'
+import { bannerSummaries, type BannerSummary } from '../../../shared/banner-commands'
 
 /** The state projection deck keys render. Minimal by design and the ONLY
  * payload remote sockets receive — never widen it with tokens/paths/URLs. */
 export interface RemoteSurfaceState {
+  screenHidden: boolean
   sessionState: string
   sessionActive: boolean
   recordEnabled: boolean
   streamEnabled: boolean
   micMuted: boolean
   layoutPreset: LayoutPreset
+  savedScenes?: { id: string; name: string }[]
+  activeSavedSceneId?: string | null
   activeTakeoverId: string | null
   windows: {
     notes: boolean
@@ -26,8 +31,55 @@ export interface RemoteSurfaceState {
 
 export interface RemoteSurfaceDescribe {
   layoutPresets: readonly LayoutPreset[]
+  /**
+   * Plan 174 S2.3a (I-14): each preset's name as the desktop shows it
+   * ("Screen + camera", "Vertical split"), so the phone never title-cases an
+   * id. Fixed strings derived from the built-in ids already listed above:
+   * nothing user-made, nothing about the machine. Additive; older clients
+   * ignore it.
+   */
+  layoutLabels: Readonly<Record<string, string>>
   takeovers: { id: string; name: string }[]
+  /**
+   * Plan 186 S7: every banner as `{id, name, shown}`, in Assets order. Ids
+   * are opaque, names are labels the streamer typed for graphics viewers
+   * see; never an image, a file name or a path. A banner key renders
+   * `shown` from here, so a client re-reads describe after `remote.state`.
+   */
+  banners: BannerSummary[]
+  /**
+   * Plan 189 S10: every sound as `{id, name, playing}`, in board order. Ids
+   * are opaque, names are labels the streamer typed for sounds they play to
+   * viewers; never a file, a path or any audio. A sound key renders
+   * `playing` from here, so a client re-reads describe after `remote.state`.
+   */
+  sounds: RemoteSoundSummary[]
   windows: readonly string[]
+}
+
+/** One sound as the remotes see it (plan 189 S10). */
+export interface RemoteSoundSummary {
+  id: string
+  name: string
+  playing: boolean
+}
+
+/** The board as the remotes see it: board order, without a sound waiting for its Undo. */
+export function remoteSoundSummaries(snapshot: SoundboardSnapshot): RemoteSoundSummary[] {
+  const playing = new Set(snapshot.voices.map((voice) => voice.soundId))
+  return (snapshot.board?.sounds ?? [])
+    .filter((sound) => !snapshot.hidden.has(sound.id))
+    .map(({ id, name }) => ({ id, name, playing: playing.has(id) }))
+}
+
+/** The phone's scene keys read the desktop's layout names (plan 174 I-14). */
+export function remoteLayoutLabels(presets: readonly LayoutPreset[]): Record<string, string> {
+  const bothOrientations =
+    presets.some((preset) => preset.startsWith('vertical-')) &&
+    presets.some((preset) => !preset.startsWith('vertical-'))
+  return Object.fromEntries(
+    presets.map((preset) => [preset, layoutPresetLabel(preset, { bothOrientations })])
+  )
 }
 
 export interface RemoteSurfaceSnapshot {
@@ -49,12 +101,22 @@ export type RemoteSurfaceValues = readonly [
   layoutPresets: readonly LayoutPreset[],
   takeovers: { id: string; name: string }[],
   systemAudioStatus: DeviceStatus | undefined,
-  systemAudioShown: boolean
+  systemAudioShown: boolean,
+  banners: readonly BannerSummary[],
+  savedScenes?: readonly { id: string; name: string }[],
+  activeSavedSceneId?: string | null,
+  screenHidden?: boolean
 ]
 
-function snapshotFromValues(values: RemoteSurfaceValues): RemoteSurfaceSnapshot {
+function snapshotFromValues(
+  values: RemoteSurfaceValues,
+  sounds: RemoteSoundSummary[]
+): RemoteSurfaceSnapshot {
   return {
     state: {
+      screenHidden: values[17] ?? false,
+      savedScenes: (values[15] ?? []).map(({ id, name }) => ({ id, name })),
+      activeSavedSceneId: values[16] ?? null,
       sessionState: values[0],
       sessionActive: values[1],
       recordEnabled: values[2],
@@ -68,7 +130,11 @@ function snapshotFromValues(values: RemoteSurfaceValues): RemoteSurfaceSnapshot 
     },
     describe: {
       layoutPresets: values[10],
+      layoutLabels: remoteLayoutLabels(values[10]),
       takeovers: values[11],
+      // Whitelisted here: Studio hands over its whole banner list.
+      banners: bannerSummaries(values[14]),
+      sounds,
       windows: ['notes', 'comments', 'preview']
     }
   }
@@ -78,38 +144,15 @@ interface RemoteSurfaceClient {
   request<T>(method: string, params?: unknown): Promise<T>
 }
 
-export interface RemoteIntentContext {
-  client: RemoteSurfaceClient
-  sessionActive: boolean
-  streamEnabled: boolean
-  startSession: () => Promise<boolean>
-  stopSession: () => Promise<boolean>
-  setMicrophoneMuted: (mode: 'mute' | 'unmute' | 'toggle') => Promise<boolean>
-  /** Plan 069 S6: the system-audio device status and the state the remotes
-   * are shown (`systemAudioOn` before the availability mask). */
-  systemAudio: readonly [status: DeviceStatus | undefined, shown: boolean]
-  /** Sets captureConfig.audio.systemAudioEnabled, exactly as the switch does;
-   * a live session picks it up through the latest-wins audio update. */
-  setSystemAudioEnabled: (enabled: boolean) => void
-  knownLayoutPresets: readonly LayoutPreset[]
-  applyLayoutPreset: (layoutPreset: LayoutPreset) => Promise<boolean>
-  hasTakeover: (assetId: string) => boolean
-  activateTakeover: (assetId: string) => Promise<boolean>
-  clearTakeover: () => Promise<boolean>
-  openWindow: (name: string) => Promise<boolean>
-  /** Phone remote: EXPLICIT show (never the button's toggle) — a double tap
-   * must not flash the card off. Resolves the user-facing refusal reason. */
-  showCommentHighlight: (messageId: string) => Promise<RemoteIntentOutcome>
-  clearCommentHighlight: () => Promise<RemoteIntentOutcome>
-  /** Plan 068 D6: mark the current moment for a clip. The backend stamps the
-   * capture clock; `ok: false` carries why nothing was kept. */
-  markClip: () => Promise<RemoteIntentOutcome>
-}
-
-export interface RemoteIntentOutcome {
-  ok: boolean
-  message?: string
-}
+// The intent executor lives in lib/studio-actions (plan 209 S5): one context
+// and one executor per action, shared by remote intents and agent tools.
+// These names stay here for the callers that read them from the surface.
+export {
+  REMOTE_INTENT_COPY,
+  executeRemoteIntent,
+  type StudioActionContext as RemoteIntentContext,
+  type StudioActionOutcome as RemoteIntentOutcome
+} from '@/lib/studio-actions'
 
 /** Coalesce same-commit bursts; deck latency is invisible below ~50ms. */
 const PUBLISH_DEBOUNCE_MS = 25
@@ -130,13 +173,23 @@ export class RemoteSurfacePublisher {
   private client: RemoteSurfaceClient | null = null
   private connected = false
   private latest: RemoteSurfaceSnapshot | null = null
+  private latestValues: RemoteSurfaceValues | null = null
   private lastPublishedBody: string | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private retryAttempt = 0
+  private offSounds: (() => void) | null = null
+
+  /** Plan 189: the soundboard the remotes are shown, followed outside React. */
+  constructor(private readonly sounds: SoundboardStore = soundboard) {}
 
   attach(client: RemoteSurfaceClient): void {
     this.client = client
     this.connected = false
+    // A sound starting or stopping changes describe, not Studio's values.
+    this.offSounds?.()
+    this.offSounds = this.sounds.subscribe(() => {
+      if (this.latestValues) this.syncValues(this.latestValues)
+    })
   }
 
   /** The socket is live: the backend's surface slate is blank, so the last
@@ -149,6 +202,8 @@ export class RemoteSurfacePublisher {
   }
 
   detach(): void {
+    this.offSounds?.()
+    this.offSounds = null
     this.client = null
     this.connected = false
     this.lastPublishedBody = null
@@ -174,7 +229,8 @@ export class RemoteSurfacePublisher {
   }
 
   syncValues(values: RemoteSurfaceValues): void {
-    this.sync(snapshotFromValues(values))
+    this.latestValues = values
+    this.sync(snapshotFromValues(values, remoteSoundSummaries(this.sounds.getSnapshot())))
   }
 
   private schedule(delayMs: number): void {
@@ -211,154 +267,5 @@ export class RemoteSurfacePublisher {
       this.retryAttempt = 0
       console.error('[remote-control] surface publish failed after retries', error)
     }
-  }
-}
-
-/** Executes a remote intent through the Studio's existing action handlers. */
-export async function executeRemoteIntent(
-  payload: unknown,
-  context: RemoteIntentContext
-): Promise<void> {
-  const envelope = payload as {
-    intentId?: string
-    intent?: { kind?: string } & Record<string, unknown>
-  } | null
-  const intentId = envelope?.intentId
-  const intent = envelope?.intent
-  if (!intentId || !intent?.kind) return
-
-  const ack = async (ok: boolean, message?: string): Promise<void> => {
-    try {
-      await context.client.request('remote.intent.ack', {
-        intentId,
-        ok,
-        ...(message ? { message } : {})
-      })
-    } catch {
-      // The remote client also observes state; a lost ack is non-fatal.
-    }
-  }
-
-  try {
-    switch (intent.kind) {
-      case 'recordStart':
-        if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
-        return void ((await context.startSession())
-          ? await ack(true)
-          : await ack(false, 'The capture session did not start. Check Studio for details.'))
-      case 'recordStop':
-      case 'streamStop':
-        if (!context.sessionActive) return void (await ack(false, 'No active session.'))
-        return void ((await context.stopSession())
-          ? await ack(true)
-          : await ack(false, 'The active session did not stop. Check Studio for details.'))
-      case 'recordToggle': {
-        const committed = context.sessionActive
-          ? await context.stopSession()
-          : await context.startSession()
-        return void (committed
-          ? await ack(true)
-          : await ack(false, 'The session toggle was not committed. Check Studio for details.'))
-      }
-      case 'streamStart':
-        if (!context.streamEnabled) {
-          return void (await ack(false, 'Enable streaming in the Studio first.'))
-        }
-        if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
-        return void ((await context.startSession())
-          ? await ack(true)
-          : await ack(
-              false,
-              'The stream did not start. Complete any required confirmation in Studio.'
-            ))
-      case 'micMute':
-      case 'micUnmute':
-      case 'micToggle': {
-        const applied = await context.setMicrophoneMuted(
-          intent.kind === 'micToggle' ? 'toggle' : intent.kind === 'micMute' ? 'mute' : 'unmute'
-        )
-        if (!applied) {
-          return void (await ack(false, 'The microphone change was not applied.'))
-        }
-        return void (await ack(true))
-      }
-      case 'systemAudioOn':
-      case 'systemAudioOff':
-      case 'systemAudioToggle': {
-        const [status, shown] = context.systemAudio
-        const target = systemAudioTarget(
-          intent.kind === 'systemAudioToggle'
-            ? 'toggle'
-            : intent.kind === 'systemAudioOn'
-              ? 'on'
-              : 'off',
-          status,
-          shown
-        )
-        if (target === null) return void (await ack(false, 'System audio is not available.'))
-        // Accepted = requested. The key renders the confirmed mix from
-        // remote.state, which follows once the session reports it.
-        context.setSystemAudioEnabled(target)
-        return void (await ack(true))
-      }
-      case 'sceneApply': {
-        const layoutPreset = intent.layoutPreset as LayoutPreset | undefined
-        if (!layoutPreset) {
-          return void (await ack(false, 'Only layoutPreset scene switches are supported.'))
-        }
-        if (!(context.knownLayoutPresets as readonly string[]).includes(layoutPreset)) {
-          return void (await ack(false, `Unknown layout preset "${layoutPreset}".`))
-        }
-        const committed = await context.applyLayoutPreset(layoutPreset)
-        if (!committed) {
-          return void (await ack(false, 'The layout change was not committed.'))
-        }
-        return void (await ack(true))
-      }
-      case 'takeoverShow': {
-        const assetId = intent.assetId as string | undefined
-        if (!assetId || !context.hasTakeover(assetId)) {
-          return void (await ack(false, 'No takeover with that id.'))
-        }
-        const activated = await context.activateTakeover(assetId)
-        if (!activated) {
-          return void (await ack(false, 'The takeover was not activated.'))
-        }
-        return void (await ack(true))
-      }
-      case 'takeoverHide': {
-        const cleared = await context.clearTakeover()
-        if (!cleared) {
-          return void (await ack(false, 'The takeover was not cleared.'))
-        }
-        return void (await ack(true))
-      }
-      case 'windowFront': {
-        const windowName = intent.window as string | undefined
-        if (!windowName || !(await context.openWindow(windowName))) {
-          return void (await ack(false, `Unknown window "${windowName}".`))
-        }
-        return void (await ack(true))
-      }
-      case 'commentHighlight': {
-        const messageId = intent.messageId as string | undefined
-        if (!messageId) return void (await ack(false, 'commentHighlight needs a messageId.'))
-        const outcome = await context.showCommentHighlight(messageId)
-        return void (await ack(outcome.ok, outcome.message))
-      }
-      case 'commentHighlightClear': {
-        const outcome = await context.clearCommentHighlight()
-        return void (await ack(outcome.ok, outcome.message))
-      }
-      case 'clipMark': {
-        if (!context.sessionActive) return void (await ack(false, 'No active session.'))
-        const outcome = await context.markClip()
-        return void (await ack(outcome.ok, outcome.message))
-      }
-      default:
-        return void (await ack(false, `Unsupported intent "${intent.kind}".`))
-    }
-  } catch (error) {
-    await ack(false, error instanceof Error ? error.message : 'Intent failed.')
   }
 }

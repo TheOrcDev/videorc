@@ -41,7 +41,7 @@ const openUpcoming = async () => {
   await waitFor(
     () =>
       evaluate(
-        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.dispatchEvent(new MouseEvent('mousedown',{button:0,bubbles:true})); return Boolean(tab)`
+        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.click(); return Boolean(tab)`
       ),
     'Upcoming tab mounted'
   )
@@ -156,7 +156,9 @@ try {
     await evaluate(`document.querySelector('[role="option"]').click();return true`)
     for (const theme of ['dark', 'light']) {
       await evaluate(
-        `if(document.documentElement.classList.contains('dark')!==${theme === 'dark'}) document.dispatchEvent(new KeyboardEvent('keydown',{key:'d',bubbles:true})); return true`
+        // The D key is gated while a dialog is open (plan 174 A-2), so set the
+        // theme the way another window would: next-themes follows storage events.
+        `localStorage.setItem('videorc.theme', '${theme}'); window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: '${theme}' })); return true`
       )
       await waitFor(
         () =>
@@ -197,7 +199,7 @@ try {
       )
     )
     const scrolling = await evaluate(
-      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-radix-scroll-area-viewport]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
+      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-slot="dialog-body"]')??dialog.querySelector('[data-slot="scroll-area-viewport"]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail…');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
     )
     assert.ok(scrolling.viewportHeight >= 64, '200% form must retain a usable scroll viewport')
     assert.ok(scrolling.after > scrolling.initial, '200% form must actually scroll')
@@ -227,7 +229,7 @@ try {
       'dirty dismissal guard'
     )
     await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Discard');button.click();return true`
+      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Discard changes');button.click();return true`
     )
     await waitFor(
       () => evaluate(`return !document.querySelector('#schedule-title')`),
@@ -456,12 +458,12 @@ try {
     await waitFor(
       () =>
         evaluate(
-          `return [...document.querySelectorAll('button')].some(button=>button.textContent==='Go Live…' && !button.disabled)`
+          `return [...document.querySelectorAll('button')].some(button=>button.textContent==='Use for Go Live…' && !button.disabled)`
         ),
       'recovered event selectable'
     )
     await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Go Live…' && !button.disabled);button.click();return true`
+      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Use for Go Live…' && !button.disabled);button.click();return true`
     )
     await waitFor(
       () =>
@@ -687,7 +689,11 @@ try {
     }
     assert.equal((await request(ws, timeoutMs, 'recording.status')).state, 'idle')
     const stoppedChat = await request(ws, timeoutMs, 'liveChat.stop', {})
-    assert.equal(stoppedChat.sessionId ?? null, null, 'viewer/chat owners stop before accounting snapshot')
+    assert.equal(
+      stoppedChat.sessionId ?? null,
+      null,
+      'viewer/chat owners stop before accounting snapshot'
+    )
     assert.ok(
       fixture.calls.every((call) => call.path.startsWith('/2/') || isDataApiPath(call.path)),
       'every fixture attempt uses a recognized provider API root'

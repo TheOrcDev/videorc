@@ -238,7 +238,7 @@ describe('chat moderation relay: the Stream Manager commands', () => {
       listed: () => ledger,
       handler: async () => {
         ledger = [landed]
-        throw new Error('Backend request "liveChat.moderation.request" timed out.')
+        throw new Error('The "liveChat.moderation.request" request timed out.')
       }
     })
     await flush()
@@ -257,7 +257,7 @@ describe('chat moderation relay: the Stream Manager commands', () => {
     const test = harness({
       listed: () => [operation()],
       handler: async () => {
-        throw new Error('Backend WebSocket is not connected.')
+        throw new Error("Videorc's engine isn't connected.")
       }
     })
     await flush()
@@ -268,7 +268,7 @@ describe('chat moderation relay: the Stream Manager commands', () => {
         action: 'confirm',
         operationId: OPERATION_ID
       })
-    ).toMatchObject({ ok: false, error: 'Backend WebSocket is not connected.' })
+    ).toMatchObject({ ok: false, error: "Videorc's engine isn't connected." })
   })
 
   it('stops listening when disposed', async () => {
@@ -346,7 +346,7 @@ describe('chat moderation relay: the main-window toast', () => {
     test.relay.feed(
       operation({
         phase: 'cancelled',
-        outcome: 'Cancelled. Nothing was removed.',
+        outcome: 'Canceled. Nothing was removed.',
         updatedAt: '2026-10-04T12:00:12Z'
       })
     )

@@ -1,33 +1,35 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+/* shadcn's variants (data-open, data-closed, data-checked, data-active,
+   data-disabled, data-horizontal, data-vertical, …) and accordion keyframes.
+   Each variant matches the Base UI attribute and Radix's data-state, so the
+   @videorc components and the Radix ones not yet replaced both style by it. */
+@import 'shadcn/tailwind.css';
 
 @custom-variant dark (&:is(.dark *));
 /* Windows-only chrome. theme-bootstrap.js sets data-platform before the
-   first paint, so this never waits for runtime info (the Mica coats key on
-   the same attribute). */
+   first paint, so this never waits for runtime info. */
 @custom-variant win32 (&:is([data-platform='win32'] *));
-/* The radix-rhea registry components style by orientation through these
-   variants; without them Tailwind matches a literal data-horizontal
-   attribute that radix never sets, and e.g. slider tracks get zero height. */
-@custom-variant data-horizontal (&[data-orientation='horizontal']);
-@custom-variant data-vertical (&[data-orientation='vertical']);
 
 /*
  * Videorc design tokens (.claude/skills/videorc-design, v2: the window family).
  * Two columns of the SAME design: dark is the default and reference
- * expression, light is its structural twin. Every window sits on clear glass
- * (the OS blur, stripped of its tint by the native addon; plan 091) under
- * one cover per region of the theme's solid tone: the body paints the
- * lighter cover, the sidebar and the content panes add their deltas. Chrome
- * is monochrome: hairlines, three text tiers, glass chips. Colour carries
- * meaning only: live/destructive (red), success, warning, info, and the
- * vivid source icons. There is no coloured action accent.
+ * expression, light is its structural twin. Every window is opaque on the
+ * theme's solid tone, the same on every platform (the plan 208 chrome
+ * ground under the coats was removed on 2026-10-29). The body paints the
+ * lighter cover, the sidebar and the content panes add their deltas, so
+ * every region composites to the solid. Chrome is
+ * monochrome and truly neutral (every neutral is chroma 0): hairlines, three
+ * text tiers, glass chips. Colour carries meaning only: live/destructive
+ * (red), success, warning, info, and the vivid source icons. There is no
+ * coloured action accent.
  *
  * Token contract: reach for these utilities, not raw values:
  *   Covers     --glass-base (the solid's oklch components) with
- *              --glass-cover-sidebar / --glass-cover-work per theme and
- *              platform (plan 091 D3/D5); the coats below are derived from
- *              them (D4), never set by hand.
+ *              --glass-cover-sidebar / --glass-cover-work per theme (plan 208
+ *              D10; plan 091 D3 for the derivation); the coats below are
+ *              derived from them (D4), never set by hand.
+ *              window-contrast.test.ts proves every text tier over the solid.
  *   Coats      bg-glass-window (body) · bg-glass-sidebar (the sidebar, the
  *              heavier region) · bg-glass-content (content panes). Never
  *              stack a third coat, never backdrop-filter.
@@ -35,7 +37,7 @@
  *              cards, chart tooltips, toasts) · glass-float-dialog (dialogs,
  *              the palette, the error panel) · glass-float-tooltip. Flat,
  *              opaque tiers of the solid with a rim and a drop shadow (plan
- *              072, plan 091 D6).
+ *              072, plan 091 D6); light dialogs a deeper drop (plan 208 S5).
  *   Text tiers text-foreground (primary) · text-muted-foreground (secondary) ·
  *              text-subtle (tertiary). Three tiers, nothing else.
  *   Radius     rounded-panel (12px: containers, dialogs) · rounded-row (8px:
@@ -47,6 +49,8 @@
  *   Selection  bg-accent (hover/selected block) · bg-accent-pressed.
  *   Chips      glass-chip · glass-chip-tinted · glass-dot · glass-keycap, with
  *              the tone-* utilities carrying colour.
+ *   Chrome     chrome-fill · chrome-plate · chrome-bead(-ink) · chrome-led
+ *              (plan 208 S4): the controls' shine, in components/ui only.
  *   Focus      :focus-visible ring is wired in @layer base below.
  *   Motion     100–150ms ease-out; reduced-motion collapse wired below.
  */
@@ -63,30 +67,32 @@
   /* White glass — the porcelain twin of the black-glass column below.
      White-over-bright reads solid at higher alphas — light mode needs a
      thinner coat than dark to show at all. */
-  --background: oklch(0.985 0.001 286 / 62%);
-  --foreground: oklch(0.17 0.004 286);
+  --background: oklch(0.985 0 0 / 62%);
+  --foreground: oklch(0.17 0 0);
   --card: oklch(0.99 0 0 / 92%);
-  --card-foreground: oklch(0.17 0.004 286);
+  --card-foreground: oklch(0.17 0 0);
   /* Floating surfaces paint glass-float; the token follows it so a stray
      bg-popover (a fresh shadcn add) still lands on the glass tone. */
   --popover: var(--glass-float);
-  --popover-foreground: oklch(0.17 0.004 286);
+  --popover-foreground: oklch(0.17 0 0);
 
   /* Monochrome action: ink on porcelain. */
-  --primary: oklch(0.17 0.004 286);
+  --primary: oklch(0.17 0 0);
   --primary-foreground: oklch(0.985 0 0);
 
   --secondary: oklch(0 0 0 / 7%);
-  --secondary-foreground: oklch(0.17 0.004 286);
+  --secondary-foreground: oklch(0.17 0 0);
   --muted: oklch(0 0 0 / 7%);
-  --muted-foreground: oklch(0.47 0.006 286);
+  --muted-foreground: oklch(0.47 0 0);
   /* Hover/selection block: black-6%. */
   --accent: oklch(0 0 0 / 6%);
-  --accent-foreground: oklch(0.17 0.004 286);
+  --accent-foreground: oklch(0.17 0 0);
   /* Pressed block: black-10%. */
   --accent-pressed: oklch(0 0 0 / 10%);
-  /* Tertiary text tier (section headers, footer hints, disabled). */
-  --subtle: oklch(0.58 0.005 286);
+  /* Tertiary text tier (section labels, hints, disabled). Plan 174 S1.8
+     (D12): 4.85:1 on the porcelain solid and 4.92:1 on a float; it was
+     0.58, 4.11:1. Essential copy uses the secondary tier, never this one. */
+  --subtle: oklch(0.54 0 0);
 
   /* The brand red — the logo's LED-glow eyes (same hue family both themes). */
   --destructive: oklch(0.55 0.24 27);
@@ -101,9 +107,13 @@
   --warning-foreground: oklch(0.27 0.06 75);
   --info: oklch(0.58 0.14 250);
   --info-foreground: oklch(0.985 0 0);
-  /* Membership (plan 154): the member row tint. Never chrome, never text. */
+  /* Membership (plan 154): the member hue. Since plan 0011 a member's row is a
+     chrome plate and this hue is only its edge. Never text. */
   --member: oklch(0.55 0.13 300);
   --member-foreground: oklch(0.985 0 0);
+  /* Rewards (plan 177): the channel point reward row tint in Activity. Never
+     chrome, never text. */
+  --reward: oklch(0.55 0.11 200);
 
   /* Hairlines: black-12% on light — 8% vanished on pale glass over a bright
      wallpaper (plan 022 Q5 contrast pass). */
@@ -111,31 +121,29 @@
   --input: oklch(0 0 0 / 12%);
   --ring: oklch(0 0 0 / 25%);
 
-  /* Sidebar is a frosted pane on the glass (backdrop-blur in the aside);
+  /* The sidebar's shadcn tokens: the aside itself paints the heavier coat
+     (bg-glass-sidebar) over the body, never a backdrop blur;
      selection is the monochrome block. */
   --sidebar: oklch(0 0 0 / 4%);
-  --sidebar-foreground: oklch(0.17 0.004 286);
-  --sidebar-primary: oklch(0.17 0.004 286);
+  --sidebar-foreground: oklch(0.17 0 0);
+  --sidebar-primary: oklch(0.17 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0 0 0 / 6%);
-  --sidebar-accent-foreground: oklch(0.17 0.004 286);
+  --sidebar-accent-foreground: oklch(0.17 0 0);
   --sidebar-border: oklch(0 0 0 / 12%);
   --sidebar-ring: oklch(0 0 0 / 25%);
 
-  /* Floating glass panel shadow + hairline ring. */
-  --shadow-glass-panel: 0 16px 70px oklch(0 0 0 / 25%), 0 0 0 1px oklch(0 0 0 / 12%);
-
-  /* Window glass (plan 091): a clear, neutral blur of the desktop under one
-     cover per region. --glass-base is the theme's solid tone (oklch
-     components); a cover is how much of it a region paints over the blur,
-     Ghostex's numbers: the sidebar is the heavier one, the work area shows
-     more of the desktop. The coats themselves are derived below (D4) so
-     every region composites to exactly its cover, and --glass-solid replaces
-     them when the OS asks for reduced transparency. */
-  --glass-base: 0.985 0.001 286;
-  --glass-cover-sidebar: 0.93;
+  /* The window coats (plan 208, D10; plan 091 for the derivation): one cover
+     per region. --glass-base is the theme's solid tone (oklch components);
+     a cover is how much of it a region paints over what sits behind. On the
+     solid window every region composites to the solid; the covers still
+     decide the frost under VIDEORC_GLASS=clear. The coats themselves are
+     derived below (D4) so every region composites to exactly its cover, and
+     --glass-solid replaces them when the OS asks for reduced transparency. */
+  --glass-base: 0.985 0 0;
+  --glass-cover-sidebar: 0.92;
   --glass-cover-work: 0.86;
-  --glass-solid: oklch(0.985 0.001 286);
+  --glass-solid: oklch(0.985 0 0);
 
   /* Floating glass (plan 072; plan 091 D6, Ghostex's web modals): menus,
      popovers, hover cards, tooltips, dialogs and toasts are flat, opaque
@@ -151,34 +159,98 @@
   --glass-float-tooltip: oklch(0.99 0 0);
   --glass-float-rim: oklch(0 0 0 / 10%);
   --glass-float-drop: 0 12px 36px oklch(0 0 0 / 14%), 0 1px 3px oklch(0 0 0 / 8%);
+  /* The dialog tier's own drop (plan 208 S5): the Welcome card sits on the
+     white liquid chrome with no overlay, where the popup drop melted into
+     the white crests and only the rim drew the edge. A deeper ambient and a
+     10 px halo on every side separate porcelain from white; every dialog,
+     the palette and the error panel take it. */
+  --glass-float-dialog-drop: 0 16px 48px oklch(0 0 0 / 20%), 0 1px 10px oklch(0 0 0 / 14%);
 
-  /* Glass chips (plan 050, D9): the porcelain twin of the dark chip glass. */
-  --chip-fill-top: oklch(1 0 0 / 70%);
-  --chip-fill-bottom: oklch(1 0 0 / 45%);
-  --chip-rim: oklch(0 0 0 / 8%);
-  --chip-highlight: oklch(1 0 0 / 90%);
-  --chip-drop: oklch(0 0 0 / 6%);
+  /* Glass chips (plan 050, D9; plan 208 S4 crisper): the porcelain twin of
+     the dark chip glass, a whiter fill under a full white top line. */
+  --chip-fill-top: oklch(1 0 0 / 95%);
+  --chip-fill-bottom: oklch(1 0 0 / 55%);
+  --chip-rim: oklch(0 0 0 / 9%);
+  --chip-highlight: oklch(1 0 0);
+  --chip-drop: oklch(0 0 0 / 5%);
   --chip-tint-top: 16%;
   --chip-tint-bottom: 6%;
   --chip-tint-rim: 32%;
   --chip-tint-ink: 80%;
   --chip-tint-ink-base: var(--foreground);
   --chip-dot-glow: 45%;
-  --keycap-fill-top: oklch(1 0 0 / 95%);
-  --keycap-fill-bottom: oklch(1 0 0 / 70%);
-  --keycap-rim: oklch(0 0 0 / 10%);
+  --keycap-fill-top: oklch(1 0 0);
+  --keycap-fill-bottom: oklch(1 0 0 / 72%);
+  --keycap-rim: oklch(0 0 0 / 11%);
   --keycap-highlight: oklch(1 0 0);
-  --keycap-base: oklch(0 0 0 / 12%);
+  --keycap-base: oklch(0 0 0 / 14%);
 
-  /* Slider and switch knobs stay white in both themes, like AppKit's. */
+  /* Chrome controls (plan 208 S4, D2): the light column is the crisp invert,
+     black chrome on porcelain. A primary fill is polished graphite with white
+     ink, a selected plate is a faint dark sheen under a white top line, a
+     knob is a pearl bead, and Record is the same red LED as dark. */
+  --chrome-fill-stops:
+    oklch(0.45 0 0) 0%, oklch(0.27 0 0) 40%, oklch(0.13 0 0) 54%, oklch(0.23 0 0) 82%,
+    oklch(0.4 0 0) 100%;
+  --chrome-fill-flat: oklch(0.27 0 0);
+  --chrome-fill-ink: oklch(0.985 0 0);
+  --chrome-fill-hi: oklch(1 0 0 / 35%);
+  --chrome-fill-lo: oklch(0 0 0 / 35%);
+  --chrome-fill-drop: oklch(0 0 0 / 35%);
+  --chrome-fill-lift: oklch(1 0 0 / 10%);
+  --chrome-press: oklch(0 0 0 / 45%);
+  --chrome-plate-top: oklch(0 0 0 / 9%);
+  --chrome-plate-bottom: oklch(0 0 0 / 3%);
+  --chrome-plate-hi: oklch(1 0 0 / 90%);
+  --chrome-plate-rim: oklch(0 0 0 / 7%);
+  --chrome-bead-stops: oklch(1 0 0), oklch(0.9 0 0) 55%, oklch(0.7 0 0);
+  --chrome-bead-drop: oklch(0 0 0 / 35%);
+  --chrome-bead-ink-stops: oklch(1 0 0), oklch(0.95 0 0) 55%, oklch(0.8 0 0);
+  --chrome-bead-ink-drop: oklch(0 0 0 / 50%);
+  --chrome-led-stops: oklch(0.64 0.22 27) 0%, oklch(0.52 0.24 27) 55%, oklch(0.46 0.22 27) 100%;
+  --chrome-led-flat: oklch(0.52 0.24 27);
+  --chrome-led-hi: oklch(1 0 0 / 38%);
+  --chrome-led-lo: oklch(0 0 0 / 25%);
+  --chrome-led-drop: oklch(0 0 0 / 30%);
+  --chrome-led-lift: oklch(1 0 0 / 10%);
+  --chrome-led-glow: color-mix(in oklch, var(--live) 30%, transparent);
+  /* The edge a fill or LED gains under Increase Contrast (D12). */
+  --chrome-edge: transparent;
+  /* The chromatic ring (Button's `chromatic`): a porcelain face in a ring of
+     liquid chrome. Three bands of metal, each a trough, a slope and a hot
+     highlight, a shade darker than dark's so the ring still frames a white
+     face. */
+  --chrome-chromatic-face-stops: oklch(1 0 0) 0%, oklch(0.985 0 0) 60%, oklch(0.95 0 0) 100%;
+  --chrome-chromatic-bands:
+    oklch(0.27 0 0) 0deg, oklch(0.63 0 0) 34deg, oklch(0.92 0 0) 46deg, oklch(0.74 0 0) 54deg,
+    oklch(0.45 0 0) 74deg, oklch(0.14 0 0) 96deg, oklch(0.27 0 0) 120deg;
+  --chrome-chromatic-recess: oklch(0 0 0 / 28%);
+  --chrome-chromatic-rim: oklch(0 0 0 / 18%);
+  --chrome-chromatic-lift: oklch(0 0 0 / 3%);
+  /* Chrome rows (plan 0011): the Stream Manager's on-stream row is a plate
+     with a black-chrome edge down its left side; a member's row is a quieter
+     plate whose edge keeps the member hue, the one place colour says who
+     wrote it. */
+  --chrome-row-edge-stops: oklch(0.45 0 0), oklch(0.22 0 0) 55%, oklch(0.1 0 0);
+  --chrome-row-live-top: oklch(0 0 0 / 10%);
+  --chrome-row-live-bottom: oklch(0 0 0 / 3%);
+  --chrome-row-live-hi: oklch(1 0 0 / 90%);
+  --chrome-row-member-top: oklch(0 0 0 / 5%);
+  --chrome-row-member-bottom: oklch(0 0 0 / 1%);
+  --chrome-row-member-hi: oklch(1 0 0 / 70%);
+  --chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);
+  --chrome-row-rim: oklch(0 0 0 / 8%);
+  --chrome-row-lift: oklch(0 0 0 / 3%);
+
+  /* The knob's hairline: the chrome bead's rim (black 20% on porcelain). */
   --knob: oklch(1 0 0);
-  --knob-ring: oklch(0 0 0 / 12%);
+  --knob-ring: oklch(0 0 0 / 20%);
 
   /* The video ground: the letterbox the docked preview sits on, with its
      text. Dark in both themes, because it frames video. */
-  --video-ground: oklch(0.13 0.003 286);
-  --video-ground-foreground: oklch(0.97 0.001 286);
-  --video-ground-muted: oklch(0.71 0.01 286);
+  --video-ground: oklch(0.13 0 0);
+  --video-ground-foreground: oklch(0.97 0 0);
+  --video-ground-muted: oklch(0.71 0 0);
 }
 
 .dark {
@@ -191,27 +263,29 @@
      Alpha history: 65% read as barely-there, 58% let background text interfere;
      62% was the charcoal sweet spot — the black base needs 68% or the frost
      disappears into it. */
-  --background: oklch(0.13 0.003 286 / 68%);
-  --foreground: oklch(0.97 0.001 286);
-  --card: oklch(0.16 0.004 286 / 92%);
-  --card-foreground: oklch(0.97 0.001 286);
+  --background: oklch(0.13 0 0 / 68%);
+  --foreground: oklch(0.97 0 0);
+  --card: oklch(0.16 0 0 / 92%);
+  --card-foreground: oklch(0.97 0 0);
   --popover: var(--glass-float);
-  --popover-foreground: oklch(0.97 0.001 286);
+  --popover-foreground: oklch(0.97 0 0);
 
   /* Monochrome action: chrome on black. */
-  --primary: oklch(0.97 0.001 286);
-  --primary-foreground: oklch(0.13 0.003 286);
+  --primary: oklch(0.97 0 0);
+  --primary-foreground: oklch(0.13 0 0);
 
   --secondary: oklch(1 0 0 / 6%);
-  --secondary-foreground: oklch(0.97 0.001 286);
+  --secondary-foreground: oklch(0.97 0 0);
   --muted: oklch(1 0 0 / 6%);
-  --muted-foreground: oklch(0.71 0.01 286);
+  --muted-foreground: oklch(0.71 0 0);
   /* Hover/selection block: white-8%. */
   --accent: oklch(1 0 0 / 8%);
-  --accent-foreground: oklch(0.97 0.001 286);
+  --accent-foreground: oklch(0.97 0 0);
   /* Pressed block: white-12%. */
   --accent-pressed: oklch(1 0 0 / 12%);
-  --subtle: oklch(0.55 0.008 286);
+  /* Plan 174 S1.8 (D12): 5.32:1 on the black solid and 4.69:1 on a dialog;
+     it was 0.55, 3.99:1. */
+  --subtle: oklch(0.62 0 0);
 
   /* The brand red — the logo's LED-glow eyes. Red stays semantic (record,
      live, destructive); it is never chrome. */
@@ -228,6 +302,7 @@
   --info-foreground: oklch(0.205 0.04 250);
   --member: oklch(0.7 0.12 300);
   --member-foreground: oklch(0.205 0.04 300);
+  --reward: oklch(0.72 0.11 200);
 
   /* Hairlines: white-10% — the polished edge of the black glass. */
   --border: oklch(1 0 0 / 10%);
@@ -235,46 +310,42 @@
   --ring: oklch(1 0 0 / 28%);
 
   --sidebar: oklch(1 0 0 / 5%);
-  --sidebar-foreground: oklch(0.97 0.001 286);
-  --sidebar-primary: oklch(0.97 0.001 286);
-  --sidebar-primary-foreground: oklch(0.13 0.003 286);
+  --sidebar-foreground: oklch(0.97 0 0);
+  --sidebar-primary: oklch(0.97 0 0);
+  --sidebar-primary-foreground: oklch(0.13 0 0);
   --sidebar-accent: oklch(1 0 0 / 8%);
-  --sidebar-accent-foreground: oklch(0.97 0.001 286);
+  --sidebar-accent-foreground: oklch(0.97 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(1 0 0 / 28%);
 
-  --shadow-glass-panel: 0 16px 70px oklch(0 0 0 / 60%), 0 0 0 1px oklch(1 0 0 / 10%);
-
-  /* Dark window glass (plan 091, D3): the sidebar covers 88% and the work
-     area 83% of the clear blur. 83% is the smallest work cover that keeps
-     --muted-foreground at 4.5:1 over a white desktop (probe:ui-glass). The
-     base is the OKLCH of #0D0D0F, the dark solid the palette, the addon's
-     snapshot base and the design skill all name (0.13 rendered #070708 and
-     composited to near-black over a dark desktop). */
-  --glass-base: 0.16 0.004 286;
+  /* The dark window coats (plan 208, D10): the sidebar covers 88% and the
+     work area 82%. The base is the chrome's own black, oklch 0.13 (#070707),
+     the dark solid the palette and the design skill name. */
+  --glass-base: 0.13 0 0;
   --glass-cover-sidebar: 0.88;
-  --glass-cover-work: 0.83;
-  --glass-solid: oklch(0.16 0.004 286);
+  --glass-cover-work: 0.82;
+  --glass-solid: oklch(0.13 0 0);
 
   /* Dark floating glass (plan 091 D6): Ghostex's lifts over the solid,
      mixed in sRGB. A dialog (and the palette) is the solid plus 6% white,
-     about #1C1C1D; a popup (menus, selects, popovers, hover cards, chart
-     tooltips, toasts) adds 3% more, about #222224; a tooltip sits on the
-     solid itself. Deliberately darker than the glass over a bright desktop:
-     a fixed tone whatever is behind (probe:ui-glass --surfaces). */
+     about #161616; a popup (menus, selects, popovers, hover cards, chart
+     tooltips, toasts) adds 3% more, about #1D1D1D; a tooltip sits on the
+     solid itself. Flat and opaque (plan 208 D2): a fixed tone whatever is
+     behind (probe:ui-glass --surfaces). */
   --glass-float-dialog: color-mix(in srgb, oklch(1 0 0) 6%, var(--glass-solid));
   --glass-float: color-mix(in srgb, oklch(1 0 0) 3%, var(--glass-float-dialog));
   --glass-float-tooltip: var(--glass-solid);
   --glass-float-rim: oklch(1 0 0 / 10%);
   --glass-float-drop: 0 14px 44px oklch(0 0 0 / 50%), 0 1px 3px oklch(0 0 0 / 30%);
+  --glass-float-dialog-drop: var(--glass-float-drop);
 
-  /* Glass chips (plan 050, D9): white 10% to 3.5% with a 13% rim, a 12% top
-     highlight and a soft drop. Emphasis chips tint the same glass with their
-     tone; the status dot glows in it. */
-  --chip-fill-top: oklch(1 0 0 / 10%);
-  --chip-fill-bottom: oklch(1 0 0 / 3.5%);
-  --chip-rim: oklch(1 0 0 / 13%);
-  --chip-highlight: oklch(1 0 0 / 12%);
+  /* Glass chips (plan 050, D9; plan 208 S4 crisper): white 13% to 3% with a
+     9% rim, an 18% top highlight and a soft drop. Emphasis chips tint the
+     same glass with their tone; the status dot glows in it. */
+  --chip-fill-top: oklch(1 0 0 / 13%);
+  --chip-fill-bottom: oklch(1 0 0 / 3%);
+  --chip-rim: oklch(1 0 0 / 9%);
+  --chip-highlight: oklch(1 0 0 / 18%);
   --chip-drop: oklch(0 0 0 / 30%);
   --chip-tint-top: 30%;
   --chip-tint-bottom: 12%;
@@ -282,26 +353,80 @@
   --chip-tint-ink: 35%;
   --chip-tint-ink-base: oklch(1 0 0);
   --chip-dot-glow: 75%;
-  --keycap-fill-top: oklch(1 0 0 / 12%);
+  --keycap-fill-top: oklch(1 0 0 / 15%);
   --keycap-fill-bottom: oklch(1 0 0 / 4%);
-  --keycap-rim: oklch(1 0 0 / 13%);
-  --keycap-highlight: oklch(1 0 0 / 14%);
-  --keycap-base: oklch(0 0 0 / 30%);
+  --keycap-rim: oklch(1 0 0 / 10%);
+  --keycap-highlight: oklch(1 0 0 / 22%);
+  --keycap-base: oklch(0 0 0 / 35%);
+
+  /* Chrome controls (plan 208 S4, D2): polished silver on black, the
+     Welcome screen's Liquid Chrome in the hand. A primary fill is a bright
+     band over a darker waist with dark ink, a selected plate is a white sheen
+     under a top line, a knob is a silver bead (black on a silver track), and
+     Record is a red LED that glows while a session runs. */
+  --chrome-fill-stops:
+    oklch(1 0 0) 0%, oklch(0.93 0 0) 40%, oklch(0.75 0 0) 52%, oklch(0.88 0 0) 78%,
+    oklch(0.97 0 0) 100%;
+  --chrome-fill-flat: oklch(0.88 0 0);
+  --chrome-fill-ink: oklch(0.13 0 0);
+  --chrome-fill-hi: oklch(1 0 0);
+  --chrome-fill-lo: oklch(0 0 0 / 30%);
+  --chrome-fill-drop: oklch(0 0 0 / 60%);
+  --chrome-fill-lift: oklch(1 0 0 / 14%);
+  --chrome-press: oklch(0 0 0 / 40%);
+  --chrome-plate-top: oklch(1 0 0 / 14%);
+  --chrome-plate-bottom: oklch(1 0 0 / 4%);
+  --chrome-plate-hi: oklch(1 0 0 / 16%);
+  --chrome-plate-rim: oklch(1 0 0 / 5%);
+  --chrome-bead-stops: oklch(1 0 0), oklch(0.85 0 0) 55%, oklch(0.6 0 0);
+  --chrome-bead-drop: oklch(0 0 0 / 70%);
+  --chrome-bead-ink-stops: oklch(0.5 0 0), oklch(0.22 0 0) 55%, oklch(0.1 0 0);
+  --chrome-bead-ink-drop: oklch(0 0 0 / 50%);
+  --chrome-led-stops: oklch(0.7 0.21 27) 0%, oklch(0.56 0.23 27) 55%, oklch(0.5 0.21 27) 100%;
+  --chrome-led-flat: oklch(0.56 0.23 27);
+  --chrome-led-hi: oklch(1 0 0 / 38%);
+  --chrome-led-lo: oklch(0 0 0 / 30%);
+  --chrome-led-drop: oklch(0 0 0 / 50%);
+  --chrome-led-lift: oklch(1 0 0 / 10%);
+  --chrome-led-glow: color-mix(in oklch, var(--live) 40%, transparent);
+  --chrome-edge: transparent;
+  /* The chromatic ring: a black face, the solid's, in a ring of liquid
+     chrome, the same three bands of metal at full brightness. */
+  --chrome-chromatic-face-stops: oklch(0.22 0 0) 0%, oklch(0.16 0 0) 60%, oklch(0.13 0 0) 100%;
+  --chrome-chromatic-bands:
+    oklch(0.3 0 0) 0deg, oklch(0.7 0 0) 34deg, oklch(1 0 0) 46deg, oklch(0.82 0 0) 54deg,
+    oklch(0.5 0 0) 74deg, oklch(0.16 0 0) 96deg, oklch(0.3 0 0) 120deg;
+  --chrome-chromatic-recess: oklch(0 0 0 / 90%);
+  --chrome-chromatic-rim: oklch(0 0 0 / 70%);
+  --chrome-chromatic-lift: oklch(1 0 0 / 6%);
+  /* Chrome rows (plan 0011): a silver plate on the black solid with a
+     polished bead edge for the on-stream row, half its strength for a
+     member's row. */
+  --chrome-row-edge-stops: oklch(1 0 0), oklch(0.85 0 0) 55%, oklch(0.6 0 0);
+  --chrome-row-live-top: oklch(1 0 0 / 14%);
+  --chrome-row-live-bottom: oklch(1 0 0 / 4%);
+  --chrome-row-live-hi: oklch(1 0 0 / 20%);
+  --chrome-row-member-top: oklch(1 0 0 / 7%);
+  --chrome-row-member-bottom: oklch(1 0 0 / 2%);
+  --chrome-row-member-hi: oklch(1 0 0 / 10%);
+  --chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);
+  --chrome-row-rim: oklch(1 0 0 / 8%);
+  --chrome-row-lift: oklch(1 0 0 / 4%);
 
   --knob: oklch(1 0 0);
   --knob-ring: oklch(0 0 0 / 35%);
 
-  --video-ground: oklch(0.13 0.003 286);
-  --video-ground-foreground: oklch(0.97 0.001 286);
-  --video-ground-muted: oklch(0.71 0.01 286);
+  --video-ground: oklch(0.13 0 0);
+  --video-ground-foreground: oklch(0.97 0 0);
+  --video-ground-muted: oklch(0.71 0 0);
 }
 
 /* The derived coats (plan 091, D4). The body paints the lighter cover, so
    first paint and every full-window state are already tinted; the heavier
    region adds exactly the delta that composites to its cover,
-   1 - (1 - cover) / (1 - body). On macOS the work delta is 0 and the sidebar
-   adds 29.4% (dark) or 50% (light); on Windows the Mica covers (below) put
-   the delta on the content pane instead. window-palette.test.ts computes the
+   1 - (1 - cover) / (1 - body). The work delta is 0 and the sidebar adds
+   33.3% (dark) or 42.9% (light), on every platform (plan 208 took the
+   Windows Mica covers away with Mica). window-palette.test.ts computes the
    composites from the covers. */
 :root,
 .dark {
@@ -317,56 +442,78 @@
   );
 }
 
-/* Windows 11 Mica (plan 050, D7; plan 091, D5): Mica tints from the wallpaper
-   and never shows what is behind the window, so the coats only carry the
-   tone. These covers reproduce the plan 050 composite exactly: a 50% body
-   plus a 24% content coat in light, 34% plus 26% in dark. Starting values;
-   the Windows box tunes them (S21 acceptance). */
-:root[data-platform='win32'] {
-  --glass-cover-sidebar: 0.5;
-  --glass-cover-work: 0.62;
-}
-:root[data-platform='win32'].dark {
-  --glass-cover-sidebar: 0.34;
-  --glass-cover-work: 0.5116;
+/* The chrome controls' light and shade (plan 208 S4), cut from each theme's
+   tokens above: a top line, a bottom line and a drop, plus the edge Increase
+   Contrast adds. Pressed is concave: a shade along the top and no drop. */
+:root,
+.dark {
+  --chrome-fill-shadow:
+    inset 0 1px 0 var(--chrome-fill-hi), inset 0 -1px 0 var(--chrome-fill-lo),
+    0 1px 3px var(--chrome-fill-drop), 0 0 0 1px var(--chrome-edge);
+  --chrome-led-shadow:
+    inset 0 1px 0 var(--chrome-led-hi), inset 0 -1px 0 var(--chrome-led-lo),
+    0 1px 3px var(--chrome-led-drop), 0 0 0 1px var(--chrome-edge);
+  --chrome-pressed-shadow: inset 0 1px 2px var(--chrome-press), 0 0 0 1px var(--chrome-edge);
+
+  /* The chromatic ring's light and shade: glints that run against the bands,
+     a tube's lit top and shaded underside, the ring's shade on the face, and
+     a rim and drop around it. Pressed sinks the face deeper and drops no
+     shadow. */
+  --chrome-chromatic-glints:
+    transparent 0deg, oklch(1 0 0 / 65%) 8deg, transparent 18deg, transparent 50deg,
+    oklch(0 0 0 / 40%) 62deg, transparent 74deg, transparent 90deg;
+  --chrome-chromatic-sheen:
+    oklch(1 0 0 / 35%) 0%, transparent 30%, transparent 70%, oklch(0 0 0 / 35%) 100%;
+  --chrome-chromatic-shadow:
+    inset 0 1px 3px var(--chrome-chromatic-recess), 0 0 0 1px var(--chrome-edge),
+    0 0 0 1px var(--chrome-chromatic-rim), 0 1px 3px var(--chrome-fill-drop);
+  --chrome-chromatic-pressed-shadow:
+    inset 0 2px 5px var(--chrome-chromatic-recess), 0 0 0 1px var(--chrome-edge),
+    0 0 0 1px var(--chrome-chromatic-rim);
 }
 
-/* Increase Contrast: hairlines strong enough to read on glass, the secondary
-   tier one step closer to the primary, and both covers at 95% (plan 091, D7). */
+/* Increase Contrast: hairlines strong enough to read on any backing, the
+   secondary and tertiary tiers one step closer to the primary, and both
+   covers at 95% (plan 091, D7; plan 208 D12; the tertiary since plan 174
+   S1.8). */
 @media (prefers-contrast: more) {
-  :root,
-  :root[data-platform='win32'] {
+  :root {
     --border: oklch(0 0 0 / 28%);
     --input: oklch(0 0 0 / 28%);
-    --muted-foreground: oklch(0.38 0.006 286);
+    --muted-foreground: oklch(0.38 0 0);
+    --subtle: oklch(0.45 0 0);
     --glass-cover-sidebar: 0.95;
     --glass-cover-work: 0.95;
     --glass-float-rim: oklch(0 0 0 / 24%);
     --chip-rim: oklch(0 0 0 / 24%);
     --keycap-rim: oklch(0 0 0 / 28%);
+    --chrome-edge: oklch(0 0 0 / 60%);
+    --chrome-plate-rim: oklch(0 0 0 / 28%);
+    --chrome-row-rim: oklch(0 0 0 / 28%);
   }
-  .dark,
-  :root[data-platform='win32'].dark {
+  .dark {
     --border: oklch(1 0 0 / 24%);
     --input: oklch(1 0 0 / 24%);
-    --muted-foreground: oklch(0.8 0.01 286);
+    --muted-foreground: oklch(0.8 0 0);
+    --subtle: oklch(0.68 0 0);
     --glass-cover-sidebar: 0.95;
     --glass-cover-work: 0.95;
     --glass-float-rim: oklch(1 0 0 / 30%);
     --chip-rim: oklch(1 0 0 / 30%);
     --keycap-rim: oklch(1 0 0 / 30%);
+    --chrome-edge: oklch(1 0 0 / 55%);
+    --chrome-plate-rim: oklch(1 0 0 / 30%);
+    --chrome-row-rim: oklch(1 0 0 / 30%);
   }
 }
 
-/* After Increase Contrast, so it wins when both are on. The OS paints the
-   material solid under Reduce Transparency (the clear-glass strip steps
-   aside too); the coats go solid with it so text contrast never depends on
-   what sits behind. */
+/* After Increase Contrast, so it wins when both are on. Under Reduce
+   Transparency the coats go solid (a media query, so a runtime change
+   applies at once), so text contrast never depends on what sits behind.
+   Under the clear glass (D9) the OS paints the material solid too. */
 @media (prefers-reduced-transparency: reduce) {
   :root,
-  .dark,
-  :root[data-platform='win32'],
-  :root[data-platform='win32'].dark {
+  .dark {
     --glass-window: var(--glass-solid);
     --glass-sidebar: transparent;
     --glass-content: transparent;
@@ -399,15 +546,27 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 8px);
-  --radius-3xl: calc(var(--radius) + 14px);
-  --radius-4xl: calc(var(--radius) + 20px);
 
   /* Semantic radius tiers (plan 050, D4): containers 12, rows and cards 8,
      controls and chips 6. Use rounded-panel / rounded-row / rounded-chip. */
   --radius-panel: calc(var(--radius) + 2px); /* 12px */
   --radius-row: calc(var(--radius) - 2px); /* 8px */
   --radius-chip: calc(var(--radius) - 4px); /* 6px */
+  /* Tags (Badge outline: 9:16, counts, Idle) sit between chip and row. */
+  --radius-tag: 7px;
+
+  /* The type tokens (plan 174 S1.6a, J1-12): a section label 11 / 600
+     (text-label, tertiary), a section header 13 / 600 (text-section) and
+     metadata 12 (text-meta). Body stays text-sm (14). Never an arbitrary
+     text-[Npx] where one of these is meant. */
+  --text-label: 0.6875rem; /* 11px */
+  --text-label--line-height: 1rem;
+  --text-label--font-weight: 600;
+  --text-section: 0.8125rem; /* 13px */
+  --text-section--line-height: 1.25rem;
+  --text-section--font-weight: 600;
+  --text-meta: 0.75rem; /* 12px */
+  --text-meta--line-height: 1rem;
 
   /* The desktop scale (plan 050, D4): one toolbar, one status bar, one row,
      and one control height for every screen. */
@@ -424,12 +583,10 @@
     -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
 
-  /* One soft elevation token for menus/dialogs/popovers (borders do the rest). */
-  --shadow-soft: 0 1px 2px oklch(0 0 0 / 0.05), 0 10px 30px oklch(0 0 0 / 0.08);
-  /* Floating glass panel: layered drop + hairline ring (per-theme value above). */
-  --shadow-glass: var(--shadow-glass-panel);
-
   --color-subtle: var(--subtle);
+  /* The inset fill (plan 174 S1.6a, A-15): grouped lists, read-only fields
+     and in-pane wells, 3% of the text colour over the glass. bg-inset. */
+  --color-inset: color-mix(in oklab, var(--foreground) 3%, transparent);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -445,6 +602,7 @@
   --color-info: var(--info);
   --color-member-foreground: var(--member-foreground);
   --color-member: var(--member);
+  --color-reward: var(--reward);
   --color-live-foreground: var(--live-foreground);
   --color-live: var(--live);
   --color-destructive-foreground: var(--destructive-foreground);
@@ -498,6 +656,7 @@
   --color-platform-twitch: #9146ff;
   --color-platform-twitch-ink: #a970ff;
   --color-platform-instagram: #e1306c;
+  --color-platform-facebook: #0866ff;
   --color-platform-kick: #53fc18;
   --color-platform-kick-ink: #0b1a05;
 }
@@ -552,7 +711,7 @@
 @utility glass-float-dialog {
   border-color: var(--glass-float-rim);
   background-color: var(--glass-float-dialog);
-  box-shadow: var(--glass-float-drop);
+  box-shadow: var(--glass-float-dialog-drop);
 }
 
 @utility glass-float-tooltip {
@@ -581,6 +740,237 @@
   box-shadow:
     inset 0 1px 0 var(--keycap-highlight),
     inset 0 -1px 0 var(--keycap-base);
+}
+
+/*
+ * Chrome controls (plan 208 S4, D2): the Welcome screen's Liquid Chrome on
+ * the controls you touch, and only there. Four materials, used by the
+ * primitives in components/ui (plus the sidebar's selected row and
+ * MediaCard), never by a screen; a style guard holds it:
+ *   chrome-fill   polished primary fills (Button default, a checked Checkbox
+ *                 or Switch, Progress and slider ranges). Hover lifts it,
+ *                 pressed turns it concave, disabled is flat.
+ *   chrome-plate  selected and active (a segment, a tab, a pressed toggle, the
+ *                 sidebar's page, a MediaCard in use). Hover stays bg-accent.
+ *   chrome-bead   knobs and thumbs; chrome-bead-ink is the inverse bead for a
+ *                 knob on a chrome track.
+ *   chrome-led    Record and the stop button: a red LED, glowing with
+ *                 data-lit while a recording or livestream runs (D8).
+ * Each writes its light and shade into --tw-shadow and repeats Tailwind's
+ * shadow stack, so a focus or hover ring (ring-*) still composes with it.
+ * Fast and flat: no transition, no motion, no backdrop-filter.
+ */
+@utility chrome-fill {
+  color: var(--chrome-fill-ink);
+  background-color: var(--chrome-fill-flat);
+  background-image: linear-gradient(to bottom, var(--chrome-fill-stops));
+  background-origin: border-box;
+  --tw-shadow: var(--chrome-fill-shadow);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &:is(button, a):hover:not(:disabled) {
+    background-image:
+      linear-gradient(var(--chrome-fill-lift), var(--chrome-fill-lift)),
+      linear-gradient(to bottom, var(--chrome-fill-stops));
+  }
+  &:is(button, a):active:not(:disabled) {
+    background-image: linear-gradient(to top, var(--chrome-fill-stops));
+    --tw-shadow: var(--chrome-pressed-shadow);
+  }
+  &:disabled {
+    background-image: none;
+    --tw-shadow: 0 0 0 1px var(--chrome-edge);
+  }
+}
+
+@utility chrome-plate {
+  background-image: linear-gradient(to bottom, var(--chrome-plate-top), var(--chrome-plate-bottom));
+  background-origin: border-box;
+  --tw-shadow: inset 0 1px 0 var(--chrome-plate-hi), inset 0 0 0 1px var(--chrome-plate-rim);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+@utility chrome-bead {
+  background-image: radial-gradient(circle at 35% 30%, var(--chrome-bead-stops));
+  --tw-shadow: 0 1px 2px var(--chrome-bead-drop);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+@utility chrome-bead-ink {
+  background-image: radial-gradient(circle at 35% 30%, var(--chrome-bead-ink-stops));
+  --tw-shadow: 0 1px 2px var(--chrome-bead-ink-drop);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+@utility chrome-led {
+  color: var(--live-foreground);
+  background-color: var(--chrome-led-flat);
+  background-image: linear-gradient(to bottom, var(--chrome-led-stops));
+  background-origin: border-box;
+  --tw-shadow: var(--chrome-led-shadow);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &[data-lit] {
+    --tw-shadow: var(--chrome-led-shadow), 0 0 12px var(--chrome-led-glow);
+  }
+  &:is(button, a):hover:not(:disabled) {
+    background-image:
+      linear-gradient(var(--chrome-led-lift), var(--chrome-led-lift)),
+      linear-gradient(to bottom, var(--chrome-led-stops));
+  }
+  &:is(button, a):active:not(:disabled) {
+    background-image: linear-gradient(to top, var(--chrome-led-stops));
+    --tw-shadow: var(--chrome-pressed-shadow);
+  }
+  &:disabled {
+    background-image: none;
+    --tw-shadow: 0 0 0 1px var(--chrome-edge);
+  }
+}
+
+/* The chromatic ring (Button's `chromatic`): a face of the theme's solid set
+   in a 2px ring of liquid chrome. Three bands of silver flow around the ring
+   while glints run against them, so the metal seems to slosh; hover surges
+   the flow and lifts the face, and easing off picks up where the surge left
+   it, without a jump. Pressed sinks the face. The ring is the border box,
+   and reduced motion holds the metal still. */
+@property --chrome-chromatic-flow {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@property --chrome-chromatic-surge {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@utility chrome-chromatic {
+  color: var(--foreground);
+  border: 2px solid transparent;
+  /* Each loop turns the bands and glints by whole periods, so it never
+     seams: 360deg is three bands, and 1.5 turns are six glints. */
+  background-image:
+    linear-gradient(to bottom, var(--chrome-chromatic-face-stops)),
+    linear-gradient(to bottom, var(--chrome-chromatic-sheen)),
+    repeating-conic-gradient(
+      from calc(var(--chrome-chromatic-flow) * -1.5 - var(--chrome-chromatic-surge)),
+      var(--chrome-chromatic-glints)
+    ),
+    repeating-conic-gradient(
+      from calc(var(--chrome-chromatic-flow) + var(--chrome-chromatic-surge)),
+      var(--chrome-chromatic-bands)
+    );
+  background-clip: padding-box, border-box, border-box, border-box;
+  background-origin: border-box;
+  --tw-shadow: var(--chrome-chromatic-shadow);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  animation:
+    chrome-chromatic-flow 9s linear infinite,
+    chrome-chromatic-surge 4.5s linear infinite paused;
+  /* As specific as Button's own border, clip and focus border, and later,
+     so the ring shows in any class order. */
+  &:is(button, a),
+  &:is(button, a):focus-visible {
+    border-color: transparent;
+    border-width: 2px;
+    background-clip: padding-box, border-box, border-box, border-box;
+  }
+  &:is(button, a):hover:not(:disabled) {
+    animation-play-state: running;
+    --tw-shadow: var(--chrome-chromatic-shadow), inset 0 0 0 100vmax var(--chrome-chromatic-lift);
+  }
+  &:is(button, a):active:not(:disabled) {
+    --tw-shadow: var(--chrome-chromatic-pressed-shadow);
+  }
+  &:disabled {
+    animation: none;
+  }
+}
+
+@keyframes chrome-chromatic-flow {
+  to {
+    --chrome-chromatic-flow: 360deg;
+  }
+}
+
+@keyframes chrome-chromatic-surge {
+  to {
+    --chrome-chromatic-surge: 360deg;
+  }
+}
+
+/*
+ * Chrome rows (plan 0011): the Stream Manager's rows that matter most, as
+ * plates of the same Liquid Chrome, worn through components/ui/chrome-row.ts
+ * and never named by a screen. Each plate sits on the theme's solid (the
+ * bottom layer), so its text keeps the tiers' contrast whatever sits behind
+ * (window-contrast.test.ts). Hover adds a faint lift, as chrome-fill
+ * does. Both are static: a few gradients and inset shadows on the row's own
+ * box, cached with its tile, so a virtualized chat of any number of members
+ * costs what the old flat tint did, also on a CPU-only compositor. No
+ * transition, no motion, no backdrop-filter.
+ *   chrome-row-live    the row that is on stream: a plate, a top line, a rim
+ *                      and a 2px polished edge down the left.
+ *   chrome-row-member  a member's row: a plate at half strength with a 2px
+ *                      edge in the member hue, so a tip still reads louder.
+ */
+@utility chrome-row-live {
+  background-image:
+    linear-gradient(to bottom, var(--chrome-row-edge-stops)),
+    linear-gradient(to bottom, var(--chrome-row-live-top), var(--chrome-row-live-bottom)),
+    linear-gradient(var(--glass-solid), var(--glass-solid));
+  background-size:
+    2px 100%,
+    100% 100%,
+    100% 100%;
+  background-repeat: no-repeat;
+  background-origin: border-box;
+  --tw-shadow: inset 0 1px 0 var(--chrome-row-live-hi), inset 0 0 0 1px var(--chrome-row-rim);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &:hover:not(:disabled) {
+    background-image:
+      linear-gradient(to bottom, var(--chrome-row-edge-stops)),
+      linear-gradient(var(--chrome-row-lift), var(--chrome-row-lift)),
+      linear-gradient(to bottom, var(--chrome-row-live-top), var(--chrome-row-live-bottom)),
+      linear-gradient(var(--glass-solid), var(--glass-solid));
+    background-size:
+      2px 100%,
+      100% 100%,
+      100% 100%,
+      100% 100%;
+  }
+}
+
+@utility chrome-row-member {
+  background-image:
+    linear-gradient(to bottom, var(--chrome-row-member-top), var(--chrome-row-member-bottom)),
+    linear-gradient(var(--glass-solid), var(--glass-solid));
+  background-origin: border-box;
+  --tw-shadow:
+    inset 2px 0 0 var(--chrome-row-member-edge), inset 0 1px 0 var(--chrome-row-member-hi);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+  &:hover:not(:disabled) {
+    background-image:
+      linear-gradient(var(--chrome-row-lift), var(--chrome-row-lift)),
+      linear-gradient(to bottom, var(--chrome-row-member-top), var(--chrome-row-member-bottom)),
+      linear-gradient(var(--glass-solid), var(--glass-solid));
+  }
 }
 
 @utility tone-success {
@@ -695,9 +1085,10 @@
   * {
     @apply border-border outline-ring/50;
   }
-  /* The window coat sits on the OS material. color-scheme lives on body, never
-     inline on the root: a root color-scheme of light makes Chromium paint an
-     opaque canvas over the material (plan 050, P5.3). */
+  /* The body paints the window coat as the canvas, so the first paint is
+     already the theme's tone. color-scheme lives on body, never inline on
+     the root: a root color-scheme of light makes Chromium paint an opaque
+     canvas over the window (plan 050, P5.3). */
   body {
     @apply bg-glass-window text-foreground;
     color-scheme: light;

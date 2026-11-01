@@ -157,6 +157,12 @@ try {
   })
   await waitForNativeSurface(smoke)
   await waitForCgHost(oracle, smoke)
+  // Plan 181 (redesign R2): the clip ring runs by default and arms the live
+  // preview compositor in place at the Output profile's fps, so the preview
+  // presents at that cadence (30 on the default profile) rather than the
+  // idle 60. The floor follows the compositor's own target, as it already
+  // does for the device recording phase.
+  const compositorTargetFps = (await request(ws, timeoutMs, 'compositor.status'))?.targetFps
   const floatingPhase = await runMovementPhase({
     label: 'floating movement/resize + focus/click',
     smoke,
@@ -164,13 +170,15 @@ try {
     movement: profile.floating,
     command: 'preview-window-set-bounds',
     boundsForIndex: floatingBounds,
-    interleaveClickFocus: true
+    interleaveClickFocus: true,
+    targetPresentFps: compositorTargetFps
   })
   report.phases.floating = floatingPhase
   report.failures.push(...floatingPhase.failures)
 
   const resizePhase = await runMovementPhase({
     label: 'floating continuous resize',
+    targetPresentFps: compositorTargetFps,
     smoke,
     oracle,
     movement: resizeMovementProfile(),
@@ -202,6 +210,7 @@ try {
   await waitForCgHost(oracle, smoke)
   const dockedPhase = await runMovementPhase({
     label: 'docked main-window movement',
+    targetPresentFps: compositorTargetFps,
     smoke,
     oracle,
     movement: profile.docked,
@@ -361,7 +370,10 @@ async function issueLayoutIntentBurst(smoke, sequence) {
       while (Date.now() < deadline) {
         const button = Array.from(document.querySelectorAll('[data-videorc-layout-preset]'))
           .find((candidate) => candidate.getAttribute('data-videorc-layout-preset') === preset);
-        if (button?.getAttribute('aria-pressed') === 'true') {
+        if (
+          button?.getAttribute('aria-checked') === 'true' ||
+          button?.getAttribute('aria-pressed') === 'true'
+        ) {
           observe(preset, 'committed', button);
           return { preset, pressed: true, disabled: Boolean(button.disabled), label: button.textContent?.trim() ?? '', timeline };
         }
@@ -1017,7 +1029,7 @@ async function dismissLaunchDialogs(smoke) {
   const result = await smokeCommand(smoke, 'eval-js', {
     code: `
       for (let i = 0; i < 25; i++) {
-        const scrim = document.querySelector('[data-slot="dialog-overlay"][data-state="open"]')
+        const scrim = document.querySelector('[data-slot="dialog-overlay"][data-open]')
         if (!scrim) return { dismissed: true }
         document.querySelectorAll('[data-slot="dialog-close"]').forEach((button) => button.click())
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -1184,7 +1196,8 @@ while true {
       previewWindow = content.windows.first { window in
         let title = window.title ?? ""
         let owner = window.owningApplication?.applicationName ?? ""
-        return title == "Videorc Preview" &&
+        // shared/window-names.ts (plan 174 S2.3a); the old title keeps A/B runs on older builds working.
+        return (title == "Preview" || title == "Videorc Preview") &&
           window.owningApplication?.processID == ${expectedPid} &&
           (owner.localizedCaseInsensitiveContains("Electron") ||
             owner.localizedCaseInsensitiveContains("Videorc"))

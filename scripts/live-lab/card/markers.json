@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "about": "Machine-readable marker regions on the live-lab test card (plan 178 U7). Rects are [x, y, width, height] normalized to the card viewport (0..1, origin top-left); the card fills the captured display. Every region is a grid of square cells painted pure white (bit 1) or pure black (bit 0) on a black quiet-zone plate. Decode by sampling the inner part of each cell's luma; no OCR. The markers sit above the flash layer, so they stay decodable on flash frames.",
+  "colors": { "one": "#ffffff", "zero": "#000000" },
+  "quietZone": 0.5,
+  "luma": {
+    "threshold": 128,
+    "minMargin": 40,
+    "sampleInset": 0.25,
+    "flashMeanLuma": 100
+  },
+  "fiducials": {
+    "tl": { "rect": [0.0125, 0.0222, 0.04, 0.0711], "grid": [3, 3], "bits": "111100100" },
+    "tr": { "rect": [0.9475, 0.0222, 0.04, 0.0711], "grid": [3, 3], "bits": "111001011" },
+    "bl": { "rect": [0.0125, 0.9067, 0.04, 0.0711], "grid": [3, 3], "bits": "110100111" },
+    "br": { "rect": [0.9475, 0.9067, 0.04, 0.0711], "grid": [3, 3], "bits": "011001111" }
+  },
+  "codes": {
+    "scene": {
+      "rect": [0.33, 0.9311, 0.0875, 0.0222],
+      "dataBits": 4,
+      "encoding": "one row of dataBits + 3 cells: guard 1, data bits most significant first, even parity over the data bits, guard 0",
+      "meaning": "card scene id 0..15 set by the harness with setStep({ sceneId })"
+    },
+    "step": {
+      "rect": [0.09, 0.9311, 0.1625, 0.0222],
+      "dataBits": 10,
+      "encoding": "one row of dataBits + 3 cells: guard 1, data bits most significant first, even parity over the data bits, guard 0",
+      "meaning": "scenario step index modulo 1024 set by the harness with setStep({ index })"
+    }
+  }
+}

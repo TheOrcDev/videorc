@@ -15,6 +15,10 @@ export type GoLivePartialSetup = {
   readyLabels: string[]
 }
 
+/** Why a new Go Live waits: the last one is still being ended on its platforms. */
+export const LIVESTREAM_STILL_SETTLING =
+  'Videorc is still ending your last livestream on its platforms. Try again in a moment.'
+
 export type GoLiveStartDecision = 'start-directly' | 'open-confirmation'
 
 export function decideGoLiveStart(streamEnabled: boolean): GoLiveStartDecision {

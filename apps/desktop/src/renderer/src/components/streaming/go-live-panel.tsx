@@ -1,12 +1,14 @@
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
-import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon } from '@/components/icons'
-import { useMemo, useState, type ReactElement } from 'react'
+import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
+import { useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
+import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { InfoTooltip } from '@/components/ui/info-tooltip'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   useStudioCore,
@@ -30,15 +32,27 @@ import {
   resolveProviderStreamOutputPlan,
   STREAM_OUTPUT_GOP_SECONDS,
   streamVideoProfileValidationReason,
+  type CaptureConfig,
   type ProviderStreamOutputPlan,
   videoProfileCompatibility
 } from '@/lib/capture'
+import { captureConfigForIntent, livestreamIntent } from '@/lib/session-start-intent'
+import {
+  CAPTION_OUTPUT_RULE_LABELS,
+  livestreamCaptionsBlockerFor,
+  type CaptionOutputRule
+} from '@/lib/captions-preflight'
 import { destinationSetup, destinationSetupHint } from '@/lib/destination-readiness'
+import { NO_VALUE } from '@/lib/format'
+import { destinationLabel } from '@/lib/platform-copy'
+import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
 import {
   classifyStreamHealthAttribution,
+  liveProblemLabel,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
 import { cn } from '@/lib/utils'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
 // The Livestream right column (plan 080 S7). Owner, 2026-09-30: "Live stream
 // should be about connecting your accounts and not about reading some tech
@@ -86,11 +100,7 @@ export function GoLivePanel({
   const separateEncodedOutputRoleAvailable = isSessionActive
     ? diagnosticStats.encoderBridgeSeparateOutputEncodersActive
     : preflightProvesSeparateOutput
-  let providerPlan = resolveProviderStreamOutputPlan(
-    video,
-    captureConfig.streamEnabled ? streaming : undefined,
-    providerStreamOutputPlanOptions(captureConfig, separateEncodedOutputRoleAvailable)
-  )
+  let providerPlan = goLiveProviderPlan(captureConfig, video, separateEncodedOutputRoleAvailable)
   if (simulcastArmed(captureConfig)) {
     const verticalVideo = simulcastStreamVideo(video, streaming)
     providerPlan = {
@@ -123,7 +133,6 @@ export function GoLivePanel({
       {compatibilityMessage ? (
         <div className="border-b border-border p-gutter">
           <Alert variant="warning">
-            <AlertIcon weight="fill" />
             <AlertDescription>{compatibilityMessage}</AlertDescription>
           </Alert>
         </div>
@@ -146,6 +155,11 @@ export function GoLivePanel({
       </PanelSection>
       <ReadyToGoLive
         accountByPlatform={accountByPlatform}
+        captions={
+          captureConfig.captions.enabled
+            ? { blocker: livestreamCaptionsBlockerFor(captureConfig) }
+            : undefined
+        }
         diagnosticStats={diagnosticStats}
         ffmpegReady={Boolean(health?.ffmpeg.available)}
         liveOutputActive={liveOutputActive}
@@ -173,9 +187,32 @@ export function GoLivePanel({
   )
 }
 
+/**
+ * The plan the Ready panel describes: what Go Live will run. Go Live streams
+ * whatever the saved output mode says (plan 174 S3.1), so planning with the
+ * saved mode's "no stream" showed the recording's quality, upload and disk
+ * as the stream's (plan 0016).
+ */
+export function goLiveProviderPlan(
+  captureConfig: Pick<CaptureConfig, 'recordEnabled' | 'streamEnabled' | 'streaming' | 'layout'>,
+  video: VideoSettings,
+  separateEncodedOutputRoleAvailable: boolean
+): ProviderStreamOutputPlan {
+  const goLiveConfig = captureConfigForIntent(
+    captureConfig,
+    livestreamIntent(captureConfig.recordEnabled)
+  )
+  return resolveProviderStreamOutputPlan(
+    video,
+    goLiveConfig.streaming,
+    providerStreamOutputPlanOptions(goLiveConfig, separateEncodedOutputRoleAvailable)
+  )
+}
+
 export function ReadyToGoLive({
   targets,
   accountByPlatform,
+  captions,
   ffmpegReady,
   profileCompatible,
   providerPlan,
@@ -192,6 +229,11 @@ export function ReadyToGoLive({
 }: {
   targets: StreamTargetSettings[]
   accountByPlatform: ReadonlyMap<StreamPlatform, PlatformAccount>
+  /**
+   * Live captions, when on: the output rule a livestream would break (plan
+   * 174 S3.4, D-9), so the Go Live dialog is never the first to say it.
+   */
+  captions?: { blocker: { rule: CaptionOutputRule; description: string } | null }
   ffmpegReady: boolean
   profileCompatible: boolean
   providerPlan: ProviderStreamOutputPlan
@@ -244,16 +286,18 @@ export function ReadyToGoLive({
         ok={enabled.length > 0 && notReady.length === 0}
       />
       {notReady.length ? (
+        // Each link opens its destination and moves focus to it (plan 174
+        // S3.5a, D-24), on a 24 px target.
         <div className="-mt-1 flex flex-col pl-6" data-slot="destinations-not-ready">
           {notReady.map(({ target, hint }) => (
             <Button
-              className="h-auto justify-start px-0 py-0.5 text-xs font-normal text-muted-foreground hover:text-foreground"
+              className="h-auto min-h-6 justify-start px-0 py-0.5 text-xs font-normal text-muted-foreground hover:text-foreground"
               key={target.id}
               size="xs"
               variant="link"
               onClick={() => onOpenDestination(target.id)}
             >
-              {target.label} · {hint}
+              {destinationLabel(target.label)} · {hint}
             </Button>
           ))}
         </div>
@@ -269,10 +313,24 @@ export function ReadyToGoLive({
       ) : null}
       <ChecklistRow
         detail={presetOk ? quality.text : `${quality.text} · choose a stream-safe preset`}
+        description={quality.lines ? <QualityLines lines={quality.lines} /> : undefined}
         label="Quality"
         ok={presetOk}
-        title={quality.title}
       />
+      {captions ? (
+        <>
+          <ChecklistRow
+            detail={captions.blocker ? CAPTION_OUTPUT_RULE_LABELS[captions.blocker.rule] : 'On'}
+            label="Captions"
+            ok={!captions.blocker}
+          />
+          {captions.blocker ? (
+            <p className="-mt-1 pl-6 text-xs text-muted-foreground" data-slot="captions-not-ready">
+              {captions.blocker.description}
+            </p>
+          ) : null}
+        </>
+      ) : null}
       {recordEnabled && recordingMatchesStream ? (
         <InfoRow
           detail={`${formatQuality(recordingVideo)} · matches the stream`}
@@ -288,7 +346,16 @@ export function ReadyToGoLive({
         <InfoRow detail={`About ${diskGbPerHour} GB per hour`} label="Disk" />
       ) : null}
       {ffmpegReady ? null : (
-        <ChecklistRow detail="Missing. Check Settings." label="FFmpeg" ok={false} />
+        // A row that goes where FFmpeg is fixed (D-24), like Studio's
+        // "Videorc's recorder isn't available": Health, since S3.6 removed
+        // Settings → Recording.
+        <NavigableRow
+          className="-mx-3 w-[calc(100%+1.5rem)]"
+          icon={AlertIcon}
+          label="FFmpeg"
+          value="Missing"
+          onNavigate={() => openWorkspaceTab('diagnostics')}
+        />
       )}
     </PanelSection>
   )
@@ -309,8 +376,15 @@ function StreamCheckRow({
       return <ChecklistRow detail="Checking…" label="Stream settings" ok={false} />
     case 'failed':
       return (
-        <div className="flex flex-col gap-1" title={preflight.message}>
-          <ChecklistRow detail="Couldn't check" label="Stream settings" ok={false} />
+        <div className="flex flex-col gap-1">
+          {/* The raw probe message is one hover or focus away, not inline;
+              Technical details reads it too (plan 174 S1.10, D-23). */}
+          <ChecklistRow
+            detail="Couldn't check"
+            detailHint={preflight.message}
+            label="Stream settings"
+            ok={false}
+          />
           <div className="flex items-center justify-between gap-2 pl-6">
             <span className="text-xs text-muted-foreground">
               Go Live checks again when you start.
@@ -354,9 +428,10 @@ function LiveStreamRow({
   return (
     <ChecklistRow
       detail={healthy ? 'Healthy' : liveProblemLabel(attribution)}
+      // The problem's whole sentence on hover and on focus (plan 174 S1.10).
+      detailHint={streamHealthDescription(attribution, true, { state: 'not-requested' })}
       label="Stream"
       ok={healthy}
-      title={streamHealthDescription(attribution, true, { state: 'not-requested' })}
     />
   )
 }
@@ -394,13 +469,16 @@ export function TechnicalDetails({
   const fallbackReason = liveOutputActive
     ? diagnosticStats.encoderBridgeEncodedOutputFallbackReason
     : probeResult?.fallbackReason
+  // Plan 0015: why the raw path uses this encoder (Linux OpenH264, VAAPI
+  // rejected). Informational; the live diagnostics fold it into the reason.
+  const encoderNote = liveOutputActive ? undefined : probeResult?.encoderSelectionReason
   const coalescedFrames = diagnosticStats.encoderBridgeSeparateOutputEncodersActive
     ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
     : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
   const bitrate = streamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
   const summary = liveOutputActive
     ? attribution === 'healthy'
-      ? [formatMbps(bitrate), formatLiveFps(streamHealth?.fps)].filter(Boolean).join(' · ')
+      ? [formatBitrate(bitrate), formatLiveFps(streamHealth?.fps)].filter(Boolean).join(' · ')
       : liveProblemLabel(attribution)
     : null
   const outputs = streamOutputs(providerPlan)
@@ -408,7 +486,7 @@ export function TechnicalDetails({
   return (
     <Collapsible
       className="border-b border-border"
-      data-slot="technical-details"
+      data-testid="technical-details"
       open={open}
       onOpenChange={(next) => {
         setOpen(next)
@@ -416,16 +494,20 @@ export function TechnicalDetails({
       }}
     >
       <CollapsibleTrigger className="group flex w-full items-center gap-2 px-gutter py-3 text-left text-[13px] font-semibold text-foreground hover:bg-accent">
-        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-panel-open:rotate-180" />
         <span className="flex-1">Technical details</span>
         {summary ? (
           <span
             className={cn(
-              'truncate text-xs font-normal tabular-nums',
-              attribution === 'healthy' ? 'text-muted-foreground' : 'text-warning'
+              'flex min-w-0 items-center gap-1 text-xs font-normal tabular-nums',
+              attribution === 'healthy' ? 'text-muted-foreground' : 'text-foreground'
             )}
           >
-            {summary}
+            {/* The tone rides on the icon (plan 174 S1.8, D-35). */}
+            {attribution === 'healthy' ? null : (
+              <WarningIcon aria-hidden className="size-3.5 shrink-0 text-warning" weight="fill" />
+            )}
+            <span className="truncate">{summary}</span>
           </span>
         ) : null}
       </CollapsibleTrigger>
@@ -439,7 +521,7 @@ export function TechnicalDetails({
 
         {liveOutputActive ? (
           <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
-            <OutputMetric label="Frame rate" value={formatLiveFps(streamHealth?.fps) || '-'} />
+            <OutputMetric label="Frame rate" value={formatLiveFps(streamHealth?.fps) || NO_VALUE} />
             <OutputMetric label="Bitrate" value={formatLiveBitrate(bitrate)} />
             <OutputMetric
               label="Encoder speed"
@@ -473,6 +555,9 @@ export function TechnicalDetails({
             }
           />
           {fallbackReason ? <DetailRow label="Fallback reason" value={fallbackReason} /> : null}
+          {encoderNote && !fallbackReason ? (
+            <DetailRow label="Encoder note" value={encoderNote} />
+          ) : null}
           <DetailRow label="Keyframe interval" value={`${STREAM_OUTPUT_GOP_SECONDS} s`} />
           <DetailRow
             label="Encode sharing"
@@ -485,7 +570,7 @@ export function TechnicalDetails({
           {outputs.map(({ target, video }, index) => (
             <DetailRow
               key={target?.id ?? `stream-${index}`}
-              label={target?.label ?? 'Stream'}
+              label={target ? destinationLabel(target.label) : 'Stream'}
               value={formatEffectiveStreamProfile(video)}
             />
           ))}
@@ -520,17 +605,17 @@ function streamOutputs(plan: ProviderStreamOutputPlan): StreamOutput[] {
     : [{ video: plan.streamVideo }]
 }
 
-/** "1080p · 30 fps · 6 Mbps"; portrait canvases keep both sides ("1080×1920"). */
-export function formatQuality(video: VideoSettings): string {
-  const size = video.height > video.width ? `${video.width}×${video.height}` : `${video.height}p`
-  return `${size} · ${video.fps} fps · ${formatMbps(video.bitrateKbps)}`
+/** "1080p · 30 fps · 6 Mbps"; portrait canvases keep both sides (plan 174 S1.4). */
+function formatQuality(video: VideoSettings): string {
+  return formatVideoQuality(video, { bitrate: true })
 }
 
 /**
  * One quality line for every destination. Identical outputs read once;
- * different ones say so and list each destination by its own name on hover.
+ * different ones say so and list each destination by its own name, one line
+ * each under the row (plan 174 S1.10, D-23).
  */
-export function qualitySummary(outputs: StreamOutput[]): { text: string; title?: string } {
+export function qualitySummary(outputs: StreamOutput[]): { text: string; lines?: string[] } {
   const lines = outputs.map(({ target, video }) => ({
     label: target?.label,
     quality: formatQuality(
@@ -538,17 +623,11 @@ export function qualitySummary(outputs: StreamOutput[]): { text: string; title?:
     )
   }))
   const distinct = new Set(lines.map((line) => line.quality))
-  if (distinct.size <= 1) return { text: lines[0]?.quality ?? '-' }
+  if (distinct.size <= 1) return { text: lines[0]?.quality ?? NO_VALUE }
   return {
     text: 'Varies by destination',
-    title: lines.map((line) => `${line.label ?? 'Stream'}: ${line.quality}`).join('\n')
+    lines: lines.map((line) => `${line.label ?? 'Stream'}: ${line.quality}`)
   }
-}
-
-function formatMbps(kbps?: number): string {
-  if (typeof kbps !== 'number' || !Number.isFinite(kbps)) return ''
-  const mbps = Math.round(kbps / 100) / 10
-  return `${mbps.toLocaleString()} Mbps`
 }
 
 /** "hardware-videotoolbox" → "VideoToolbox · hardware"; unknown values pass through. */
@@ -568,31 +647,6 @@ export function encoderLabel(value?: string): string | undefined {
     vaapi: 'VA-API'
   }
   return `${names[match[2]] ?? match[2]} · ${match[1]}`
-}
-
-function liveProblemLabel(attribution: StreamHealthAttribution): string {
-  switch (attribution) {
-    case 'device':
-      return 'Capture device lost'
-    case 'audio':
-      return 'Audio dropping'
-    case 'capture':
-      return 'Capture running slow'
-    case 'render':
-      return 'Rendering slow'
-    case 'encoder':
-      return 'Encoder dropping frames'
-    case 'fallback':
-      return 'Encoder fallback'
-    case 'network':
-      return 'Delivery degraded'
-    case 'preview':
-      return 'Preview degraded'
-    case 'healthy':
-      return 'Healthy'
-    default:
-      return 'Checking…'
-  }
 }
 
 function encodeFootnote(plan: ProviderStreamOutputPlan, outputs: StreamOutput[]): string {
@@ -653,7 +707,7 @@ function streamHealthDescription(
   if (!liveOutputActive) {
     switch (preflight.state) {
       case 'not-requested':
-        return 'The output path has not been checked yet.'
+        return "The output path hasn't been checked yet."
       case 'pending':
         return 'Checking the output path…'
       case 'failed':
@@ -673,7 +727,7 @@ function streamHealthDescription(
     case 'capture':
       return 'Capture is running below the target frame rate.'
     case 'render':
-      return 'The compositor is running below the target frame rate.'
+      return 'The scene is rendering below the target frame rate.'
     case 'encoder':
       return 'The encoder or its output queue is losing frames.'
     case 'fallback':
@@ -711,9 +765,9 @@ function DetailRow({
     <div className="flex items-start justify-between gap-3 text-xs">
       <span className="shrink-0 text-muted-foreground">{label}</span>
       {code ? (
-        <code className="min-w-0 text-right break-words text-foreground">{value ?? 'unknown'}</code>
+        <code className="min-w-0 text-right break-words text-foreground">{value ?? NO_VALUE}</code>
       ) : (
-        <span className="min-w-0 text-right break-words text-foreground">{value ?? 'unknown'}</span>
+        <span className="min-w-0 text-right break-words text-foreground">{value ?? NO_VALUE}</span>
       )}
     </div>
   )
@@ -724,42 +778,46 @@ function formatLiveFps(value?: number): string {
 }
 
 function formatLiveBitrate(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? `${Math.round(value).toLocaleString()} kbps`
-    : '-'
+  return formatBitrate(value) || NO_VALUE
 }
 
 function formatEncoderSpeed(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : '-'
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : NO_VALUE
 }
 
 function formatFrameCount(value?: number): string {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.max(0, Math.round(value)).toLocaleString()
-    : '-'
+    : NO_VALUE
 }
 
 function formatEffectiveStreamProfile(video: VideoSettings): string {
-  return `${video.width}×${video.height} @ ${video.fps} fps · ${video.bitrateKbps.toLocaleString()} kbps CBR`
+  return `${formatVideoQuality(video, { size: 'full', bitrate: true })} CBR`
 }
 
+/**
+ * One readiness fact (plan 174 S1.10, D-23): never a native title.
+ * `description` is what the short `detail` stands for, as visible lines under
+ * it; `detailHint` explains the detail on hover and on keyboard focus.
+ */
 function ChecklistRow({
   label,
   detail,
   ok,
-  title
+  description,
+  detailHint
 }: {
   label: string
   detail: string
   ok: boolean
-  title?: string
+  description?: ReactNode
+  detailHint?: ReactNode
 }): ReactElement {
-  return (
+  const row = (
     <div
       className="flex items-start justify-between gap-3 text-sm"
       data-ok={ok}
       data-slot="checklist-row"
-      title={title}
     >
       <div className="flex items-center gap-2">
         {ok ? (
@@ -769,8 +827,30 @@ function ChecklistRow({
         )}
         <span>{label}</span>
       </div>
-      <span className="text-right text-xs text-muted-foreground">{detail}</span>
+      <InfoTooltip align="end" content={detailHint}>
+        <span className="text-right text-xs text-muted-foreground">{detail}</span>
+      </InfoTooltip>
     </div>
+  )
+  if (!description) return row
+  return (
+    <div className="flex flex-col gap-1">
+      {row}
+      <div className="pl-6 text-xs text-muted-foreground" data-slot="checklist-row-description">
+        {description}
+      </div>
+    </div>
+  )
+}
+
+/** One line per destination when their qualities differ. */
+function QualityLines({ lines }: { lines: readonly string[] }): ReactElement {
+  return (
+    <ul className="flex flex-col gap-0.5">
+      {lines.map((line) => (
+        <li key={line}>{line}</li>
+      ))}
+    </ul>
   )
 }
 

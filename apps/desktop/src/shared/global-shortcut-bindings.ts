@@ -6,20 +6,22 @@ import { globalShortcutLayout, type GlobalShortcutAction } from './global-shortc
 // so only Settings and the IPC contract carry it.
 
 const ACTION_CONFIG_KEYS = {
+  'screen-hide-toggle': 'screenHideToggle',
   'record-toggle': 'recordToggle',
   'stream-toggle': 'streamToggle',
   'mic-toggle': 'micToggle',
   'system-audio-toggle': 'systemAudioToggle',
   'clip-mark': 'clipMark',
+  'clip-mark-long': 'clipMarkLong',
   'layout-next': 'layoutNext',
   'layout-previous': 'layoutPrevious'
 } as const satisfies Record<
-  Exclude<GlobalShortcutAction, `layout:${string}`>,
-  Exclude<keyof GlobalShortcutsConfig, 'layouts'>
+  Exclude<GlobalShortcutAction, `layout:${string}` | `scene:${string}`>,
+  Exclude<keyof GlobalShortcutsConfig, 'layouts' | 'scenes'>
 >
 
 /** A single-action key a GlobalShortcutsConfig may carry (besides
- * `layouts`): the IPC schema admits exactly these. */
+ * `layouts` and `scenes`): the IPC schema admits exactly these. */
 export function isGlobalShortcutConfigKey(key: string): boolean {
   return (Object.values(ACTION_CONFIG_KEYS) as string[]).includes(key)
 }
@@ -30,6 +32,9 @@ export function withGlobalShortcut(
   action: GlobalShortcutAction,
   accelerator: string
 ): GlobalShortcutsConfig {
+  if (action.startsWith('scene:')) {
+    return { ...config, scenes: { ...config?.scenes, [action.slice(6)]: accelerator } }
+  }
   const layout = globalShortcutLayout(action)
   if (layout) {
     return { ...config, layouts: { ...config?.layouts, [layout]: accelerator } }

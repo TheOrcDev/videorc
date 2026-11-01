@@ -4,6 +4,7 @@ import type { ReactElement } from 'react'
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { Badge } from '@/components/ui/badge'
 import { CommandItem, CommandShortcut } from '@/components/ui/command'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { CohostQuestion } from '@/lib/backend'
 import {
   cohostAgeLabel,
@@ -46,7 +47,7 @@ export function CohostQuestionRow({
 
   return (
     <CommandItem
-      className="min-h-11"
+      className="h-row"
       data-cohost-row="question"
       data-cohost-row-key={key}
       data-cohost-selected={selected ? 'true' : 'false'}
@@ -70,18 +71,24 @@ export function CohostQuestionRow({
       ) : null}
       <span className="min-w-0 flex-1 truncate text-foreground">{question.text}</span>
       {question.onTopic === true ? (
-        <Badge
-          className="shrink-0 text-muted-foreground"
-          data-slot="cohost-on-topic"
-          title="About what you are talking about right now"
-          variant="outline"
-        >
-          On topic
-        </Badge>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Badge
+                className="shrink-0 text-muted-foreground"
+                data-testid="cohost-on-topic"
+                variant="outline"
+              />
+            }
+          >
+            On topic
+          </TooltipTrigger>
+          <TooltipContent>About what you're talking about right now</TooltipContent>
+        </Tooltip>
       ) : null}
       {question.fromNotes ? (
         <NoteIcon
-          aria-label="Answered from your Orcle notes"
+          aria-label="Answered from About you"
           className="size-3.5 shrink-0 text-muted-foreground"
           weight="duotone"
         />
@@ -95,18 +102,24 @@ export function CohostQuestionRow({
         <span className="max-w-32 shrink-0 truncate text-xs text-muted-foreground">{askers}</span>
       ) : null}
       {talkingAbout ? (
-        <Badge
-          aria-label="Talking about this"
-          className="shrink-0"
-          data-slot="cohost-talking-about"
-          title="You are talking about this question"
-          variant="outline"
-        >
-          <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
-          <span className="@max-[400px]/cohost-pane:hidden">Talking about this</span>
-        </Badge>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Badge
+                aria-label="Talking about this"
+                className="shrink-0"
+                data-testid="cohost-talking-about"
+                variant="outline"
+              />
+            }
+          >
+            <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
+            <span className="@max-[400px]/cohost-pane:hidden">Talking about this</span>
+          </TooltipTrigger>
+          <TooltipContent>You're talking about this question</TooltipContent>
+        </Tooltip>
       ) : null}
-      {onStream ? <Badge variant="success">On stream</Badge> : null}
+      {onStream ? <Badge variant="chrome">On stream</Badge> : null}
       <CommandShortcut className="tabular-nums">{age}</CommandShortcut>
     </CommandItem>
   )
