@@ -683,6 +683,17 @@ export function LayoutTab(): ReactElement {
                 value={layout.verticalScreenFraming}
                 onChange={(verticalScreenFraming) => applyCameraPreset({ verticalScreenFraming })}
               />
+            ) : hasScreen && landscapeScreenFramed(layout.layoutPreset) ? (
+              // Plan 213 G3: the same Fill / Fit for the landscape screen
+              // scenes (Freeform follows the scene it came from); side by
+              // side always fills and Camera only has no screen.
+              <ScreenFramingControl
+                orientation="horizontal"
+                value={layout.horizontalScreenFraming}
+                onChange={(horizontalScreenFraming) =>
+                  applyCameraPreset({ horizontalScreenFraming })
+                }
+              />
             ) : null}
             {/* Scene motion changes what viewers see, so it lives with the
                 layouts, not under Settings (plan 174, D17). */}
@@ -1593,6 +1604,11 @@ export function OverlayItemInspector({
       </Field>
     </div>
   )
+}
+
+/** The landscape scenes whose screen fits or fills by the user's choice. */
+function landscapeScreenFramed(preset: LayoutPreset): boolean {
+  return preset === 'screen-camera' || preset === 'screen-only'
 }
 
 function sourceIsFullCanvas(source: SceneSource): boolean {

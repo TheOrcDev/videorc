@@ -93,6 +93,7 @@
       "sideBySideSplit": "70-30",
       "sideBySideCameraSide": "right",
       "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
       "arrangementMode": "preset",
       "sourceTransformOverrides": {},
       "sourceVisibility": {
@@ -123,6 +124,7 @@
       "sideBySideSplit": "70-30",
       "sideBySideCameraSide": "right",
       "verticalScreenFraming": "fill",
+      "horizontalScreenFraming": "fit",
       "arrangementMode": "freeform",
       "sourceTransformOverrides": {
         "source:base": {

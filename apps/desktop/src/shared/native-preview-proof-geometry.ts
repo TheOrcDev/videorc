@@ -51,8 +51,13 @@ export function previewProofLayerFit(
     }
     return layout.cameraFit === 'fit' && layout.cameraZoom <= 100 ? 'contain' : 'cover'
   }
+  const vertical = VERTICAL_FILL_PRESETS.includes(layout.layoutPreset)
+  // A vertical scene's Fit shows the whole screen; a landscape scene's Fill
+  // (plan 213 G3) fills its frame like side by side always does.
+  if (vertical && layout.verticalScreenFraming === 'fit') return 'contain'
   return layout.layoutPreset === 'side-by-side' ||
-    VERTICAL_FILL_PRESETS.includes(layout.layoutPreset)
+    vertical ||
+    layout.horizontalScreenFraming === 'fill'
     ? 'cover'
     : 'contain'
 }

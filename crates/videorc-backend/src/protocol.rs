@@ -516,6 +516,11 @@ pub struct LayoutSettings {
     /// the renderer contract — serde null trap).
     #[serde(default)]
     pub vertical_screen_framing: VerticalScreenFraming,
+    /// How the SCREEN is framed in the landscape screen scenes (Screen +
+    /// camera, Screen only, and Freeform over them), plan 213 G3. Non-optional
+    /// with a default on purpose (serde null trap).
+    #[serde(default)]
+    pub horizontal_screen_framing: HorizontalScreenFraming,
     /// Preset (default) composes the fixed `layout_preset` arrangement.
     /// Freeform composes the screen + camera base and applies
     /// `source_transform_overrides` — the "arrange it yourself" mode.
@@ -559,6 +564,21 @@ pub enum VerticalScreenFraming {
     #[default]
     Fill,
     Fit,
+}
+
+/// Screen framing for the landscape screen scenes (plan 213 G3).
+///
+/// `Fit` (the default) shows the whole screen, with bars when its shape
+/// differs from the frame: nothing on a shared screen is cut. `Fill` fills the
+/// frame and centre-crops what does not fit, which makes a screen of another
+/// shape (an ultrawide through a virtual display) as big as it can be.
+/// Side by side always fills, and the vertical scenes keep their own field.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HorizontalScreenFraming {
+    #[default]
+    Fit,
+    Fill,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1207,6 +1227,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         side_by_side_split: default_side_by_side_split(),
         side_by_side_camera_side: default_side_by_side_camera_side(),
         vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+        horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
         arrangement_mode: ArrangementMode::Preset,
         source_transform_overrides: std::collections::BTreeMap::new(),
         source_visibility: Default::default(),
@@ -7432,6 +7453,7 @@ mod tests {
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+            horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),

@@ -828,6 +828,7 @@ describe('smokePreviewCompositorCaptureConfig', () => {
       sideBySideSplit: '70-30',
       sideBySideCameraSide: 'right',
       verticalScreenFraming: 'fill',
+      horizontalScreenFraming: 'fit',
       arrangementMode: 'preset',
       sourceTransformOverrides: {}
     },
@@ -916,6 +917,7 @@ describe('smokePreviewCompositorCaptureConfig', () => {
         sideBySideSplit: '70-30',
         sideBySideCameraSide: 'right',
         verticalScreenFraming: 'fill',
+        horizontalScreenFraming: 'fit',
         arrangementMode: 'preset',
         sourceTransformOverrides: {}
       },
@@ -2123,6 +2125,40 @@ describe('freeform arrangement (plan phase 4)', () => {
     expect(layout.sourceTransformOverrides).toEqual({
       'source:base': { x: 0.1, y: 0.1, width: 0.5, height: 0.5 }
     })
+  })
+
+  it("keeps a screen's crop on its box and clamps it like the backend (plan 213 G2)", () => {
+    const layout = normalizeLayoutSettings({
+      arrangementMode: 'freeform',
+      sourceTransformOverrides: {
+        'source:base': {
+          x: 0.1,
+          y: 0.1,
+          width: 0.5,
+          height: 0.5,
+          cropLeft: 0.25,
+          cropTop: 0,
+          cropRight: 1.5,
+          cropBottom: 'lots'
+        }
+      }
+    } as unknown as Partial<CaptureConfig['layout']>)
+
+    expect(layout.sourceTransformOverrides).toEqual({
+      'source:base': { x: 0.1, y: 0.1, width: 0.5, height: 0.5, cropLeft: 0.25, cropRight: 0.95 }
+    })
+  })
+
+  it('reads the landscape screen framing, Fit unless Fill was chosen (plan 213 G3)', () => {
+    expect(normalizeLayoutSettings({}).horizontalScreenFraming).toBe('fit')
+    expect(normalizeLayoutSettings({ horizontalScreenFraming: 'fill' }).horizontalScreenFraming).toBe(
+      'fill'
+    )
+    expect(
+      normalizeLayoutSettings({ horizontalScreenFraming: 'stretch' } as unknown as Partial<
+        CaptureConfig['layout']
+      >).horizontalScreenFraming
+    ).toBe('fit')
   })
 
   it('rejects junk arrangement modes back to preset', () => {

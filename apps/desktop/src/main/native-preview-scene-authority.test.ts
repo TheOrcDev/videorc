@@ -224,6 +224,7 @@ function scene(
       sideBySideSplit: '70-30',
       sideBySideCameraSide: 'right',
       verticalScreenFraming: 'fill',
+      horizontalScreenFraming: 'fit',
       arrangementMode: 'preset',
       sourceTransformOverrides: {}
     },

@@ -917,7 +917,8 @@ describe('backend RPC contract', () => {
         cameraOffsetY: 0,
         sideBySideSplit: '50-50',
         sideBySideCameraSide: 'left',
-        verticalScreenFraming: 'fill'
+        verticalScreenFraming: 'fill',
+        horizontalScreenFraming: 'fit'
       },
       transitionMs: 320
     }

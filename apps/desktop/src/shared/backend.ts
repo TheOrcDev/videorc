@@ -652,6 +652,8 @@ export const LAYOUT_PRESET_VALUES = [
 export type CameraTransformMode = 'preset' | 'custom'
 export type SideBySideSplit = '50-50' | '60-40' | '70-30'
 export type VerticalScreenFraming = 'fill' | 'fit'
+/** The landscape screen scenes' framing (plan 213 G3); Fit by default. */
+export type HorizontalScreenFraming = 'fit' | 'fill'
 export type ArrangementMode = 'preset' | 'freeform'
 export type SideBySideCameraSide = 'left' | 'right'
 
@@ -717,6 +719,13 @@ export interface LayoutSettings {
    * covers the rest. Horizontal scenes ignore it.
    */
   verticalScreenFraming: VerticalScreenFraming
+  /**
+   * How the SCREEN is framed in the landscape screen scenes (Screen + camera,
+   * Screen only, and Freeform over them), plan 213 G3. 'fit' (default) shows
+   * the whole screen; 'fill' fills the frame and centre-crops the rest.
+   * Side by side always fills; vertical scenes ignore it.
+   */
+  horizontalScreenFraming: HorizontalScreenFraming
   /**
    * 'preset' (default) composes the fixed layoutPreset arrangement.
    * 'freeform' composes the screen + camera base and applies

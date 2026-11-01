@@ -35,6 +35,7 @@ function layout(overrides: Partial<LayoutSettings> = {}): LayoutSettings {
     sideBySideSplit: '70-30',
     sideBySideCameraSide: 'right',
     verticalScreenFraming: 'fill',
+    horizontalScreenFraming: 'fit',
     arrangementMode: 'preset',
     sourceTransformOverrides: {},
     ...overrides
@@ -89,6 +90,27 @@ describe('Windows proof-surface geometry', () => {
     ] as const) {
       expect(previewProofLayerFit(screen, layout({ layoutPreset }))).toBe('cover')
     }
+  })
+
+  it("follows the screen framing like Rust's scene_source_fit (plan 213 G3)", () => {
+    // Landscape Fill covers the screen scenes; their default Fit contains.
+    for (const layoutPreset of ['screen-camera', 'screen-only'] as const) {
+      expect(previewProofLayerFit(screen, layout({ layoutPreset }))).toBe('contain')
+      expect(
+        previewProofLayerFit(screen, layout({ layoutPreset, horizontalScreenFraming: 'fill' }))
+      ).toBe('cover')
+    }
+    // A vertical scene reads its own framing: Fit shows the whole screen.
+    expect(
+      previewProofLayerFit(
+        screen,
+        layout({
+          layoutPreset: 'vertical-screen-only',
+          verticalScreenFraming: 'fit',
+          horizontalScreenFraming: 'fill'
+        })
+      )
+    ).toBe('contain')
   })
 
   it('preserves rounded and circle masks only for the inset scene overlays', () => {

@@ -1654,6 +1654,7 @@ const layoutSchema = objectSchema(
     sideBySideSplit: enumSchema(['50-50', '60-40', '70-30']),
     sideBySideCameraSide: enumSchema(['left', 'right']),
     verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit'])),
+    horizontalScreenFraming: optionalSchema(enumSchema(['fit', 'fill'])),
     arrangementMode: optionalSchema(enumSchema(['preset', 'freeform'])),
     sourceVisibility: optionalSchema(
       objectSchema(

@@ -7784,7 +7784,8 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => backend.simulcastLegLayouts.length >= 3)
     expect(backend.simulcastLegLayouts.at(-1)).toMatchObject({
       layoutPreset: 'vertical-camera-bottom',
-      verticalScreenFraming: 'fill'
+      verticalScreenFraming: 'fill',
+      horizontalScreenFraming: 'fit'
     })
     expect(
       backend.commands

@@ -13389,6 +13389,9 @@ fn source_iso_snapshot(
     layout.camera_shape = crate::protocol::CameraShape::Rectangle;
     layout.camera_chroma_key_enabled = false;
     layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::default();
+    // The Screen file is the raw source for editing (plan 213 D5): whole,
+    // never filled or cropped like the scene's screen.
+    layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::default();
     Some(CompositorSceneSnapshot {
         synthetic_hard_content: false,
         selected_sources: snapshot.selected_sources.clone(),

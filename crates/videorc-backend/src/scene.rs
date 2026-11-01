@@ -1203,6 +1203,7 @@ mod tests {
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
                 vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+                horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
                 arrangement_mode: crate::protocol::ArrangementMode::Preset,
                 source_transform_overrides: std::collections::BTreeMap::new(),
                 source_visibility: Default::default(),
