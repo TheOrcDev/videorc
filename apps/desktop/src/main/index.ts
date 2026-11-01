@@ -51,6 +51,7 @@ import {
   nativeImage,
   nativeTheme,
   net,
+  powerSaveBlocker,
   protocol,
   safeStorage,
   screen,
@@ -427,6 +428,7 @@ import {
 import { installContextMenu } from './context-menu'
 import { installAppMenu } from './app-menu'
 import { LiveExitGuard, type AppExitKind } from './exit-guard'
+import { DisplaySleepGuard } from './display-sleep-guard'
 import {
   appMenuReleaseNotesUrl,
   type AppMenuPageKey,
@@ -942,6 +944,12 @@ let mainPreviewProgramShape: ReturnType<typeof previewProgramShape> = null
 // Plan 174 S3.1 (D2): a quit or a main-window close while on air waits for
 // the renderer's End livestream question (exit-guard.ts).
 const liveExitGuard = new LiveExitGuard()
+// The display stays awake while a recording or livestream runs: a sleeping
+// display stops every ScreenCaptureKit stream (display-sleep-guard.ts).
+const displaySleepGuard = new DisplaySleepGuard(
+  () => powerSaveBlocker.start('prevent-display-sleep'),
+  (id) => powerSaveBlocker.stop(id)
+)
 let deferredPermissionRestartState: DeferredPermissionRestartState =
   idleDeferredPermissionRestartState
 let smokePreviewMotionServer: HttpServer | null = null
@@ -10188,6 +10196,7 @@ function disconnectBackendEventSocket(): void {
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
+  displaySleepGuard.update(mainCaptureState)
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
   if (socket) {
@@ -10223,6 +10232,7 @@ function retireBackendEventSocket(
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
+  displaySleepGuard.update(mainCaptureState)
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
   clearNativePreviewMainPumpWork()
@@ -14450,6 +14460,7 @@ function updateMainCaptureState(payload: RecordingStatus): void {
   const nextState = captureStateAfterStatusPayload(payload)
   mainCaptureState = nextState
   liveExitGuard.observeRecordingStatus(payload)
+  displaySleepGuard.update(nextState)
   const decision = flushPermissionRestart(deferredPermissionRestartState, nextState)
   deferredPermissionRestartState = decision.state
   if (decision.runReason) {
