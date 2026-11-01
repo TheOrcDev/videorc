@@ -393,6 +393,7 @@ import {
   aspectFitRect,
   composeDockedScreenRect,
   decideDockVisibility,
+  initialPreviewWindowMode,
   parseDockSlotReport,
   parsePreviewWindowMode,
   previewWindowClosePrefs,
@@ -2886,9 +2887,12 @@ type PreviewWindowPrefs = {
 
 // Mode is module state so the placement helpers can consult it synchronously,
 // hydrated from prefs once (lazily, so early callers agree with openPreviewWindow).
+// A new install starts stuck to the app (plan 213 D5); a saved choice wins.
 function currentPreviewWindowMode(): PreviewWindowMode {
   if (!previewWindowModeLoaded) {
-    previewWindowMode = parsePreviewWindowMode(loadPreviewWindowPrefs().mode)
+    previewWindowMode = initialPreviewWindowMode(loadPreviewWindowPrefs().mode, {
+      scripted: !previewWindowAutoRestoreEnabled
+    })
     previewWindowModeLoaded = true
   }
   return previewWindowMode

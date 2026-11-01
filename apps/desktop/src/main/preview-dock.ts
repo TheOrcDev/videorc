@@ -32,6 +32,23 @@ export function parsePreviewWindowMode(raw: unknown): PreviewWindowMode {
 }
 
 /**
+ * The mode a launch starts in (plan 213 D5). A saved choice wins. With none
+ * saved, a new install starts stuck to the app: one window, as in OBS, and
+ * nothing a tiling window manager can move on its own. Smoke and probe runs
+ * (`scripted`: nothing is restored or saved) start floating, the state every
+ * probe assumes before it sets the mode it tests.
+ */
+export function initialPreviewWindowMode(
+  savedMode: unknown,
+  options: { scripted: boolean }
+): PreviewWindowMode {
+  if (savedMode === 'docked' || savedMode === 'floating') {
+    return savedMode
+  }
+  return options.scripted ? 'floating' : 'docked'
+}
+
+/**
  * What a floating Preview does with a size it did not choose (plan 213 D4): a
  * tiling window manager's tile, or a programmatic setBounds. On macOS AppKit
  * already keeps the user's own drags on the output aspect, so the window

@@ -5,6 +5,7 @@ import {
   aspectFitRect,
   composeDockedScreenRect,
   decideDockVisibility,
+  initialPreviewWindowMode,
   parseDockSlot,
   parseDockSlotReport,
   parsePreviewWindowMode,
@@ -43,6 +44,29 @@ describe('parsePreviewWindowMode', () => {
 
   it('accepts docked', () => {
     expect(parsePreviewWindowMode('docked')).toBe('docked')
+  })
+})
+
+describe('initialPreviewWindowMode (plan 213 D5)', () => {
+  it('starts a fresh install stuck to the app', () => {
+    expect(initialPreviewWindowMode(undefined, { scripted: false })).toBe('docked')
+  })
+
+  it('keeps a saved floating choice', () => {
+    expect(initialPreviewWindowMode('floating', { scripted: false })).toBe('floating')
+  })
+
+  it('keeps a saved docked choice', () => {
+    expect(initialPreviewWindowMode('docked', { scripted: false })).toBe('docked')
+  })
+
+  it('starts a scripted (smoke or probe) run floating unless a mode is saved', () => {
+    expect(initialPreviewWindowMode(undefined, { scripted: true })).toBe('floating')
+    expect(initialPreviewWindowMode('docked', { scripted: true })).toBe('docked')
+  })
+
+  it('treats an unknown saved value as no choice', () => {
+    expect(initialPreviewWindowMode('attached', { scripted: false })).toBe('docked')
   })
 })
 
