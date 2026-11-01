@@ -13832,6 +13832,77 @@ mod tests {
     }
 
     #[test]
+    fn source_iso_screen_leg_records_the_whole_uncropped_screen() {
+        // Plan 213 G5 (D5): the Screen file is the raw source for editing.
+        // A scene that crops its screen and fills it in landscape still
+        // records the whole screen, uncropped and fitted, on the Screen leg,
+        // whether the selection is known or only the scene's own source.
+        use crate::scene_geometry::screen_crop_fixture::{
+            CYAN, MAGENTA, RED, WHITE, sample_pixel,
+        };
+        let mut cropped = screen_crop_fixture_snapshot();
+        cropped.layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::Fill;
+        cropped.layout.source_transform_overrides.insert(
+            "source:base".to_string(),
+            crate::protocol::SourceTransformOverride {
+                crop_left: 0.25,
+                crop_top: 0.25,
+                crop_right: 0.25,
+                crop_bottom: 0.25,
+                ..crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x: 0.25,
+                    y: 0.25,
+                    width: 0.5,
+                    height: 0.5,
+                })
+            },
+        );
+        let mut selected = cropped.clone();
+        selected.selected_sources = Some(SourceSelection {
+            screen_id: Some("screen-1".to_string()),
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        });
+        let frame = screen_crop_fixture_frame();
+        for snapshot in [cropped, selected] {
+            let iso = source_iso_snapshot(Some(&snapshot), SourceIsoRole::Screen)
+                .expect("screen ISO snapshot");
+            let source = &iso.scene.as_ref().expect("scene").sources[0];
+            assert_eq!(source.transform, full_frame_transform(), "no box, no crop");
+            assert_eq!(
+                iso.layout.horizontal_screen_framing,
+                crate::protocol::HorizontalScreenFraming::Fit
+            );
+            assert!(iso.layout.source_transform_overrides.is_empty());
+            assert_eq!(
+                scene_source_fit(&SceneSourceKind::Screen, &iso.layout),
+                SceneFit::Contain
+            );
+
+            // And it draws so: every edge of the picture reaches the file.
+            let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+            render_compositor_yuv420p_frame(screen_crop_inputs(&iso, &frame, 128, 72), &mut bytes);
+            for (point, [r, g, b]) in [
+                ((0.05, 0.50), RED),
+                ((0.95, 0.50), WHITE),
+                ((0.50, 0.05), MAGENTA),
+                ((0.50, 0.95), CYAN),
+            ] {
+                let (x, y) = sample_pixel(point, 128, 72);
+                let (expected, _, _) = rgb_to_yuv(r, g, b);
+                let luma = bytes[y * 128 + x];
+                assert!(
+                    (i16::from(luma) - i16::from(expected)).abs() <= 8,
+                    "the Screen file shows {:?} at {point:?}: Y {luma} vs {expected}",
+                    [r, g, b]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_iso_snapshot_is_none_without_the_role_source() {
         let screen_only = test_scene_snapshot(LayoutPreset::ScreenOnly, Some("screen-1"), None);
         assert!(source_iso_snapshot(Some(&screen_only), SourceIsoRole::Screen).is_some());
