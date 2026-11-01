@@ -12969,6 +12969,7 @@ fn read_source_rgba(source: &RgbaSource<'_>, x: u32, y: u32) -> (u8, u8, u8, u8)
 
 fn camera_state_name(state: &PreviewCameraState) -> &'static str {
     match state {
+        PreviewCameraState::Disconnected => "disconnected",
         PreviewCameraState::DeviceMissing => "device-missing",
         PreviewCameraState::PermissionNeeded => "permission-needed",
         PreviewCameraState::Starting => "starting",

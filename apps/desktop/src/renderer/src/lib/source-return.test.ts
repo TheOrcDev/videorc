@@ -94,3 +94,24 @@ it('restores while idle with Clips on, and offers a click for recordings and str
     expect(sourceReturnAction({ state })).toBe('offer')
   }
 })
+
+it('lets the backend reconnect a disconnected camera without a renderer re-grab', () => {
+  expect(
+    cameraPreviewStartAllowed(camera.id, devicesForReconnect(), 'key', null, 'disconnected')
+  ).toBe(false)
+  const wanted = { cameraId: camera.id, cameraName: camera.name }
+  expect(
+    reconcileSourceSelection(wanted, [substitute], { disconnectedCameraId: camera.id })
+  ).toMatchObject(wanted)
+  expect(
+    reconcileSourceSelection(wanted, [substitute], { disconnectedCameraId: camera.id })
+      .wantedCameraId
+  ).toBeUndefined()
+  expect(
+    reconcileSourceSelection(wanted, [substitute], { disconnectedCameraId: 'other' }).cameraId
+  ).toBe(substitute.id)
+})
+
+function devicesForReconnect(): Device[] {
+  return [camera, substitute]
+}

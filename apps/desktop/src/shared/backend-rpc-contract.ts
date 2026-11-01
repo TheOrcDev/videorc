@@ -2085,7 +2085,14 @@ const previewCameraStatusSchema = boundedSemanticValue(
   'a preview camera status',
   objectSchema(
     {
-      state: enumSchema(['starting', 'live', 'permission-needed', 'device-missing', 'failed']),
+      state: enumSchema([
+        'starting',
+        'live',
+        'permission-needed',
+        'device-missing',
+        'disconnected',
+        'failed'
+      ]),
       targetFps: numberSchema({ min: 0, max: 1000 }),
       framesCaptured: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,

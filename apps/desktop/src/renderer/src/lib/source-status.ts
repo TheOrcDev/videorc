@@ -112,6 +112,9 @@ function pipelineSourceStatus(
   if (input.switching) return SWITCHING
   if (!input.selected) return null
   const { state, frameAgeMs } = input.preview ?? {}
+  if (state === 'disconnected') {
+    return { label: 'Disconnected', tone: 'warn', hint: input.preview?.message }
+  }
   if (state === 'live') {
     if (
       input.kind === 'camera' &&

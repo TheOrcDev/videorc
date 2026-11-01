@@ -2846,6 +2846,8 @@ export interface ReconcileSourceSelectionOptions {
    * even when the pick behind it is connected again.
    */
   holdStandIns?: boolean
+  /** A running disconnected camera keeps its last frame until it reconnects. */
+  disconnectedCameraId?: string
 }
 
 export function reconcileSourceSelection(
@@ -2958,14 +2960,24 @@ export function reconcileSourceSelection(
     ? undefined
     : (heldCamera ?? findRememberedSource(cameraPick.id, cameraPick.name, cameras))
   const holdingCamera = options.holdStandIns && cameraPick.standIn && !cameraOff
+  const disconnectedCamera =
+    options.disconnectedCameraId === nextSources.cameraId && nextSources.cameraId
+      ? {
+          id: nextSources.cameraId,
+          name: nextSources.cameraName ?? 'Camera',
+          kind: 'camera' as const,
+          status: 'unavailable' as const
+        }
+      : undefined
   const selectedCamera = cameraOff
     ? undefined
     : holdingCamera
       ? cameras.find((device) => device.id === nextSources.cameraId)
-      : (rememberedCamera ?? cameras[0])
+      : (disconnectedCamera ?? rememberedCamera ?? cameras[0])
   const cameraStandIn =
     !cameraOff &&
-    (holdingCamera || (!rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
+    (holdingCamera ||
+      (!disconnectedCamera && !rememberedCamera && Boolean(cameraPick.id || cameraPick.name)))
   nextSources.cameraOff = cameraOff ? true : undefined
   nextSources.wantedCameraId = cameraStandIn ? cameraPick.id : undefined
   nextSources.wantedCameraName = cameraStandIn ? cameraPick.name : undefined

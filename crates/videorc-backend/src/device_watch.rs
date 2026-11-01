@@ -2,6 +2,37 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
+#[derive(Debug, Clone)]
+pub(crate) struct CameraConnectionEvent {
+    pub unique_id: String,
+    pub name: String,
+    pub connected: bool,
+}
+
+fn camera_events() -> &'static std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>> {
+    static EVENTS: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<CameraConnectionEvent>>> = std::sync::OnceLock::new();
+    EVENTS.get_or_init(Default::default)
+}
+
+static CAMERA_EVENT_READY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+#[cfg(target_os = "macos")]
+fn camera_changed(event: CameraConnectionEvent) {
+    camera_events().lock().unwrap_or_else(|p| p.into_inner()).push_back(event);
+    CAMERA_EVENT_READY.notify_one();
+}
+
+async fn run_camera_events(state: crate::state::AppState) {
+    loop {
+        CAMERA_EVENT_READY.notified().await;
+        loop {
+            let event = camera_events().lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+            let Some(event) = event else { break; };
+            crate::preview_camera::camera_connection_changed(&state, &event).await;
+        }
+    }
+}
+
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub fn channel() -> (watch::Sender<u64>, watch::Receiver<u64>) {
@@ -24,6 +55,8 @@ async fn next_change(changes: &mut watch::Receiver<u64>) -> bool {
 }
 
 pub async fn run(mut changes: watch::Receiver<u64>, state: crate::state::AppState) {
+    let camera_state = state.clone();
+    state.spawn_process_task(async move { run_camera_events(camera_state).await });
     while next_change(&mut changes).await {
         crate::devices::invalidate_avfoundation_probe_cache();
         let ffmpeg_path = crate::ffmpeg::resolve_ffmpeg_path_ref(None);
@@ -88,15 +121,30 @@ mod macos {
     pub fn install(changes: watch::Sender<u64>) -> DeviceWatch {
         let center = NSNotificationCenter::defaultCenter();
         let mut observers = Vec::new();
-        for name in unsafe {
+        for (name, connected) in unsafe {
             [
-                AVCaptureDeviceWasConnectedNotification,
-                AVCaptureDeviceWasDisconnectedNotification,
+                (AVCaptureDeviceWasConnectedNotification, true),
+                (AVCaptureDeviceWasDisconnectedNotification, false),
             ]
         } {
             let changes = changes.clone();
-            let block =
-                RcBlock::new(move |_notification: NonNull<NSNotification>| changed(&changes));
+            let block = RcBlock::new(move |notification: NonNull<NSNotification>| {
+                // AVFoundation supplies the device as the notification object. Copy
+                // identity only; capture teardown and restart run on the backend.
+                if let Some(object) = unsafe { notification.as_ref() }.object() {
+                    let camera: &objc2_av_foundation::AVCaptureDevice = unsafe {
+                        &*objc2::rc::Retained::as_ptr(&object).cast()
+                    };
+                    if unsafe { camera.hasMediaType(objc2_av_foundation::AVMediaTypeVideo.unwrap()) } {
+                        super::camera_changed(super::CameraConnectionEvent {
+                            unique_id: unsafe { camera.uniqueID() }.to_string(),
+                            name: unsafe { camera.localizedName() }.to_string(),
+                            connected,
+                        });
+                    }
+                }
+                changed(&changes);
+            });
             // SAFETY: no object filter or queue; the block only signals a thread-safe channel.
             observers.push(unsafe {
                 center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
