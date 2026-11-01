@@ -6227,33 +6227,44 @@ mod windows {
     /// admits the next at ~666_6xx: bursts of 15 fps on a healthy source.
     const CADENCE_EARLY_TOLERANCE_100NS: i64 = 80_000;
 
+    /// Admits frames on a fixed grid of the target interval. The grid, not
+    /// the last admitted stamp, sets the next slot, so the early tolerance
+    /// never compounds: on a 75, 144 or 165 Hz display a 30 fps target stays
+    /// 30 fps instead of admitting every frame that clears the tolerance.
     struct WindowsCaptureCadenceGate {
         interval_100ns: i64,
-        last_admitted_100ns: Option<i64>,
+        next_due_100ns: Option<i64>,
     }
 
     impl WindowsCaptureCadenceGate {
         fn new(fps: u32) -> Self {
             Self {
                 interval_100ns: 10_000_000_i64 / i64::from(fps.max(1)),
-                last_admitted_100ns: None,
+                next_due_100ns: None,
             }
         }
 
         fn admit(&mut self, timestamp_100ns: i64) -> bool {
-            if let Some(last) = self.last_admitted_100ns
-                && timestamp_100ns.saturating_sub(last) < self.required_gap_100ns()
-            {
+            let due = self.next_due_100ns.unwrap_or(timestamp_100ns);
+            if timestamp_100ns < due.saturating_sub(self.early_tolerance_100ns()) {
                 return false;
             }
-            self.last_admitted_100ns = Some(timestamp_100ns);
+            // A frame a whole interval past its slot (a stall) restarts the
+            // grid from itself, so the frames after it are not a catch-up
+            // burst.
+            let next_due = if timestamp_100ns >= due.saturating_add(self.interval_100ns) {
+                timestamp_100ns
+            } else {
+                due
+            };
+            self.next_due_100ns = Some(next_due.saturating_add(self.interval_100ns));
             true
         }
 
-        /// A frame interval less the tolerance, never under three quarters of
-        /// the interval so a high target fps keeps rejecting duplicates.
-        fn required_gap_100ns(&self) -> i64 {
-            self.interval_100ns - CADENCE_EARLY_TOLERANCE_100NS.min(self.interval_100ns / 4)
+        /// Never more than a quarter of the interval, so a high target fps
+        /// keeps rejecting duplicates.
+        fn early_tolerance_100ns(&self) -> i64 {
+            CADENCE_EARLY_TOLERANCE_100NS.min(self.interval_100ns / 4)
         }
     }
 
@@ -6501,6 +6512,32 @@ mod windows {
             assert!(fast.admit(0));
             assert!(!fast.admit(60_000));
             assert!(fast.admit(63_000));
+        }
+
+        #[test]
+        fn graphics_capture_cadence_gate_holds_the_target_on_any_refresh_rate() {
+            // The tolerance must not compound: a display whose refresh is not
+            // a multiple of the target still yields the target, never more.
+            for refresh_hz in [60_i64, 75, 90, 120, 144, 165, 240] {
+                let mut gate = WindowsCaptureCadenceGate::new(30);
+                let admitted = (0..refresh_hz * 10)
+                    .filter(|frame| gate.admit(frame * 10_000_000 / refresh_hz))
+                    .count();
+                assert!(
+                    (299..=301).contains(&admitted),
+                    "{refresh_hz} Hz admitted {admitted} frames in 10 s at 30 fps"
+                );
+            }
+        }
+
+        #[test]
+        fn graphics_capture_cadence_gate_restarts_its_grid_after_a_stall() {
+            let mut gate = WindowsCaptureCadenceGate::new(30);
+            assert!(gate.admit(0));
+            // Half a second with no frames, then 60 Hz again: no burst.
+            assert!(gate.admit(5_000_000));
+            assert!(!gate.admit(5_166_667));
+            assert!(gate.admit(5_333_333));
         }
 
         #[test]
