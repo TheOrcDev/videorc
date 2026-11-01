@@ -6367,6 +6367,26 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           image.removeAttribute('src');
         }
 
+        // Scene sources share one z-index, so DOM order is their stacking
+        // order. A layer re-created after a scene dropped it (Screen only,
+        // then Camera only, then Screen + camera) was appended last and drew
+        // over the sources listed after it: the camera inset sat under the
+        // screen. Keep the DOM in scene order, the order the program draws.
+        function orderSceneLayers(nextLayers) {
+          let previous = null;
+          for (const layer of nextLayers) {
+            const element = layers.get(String(layer.id))?.element;
+            if (!element) {
+              continue;
+            }
+            const expected = previous ? previous.nextSibling : root.firstChild;
+            if (element !== expected) {
+              root.insertBefore(element, expected);
+            }
+            previous = element;
+          }
+        }
+
         function applyScene(nextScene) {
           scene = nextScene;
           window.__videorcNativePreviewSceneRevision = scene?.revision ?? null;
@@ -6384,6 +6404,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             }
           }
           nextLayers.forEach(upsertLayer);
+          orderSceneLayers(nextLayers);
           liveLayerCount = [...layers.values()].filter(({ image }) => image?.dataset.live === '1').length;
           if (liveLayerCount === 0) {
             document.body.classList.remove('surface-live');
