@@ -390,11 +390,13 @@ import {
 } from './managed-asset-renderer-probe'
 import { PreviewSupervisorModel, previewWindowTargetAction } from './preview-supervisor'
 import {
+  aspectFitRect,
   composeDockedScreenRect,
   decideDockVisibility,
   parseDockSlotReport,
   parsePreviewWindowMode,
   previewWindowClosePrefs,
+  previewWindowExternalResizePolicy,
   type DockHiddenReason,
   type DockSlot,
   type DockSlotReport,
@@ -2802,11 +2804,15 @@ function applyPreviewWindowAspect(window: BrowserWindow): void {
   conformPreviewWindowToAspect(window)
 }
 
-// setAspectRatio only constrains USER drag-resizes; macOS tiling, third-party
-// window managers, and programmatic setBounds all bypass it and can squeeze the
-// window. This backstop runs on every resize: keep the width and re-derive the
-// video height, falling back to height-derived width when that would overflow
-// the display's work area. Guarded because setContentSize re-emits 'resize'.
+// setAspectRatio only constrains USER drag-resizes; tiling, third-party window
+// managers, and programmatic setBounds all bypass it and can squeeze the
+// window. This backstop keeps the width and re-derives the video height,
+// falling back to height-derived width when that would overflow the display's
+// work area. Guarded because setContentSize re-emits 'resize'. The app's own
+// aspect changes run it everywhere; an EXTERNAL resize runs it only where
+// previewWindowExternalResizePolicy says so (plan 213 D4): on macOS the window
+// keeps a tiler's size and the video is drawn aspect-fit inside, because
+// setting the size back made AeroSpace re-tile, and so on, every time.
 let conformingPreviewWindow = false
 
 function conformPreviewWindowToAspect(window: BrowserWindow): void {
@@ -2850,12 +2856,22 @@ function previewWindowVideoBounds(window: BrowserWindow): Electron.Rectangle {
   // Docked mode has no drag bar (the window cannot be dragged); the video fills
   // the whole slot-sized content rect.
   const barHeight = previewWindowMode === 'docked' ? 0 : PREVIEW_WINDOW_BAR_HEIGHT
-  return {
+  const region = {
     x: contentBounds.x,
     y: contentBounds.y + barHeight,
     width: contentBounds.width,
     height: Math.max(1, contentBounds.height - barHeight)
   }
+  // A floating window a window manager sized off the output aspect keeps that
+  // size on macOS (plan 213 D4); the video is the largest output-aspect rect
+  // inside, centred, with the window's glass as bars.
+  if (
+    previewWindowMode !== 'docked' &&
+    previewWindowExternalResizePolicy(process.platform) === 'fit-inside'
+  ) {
+    return aspectFitRect(region, previewWindowAspectRatio())
+  }
+  return region
 }
 
 // Window frame, open/closed choice, always-on-top, and floating/docked mode
@@ -4835,11 +4851,15 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   applyPreviewWindowAspect(window)
   savePreviewWindowPrefs({ open: true })
 
-  // Re-conform first so any squeeze that escaped the user-resize aspect lock
-  // (tiling, window managers, programmatic setBounds) is corrected before the
-  // placement push below feeds bounds to the native surface.
+  // Windows: re-conform first so any squeeze that escaped the user-resize
+  // aspect lock (tiling, programmatic setBounds) is corrected before the
+  // placement push below feeds bounds to the native surface. macOS keeps the
+  // size and fits the video inside it (plan 213 D4, previewWindowVideoBounds).
   window.on('resize', () => {
-    if (previewWindow === window) {
+    if (
+      previewWindow === window &&
+      previewWindowExternalResizePolicy(process.platform) === 'conform-window'
+    ) {
       conformPreviewWindowToAspect(window)
     }
   })

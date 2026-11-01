@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DOCK_SLOT_MIN_VISIBLE_FRACTION,
+  aspectFitRect,
   composeDockedScreenRect,
   decideDockVisibility,
   parseDockSlot,
   parseDockSlotReport,
   parsePreviewWindowMode,
   previewWindowClosePrefs,
+  previewWindowExternalResizePolicy,
   type DockSlotReport,
   type DockVisibilityInput
 } from './preview-dock'
@@ -41,6 +43,53 @@ describe('parsePreviewWindowMode', () => {
 
   it('accepts docked', () => {
     expect(parsePreviewWindowMode('docked')).toBe('docked')
+  })
+})
+
+describe('previewWindowExternalResizePolicy (plan 213 D4)', () => {
+  it('keeps a window manager size on macOS and conforms the window elsewhere', () => {
+    expect(previewWindowExternalResizePolicy('darwin')).toBe('fit-inside')
+    expect(previewWindowExternalResizePolicy('win32')).toBe('conform-window')
+    expect(previewWindowExternalResizePolicy('linux')).toBe('conform-window')
+  })
+})
+
+describe('aspectFitRect', () => {
+  it('letterboxes a wide region, centred', () => {
+    // A 720x272 video region (a 720x300 tile under a 28 pt strip) at 16:9.
+    expect(aspectFitRect({ x: 0, y: 28, width: 720, height: 272 }, 16 / 9)).toEqual({
+      x: 118,
+      y: 28,
+      width: 484,
+      height: 272
+    })
+  })
+
+  it('pillarboxes a tall region, centred', () => {
+    expect(aspectFitRect({ x: 10, y: 20, width: 400, height: 600 }, 16 / 9)).toEqual({
+      x: 10,
+      y: 208,
+      width: 400,
+      height: 225
+    })
+  })
+
+  it('fills a region already on the ratio', () => {
+    expect(aspectFitRect({ x: 0, y: 0, width: 960, height: 540 }, 16 / 9)).toEqual({
+      x: 0,
+      y: 0,
+      width: 960,
+      height: 540
+    })
+  })
+
+  it('never returns an empty rect and falls back to 16:9 for a bad ratio', () => {
+    expect(aspectFitRect({ x: 0, y: 0, width: 0, height: 0 }, 0)).toEqual({
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1
+    })
   })
 })
 
