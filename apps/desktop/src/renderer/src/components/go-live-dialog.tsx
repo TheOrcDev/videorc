@@ -38,6 +38,7 @@ import { GO_LIVE_DIALOG_TITLE, goLiveConfirmLabel, goLiveOnReadyLabel } from '@/
 import {
   goLiveConfirmGate,
   goLivePendingLabel,
+  verticalLegUnsupported,
   type GoLiveDestinationView,
   type GoLivePhase
 } from '@/lib/go-live-dialog-view'
@@ -146,6 +147,12 @@ export function GoLiveConfirmationDialog({
       ? captureConfig
       : { ...captureConfig, streaming: sentStreaming }
   const simulcast = simulcastArmed(sentCapture)
+  const verticalUnsupported = verticalLegUnsupported(
+    simulcast,
+    streamOutputTopologyPreflight.state === 'ready'
+      ? streamOutputTopologyPreflight.result.effectiveBridgeOutput
+      : null
+  )
 
   // D13 (plan 164): every overlay switch pair this session cannot honour,
   // said before start. The auxiliary leg is the topology's, never an
@@ -190,7 +197,14 @@ export function GoLiveConfirmationDialog({
     view,
     entitlementBlocker,
     blocked
-  } = goLiveConfirmGate({ preflight, draft, sentStreaming, captionsReadiness, entitlementGate })
+  } = goLiveConfirmGate({
+    preflight,
+    draft,
+    sentStreaming,
+    captionsReadiness,
+    entitlementGate,
+    verticalLegUnsupported: verticalUnsupported
+  })
   const canConfirm = !pending && Boolean(preflight) && !blocked
   const canContinuePartial =
     !pending && !entitlementBlocker && !captionsReadiness.blocksStart && Boolean(partialSetup)
@@ -370,7 +384,9 @@ export function GoLiveConfirmationDialog({
               </Alert>
             ) : null}
 
-            {simulcast ? <GoLiveSimulcastAdvisory streaming={sentStreaming} /> : null}
+            {simulcast && !verticalUnsupported ? (
+              <GoLiveSimulcastAdvisory streaming={sentStreaming} />
+            ) : null}
             <GoLiveProducerReminder streaming={sentStreaming} />
 
             <GoLiveOutputAdvice
