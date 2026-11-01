@@ -51,10 +51,11 @@ export function cameraPreviewStartAllowed(
   devices: Device[],
   key: string,
   previousKey: string | null,
-  state: string
+  state: string,
+  currentCameraId?: string
 ): boolean {
   return (
-    state !== 'disconnected' &&
+    !(state === 'disconnected' && currentCameraId === cameraId) &&
     cameraIsAvailable(cameraId, devices) &&
     !(key === previousKey && ['starting', 'live', 'failed', 'device-missing'].includes(state))
   )
