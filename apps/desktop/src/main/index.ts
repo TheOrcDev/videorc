@@ -973,6 +973,10 @@ const nativePreviewCompositorRunAuthority = new NativePreviewRunAuthority()
 let nativePreviewPendingSceneRevision: number | null = null
 let nativePreviewSurfaceSceneRevisionGuardUntilMs = 0
 let appIsQuitting = false
+// Off macOS, closing the Studio quits the app (`window-all-closed`), but the
+// Studio's `closed` handler closes the detached windows before `before-quit`
+// sets `appIsQuitting`. Those closes are part of the quit too (#978).
+let studioClosedToQuit = false
 let appIcon: NativeImage | null | undefined
 const backendLogs: BackendLogEvent[] = []
 const earlyProtocolCallbackUrls: string[] = []
@@ -2419,6 +2423,12 @@ secureIpcHandle('app:icons', (event, bundleIds: unknown) =>
   frontAppSenderIsMain(event.sender.id, mainWindow?.webContents.id) ? getAppIcons(bundleIds) : {}
 )
 
+// A detached window that quitting closes keeps its open state, so the next
+// launch restores it (`previewWindowClosePrefs`).
+function closingForQuit(): boolean {
+  return appIsQuitting || studioClosedToQuit
+}
+
 function createWindow(): void {
   const chrome = glassWindowChrome('main')
   mainWindow = new BrowserWindow({
@@ -2630,6 +2640,7 @@ function createWindow(): void {
   })
 
   previewLifecycleEvidence.bindMainWindow(mainWindow, () => {
+    studioClosedToQuit = process.platform !== 'darwin'
     commentsCommandBroker.rejectAll()
     destroyNativePreviewSurface()
     if (previewWindow && !previewWindow.isDestroyed()) {
@@ -3219,7 +3230,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
       }
       notesWindowClosing = true
       notesWindowLastFrame = window.getBounds()
-      saveNotesWindowPrefs({ frame: notesWindowLastFrame, open: false })
+      saveNotesWindowPrefs(previewWindowClosePrefs(notesWindowLastFrame, closingForQuit()))
     }
   })
   window.on('closed', () => {
@@ -4046,7 +4057,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     if (commentsWindow === window) {
       commentsWindowClosing = true
       commentsWindowLastFrame = window.getBounds()
-      saveCommentsWindowPrefs({ frame: commentsWindowLastFrame, open: false })
+      saveCommentsWindowPrefs(previewWindowClosePrefs(commentsWindowLastFrame, closingForQuit()))
     }
   })
   window.on('closed', () => {
@@ -4264,7 +4275,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     if (captionsWindow === window) {
       captionsWindowClosing = true
       captionsWindowLastFrame = window.getBounds()
-      saveCaptionsWindowPrefs({ frame: captionsWindowLastFrame, open: false })
+      saveCaptionsWindowPrefs(previewWindowClosePrefs(captionsWindowLastFrame, closingForQuit()))
     }
   })
   window.on('closed', () => {
@@ -4822,7 +4833,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
         currentPreviewWindowMode() === 'docked'
           ? (previewWindowFloatingFrame ?? previewWindowLastFrame)
           : window.getBounds()
-      savePreviewWindowPrefs(previewWindowClosePrefs(previewWindowLastFrame, appIsQuitting))
+      savePreviewWindowPrefs(previewWindowClosePrefs(previewWindowLastFrame, closingForQuit()))
     }
   })
   window.on('closed', () => {
