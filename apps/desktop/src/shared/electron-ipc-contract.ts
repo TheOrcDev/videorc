@@ -878,6 +878,21 @@ const cameraTransformSchema = objectSchema(
   { allowUnknown: false }
 )
 
+// A freeform box; the screen's crop rides along when it has one (plan 213 G2).
+const sourceTransformOverrideSchema = objectSchema(
+  {
+    x: numberSchema(),
+    y: numberSchema(),
+    width: numberSchema(),
+    height: numberSchema(),
+    cropLeft: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropTop: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropRight: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropBottom: optionalSchema(numberSchema({ min: 0, max: 1 }))
+  },
+  { allowUnknown: false }
+)
+
 const layoutSettingsSchema = objectSchema(
   {
     layoutPreset: enumSchema(LAYOUT_PRESET_VALUES),
@@ -909,7 +924,9 @@ const layoutSettingsSchema = objectSchema(
         { allowUnknown: false }
       )
     ),
-    sourceTransformOverrides: optionalSchema(recordSchema(cameraTransformSchema, { maxKeys: 16 }))
+    sourceTransformOverrides: optionalSchema(
+      recordSchema(sourceTransformOverrideSchema, { maxKeys: 16 })
+    )
   },
   { allowUnknown: false }
 )

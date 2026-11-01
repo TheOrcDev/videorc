@@ -82,6 +82,7 @@ import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
   restoreLayoutUndo,
+  sourceOverrideOf,
   takeLayoutUndo
 } from '@/lib/freeform-memory'
 import {
@@ -409,7 +410,6 @@ import type {
   GateStatus,
   GoLivePreflight,
   HealthEvent,
-  CameraTransform,
   LayoutPreset,
   LayoutSettings,
   LiveLayoutApplyStatus,
@@ -458,6 +458,7 @@ import type {
   SceneConfigParams,
   SceneEditorDraftAck,
   SceneEditorDraftParams,
+  SceneTransformPatch,
   SessionCommentsPage,
   SessionDeletionOperation,
   SessionDetails,
@@ -466,6 +467,7 @@ import type {
   SessionLogEntry,
   SessionSummary,
   SourceSelection,
+  SourceTransformOverride,
   StartSessionParams,
   StreamMetadataDraft,
   StreamMetadataValidation,
@@ -1594,7 +1596,7 @@ export type StudioContextValue = {
   ) => Promise<void>
   setSceneSourceTransform: (
     sourceId: string,
-    patch: { x?: number; y?: number; width?: number; height?: number }
+    patch: SceneTransformPatch
   ) => Promise<TransformCommitResult>
   /** Live drag drafts for the Scene canvas (plan 058); refused while a session runs. */
   setSceneEditorDraft: (params: SceneEditorDraftParams) => Promise<SceneEditorDraftAck>
@@ -9025,14 +9027,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const syncSourceTransformsToLayout = useCallback(
     (nextScene: Scene, changedSourceId?: string) => {
       if (captureConfigRef.current.layout.arrangementMode === 'freeform') {
-        const sourceTransformOverrides: Record<string, CameraTransform> = {}
+        const sourceTransformOverrides: Record<string, SourceTransformOverride> = {}
         for (const source of nextScene.sources) {
-          sourceTransformOverrides[source.id] = {
-            x: source.transform.x,
-            y: source.transform.y,
-            width: source.transform.width,
-            height: source.transform.height
-          }
+          sourceTransformOverrides[source.id] = sourceOverrideOf(source)
         }
         const layout = { ...captureConfigRef.current.layout, sourceTransformOverrides }
         patchLayout({ sourceTransformOverrides })
@@ -9505,10 +9502,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // visible until React has applied this exact commit. BackendClient rejects
   // disconnects/timeouts; failures must never masquerade as acknowledgement.
   const setSceneSourceTransform = useCallback(
-    async (
-      sourceId: string,
-      patch: { x?: number; y?: number; width?: number; height?: number }
-    ): Promise<TransformCommitResult> => {
+    async (sourceId: string, patch: SceneTransformPatch): Promise<TransformCommitResult> => {
       const requestedScene = transformSceneRef.current
       const requestedLayoutIntentId = layoutIntentIdRef.current
       const identity = transformSourceIdentity(requestedScene)

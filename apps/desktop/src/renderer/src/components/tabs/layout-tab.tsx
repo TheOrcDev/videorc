@@ -33,7 +33,7 @@ import { SceneList } from '@/components/scene/scene-list'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
 import { presetCameraCornerRect } from '@/components/scene/stage-corner'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
-import { SourceTransformFields } from '@/components/scene/source-transform-fields'
+import { SourceCropFields, SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
 import { ScreenFramingControl } from '@/components/studio/scenes-gallery'
 import { Badge } from '@/components/ui/badge'
@@ -76,7 +76,7 @@ import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
-import { freeformEntryPatch, peekLayoutUndo } from '@/lib/freeform-memory'
+import { freeformEntryPatch, peekLayoutUndo, sourceCroppable } from '@/lib/freeform-memory'
 import {
   SCENE_VISIBILITY_LOCK_REASON,
   cameraShapePatch,
@@ -754,6 +754,9 @@ export function LayoutTab(): ReactElement {
                 !preciseEditPending &&
                 !sceneSwitchPending
               }
+              // Plan 213 G2: a crop is saved with the freeform box, so only
+              // Freeform crops; locked while recording or live like the box.
+              cropEnabled={isFreeform && !isSessionActive}
               // The vertical view is the derived stream's canvas: a greyed
               // stage with that stream's overlay rects; the sources stay with
               // the primary (the stream is derived, plan 164 out of scope).
@@ -941,7 +944,7 @@ export function LayoutTab(): ReactElement {
             // the disabled-arrow grid read as a broken app).
             <PanelSection
               className="min-w-0"
-              description="Fills the whole canvas. Position is fixed for this layout."
+              description="Fills the whole canvas in this layout. Use Freeform to move, resize or crop it."
               icon={AdjustIcon}
               title={selectedSource.name}
             >
@@ -1002,6 +1005,17 @@ export function LayoutTab(): ReactElement {
                     runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
                   }
                 />
+                {/* Plan 213 G2: the screen's crop, saved with its freeform box. */}
+                {isFreeform && sourceCroppable(selectedSource.kind) ? (
+                  <SourceCropFields
+                    key={`${selectedSource.id}-crop`}
+                    disabled={isSessionActive || stageDragging}
+                    source={selectedSource}
+                    onCommit={(patch) =>
+                      runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
+                    }
+                  />
+                ) : null}
                 {/* w-fit + auto columns keep the arrows a tight d-pad cluster;
                   1fr side columns stretched, stranding ← at the panel edge
                   (external tester report, 2026-07-06). Shift takes the bigger

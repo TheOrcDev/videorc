@@ -404,10 +404,11 @@ fn push_freeform_sources(
 /// rectangle the user drew. Width drives, height follows, and the box's
 /// CENTRE (not its corner) is preserved so conforming the aspect never makes
 /// the box appear to jump. The screen/base source is untouched: it always
-/// takes the override box as given.
+/// takes the override box as given, and with it the crop saved beside it
+/// (plan 213 G2). The camera's crop stays its zoom and pan.
 fn apply_transform_override(
     source: &mut SceneSource,
-    overrides: &std::collections::BTreeMap<String, crate::protocol::CameraTransform>,
+    overrides: &std::collections::BTreeMap<String, crate::protocol::SourceTransformOverride>,
     layout: &crate::protocol::LayoutSettings,
     output_width: u32,
     output_height: u32,
@@ -433,7 +434,7 @@ fn apply_transform_override(
         let center_y = value.y + value.height / 2.0;
         let (width, height) = custom_camera_box_fractions(
             layout,
-            *value,
+            value.camera_box(),
             &source.transform,
             output_width,
             output_height,
@@ -444,16 +445,31 @@ fn apply_transform_override(
     } else {
         (value.width, value.height, value.x, value.y)
     };
+    let crop = if source_takes_saved_crop(&source.kind) {
+        SceneTransform {
+            crop_left: value.crop_left,
+            crop_top: value.crop_top,
+            crop_right: value.crop_right,
+            crop_bottom: value.crop_bottom,
+            ..source.transform.clone()
+        }
+    } else {
+        source.transform.clone()
+    };
     source.transform = sanitize_transform_unsnapped(SceneTransform {
         x,
         y,
         width,
         height,
-        crop_left: source.transform.crop_left,
-        crop_top: source.transform.crop_top,
-        crop_right: source.transform.crop_right,
-        crop_bottom: source.transform.crop_bottom,
+        ..crop
     });
+}
+
+/// Only the screen side keeps a crop of its own (plan 213 G2). The camera
+/// frames itself with zoom and pan, and every render path draws the test
+/// pattern at the canvas size, so neither takes one.
+fn source_takes_saved_crop(kind: &SceneSourceKind) -> bool {
+    matches!(kind, SceneSourceKind::Screen | SceneSourceKind::Window)
 }
 
 fn base_source(sources: &SourceSelection) -> SceneSource {
@@ -742,14 +758,10 @@ fn apply_transform_patch(
     transform
 }
 
-fn sanitize_transform(transform: SceneTransform) -> SceneTransform {
-    snap_transform(sanitize_transform_unsnapped(transform))
-}
-
-// Clamp + clean without the edge/center snap — for precision operations
-// (numeric/gesture edits, saved overrides and arrow nudges) where the snap
-// magnet must not undo the movement.
-fn sanitize_transform_unsnapped(transform: SceneTransform) -> SceneTransform {
+/// Only the crop half of the sanitizer: each axis' pair under the 95%
+/// ceiling, NaN as no crop. The editor's live crop draft uses it too, so the
+/// Preview never shows a crop the commit would refuse.
+pub(crate) fn sanitize_crop(transform: SceneTransform) -> SceneTransform {
     let (crop_left, crop_right) = normalize_crop_pair(
         clean_number(transform.crop_left),
         clean_number(transform.crop_right),
@@ -758,16 +770,30 @@ fn sanitize_transform_unsnapped(transform: SceneTransform) -> SceneTransform {
         clean_number(transform.crop_top),
         clean_number(transform.crop_bottom),
     );
+    SceneTransform {
+        crop_left,
+        crop_top,
+        crop_right,
+        crop_bottom,
+        ..transform
+    }
+}
 
+fn sanitize_transform(transform: SceneTransform) -> SceneTransform {
+    snap_transform(sanitize_transform_unsnapped(transform))
+}
+
+// Clamp + clean without the edge/center snap — for precision operations
+// (numeric/gesture edits, saved overrides and arrow nudges) where the snap
+// magnet must not undo the movement.
+fn sanitize_transform_unsnapped(transform: SceneTransform) -> SceneTransform {
+    let transform = sanitize_crop(transform);
     SceneTransform {
         x: clean_number(transform.x).clamp(-1.0, 2.0),
         y: clean_number(transform.y).clamp(-1.0, 2.0),
         width: clean_number(transform.width).clamp(0.0, 2.0),
         height: clean_number(transform.height).clamp(0.0, 2.0),
-        crop_left,
-        crop_top,
-        crop_right,
-        crop_bottom,
+        ..transform
     }
 }
 
@@ -1253,21 +1279,21 @@ mod tests {
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([
             (
                 "source:base".to_string(),
-                CameraTransform {
-                    x: 0.05,
-                    y: 0.1,
-                    width: 0.6,
-                    height: 0.6,
-                },
+                crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                        x: 0.05,
+                        y: 0.1,
+                        width: 0.6,
+                        height: 0.6,
+                }),
             ),
             (
                 "source:camera".to_string(),
-                CameraTransform {
-                    x: 0.7,
-                    y: 0.2,
-                    width: 0.25,
-                    height: 0.5,
-                },
+                crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                        x: 0.7,
+                        y: 0.2,
+                        width: 0.25,
+                        height: 0.5,
+                }),
             ),
         ]);
 
@@ -1285,6 +1311,107 @@ mod tests {
         assert_eq!(camera.kind, SceneSourceKind::Camera);
         assert!((camera.transform.x - 0.7).abs() < 1e-9);
         assert!((camera.transform.height - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn freeform_keeps_the_screens_saved_crop_and_never_the_cameras() {
+        // Plan 213 G2: the crop saved beside the screen's box is the screen's
+        // crop in the scene; a crop on the camera's entry is ignored, since
+        // the camera frames itself with zoom and pan.
+        let cropped = |x: f64, y: f64, width: f64, height: f64| {
+            crate::protocol::SourceTransformOverride {
+                crop_left: 0.1,
+                crop_top: 0.05,
+                crop_right: 0.2,
+                crop_bottom: 0.15,
+                ..crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x,
+                    y,
+                    width,
+                    height,
+                })
+            }
+        };
+        let mut params = base_params();
+        params.layout.arrangement_mode = ArrangementMode::Freeform;
+        params.layout.source_transform_overrides = std::collections::BTreeMap::from([
+            ("source:base".to_string(), cropped(0.0, 0.0, 0.8, 0.8)),
+            ("source:camera".to_string(), cropped(0.7, 0.6, 0.25, 0.3)),
+        ]);
+
+        let scene = scene_from_capture_config(params.clone());
+        let screen = &scene.sources[0];
+        assert_eq!(
+            (
+                screen.transform.crop_left,
+                screen.transform.crop_top,
+                screen.transform.crop_right,
+                screen.transform.crop_bottom
+            ),
+            (0.1, 0.05, 0.2, 0.15)
+        );
+        assert_eq!(screen.default_transform, full_frame_transform(), "Reset uncrops");
+        let camera = &scene.sources[1];
+        assert_eq!(
+            (camera.transform.crop_left, camera.transform.crop_right),
+            (0.0, 0.0),
+            "the camera's crop is its zoom and pan, not the saved one"
+        );
+
+        // A commit echoed back into the overrides rebuilds the same scene.
+        let mut saved = params;
+        for source in &scene.sources {
+            let transform = &source.transform;
+            saved.layout.source_transform_overrides.insert(
+                source.id.clone(),
+                crate::protocol::SourceTransformOverride {
+                    x: transform.x,
+                    y: transform.y,
+                    width: transform.width,
+                    height: transform.height,
+                    crop_left: transform.crop_left,
+                    crop_top: transform.crop_top,
+                    crop_right: transform.crop_right,
+                    crop_bottom: transform.crop_bottom,
+                },
+            );
+        }
+        assert_eq!(scene_from_capture_config(saved).sources, scene.sources);
+
+        // An out-of-range crop is held to the same ceiling as a live edit.
+        let mut wild = base_params();
+        wild.layout.arrangement_mode = ArrangementMode::Freeform;
+        wild.layout.source_transform_overrides = std::collections::BTreeMap::from([(
+            "source:base".to_string(),
+            crate::protocol::SourceTransformOverride {
+                crop_left: 0.9,
+                crop_right: 0.9,
+                crop_top: f64::NAN,
+                ..cropped(0.0, 0.0, 1.0, 1.0)
+            },
+        )]);
+        let screen = scene_from_capture_config(wild).sources[0].transform.clone();
+        assert!(screen.crop_left + screen.crop_right <= 0.95 + 1e-12);
+        assert_eq!(screen.crop_top, 0.0);
+    }
+
+    #[test]
+    fn freeform_override_wire_leaves_out_the_sides_that_crop_nothing() {
+        // A box saved before plan 213 reads with no crop and writes back the
+        // same bytes; a cropped screen writes only the sides it crops.
+        let legacy = serde_json::json!({ "x": 0.1, "y": 0.2, "width": 0.5, "height": 0.4 });
+        let parsed: crate::protocol::SourceTransformOverride =
+            serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!((parsed.crop_left, parsed.crop_bottom), (0.0, 0.0));
+        assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+
+        let cropped = serde_json::json!({
+            "x": 0.1, "y": 0.2, "width": 0.5, "height": 0.4, "cropLeft": 0.25, "cropBottom": 0.1
+        });
+        let parsed: crate::protocol::SourceTransformOverride =
+            serde_json::from_value(cropped.clone()).unwrap();
+        assert_eq!((parsed.crop_left, parsed.crop_top), (0.25, 0.0));
+        assert_eq!(serde_json::to_value(parsed).unwrap(), cropped);
     }
 
     #[test]
@@ -1308,12 +1435,12 @@ mod tests {
         params.layout.arrangement_mode = ArrangementMode::Freeform;
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
             "source:base".to_string(),
-            CameraTransform {
-                x: 0.25,
-                y: 0.25,
-                width: 0.5,
-                height: 0.5,
-            },
+            crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x: 0.25,
+                    y: 0.25,
+                    width: 0.5,
+                    height: 0.5,
+            }),
         )]);
 
         let scene = scene_from_capture_config(params);
@@ -1329,12 +1456,12 @@ mod tests {
         params.layout.arrangement_mode = ArrangementMode::Freeform;
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
             "source:camera".to_string(),
-            CameraTransform {
-                x: f64::NAN,
-                y: 9.0,
-                width: 0.4,
-                height: 0.4,
-            },
+            crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x: f64::NAN,
+                    y: 9.0,
+                    width: 0.4,
+                    height: 0.4,
+            }),
         )]);
 
         let scene = scene_from_capture_config(params);
@@ -1358,12 +1485,12 @@ mod tests {
         params.layout.camera_shape = CameraShape::Circle;
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
             "source:camera".to_string(),
-            CameraTransform {
-                x: 0.375,
-                y: 0.375,
-                width: 0.25,
-                height: 0.1,
-            },
+            crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x: 0.375,
+                    y: 0.375,
+                    width: 0.25,
+                    height: 0.1,
+            }),
         )]);
 
         let scene = scene_from_capture_config(params);
@@ -1402,12 +1529,12 @@ mod tests {
         params.layout.arrangement_mode = ArrangementMode::Freeform;
         params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
             "source:camera".to_string(),
-            CameraTransform {
-                x: 0.375,
-                y: 0.375,
-                width: 0.25,
-                height: 0.1,
-            },
+            crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x: 0.375,
+                    y: 0.375,
+                    width: 0.25,
+                    height: 0.1,
+            }),
         )]);
 
         let scene = scene_from_capture_config(params);
@@ -2075,12 +2202,12 @@ mod tests {
                     let transform = &source.transform;
                     config.layout.source_transform_overrides.insert(
                         source.id.clone(),
-                        CameraTransform {
-                            x: transform.x,
-                            y: transform.y,
-                            width: transform.width,
-                            height: transform.height,
-                        },
+                        crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                                x: transform.x,
+                                y: transform.y,
+                                width: transform.width,
+                                height: transform.height,
+                        }),
                     );
                 }
                 let rebuilt = scene_from_capture_config(config.clone());

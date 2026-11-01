@@ -1614,6 +1614,22 @@ const sourceSelectionSchema = objectSchema(
   { allowUnknown: false }
 )
 
+// A freeform box; the screen's crop rides along when it has one (plan 213 G2).
+const cropFraction = optionalSchema(numberSchema({ min: 0, max: 1 }))
+const sourceTransformOverrideSchema = objectSchema(
+  {
+    x: numberSchema(),
+    y: numberSchema(),
+    width: numberSchema(),
+    height: numberSchema(),
+    cropLeft: cropFraction,
+    cropTop: cropFraction,
+    cropRight: cropFraction,
+    cropBottom: cropFraction
+  },
+  { allowUnknown: false }
+)
+
 const layoutSchema = objectSchema(
   {
     layoutPreset: enumSchema(LAYOUT_PRESET_VALUES),
@@ -1646,7 +1662,7 @@ const layoutSchema = objectSchema(
       )
     ),
     sourceTransformOverrides: optionalSchema(
-      recordSchema(boundedBackendParamValueSchema, { maxKeys: 16 })
+      recordSchema(sourceTransformOverrideSchema, { maxKeys: 16 })
     )
   },
   { allowUnknown: false }
@@ -1738,6 +1754,18 @@ const sceneEditorDraftParamsSchema = objectSchema(
     sourceId: boundedString,
     // Absent = chrome-only (the idle selection holds the frame and handles).
     transform: optionalSchema(cameraTransformSchema),
+    // An ⌥-drag crop's live crop (plan 213 G2); absent keeps the committed one.
+    crop: optionalSchema(
+      objectSchema(
+        {
+          cropLeft: numberSchema({ min: 0, max: 1 }),
+          cropTop: numberSchema({ min: 0, max: 1 }),
+          cropRight: numberSchema({ min: 0, max: 1 }),
+          cropBottom: numberSchema({ min: 0, max: 1 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     chrome: editorChromeSchema
   },
   { allowUnknown: false }

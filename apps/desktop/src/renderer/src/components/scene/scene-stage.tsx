@@ -36,6 +36,7 @@ import type {
   SceneSource
 } from '@/lib/backend'
 import { backgroundAssetDisplayUrl } from '@/lib/background-library'
+import { sourceCroppable } from '@/lib/freeform-memory'
 import {
   createEditorDraftChannel,
   type EditorDraftChannel,
@@ -65,11 +66,14 @@ import {
 import { stagePixelSize, stagePoint, type StageMapping } from './stage-viewport'
 import {
   handleCursor,
+  roundCropForCommit,
   roundRectForCommit,
+  stageCropOf,
   stageHandlePoints,
   stageSnapTargets,
   stageSourceShape,
   type GhostResult,
+  type StageCrop,
   type StageHandleId,
   type StageRect
 } from './stage-transform'
@@ -143,7 +147,7 @@ const OVERLAY_ICONS: Record<OverlayItem, ElementType> = {
 }
 const stageItemIcon = (entry: OverlayStageItem): ElementType =>
   entry.kind === 'overlay' ? OVERLAY_ICONS[entry.item] : ImageIcon
-type StageGhost = GhostResult & { sourceId: string }
+type StageGhost = GhostResult & { sourceId: string; crop?: StageCrop }
 
 /** What the stage is doing: a pointer gesture, a released commit still landing, or nothing. */
 export type StagePhase = 'idle' | 'dragging' | 'pending'
@@ -185,6 +189,7 @@ export function SceneStage({
   cameraCornerRadiusPct = 12,
   dragEnabled = false,
   resizeEnabled = false,
+  cropEnabled = false,
   cameraAspectLocked = false,
   freeform = false,
   outputAspect = 16 / 9,
@@ -234,6 +239,8 @@ export function SceneStage({
   cameraCornerRadiusPct?: number
   dragEnabled?: boolean
   resizeEnabled?: boolean
+  /** ⌥-drag on a screen's edge crops it (plan 213 G2): Freeform, idle only. */
+  cropEnabled?: boolean
   cameraAspectLocked?: boolean
   freeform?: boolean
   outputAspect?: number
@@ -459,8 +466,10 @@ export function SceneStage({
   const draftOf = (gesture: ActiveGesture, ghost: GhostResult): EditorDraftSample => {
     const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
     const kind = gesture.motion.kind
+    const crop = gesture.item ? null : gesture.motion.crop
     return {
       transform: ghost.rect,
+      ...(crop ? { crop } : {}),
       chrome: {
         selected: ghost.rect,
         handles: gesture.item
@@ -580,6 +589,14 @@ export function SceneStage({
     event.preventDefault()
     onSelectSource(source.id)
     const initial = { ...displayed(source) }
+    // ⌥ down on an edge of a screen crops it instead of resizing (plan 213
+    // G2), from the crop the stage shows now: a crop still landing is the
+    // one to carry on from.
+    const crop =
+      kind !== 'move' && event.altKey && cropEnabled && sourceCroppable(source.kind)
+        ? (edits.draft?.sourceId === source.id ? edits.draft.crop : undefined) ??
+          stageCropOf(source.transform)
+        : null
     const motion = new StageGesture(
       source.id,
       event.pointerId,
@@ -590,7 +607,8 @@ export function SceneStage({
       stageSnapTargets(sources.filter((other) => other.id !== source.id).map(displayed)),
       effectiveSnap,
       aspectLocked,
-      source.kind === 'camera' && cameraAspectLocked
+      source.kind === 'camera' && cameraAspectLocked,
+      crop
     )
     // Initial modifiers establish ownership without changing the grabbed point.
     motion.sample(point, event)
@@ -692,6 +710,7 @@ export function SceneStage({
       sourceId: gesture.motion.sourceId,
       ...gesture.motion.sample(point, sample)
     }
+    if (gesture.motion.crop) next.crop = gesture.motion.crop
     // A preset scene's camera moved into a canvas corner re-enters the preset
     // there on release: the ghost (and the live draft) is that box, so the
     // drop lands where it is shown. Out of the corner it follows the pointer.
@@ -747,7 +766,9 @@ export function SceneStage({
     // corner snap commits through a preset instead: its last frame is the
     // preset's box, held (`cornerDrop`) until the preset's scene shows it;
     // without that box the draft is cleared with the gesture.
-    if (changed && (!corner || cornerDropRect)) channel.release(roundRectForCommit(final.rect))
+    const crop = final.crop
+    if (changed && (!corner || cornerDropRect))
+      channel.release(roundRectForCommit(final.rect), crop && roundCropForCommit(crop))
     cancelGesture()
     if (!changed) return
     if (corner) {
@@ -755,7 +776,7 @@ export function SceneStage({
       onSnapCorner?.(corner)
       return
     }
-    edits.submit(gesture.motion.sourceId, final.rect)
+    edits.submit(gesture.motion.sourceId, final.rect, crop)
   }
   const gutter = 28 / pixelScale
   const canvasRadius = Math.min(CANVAS_RADIUS_PX / pixelScale, stageH / 2)
@@ -775,6 +796,12 @@ export function SceneStage({
     event.preventDefault()
     onNudge(selectedSource.id, nudge.directionX, nudge.directionY, nudge.large)
   }
+  // Keyed on the scene, never the selection: the footer must not change at
+  // pointerdown (see stage-undo-control.ts).
+  const cropHint =
+    cropEnabled &&
+    resizeEnabled &&
+    sources.some((source) => sourceCroppable(source.kind) && editable(source))
   const activeMotion = gestureRef.current
   const activeHandle =
     activeMotion && activeMotion.motion.kind !== 'move'
@@ -1294,10 +1321,10 @@ export function SceneStage({
                   ? 'constrain / aspect / bigger nudge'
                   : 'constrain / aspect'}
               </span>
-              {effectiveSnap ? (
-                <span className="inline-flex items-center gap-1.5">
+              {effectiveSnap || cropHint ? (
+                <span className="inline-flex items-center gap-1.5" data-videorc-stage-alt-hint>
                   <ShortcutKeys accelerator="Alt" />
-                  no snap
+                  {!cropHint ? 'no snap' : effectiveSnap ? 'no snap / crop edge' : 'crop edge'}
                 </span>
               ) : null}
               <span className="inline-flex items-center gap-1.5">

@@ -116,6 +116,7 @@ interface HighRiskContractFixtures {
   layout: {
     legacyWire: Partial<LayoutSettings>
     normalized: LayoutSettings
+    freeformCrop: LayoutSettings
   }
   scene: { wire: Scene }
   recordingStatus: {
@@ -427,6 +428,25 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendRpcResult('scene.get', fixtures.scene.wire))).toEqual(
       fixtures.scene.wire
     )
+  })
+
+  it("keeps a freeform screen's crop on its box, the same bytes as Rust (plan 213 G2)", () => {
+    const layout = fixtures.layout.freeformCrop
+    expect(normalizeLayoutSettings(layout)).toStrictEqual(layout)
+    expect(
+      validateBackendRpcParams('scene.load_from_capture_config', { sources: {}, layout })
+    ).toStrictEqual({ sources: {}, layout })
+    expect(() =>
+      validateBackendRpcParams('scene.load_from_capture_config', {
+        sources: {},
+        layout: {
+          ...layout,
+          sourceTransformOverrides: {
+            'source:base': { x: 0, y: 0, width: 1, height: 1, cropLeft: 2 }
+          }
+        }
+      })
+    ).toThrow()
   })
 
   it('validates full and defaulted recording status shapes', () => {

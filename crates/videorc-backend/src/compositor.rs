@@ -2364,6 +2364,8 @@ pub const EDITOR_DRAFT_REFUSED_CODE: &str = "editor-draft-refused";
 pub struct EditorDraft {
     pub source_id: String,
     pub transform: Option<CameraTransform>,
+    /// An ⌥-drag crop's live crop (plan 213 G2); `None` keeps the committed one.
+    pub crop: Option<crate::protocol::SceneCropDraft>,
     pub chrome: EditorChrome,
     pub refreshed_at: Instant,
     pub release_at_revision: Option<u64>,
@@ -2433,9 +2435,10 @@ fn editor_draft_applies(frame_consumer: CompositorFrameConsumer, has_stream_outp
 }
 
 /// Replace the named source's rect with the draft rect, keeping the committed
-/// crops (the same rule as `scene::apply_transform_override`). Other sources
-/// and a snapshot without that source are untouched, and a chrome-only draft
-/// (no `transform`) leaves every rect as committed.
+/// crops (the same rule as `scene::apply_transform_override`) unless the draft
+/// is an ⌥-drag crop, whose crop replaces them too (plan 213 G2). Other
+/// sources and a snapshot without that source are untouched, and a
+/// chrome-only draft (no `transform`) leaves every rect as committed.
 fn snapshot_with_editor_draft(
     snapshot: Option<CompositorSceneSnapshot>,
     draft: Option<&EditorDraft>,
@@ -2455,8 +2458,37 @@ fn snapshot_with_editor_draft(
         source.transform.y = transform.y;
         source.transform.width = transform.width;
         source.transform.height = transform.height;
+        if let Some(crop) = draft.crop {
+            source.transform.crop_left = crop.crop_left;
+            source.transform.crop_top = crop.crop_top;
+            source.transform.crop_right = crop.crop_right;
+            source.transform.crop_bottom = crop.crop_bottom;
+        }
     }
     Some(snapshot)
+}
+
+/// A draft crop under the same 95% ceiling per axis as a committed one, so a
+/// live crop never shows what the commit would refuse.
+fn sanitize_editor_draft_crop(
+    crop: crate::protocol::SceneCropDraft,
+) -> crate::protocol::SceneCropDraft {
+    let transform = crate::scene::sanitize_crop(SceneTransform {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+        crop_left: crop.crop_left,
+        crop_top: crop.crop_top,
+        crop_right: crop.crop_right,
+        crop_bottom: crop.crop_bottom,
+    });
+    crate::protocol::SceneCropDraft {
+        crop_left: transform.crop_left,
+        crop_top: transform.crop_top,
+        crop_right: transform.crop_right,
+        crop_bottom: transform.crop_bottom,
+    }
 }
 
 impl CompositorRuntime {
@@ -2487,6 +2519,7 @@ impl CompositorRuntime {
         self.editor_draft = Some(EditorDraft {
             source_id: params.source_id,
             transform: params.transform.map(sanitize_editor_draft_transform),
+            crop: params.crop.map(sanitize_editor_draft_crop),
             chrome: params.chrome,
             refreshed_at: now,
             release_at_revision: None,
@@ -2689,6 +2722,7 @@ mod editor_draft_tests {
                 width: 0.3,
                 height: 0.4,
             }),
+            crop: None,
             chrome: chrome(),
         }
     }
@@ -2707,6 +2741,7 @@ mod editor_draft_tests {
             transform: params(source_id)
                 .transform
                 .map(sanitize_editor_draft_transform),
+            crop: None,
             chrome: chrome(),
             refreshed_at: now,
             release_at_revision: None,
@@ -2766,6 +2801,43 @@ mod editor_draft_tests {
             snapshot_with_editor_draft(Some(snapshot(3)), None),
             Some(snapshot(3))
         );
+    }
+
+    #[test]
+    fn crop_editor_draft_shows_its_crop_under_the_committed_ceiling() {
+        // Plan 213 G2: an ⌥-drag on the screen's edge drafts its crop with
+        // its rect, so the Preview shows the crop before the commit lands.
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(3));
+        runtime.set_editor_draft(
+            SceneEditorDraftParams {
+                crop: Some(crate::protocol::SceneCropDraft {
+                    crop_left: 0.25,
+                    crop_top: 0.0,
+                    crop_right: 0.9,
+                    crop_bottom: f64::NAN,
+                }),
+                ..params("source:screen")
+            },
+            now,
+        );
+        let drafted = snapshot_with_editor_draft(Some(snapshot(3)), runtime.editor_draft.as_ref())
+            .expect("snapshot survives");
+        let screen = &drafted.scene.as_ref().unwrap().sources[0];
+        assert_eq!(
+            (screen.transform.x, screen.transform.width),
+            (0.1, 0.3),
+            "the rect is drafted with the crop"
+        );
+        assert!(
+            screen.transform.crop_left + screen.transform.crop_right <= 0.95 + 1e-9,
+            "the pair keeps the committed ceiling: {:?}",
+            screen.transform
+        );
+        assert!(screen.transform.crop_left > 0.2 && screen.transform.crop_right > 0.6);
+        assert_eq!(screen.transform.crop_top, 0.0);
+        assert_eq!(screen.transform.crop_bottom, 0.0, "NaN is no crop");
     }
 
     #[test]
@@ -22847,6 +22919,7 @@ mod buddy_sprite_tests {
         EditorDraft {
             source_id: source_id.to_string(),
             transform,
+            crop: None,
             chrome: EditorChrome {
                 selected: CameraTransform {
                     x: 0.0,
@@ -23822,6 +23895,7 @@ mod banner_tests {
                 width: dragged.w,
                 height: dragged.h,
             }),
+            crop: None,
             chrome: chrome.clone(),
             refreshed_at: now,
             release_at_revision: None,

@@ -99,6 +99,46 @@
         "camera": true,
         "capture": true
       }
+    },
+    "freeformCrop": {
+      "layoutPreset": "screen-only",
+      "cameraTransformMode": "preset",
+      "cameraTransform": null,
+      "cameraCorner": "bottom-right",
+      "cameraSize": "medium",
+      "cameraShape": "rectangle",
+      "cameraCornerRadiusPct": 12,
+      "cameraAspect": "source",
+      "cameraChromaKeyEnabled": false,
+      "cameraChromaKeyColor": "#00FF00",
+      "cameraChromaKeySimilarityPct": 40,
+      "cameraChromaKeySmoothnessPct": 8,
+      "cameraChromaKeySpillPct": 10,
+      "cameraMargin": 32,
+      "cameraFit": "fill",
+      "cameraMirror": false,
+      "cameraZoom": 100,
+      "cameraOffsetX": 0,
+      "cameraOffsetY": 0,
+      "sideBySideSplit": "70-30",
+      "sideBySideCameraSide": "right",
+      "verticalScreenFraming": "fill",
+      "arrangementMode": "freeform",
+      "sourceTransformOverrides": {
+        "source:base": {
+          "x": 0.1,
+          "y": 0.05,
+          "width": 0.8,
+          "height": 0.8,
+          "cropLeft": 0.25,
+          "cropBottom": 0.125
+        },
+        "source:camera": { "x": 0.7, "y": 0.6, "width": 0.25, "height": 0.3 }
+      },
+      "sourceVisibility": {
+        "camera": true,
+        "capture": true
+      }
     }
   },
   "scene": {

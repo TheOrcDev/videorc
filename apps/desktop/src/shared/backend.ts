@@ -662,6 +662,20 @@ export interface CameraTransform {
   height: number
 }
 
+/** A screen's crop, as fractions of its own picture (plan 213 G2). */
+export interface SourceCrop {
+  cropLeft: number
+  cropTop: number
+  cropRight: number
+  cropBottom: number
+}
+
+/**
+ * One source's freeform box. The screen also keeps its crop; a box with no
+ * crop (and every camera, whose crop comes from zoom and pan) omits it.
+ */
+export interface SourceTransformOverride extends CameraTransform, Partial<SourceCrop> {}
+
 export interface SourceVisibility {
   camera: boolean
   capture: boolean
@@ -714,7 +728,7 @@ export interface LayoutSettings {
    * Per-source transforms for freeform, keyed by the stable scene source id
    * ('source:base', 'source:camera'). Empty means the base arrangement.
    */
-  sourceTransformOverrides: Record<string, CameraTransform>
+  sourceTransformOverrides: Record<string, SourceTransformOverride>
   /** Independent visual roles; legacy layouts show both. */
   sourceVisibility?: SourceVisibility
 }
@@ -902,6 +916,8 @@ export interface EditorChrome {
 export interface SceneEditorDraftParams {
   sourceId: string
   transform?: CameraTransform
+  /** An ⌥-drag crop's live crop (plan 213 G2); absent keeps the committed crop. */
+  crop?: SourceCrop
   chrome: EditorChrome
 }
 

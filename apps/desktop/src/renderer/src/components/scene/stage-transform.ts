@@ -219,6 +219,124 @@ export function resizeGhost(input: ResizeInput): GhostResult {
   }
 }
 
+/** A screen's crop, as fractions of its own picture (the scene's crop fields). */
+export interface StageCrop {
+  cropLeft: number
+  cropTop: number
+  cropRight: number
+  cropBottom: number
+}
+
+export const NO_STAGE_CROP: StageCrop = { cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }
+
+/** The least of the picture a crop leaves per axis: the backend's 95% ceiling. */
+export const MIN_CROP_KEPT = 0.05
+
+export interface CropInput {
+  start: StageRect
+  crop: StageCrop
+  handle: StageHandleId
+  /** Pointer delta in normalized canvas units. */
+  dx: number
+  dy: number
+  minFraction?: number
+}
+
+export interface CropResult extends GhostResult {
+  crop: StageCrop
+}
+
+/**
+ * ⌥-drag on an edge crops instead of resizing (plan 213 G2, OBS's habit).
+ * Each edge the handle names follows the pointer and cuts the picture there,
+ * so what stays on screen does not move or scale: the crop on that side
+ * changes by the share of the picture the edge passed over. An edge stops at
+ * the picture's own edge (no crop), at 5% of the picture left, at the
+ * smallest box and at the canvas. No snapping, like a resize.
+ */
+export function cropGhost(input: CropInput): CropResult {
+  const min = input.minFraction ?? MIN_SOURCE_FRACTION
+  const start = input.start
+  const crop = { ...input.crop }
+  let { x, y, width, height } = start
+  const keptX = 1 - crop.cropLeft - crop.cropRight
+  const keptY = 1 - crop.cropTop - crop.cropBottom
+  // The share of the picture one canvas unit of the box shows, per axis.
+  const perX = start.width > 0 ? keptX / start.width : 0
+  const perY = start.height > 0 ? keptY / start.height : 0
+  // Push in: more crop, a smaller box. Pull out: back toward the picture's edge.
+  const travel = (delta: number, outward: number, inward: number): number =>
+    clamp(delta, -outward, Math.max(-outward, inward))
+  if (perX > 0 && input.handle.includes('w')) {
+    const moved = travel(
+      input.dx,
+      Math.min(crop.cropLeft / perX, x),
+      Math.min((keptX - MIN_CROP_KEPT) / perX, width - min)
+    )
+    x += moved
+    width -= moved
+    crop.cropLeft += moved * perX
+  } else if (perX > 0 && input.handle.includes('e')) {
+    const moved = -travel(
+      -input.dx,
+      Math.min(crop.cropRight / perX, 1 - (x + width)),
+      Math.min((keptX - MIN_CROP_KEPT) / perX, width - min)
+    )
+    width += moved
+    crop.cropRight -= moved * perX
+  }
+  if (perY > 0 && input.handle.includes('n')) {
+    const moved = travel(
+      input.dy,
+      Math.min(crop.cropTop / perY, y),
+      Math.min((keptY - MIN_CROP_KEPT) / perY, height - min)
+    )
+    y += moved
+    height -= moved
+    crop.cropTop += moved * perY
+  } else if (perY > 0 && input.handle.includes('s')) {
+    const moved = -travel(
+      -input.dy,
+      Math.min(crop.cropBottom / perY, 1 - (y + height)),
+      Math.min((keptY - MIN_CROP_KEPT) / perY, height - min)
+    )
+    height += moved
+    crop.cropBottom -= moved * perY
+  }
+  const side = (value: number): number => clamp(value, 0, 0.95)
+  return {
+    rect: { x, y, width, height },
+    crop: {
+      cropLeft: side(crop.cropLeft),
+      cropTop: side(crop.cropTop),
+      cropRight: side(crop.cropRight),
+      cropBottom: side(crop.cropBottom)
+    },
+    guides: []
+  }
+}
+
+/** The crop fields of a scene transform (zero for a transform with none). */
+export function stageCropOf(transform: Partial<StageCrop>): StageCrop {
+  return {
+    cropLeft: transform.cropLeft ?? 0,
+    cropTop: transform.cropTop ?? 0,
+    cropRight: transform.cropRight ?? 0,
+    cropBottom: transform.cropBottom ?? 0
+  }
+}
+
+/** Four decimals, like a rect's commit (0.01% of the picture). */
+export function roundCropForCommit(crop: StageCrop): StageCrop {
+  const round = (value: number): number => Math.round(value * 10000) / 10000
+  return {
+    cropLeft: round(crop.cropLeft),
+    cropTop: round(crop.cropTop),
+    cropRight: round(crop.cropRight),
+    cropBottom: round(crop.cropBottom)
+  }
+}
+
 /** Handle center points (normalized) for rendering the selection frame. */
 export function stageHandlePoints(rect: StageRect): { id: StageHandleId; x: number; y: number }[] {
   const cx = rect.x + rect.width / 2

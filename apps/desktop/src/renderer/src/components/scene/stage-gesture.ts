@@ -2,16 +2,23 @@ import type { Scene } from '@/lib/backend'
 import type { TransformCommitResult } from '@/lib/scene-transform-commit'
 export type { TransformCommitResult } from '@/lib/scene-transform-commit'
 import {
+  cropGhost,
   moveGhost,
   resizeGhost,
+  roundCropForCommit,
   roundRectForCommit,
   type GhostResult,
   type SnapTargets,
+  type StageCrop,
   type StageHandleId,
   type StageRect
 } from './stage-transform'
 
-export type StageCommit = (sourceId: string, rect: StageRect) => Promise<TransformCommitResult>
+/** One released gesture's commit: the box, and an ⌥-drag crop's crop with it. */
+export type StageCommit = (
+  sourceId: string,
+  patch: StageRect & Partial<StageCrop>
+) => Promise<TransformCommitResult>
 export const sameStageRect = (a: StageRect, b: StageRect): boolean =>
   (['x', 'y', 'width', 'height'] as const).every((key) => Math.abs(a[key] - b[key]) < 0.000001)
 
@@ -92,8 +99,11 @@ class SnapAxis {
 /** Mutable only for one pointer ownership interval; never stores canonical scene state. */
 export class StageGesture {
   rect: StageRect
+  /** An ⌥-drag crop's crop so far (plan 213 G2); null for a move or a resize. */
+  crop: StageCrop | null
   private origin: { x: number; y: number }
   private start: StageRect
+  private cropStart: StageCrop | null
   private shift = false
   private axis: 'x' | 'y' | null = null
   private snapX: SnapAxis
@@ -108,9 +118,12 @@ export class StageGesture {
     private targets: SnapTargets,
     private snap: boolean,
     private locked: boolean,
-    private forced: boolean
+    private forced: boolean,
+    /** The source's crop when ⌥ was down on an edge handle: the gesture crops. */
+    crop: StageCrop | null = null
   ) {
     this.start = this.rect = { ...start }
+    this.crop = this.cropStart = kind === 'move' || !crop ? null : { ...crop }
     this.origin = point
     this.snapX = new SnapAxis(start.x, snap)
     this.snapY = new SnapAxis(start.y, snap)
@@ -121,6 +134,7 @@ export class StageGesture {
   ): GhostResult {
     if (modifiers.shiftKey !== this.shift) {
       this.start = { ...this.rect }
+      this.cropStart = this.crop && { ...this.crop }
       this.origin = point
       this.axis = null
       this.snapX = new SnapAxis(this.rect.x, this.snap && !modifiers.altKey)
@@ -172,6 +186,16 @@ export class StageGesture {
         result.guides.push({ axis: 'x', position: x.target })
       if (y.target !== undefined && result.rect.y === y.position)
         result.guides.push({ axis: 'y', position: y.target })
+    } else if (this.cropStart) {
+      const cropped = cropGhost({
+        start: this.start,
+        crop: this.cropStart,
+        handle: this.kind,
+        dx,
+        dy
+      })
+      this.crop = cropped.crop
+      result = { rect: cropped.rect, guides: cropped.guides }
     } else
       result = resizeGhost({
         start: this.start,
@@ -190,6 +214,7 @@ export class StageGesture {
 export interface StageDraft {
   sourceId: string
   rect: StageRect
+  crop?: StageCrop
   generation: number
 }
 /** Serialize released gestures and retain presentation until canonical props catch up. */
@@ -232,8 +257,13 @@ export class StageEdits {
     this.acknowledged = null
     this.changed()
   }
-  submit(sourceId: string, rect: StageRect): void {
-    const draft = { sourceId, rect: roundRectForCommit(rect), generation: ++this.generation }
+  submit(sourceId: string, rect: StageRect, crop?: StageCrop): void {
+    const draft: StageDraft = {
+      sourceId,
+      rect: roundRectForCommit(rect),
+      ...(crop ? { crop: roundCropForCommit(crop) } : {}),
+      generation: ++this.generation
+    }
     const epoch = this.epoch
     const commit = this.commit
     const sceneId = this.canonical?.id
@@ -243,7 +273,7 @@ export class StageEdits {
       if (epoch !== this.epoch) return
       let result: TransformCommitResult
       try {
-        result = await commit(sourceId, draft.rect)
+        result = await commit(sourceId, { ...draft.rect, ...draft.crop })
       } catch {
         result = { ok: false }
       }

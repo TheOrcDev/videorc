@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  MIN_CROP_KEPT,
   MIN_SOURCE_FRACTION,
   STAGE_HANDLE_IDS,
   STAGE_SNAP_THRESHOLD,
+  cropGhost,
   handleCursor,
   moveGhost,
   resizeGhost,
@@ -374,5 +376,55 @@ describe('compositor mask geometry', () => {
   it('caps rounded corners at half the shorter side, matching the compositor', () => {
     const shape = stageSourceShape(box(0.1, 0.2, 0.4, 0.2), 160, 90, 'rounded', 100)
     expect(shape).toEqual({ kind: 'rect', x: 16, y: 18, width: 64, height: 18, rx: 9 })
+  })
+})
+
+describe('cropGhost (plan 213 G2)', () => {
+  const crop = { cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }
+  // A 16:9 screen drawn in a box half the canvas wide: one canvas unit of the
+  // box shows two units of the picture.
+  const start = box(0.25, 0.25, 0.5, 0.5)
+
+  it('cuts the picture at the edge the pointer moves, so what stays does not move', () => {
+    const { rect, crop: next } = cropGhost({ start, crop, handle: 'w', dx: 0.1, dy: 0 })
+    expect(rect.x).toBeCloseTo(0.35)
+    expect(rect.width).toBeCloseTo(0.4)
+    expect(rect.y).toBe(start.y)
+    expect(rect.height).toBe(start.height)
+    expect(next.cropLeft).toBeCloseTo(0.2)
+    // The scale is unchanged: what's left of the picture over the box.
+    expect((1 - next.cropLeft - next.cropRight) / rect.width).toBeCloseTo(1 / start.width)
+  })
+
+  it('crops the opposite edges and the corners the same way', () => {
+    const east = cropGhost({ start, crop, handle: 'e', dx: -0.1, dy: 0 })
+    expect(east.rect.x).toBe(start.x)
+    expect(east.rect.width).toBeCloseTo(0.4)
+    expect(east.crop.cropRight).toBeCloseTo(0.2)
+    const corner = cropGhost({ start, crop, handle: 'se', dx: -0.05, dy: -0.1 })
+    expect(corner.crop.cropRight).toBeCloseTo(0.1)
+    expect(corner.crop.cropBottom).toBeCloseTo(0.2)
+    expect(corner.crop.cropLeft).toBe(0)
+    expect(corner.crop.cropTop).toBe(0)
+  })
+
+  it('pulling out uncrops and stops at the picture own edge', () => {
+    const cropped = { ...crop, cropLeft: 0.2 }
+    const from = box(0.35, 0.25, 0.4, 0.5)
+    const back = cropGhost({ start: from, crop: cropped, handle: 'w', dx: -0.3, dy: 0 })
+    expect(back.crop.cropLeft).toBe(0)
+    expect(back.rect.x).toBeCloseTo(0.25)
+    expect(back.rect.width).toBeCloseTo(0.5)
+    // Nothing to uncrop: the edge stays put.
+    const none = cropGhost({ start, crop, handle: 'n', dx: 0, dy: -0.2 })
+    expect(none.rect).toEqual(start)
+    expect(none.crop).toEqual(crop)
+  })
+
+  it('always leaves 5% of the picture and the smallest box', () => {
+    const { rect, crop: next } = cropGhost({ start, crop, handle: 'w', dx: 2, dy: 0 })
+    expect(1 - next.cropLeft - next.cropRight).toBeGreaterThanOrEqual(MIN_CROP_KEPT - 1e-9)
+    expect(rect.width).toBeGreaterThanOrEqual(MIN_SOURCE_FRACTION - 1e-9)
+    expect(rect.x + rect.width).toBeCloseTo(start.x + start.width)
   })
 })

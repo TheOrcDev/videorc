@@ -1,22 +1,27 @@
-import { LockIcon } from '@/components/icons'
+import { LockIcon, ResetIcon } from '@/components/icons'
 import { useRef, useState, type ReactElement } from 'react'
 
 import { SectionLabel } from '@/components/section-label'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
+import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { InputGroup, InputGroupInput, InputGroupAddon } from '@/components/ui/input-group'
 import type { SceneSource } from '@/lib/backend'
 import { cn } from '@/lib/utils'
-import type { StageRect } from './stage-transform'
+import { NO_STAGE_CROP, stageCropOf, type StageCrop, type StageRect } from './stage-transform'
 import {
+  CROP_FIELD_IDS,
+  CROP_FIELD_LABELS,
   TRANSFORM_FIELD_IDS,
   TRANSFORM_FIELD_LABELS,
+  cropFieldPatch,
   formatPercentValue,
   parsePercentValue,
   pixelReadout,
   transformFieldPatch,
+  type CropFieldId,
   type TransformFieldId
 } from './transform-fields-math'
 
@@ -175,6 +180,96 @@ export function SourceTransformFields({
       {disabled && disabledReason ? (
         <p className="text-xs text-muted-foreground">{disabledReason}</p>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * The screen's crop (plan 213 G2): left, top, right and bottom as a percent
+ * of the screen's own picture, under its Position and size. A crop typed here
+ * keeps the box and fits what is left into it; ⌥-drag on an edge of the box
+ * on the canvas crops there instead and edits the same four numbers. Every
+ * commit is the same backend scene commit as a drag, echoed back.
+ */
+export function SourceCropFields({
+  source,
+  disabled = false,
+  onCommit
+}: {
+  source: SceneSource
+  disabled?: boolean
+  onCommit: (patch: Partial<StageCrop>) => void
+}): ReactElement {
+  const committed = stageCropOf(source.transform)
+  const [drafts, setDrafts] = useState<Partial<Record<CropFieldId, string>>>({})
+  const draftsRef = useRef(drafts)
+  const updateDraft = (field: CropFieldId, value: string | undefined): void => {
+    draftsRef.current = { ...draftsRef.current, [field]: value }
+    setDrafts(draftsRef.current)
+  }
+  const commitField = (field: CropFieldId): void => {
+    const draft = draftsRef.current[field]
+    updateDraft(field, undefined)
+    if (disabled || draft === undefined) return
+    const parsed = parsePercentValue(draft)
+    if (parsed === null || parsed === committed[field]) return
+    onCommit(cropFieldPatch(field, parsed, committed))
+  }
+  const cropped = CROP_FIELD_IDS.some((field) => committed[field] > 0)
+
+  return (
+    <div className="grid gap-2" data-videorc-crop-fields={source.id}>
+      <SectionLabel>Crop</SectionLabel>
+      <FieldGroup className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {CROP_FIELD_IDS.map((field) => (
+          <Field key={field} className="min-w-0 gap-1" data-disabled={disabled}>
+            <FieldLabel htmlFor={`${source.id}-${field}`}>{CROP_FIELD_LABELS[field]}</FieldLabel>
+            <InputGroup>
+              <InputGroupInput
+                id={`${source.id}-${field}`}
+                aria-label={`Crop ${CROP_FIELD_LABELS[field].toLowerCase()} percent of the picture`}
+                className="text-right tabular-nums"
+                data-videorc-crop-field={field}
+                disabled={disabled}
+                inputMode="decimal"
+                value={drafts[field] ?? formatPercentValue(committed[field])}
+                onBlur={() => commitField(field)}
+                onChange={(event) => updateDraft(field, event.target.value)}
+                onFocus={() =>
+                  updateDraft(field, draftsRef.current[field] ?? formatPercentValue(committed[field]))
+                }
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    commitField(field)
+                  } else if (event.key === 'Escape') {
+                    updateDraft(field, undefined)
+                    event.currentTarget.blur()
+                  }
+                }}
+              />
+              <InputGroupAddon align="inline-end">%</InputGroupAddon>
+            </InputGroup>
+          </Field>
+        ))}
+      </FieldGroup>
+      <p className="text-xs text-muted-foreground">
+        Percent of the screen&apos;s picture. On the canvas, hold{' '}
+        <ShortcutKeys accelerator="Alt" /> and drag an edge to crop there.
+      </p>
+      <Button
+        className="w-fit"
+        data-videorc-crop-reset
+        disabled={disabled}
+        size="xs"
+        variant="ghost"
+        onClick={() => {
+          if (cropped) onCommit({ ...NO_STAGE_CROP })
+        }}
+      >
+        <ResetIcon data-icon="inline-start" />
+        Reset crop
+      </Button>
     </div>
   )
 }

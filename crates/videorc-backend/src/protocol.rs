@@ -529,7 +529,7 @@ pub struct LayoutSettings {
     /// Non-optional with a default on purpose (serde null trap); serializes
     /// as an empty object, never null.
     #[serde(default)]
-    pub source_transform_overrides: std::collections::BTreeMap<String, CameraTransform>,
+    pub source_transform_overrides: std::collections::BTreeMap<String, SourceTransformOverride>,
     /// Legacy layouts show both roles. Hidden roles still keep selected IDs.
     #[serde(default)]
     pub source_visibility: SourceVisibility,
@@ -674,6 +674,68 @@ pub struct CameraTransform {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+/// One source's Freeform box. The screen-side source also keeps its crop
+/// (plan 213 G2), as fractions of its own picture; a side that crops nothing
+/// is left out of the wire, so a box saved before crops existed reads and
+/// writes back unchanged. The camera ignores these: its crop is its zoom and
+/// pan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTransformOverride {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_left: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_top: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_right: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_bottom: f64,
+}
+
+fn crop_side_is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+impl SourceTransformOverride {
+    /// The box alone, with no crop.
+    pub fn from_box(transform: CameraTransform) -> Self {
+        Self {
+            x: transform.x,
+            y: transform.y,
+            width: transform.width,
+            height: transform.height,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        }
+    }
+
+    pub fn camera_box(&self) -> CameraTransform {
+        CameraTransform {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// A live crop for the Scene editor's draft (plan 213 G2): the ⌥-drag on a
+/// screen's edge shows its crop on the Preview before the commit lands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneCropDraft {
+    pub crop_left: f64,
+    pub crop_top: f64,
+    pub crop_right: f64,
+    pub crop_bottom: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1030,6 +1092,9 @@ pub struct SceneEditorDraftParams {
     pub source_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<CameraTransform>,
+    /// An ⌥-drag crop's live crop; absent keeps the committed crop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<SceneCropDraft>,
     pub chrome: EditorChrome,
 }
 
@@ -7612,6 +7677,16 @@ mod tests {
         let expected_layout = shared_high_risk_contract_fixture_value("/layout/normalized");
         let layout: LayoutSettings = serde_json::from_value(legacy_layout).unwrap();
         assert_eq!(serde_json::to_value(layout).unwrap(), expected_layout);
+
+        // Plan 213 G2: a freeform screen's crop rides its box both ways, and
+        // the camera's uncropped box keeps its four fields.
+        let cropped = shared_high_risk_contract_fixture_value("/layout/freeformCrop");
+        let layout: LayoutSettings = serde_json::from_value(cropped.clone()).unwrap();
+        assert_eq!(
+            layout.source_transform_overrides["source:base"].crop_left,
+            0.25
+        );
+        assert_eq!(serde_json::to_value(layout).unwrap(), cropped);
 
         let scene_wire = shared_high_risk_contract_fixture_value("/scene/wire");
         let scene: Scene = serde_json::from_value(scene_wire.clone()).unwrap();
