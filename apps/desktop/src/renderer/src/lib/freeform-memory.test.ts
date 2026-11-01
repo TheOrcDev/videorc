@@ -12,6 +12,7 @@ import {
   rememberFreeform,
   rememberedFreeform,
   restoreLayoutUndo,
+  sourceOverrideOf,
   takeLayoutUndo,
   type FreeformMemory,
   type LayoutUndoEntry
@@ -199,5 +200,50 @@ describe('freeformEntryPatch', () => {
       arrangementMode: 'freeform',
       sourceTransformOverrides: freeformEntryOverrides(rememberedFreeform(), 'horizontal', sources)
     })
+  })
+})
+
+describe('sourceOverrideOf (plan 213 G2)', () => {
+  const transform = {
+    x: 0.1,
+    y: 0.2,
+    width: 0.5,
+    height: 0.4,
+    cropLeft: 0.25,
+    cropTop: 0,
+    cropRight: 0,
+    cropBottom: 0.1
+  }
+
+  it("saves the screen's box with the sides it crops", () => {
+    expect(sourceOverrideOf({ kind: 'screen', transform })).toEqual({
+      x: 0.1,
+      y: 0.2,
+      width: 0.5,
+      height: 0.4,
+      cropLeft: 0.25,
+      cropBottom: 0.1
+    })
+    expect(sourceOverrideOf({ kind: 'window', transform })).toHaveProperty('cropLeft', 0.25)
+  })
+
+  it('saves the camera and the test pattern as their box only', () => {
+    // The camera's crop is its zoom and pan, never part of its box.
+    for (const kind of ['camera', 'test-pattern'] as const)
+      expect(sourceOverrideOf({ kind, transform })).toEqual({
+        x: 0.1,
+        y: 0.2,
+        width: 0.5,
+        height: 0.4
+      })
+  })
+
+  it('an uncropped screen keeps the four-field box it had before crops', () => {
+    expect(
+      sourceOverrideOf({
+        kind: 'screen',
+        transform: { ...transform, cropLeft: 0, cropBottom: 0 }
+      })
+    ).toEqual({ x: 0.1, y: 0.2, width: 0.5, height: 0.4 })
   })
 })

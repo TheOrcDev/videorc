@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { MIN_SOURCE_FRACTION } from './stage-transform'
 import {
   clampTransformField,
+  cropFieldPatch,
   formatPercentValue,
   parsePercentValue,
   pixelReadout,
@@ -96,5 +97,24 @@ describe('pixelReadout', () => {
     expect(pixelReadout({ x: 0, y: 0, width: 0.2, height: 0.3 }, 1920, 1080)).toBe(
       '384 × 324 px on 1920 × 1080'
     )
+  })
+})
+
+describe('cropFieldPatch (plan 213 G2)', () => {
+  const none = { cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }
+
+  it('commits the one side, as a share of the picture', () => {
+    expect(cropFieldPatch('cropLeft', 0.125, none)).toEqual({ cropLeft: 0.125 })
+    expect(cropFieldPatch('cropBottom', 0.33333, none)).toEqual({ cropBottom: 0.3333 })
+  })
+
+  it('never crops below nothing or past 5% of the picture beside the other side', () => {
+    expect(cropFieldPatch('cropTop', -0.2, none)).toEqual({ cropTop: 0 })
+    expect(cropFieldPatch('cropRight', 1.2, none)).toEqual({ cropRight: 0.95 })
+    expect(cropFieldPatch('cropRight', 0.9, { ...none, cropLeft: 0.6 })).toEqual({
+      cropRight: 0.35
+    })
+    // The other axis does not limit it.
+    expect(cropFieldPatch('cropLeft', 0.5, { ...none, cropTop: 0.9 })).toEqual({ cropLeft: 0.5 })
   })
 })

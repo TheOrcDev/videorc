@@ -367,3 +367,81 @@ it.each([
       expect(hit.y + hit.height).toBeLessThanOrEqual(canvas.height + 28)
     }
 })
+
+describe('⌥-drag crop gestures (plan 213 G2)', () => {
+  const crop = { cropLeft: 0.1, cropTop: 0, cropRight: 0, cropBottom: 0 }
+  const pixels = { width: 1000, height: 562 }
+
+  it('an edge grabbed with a crop crops; the same edge without one resizes', () => {
+    const cropping = new StageGesture(
+      'screen',
+      1,
+      'w',
+      rect,
+      { x: 0.3, y: 0.45 },
+      pixels,
+      empty,
+      false,
+      false,
+      false,
+      crop
+    )
+    const ghost = cropping.sample({ x: 0.36, y: 0.45 }, modifiers)
+    expect(ghost.rect.x).toBeCloseTo(0.36)
+    expect(cropping.crop?.cropLeft).toBeCloseTo(0.1 + 0.06 * (0.9 / 0.3))
+    const resizing = new StageGesture(
+      'screen',
+      1,
+      'w',
+      rect,
+      { x: 0.3, y: 0.45 },
+      pixels,
+      empty,
+      false,
+      false,
+      false
+    )
+    resizing.sample({ x: 0.36, y: 0.45 }, modifiers)
+    expect(resizing.crop).toBeNull()
+    // A move never crops, whatever it was handed.
+    const moving = new StageGesture(
+      'screen',
+      1,
+      'move',
+      rect,
+      { x: 0.4, y: 0.4 },
+      pixels,
+      empty,
+      false,
+      false,
+      false,
+      crop
+    )
+    expect(moving.crop).toBeNull()
+  })
+
+  it('commits the crop with the box in one patch, rounded like the box', async () => {
+    const commit = vi.fn(async () => result(rect))
+    const edits = new StageEdits(
+      commit,
+      () => {},
+      () => {}
+    )
+    edits.observe(scene(rect))
+    edits.submit('screen', { ...rect, x: 0.36123456 }, { ...crop, cropLeft: 0.28123456 })
+    await tick()
+    expect(commit).toHaveBeenCalledWith('screen', {
+      x: 0.3612,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+      cropLeft: 0.2812,
+      cropTop: 0,
+      cropRight: 0,
+      cropBottom: 0
+    })
+    edits.submit('screen', rect)
+    await tick()
+    expect(commit).toHaveBeenLastCalledWith('screen', rect)
+  })
+})

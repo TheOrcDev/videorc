@@ -1,5 +1,11 @@
-import type { CameraTransform, LayoutSettings, SceneSource } from '@/lib/backend'
-import { layoutPresetOrientation, type LayoutOrientation } from '@/lib/capture'
+import type {
+  CameraTransform,
+  LayoutSettings,
+  SceneSource,
+  SceneSourceKind,
+  SourceTransformOverride
+} from '@/lib/backend'
+import { layoutPresetOrientation, normalizeSourceCrop, type LayoutOrientation } from '@/lib/capture'
 
 // Freeform memory (plan 174, C-4). Choosing a preset scene leaves Freeform
 // and clears its per-source overrides, so one stray click used to lose an
@@ -27,6 +33,20 @@ export function rememberFreeform(memory: FreeformMemory, layout: FreeformLayout)
 function transformOf(source: Pick<SceneSource, 'transform'>): CameraTransform {
   const { x, y, width, height } = source.transform
   return { x, y, width, height }
+}
+
+/** Only the screen side crops (plan 213 G2): the camera frames itself with
+ * zoom and pan, and the test pattern is drawn at the canvas size. */
+export function sourceCroppable(kind: SceneSourceKind): boolean {
+  return kind === 'screen' || kind === 'window'
+}
+
+/** A source as Freeform saves it: its box, and the screen's crop with it. */
+export function sourceOverrideOf(
+  source: Pick<SceneSource, 'kind' | 'transform'>
+): SourceTransformOverride {
+  const box = transformOf(source)
+  return sourceCroppable(source.kind) ? { ...box, ...normalizeSourceCrop(source.transform) } : box
 }
 
 /**
