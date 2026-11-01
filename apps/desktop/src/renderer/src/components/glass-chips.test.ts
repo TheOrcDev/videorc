@@ -254,14 +254,15 @@ describe('chip tokens', () => {
 
 // Plan 208 S4 (D2): the Welcome screen's Liquid Chrome on the controls you
 // touch. Four materials, defined once, with a dark and a light column; red
-// stays the LED's alone (D6, D8).
+// stays Record's alone (D6, D8). Record's chrome-led is not on the still
+// list: its glow breathes while a session runs, so chrome-led.test.ts holds
+// it to opacity alone (D5).
 describe('chrome materials (plan 208 S4)', () => {
   const MATERIALS = [
     'chrome-fill',
     'chrome-plate',
     'chrome-bead',
     'chrome-bead-ink',
-    'chrome-led',
     'chrome-row-live',
     'chrome-row-member'
   ]
@@ -300,6 +301,8 @@ describe('chrome materials (plan 208 S4)', () => {
       '--chrome-bead-drop',
       '--chrome-bead-ink-stops',
       '--chrome-bead-ink-drop',
+      '--chrome-led-off-stops',
+      '--chrome-led-off-flat',
       '--chrome-led-stops',
       '--chrome-led-flat',
       '--chrome-led-hi',
@@ -327,7 +330,7 @@ describe('chrome materials (plan 208 S4)', () => {
     // white ink (D3).
     expect(dark).toContain('--chrome-fill-ink: oklch(0.13 0 0);')
     expect(light).toContain('--chrome-fill-ink: oklch(0.985 0 0);')
-    // The chrome is neutral; only the LED carries a hue, the brand red's.
+    // The chrome is neutral; only Record carries a hue, the brand red's.
     for (const column of [light, dark]) {
       const chroma = [
         ...column.matchAll(/--chrome-(?!led)[\w-]+:[^;]*oklch\(\s*[\d.]+\s+(?!0[\s/)])/g)
@@ -339,9 +342,9 @@ describe('chrome materials (plan 208 S4)', () => {
     }
   })
 
-  it('lights the LED only with data-lit, and gives fill and plate an edge under Increase Contrast', () => {
+  it('lights Record only with data-lit, and gives fill and plate an edge under Increase Contrast', () => {
     expect(body('chrome-led')).toMatch(
-      /&\[data-lit\] \{\s*--tw-shadow: var\(--chrome-led-shadow\), 0 0 12px var\(--chrome-led-glow\);/
+      /&\[data-lit\] \{\s*--chrome-led-metal: var\(--chrome-led-stops\);/
     )
     expect(body('chrome-fill')).not.toContain('data-lit')
     const contrast = /@media \(prefers-contrast: more\) \{([\s\S]*?)\n\}/.exec(styles)?.[1] ?? ''

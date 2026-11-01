@@ -1595,6 +1595,39 @@ fn observe_wall(
     }
 }
 
+/// Wait for the raw bytes belonging to one metadata record. Keep receipt and
+/// time injectable so protocol budgets can be tested without scheduler sleeps.
+/// `false` means capture was cancelled before the packet was complete.
+fn match_pcm_bytes(
+    queued: &mut VecDeque<u8>,
+    wanted: usize,
+    match_budget: Duration,
+    stop: &AtomicBool,
+    mut receive: impl FnMut(Duration) -> std::result::Result<Vec<u8>, mpsc::RecvTimeoutError>,
+    mut now: impl FnMut() -> Instant,
+) -> Result<bool> {
+    let deadline = now() + match_budget;
+    while queued.len() < wanted {
+        if stop.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if now() >= deadline {
+            bail!(
+                "Capture PCM did not match its timestamp metadata within {}ms",
+                match_budget.as_millis()
+            );
+        }
+        match receive(Duration::from_millis(5)) {
+            Ok(bytes) => queued.extend(bytes),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("Capture PCM ended in a partial timestamped packet")
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn assemble_pcm(
     protocol: CaptureProtocol,
     mut clock_pair: ClockPair,
@@ -1676,21 +1709,18 @@ fn assemble_pcm(
                 pulse.place_delivery_stamped(packet.pts, packet.frames, DSHOW_DROPOUT_FRAMES);
         }
         let wanted = packet.frames * 8;
-        let deadline = Instant::now() + Duration::from_millis(100);
-        while queued.len() < wanted {
-            if stop.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                bail!("Capture PCM did not match its timestamp metadata within 100ms");
-            }
-            match raw.recv_timeout(Duration::from_millis(5)) {
-                Ok(bytes) => queued.extend(bytes),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    bail!("Capture PCM ended in a partial timestamped packet")
-                }
-            }
+        // FFmpeg logs the record and writes its PCM from different threads, so
+        // the PCM may trail it by as long as the packet may age (Pulse: the
+        // worker stopped on a loaded Linux desktop at 100 ms, retest 153).
+        if !match_pcm_bytes(
+            &mut queued,
+            wanted,
+            max_capture_age(protocol),
+            stop,
+            |wait| raw.recv_timeout(wait),
+            Instant::now,
+        )? {
+            return Ok(());
         }
         let bytes: Vec<_> = queued.drain(..wanted).collect();
         let samples: Vec<f32> = bytes
@@ -2609,6 +2639,159 @@ mod tests {
         let (result, frames) = run(CaptureProtocol::AvFoundation, ClockPair::sample().unwrap());
         assert!(result.unwrap_err().to_string().contains("anchor"));
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn pulse_pcm_may_trail_its_record_within_the_pulse_age_budget() {
+        // Exercise the production byte matcher with the actual protocol budgets.
+        // A real sleep also aged the capture timestamp and could correctly drop
+        // the packet on a loaded CI runner, obscuring this matching contract.
+        let late = Duration::from_millis(130);
+        let bytes: Vec<u8> = (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect();
+        for protocol in [
+            CaptureProtocol::Pulse,
+            CaptureProtocol::AvFoundation,
+            CaptureProtocol::DirectShow,
+        ] {
+            let now = std::cell::Cell::new(Instant::now());
+            let arrival = now.get() + late;
+            let mut queued = VecDeque::new();
+            let result = match_pcm_bytes(
+                &mut queued,
+                bytes.len(),
+                max_capture_age(protocol),
+                &AtomicBool::new(false),
+                |wait| {
+                    now.set(now.get() + wait);
+                    if now.get() >= arrival {
+                        Ok(bytes.clone())
+                    } else {
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    }
+                },
+                || now.get(),
+            );
+            if protocol == CaptureProtocol::Pulse {
+                assert!(result.unwrap());
+                assert_eq!(queued, bytes);
+                assert_eq!(now.get(), arrival);
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("did not match its timestamp metadata within 100ms")
+                );
+                assert!(queued.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn pcm_match_still_expires_at_each_protocol_budget() {
+        for protocol in [
+            CaptureProtocol::Pulse,
+            CaptureProtocol::AvFoundation,
+            CaptureProtocol::DirectShow,
+        ] {
+            let start = Instant::now();
+            let now = std::cell::Cell::new(start);
+            let budget = max_capture_age(protocol);
+            let mut queued = VecDeque::from([1]);
+            let result = match_pcm_bytes(
+                &mut queued,
+                2,
+                budget,
+                &AtomicBool::new(false),
+                |wait| {
+                    now.set(now.get() + wait);
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                },
+                || now.get(),
+            );
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                format!(
+                    "Capture PCM did not match its timestamp metadata within {}ms",
+                    budget.as_millis()
+                )
+            );
+            assert_eq!(now.get() - start, budget);
+            assert_eq!(queued, [1]);
+        }
+    }
+
+    #[test]
+    fn pcm_match_cancellation_stops_receiving() {
+        let now = Instant::now();
+        let stop = AtomicBool::new(false);
+        let mut reads = 0;
+        let mut queued = VecDeque::new();
+        let matched = match_pcm_bytes(
+            &mut queued,
+            8,
+            PULSE_MAX_CAPTURE_AGE,
+            &stop,
+            |_| {
+                reads += 1;
+                stop.store(true, Ordering::Release);
+                Ok(vec![1, 2, 3, 4])
+            },
+            || now,
+        )
+        .unwrap();
+        assert!(!matched);
+        assert_eq!(reads, 1);
+        assert_eq!(queued, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn pcm_match_rejects_disconnected_partial_packets() {
+        let now = Instant::now();
+        let mut queued = VecDeque::from([1, 2]);
+        let result = match_pcm_bytes(
+            &mut queued,
+            8,
+            PULSE_MAX_CAPTURE_AGE,
+            &AtomicBool::new(false),
+            |_| Err(mpsc::RecvTimeoutError::Disconnected),
+            || now,
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Capture PCM ended in a partial timestamped packet"
+        );
+        assert_eq!(queued, [1, 2]);
+    }
+
+    #[test]
+    fn pcm_match_keeps_bytes_for_the_next_packet() {
+        let now = Instant::now();
+        let mut queued = VecDeque::from([1, 2]);
+        assert!(
+            match_pcm_bytes(
+                &mut queued,
+                4,
+                PULSE_MAX_CAPTURE_AGE,
+                &AtomicBool::new(false),
+                |_| Ok(vec![3, 4, 5, 6]),
+                || now,
+            )
+            .unwrap()
+        );
+        assert_eq!(queued.drain(..4).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert!(
+            match_pcm_bytes(
+                &mut queued,
+                2,
+                PULSE_MAX_CAPTURE_AGE,
+                &AtomicBool::new(false),
+                |_| panic!("already buffered PCM must not wait for another read"),
+                || now,
+            )
+            .unwrap()
+        );
+        assert_eq!(queued, [5, 6]);
     }
 
     /// On-device check (release test 147, plan 0001): opens the real Pulse

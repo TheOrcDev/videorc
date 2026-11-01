@@ -75,7 +75,8 @@
     "pane",
     "fader",
     "parameter-slider",
-    "lock-reason"
+    "lock-reason",
+    "record-button"
   ],
   "keepLocal": ["src/renderer/src/styles.css", "src/renderer/src/components/icons.tsx"]
 }

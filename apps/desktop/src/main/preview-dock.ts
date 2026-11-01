@@ -35,7 +35,8 @@ export function parsePreviewWindowMode(raw: unknown): PreviewWindowMode {
  * What the Preview window remembers as it closes: its frame, and that the
  * streamer closed it. Quitting closes every window without anyone choosing
  * to, so a quit keeps `open` as it was and the next launch restores a Preview
- * that was open (U3: the open/closed choice survives a relaunch).
+ * that was open (U3: the open/closed choice survives a relaunch). Notes, the
+ * Stream Manager and Captions restore at launch too and close by this rule.
  */
 export function previewWindowClosePrefs(
   frame: Rect | null,

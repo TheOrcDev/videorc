@@ -2368,3 +2368,52 @@ in `~/.cache/videorc-linux-beta-evidence/ci-8679de73-classification.json` and
 No Linux Beta candidate has been accepted or published. Physical Ubuntu and
 Hyprland AppImage acceptance, endurance, the seven-day pilot, updates/rollback,
 and protected publication remain open alongside the feature/runtime ledger.
+
+
+### Main integration and macOS CI follow-up, 2026-11-01
+
+The shutdown fix `c22bb0c1` was tested on merge `45420f99` with newer main
+`d3bac98c`. macOS job `124924319031` passes the advisory audit, formatting,
+Clippy, compilation, 84 library tests and all five new shutdown regressions.
+The backend suite has 4,357 passes, four failures and 22 ignored tests. The
+process/memory sentinel does not run after those failures. Job:
+<https://github.com/TheOrcDev/videorc/actions/runs/41332117573/job/124924319031>.
+
+Two failures come from the newer main changes. The Pulse matching test sleeps
+130 ms in real time; on a busy runner its capture packet can pass the unchanged
+250 ms age limit and correctly be dropped before the assertion. The raw-byte
+matching loop now has injectable receipt/time, allowing the actual Pulse,
+AVFoundation and DirectShow budgets to be exercised without scheduler sleeps.
+Tests cover delayed PCM, timeout, cancellation, partial disconnect and bytes
+buffered for the next packet. The existing assembler timestamp/sample tests
+remain. Production polling, match/age limits and stale-packet handling are
+unchanged. This does not prove physical microphone or final-artifact A/V quality.
+
+The remote page's copied chrome LED tokens lagged the desktop's metallic LED
+change. Both remote themes now use the desktop's gradient, flat color,
+highlight and glow values. All six existing served-page palette tests pass
+when compiled directly from the maintained test module; before the correction,
+five pass and the chrome parity test fails. An isolated extraction of the
+production PCM matcher, protocol budgets and five tests also passes. Restoring
+Pulse's old 100 ms match budget in that scratch harness fails the delayed-PCM
+regression. Full backend compilation/execution of these corrections is still
+required in CI; the extraction is only focused evidence.
+
+The other two macOS failures remain the Metal golden comparisons: Beams worst
+mean/max-cell 21.723/229 and GhostFibers 1.677/88. No shader, golden, tolerance
+or waiver change is made. Windows shutdown stability repetitions and matching
+real-app shutdown evidence remain pending.
+
+Linux job `124924298778` passes FFmpeg policy (7/7), provisioning and Clippy,
+then receives a runner shutdown signal during test compilation (exit 143),
+before any Rust test executes. One targeted rerun was requested; this is an
+interrupted gate, not a pass. Job:
+<https://github.com/TheOrcDev/videorc/actions/runs/41332117474/job/124924298778>.
+
+Main `8f2bdf03` is integrated without conflicts. Its 0.17.4 package version is
+upstream release state, not a selected or accepted Linux Beta candidate.
+Local full native/runtime verification remains blocked by the current host:
+Ogre is on battery at approximately 800 MHz with about 2 GiB available memory.
+Fresh binaries, recording-studio/Linux equivalents, both encoder matrices,
+latency and physical AppImage acceptance remain required. Classification and
+focused logs are under `~/.cache/videorc-linux-beta-evidence/`.

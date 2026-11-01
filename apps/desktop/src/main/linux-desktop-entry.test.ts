@@ -6,8 +6,10 @@ import {
   desktopEntryValue,
   isVideorcManagedEntry,
   linuxAppImageToRegister,
+  linuxChromeDesktop,
   linuxDesktopEntryPaths,
-  quoteDesktopExecArgument
+  quoteDesktopExecArgument,
+  VIDEORC_DESKTOP_FILE_NAME
 } from './linux-desktop-entry'
 
 const APPIMAGE = '/home/ana/Applications/Videorc-0.15.1-linux-x64.AppImage'
@@ -17,6 +19,20 @@ function entryFor(path: string): string {
   if (!text) throw new Error(`no entry for ${path}`)
   return text
 }
+
+describe('linuxChromeDesktop', () => {
+  it('names the videorc.desktop entry on Linux, so the Wayland app_id is "videorc"', () => {
+    expect(linuxChromeDesktop('linux')).toBe(VIDEORC_DESKTOP_FILE_NAME)
+    expect(VIDEORC_DESKTOP_FILE_NAME).toBe('videorc.desktop')
+    // Electron's default comes from the package name and matches no entry.
+    expect(linuxChromeDesktop('linux')).not.toBe('@videorc/desktop.desktop')
+  })
+
+  it('leaves macOS and Windows alone', () => {
+    expect(linuxChromeDesktop('darwin')).toBeNull()
+    expect(linuxChromeDesktop('win32')).toBeNull()
+  })
+})
 
 describe('linuxAppImageToRegister', () => {
   it('registers only a packaged Linux AppImage run', () => {
