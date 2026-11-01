@@ -189,11 +189,21 @@ pub fn vertical_screen_fits(layout: &LayoutSettings) -> bool {
         )
 }
 
+/// True when a landscape scene fills its screen (plan 213 G3): the user's
+/// `HorizontalScreenFraming::Fill`. Vertical presets never consult the field.
+pub fn horizontal_screen_fills(layout: &LayoutSettings) -> bool {
+    !layout.layout_preset.is_vertical()
+        && matches!(
+            layout.horizontal_screen_framing,
+            crate::protocol::HorizontalScreenFraming::Fill
+        )
+}
+
 /// The shared fit policy for source status, FFmpeg filters, CPU blits, and
 /// Metal placement. Side-by-side and ALL vertical presets cover their regions
 /// (short-form bands are filled, center-cropped — never letterboxed); the
 /// horizontal full-frame screen/window presets contain so UI edges are never
-/// cropped. Vertical BAND cameras cover unconditionally — a contain camera
+/// cropped, unless the user chose Fill for them (plan 213 G3). Vertical BAND cameras cover unconditionally — a contain camera
 /// band letterboxes exactly like the reported bug; zoom/pan still frame the
 /// crop. The vertical screen+camera inset bubble keeps the user's Fit choice
 /// like its horizontal twin.
@@ -228,6 +238,7 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
                 SceneFit::Contain
             } else if matches!(layout.layout_preset, LayoutPreset::SideBySide)
                 || vertical_fill_preset(&layout.layout_preset)
+                || horizontal_screen_fills(layout)
             {
                 SceneFit::Cover
             } else {
@@ -748,6 +759,55 @@ mod tests {
 
     fn layout() -> LayoutSettings {
         default_layout_settings()
+    }
+
+    #[test]
+    fn horizontal_fill_covers_the_landscape_screen_scenes_only() {
+        // Plan 213 G3: Fill makes the landscape screen scenes cover; the
+        // default stays Fit (contain), side by side always covers, and a
+        // vertical scene ignores the landscape field.
+        use crate::protocol::HorizontalScreenFraming;
+        assert_eq!(
+            layout().horizontal_screen_framing,
+            HorizontalScreenFraming::Fit
+        );
+        for preset in [LayoutPreset::ScreenCamera, LayoutPreset::ScreenOnly] {
+            for freeform in [false, true] {
+                let mut layout = layout();
+                layout.layout_preset = preset.clone();
+                if freeform {
+                    layout.arrangement_mode = ArrangementMode::Freeform;
+                }
+                for kind in [SceneSourceKind::Screen, SceneSourceKind::Window] {
+                    assert_eq!(scene_source_fit(&kind, &layout), SceneFit::Contain);
+                    layout.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+                    assert_eq!(scene_source_fit(&kind, &layout), SceneFit::Cover, "{preset:?}");
+                    layout.horizontal_screen_framing = HorizontalScreenFraming::Fit;
+                }
+                // The camera keeps its own Fit choice.
+                layout.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+                layout.camera_fit = CameraFit::Fit;
+                assert_eq!(
+                    scene_source_fit(&SceneSourceKind::Camera, &layout),
+                    SceneFit::Contain
+                );
+            }
+        }
+        let mut side_by_side = layout();
+        side_by_side.layout_preset = LayoutPreset::SideBySide;
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::Screen, &side_by_side),
+            SceneFit::Cover
+        );
+        let mut vertical = layout();
+        vertical.layout_preset = LayoutPreset::VerticalScreenOnly;
+        vertical.vertical_screen_framing = crate::protocol::VerticalScreenFraming::Fit;
+        vertical.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::Screen, &vertical),
+            SceneFit::Contain,
+            "a vertical scene reads only its own framing"
+        );
     }
 
     #[test]

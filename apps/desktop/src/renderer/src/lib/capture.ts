@@ -1471,6 +1471,7 @@ export const defaultCaptureConfig: CaptureConfig = {
     sideBySideSplit: '70-30',
     sideBySideCameraSide: 'right',
     verticalScreenFraming: 'fill',
+    horizontalScreenFraming: 'fit',
     arrangementMode: 'preset',
     sourceTransformOverrides: {},
     sourceVisibility: { camera: true, capture: true }
@@ -2014,6 +2015,10 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     verticalScreenFraming: isVerticalScreenFraming(candidate.verticalScreenFraming)
       ? candidate.verticalScreenFraming
       : defaultCaptureConfig.layout.verticalScreenFraming,
+    horizontalScreenFraming:
+      candidate.horizontalScreenFraming === 'fill'
+        ? 'fill'
+        : defaultCaptureConfig.layout.horizontalScreenFraming,
     arrangementMode: candidate.arrangementMode === 'freeform' ? 'freeform' : 'preset',
     sourceTransformOverrides: normalizeSourceTransformOverrides(candidate.sourceTransformOverrides),
     sourceVisibility: normalizeSourceVisibility(candidate.sourceVisibility)
