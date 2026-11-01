@@ -23,6 +23,7 @@
     "live:verdict": "node scripts/live-lab/verdict.mjs",
     "live:calibrate": "node scripts/live-lab/calibrate.mjs",
     "dev": "pnpm --filter @videorc/desktop dev",
+    "linux:with-render-node": "node scripts/with-linux-render-node.mjs",
     "dev:zerocopy": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_ZEROCOPY_SOURCES=1 -- pnpm --filter @videorc/desktop dev",
     "build": "pnpm --filter @videorc/desktop build",
     "typecheck": "pnpm --filter @videorc/desktop typecheck",

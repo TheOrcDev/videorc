@@ -70,6 +70,26 @@ export VIDEORC_LINUX_VAAPI_DEVICE=/dev/dri/renderD128
 export VIDEORC_LINUX_H264_ENCODER=openh264
 ```
 
+The VAAPI pin only controls the backend. Chromium can independently select a
+different GPU. On ogre, run the app and every app smoke through the device
+isolation wrapper as well (requires `/usr/bin/bwrap`, package `bubblewrap`):
+
+```bash
+pnpm linux:with-render-node pnpm dev
+pnpm linux:with-render-node pnpm smoke:first-run
+```
+
+The wrapper requires the explicit permitted node above. It derives that node's
+PCI identity and matching DRM card, sets Mesa's device preference, and exposes
+only those two device nodes under `/dev/dri` to the command and its children.
+The host desktop configuration is unchanged. Missing Bubblewrap, denied mount
+namespaces, aliases or uncertain device identity fail without an unrestricted
+launch. Inspect owned app GPU handles as part of named-box evidence: the Ogre
+probe used Intel UHD 630 with only `renderD128` handles and clean normal quit.
+This restriction is a development/test environment, not proof that a candidate
+runs on every GPU. Do not use inherited `ELECTRON_CLI_ARGS` as the sole pin:
+`electron-vite dev` overwrites it with its parsed trailing CLI arguments.
+
 `VIDEORC_LINUX_H264_ENCODER=auto|vaapi|openh264` picks the encoder; `auto` is
 the default. Find the driver behind each node with
 `readlink /sys/class/drm/renderD128/device/driver` (i915, xe, amdgpu, …).

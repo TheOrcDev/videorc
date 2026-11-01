@@ -2132,3 +2132,42 @@ app-scoped Chromium override explicitly selects the permitted node and launch
 evidence confirms it. No desktop configuration or GPU policy is changed. These
 are development results, not AppImage or physical Beta acceptance; existing
 quality, latency, endurance and publication gates remain open.
+
+### Intel-only command isolation and fresh setup result, 2026-11-01
+
+`pnpm linux:with-render-node <command> [args...]` now requires an explicit
+permitted render node and uses Bubblewrap to expose only that node and its
+matching DRM card under `/dev/dri` for the command and descendants. It derives
+Mesa's PCI preference from the permitted device; ambiguous nodes, aliases,
+non-devices and unavailable isolation fail before unrestricted execution. The
+wrapper replaces itself with Bubblewrap to preserve caller PID/signal ownership.
+It changes no host desktop configuration. The named-box procedure is in
+`docs/linux-dev-loop.md`.
+
+All 45 focused isolation, launcher, first-run teardown and Linux gate tests
+pass with zero skips. The actual wrapper on Ogre exposes exactly `card1` and
+`renderD128` with Mesa preference `pci-0000_00_02_0`. A minimal Electron probe
+under the same mount restriction renders WebGL through Intel UHD 630, has only
+`renderD128` GPU handles, and exits normally with no forced cleanup. Probe:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/intel-electron-probe-syMJZu/report.json`.
+
+The full maintained first-run run on `a015a8ea` under Intel-only isolation
+passes 36 assertions and fails the next no-device-starts assertion during
+resumed setup after the What's New case. Its guard begins at 05:58:07.737 UTC
+before reload; a camera generation starts at 05:58:07.881 UTC, and the
+pre-leave snapshot has 406 captured frames. The source transitions from
+`device-missing` at guard entry to `live`. Whether an already-admitted old
+workspace request crossed the reload boundary remains under investigation;
+the failure is retained without weakening the privacy contract.
+
+All 90 sampled owned-process GPU observations use the allowed node. Normal
+quit and all owned child exits are clean. Livestream setup, Skip setup shutdown
+and preview lifecycle do not execute after the assertion failure. This run
+does not resolve the earlier private-benchmark shutdown overrun. Receipt:
+`/home/orcdev/.cache/videorc-linux-beta-evidence/intel-first-run-classification.json`.
+
+The additional Electron recheck through the promoted wrapper is blocked by
+host memory admission (about 5%, 831 MiB available). The exact recorded owner
+is stopped before launch: it has no children and no app/cleanup report. No
+GPU/app test runs in that attempt, and the memory guard remains enabled.
+Receipt: `/home/orcdev/.cache/videorc-linux-beta-evidence/intel-wrapper-admission-stop.json`.
