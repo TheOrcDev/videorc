@@ -5674,9 +5674,11 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         opacity: 1;
       }
 
-      /* Banners (plan 186) show once decoded but never count as source
-         liveness: they are overlays, not proof that a source is live. */
-      .scene-layer[data-kind="banner"] > img[data-loaded="1"] {
+      /* Banners (plan 186) and the Buddy (plan 205 S9) show once decoded
+         but never count as source liveness: they are overlays, not proof
+         that a source is live. */
+      .scene-layer[data-kind="banner"] > img[data-loaded="1"],
+      .scene-layer[data-kind="buddy"] > img[data-loaded="1"] {
         opacity: 1;
       }
 
