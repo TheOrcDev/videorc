@@ -594,8 +594,8 @@ export function SceneStage({
     // one to carry on from.
     const crop =
       kind !== 'move' && event.altKey && cropEnabled && sourceCroppable(source.kind)
-        ? (edits.draft?.sourceId === source.id ? edits.draft.crop : undefined) ??
-          stageCropOf(source.transform)
+        ? ((edits.draft?.sourceId === source.id ? edits.draft.crop : undefined) ??
+          stageCropOf(source.transform))
         : null
     const motion = new StageGesture(
       source.id,

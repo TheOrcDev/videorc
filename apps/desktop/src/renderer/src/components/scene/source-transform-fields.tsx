@@ -236,7 +236,10 @@ export function SourceCropFields({
                 onBlur={() => commitField(field)}
                 onChange={(event) => updateDraft(field, event.target.value)}
                 onFocus={() =>
-                  updateDraft(field, draftsRef.current[field] ?? formatPercentValue(committed[field]))
+                  updateDraft(
+                    field,
+                    draftsRef.current[field] ?? formatPercentValue(committed[field])
+                  )
                 }
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
@@ -254,8 +257,8 @@ export function SourceCropFields({
         ))}
       </FieldGroup>
       <p className="text-xs text-muted-foreground">
-        Percent of the screen&apos;s picture. On the canvas, hold{' '}
-        <ShortcutKeys accelerator="Alt" /> and drag an edge to crop there.
+        Percent of the screen&apos;s picture. On the canvas, hold <ShortcutKeys accelerator="Alt" />{' '}
+        and drag an edge to crop there.
       </p>
       <Button
         className="w-fit"
