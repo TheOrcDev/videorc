@@ -29,6 +29,8 @@ import type {
 } from './backend'
 import {
   parseBackendWireMessage,
+  cameraSelectionDiagnosticsSchema,
+  cameraConnectionHistoryEntrySchema,
   runtimeValidatedBackendRpcMethods,
   validateMainOwnedPreviewSurfaceBoundsParams,
   validateBackendEventPayload,
@@ -3600,4 +3602,30 @@ describe('performance check non-recorded reason', () => {
       })
     ).toThrow()
   })
+})
+
+it('accepts disconnected camera status and the support camera story', () => {
+  const status = {
+    state: 'disconnected',
+    cameraId: 'iphone',
+    deviceUniqueId: 'stable-id',
+    targetFps: 30,
+    framesCaptured: 5,
+    droppedFrames: 0,
+    updatedAt: '2026-11-01T12:00:00Z',
+    message: 'iPhone disconnected'
+  }
+  expect(validateBackendEventPayload('preview.camera.status', status)).toEqual(status)
+  const selection = { wantedCameraId: 'iphone', usedCameraId: 'builtin', state: 'live' }
+  expect(cameraSelectionDiagnosticsSchema.parse(selection)).toEqual(selection)
+  const edge = {
+    deviceType: 'AVCaptureDeviceTypeContinuityCamera',
+    transport: 0,
+    uniqueId: 'stable-id',
+    name: 'iPhone',
+    connected: false,
+    timestamp: status.updatedAt
+  }
+  expect(cameraConnectionHistoryEntrySchema.parse(edge)).toEqual(edge)
+  expect(() => cameraConnectionHistoryEntrySchema.parse({ ...edge, timestamp: null })).toThrow()
 })

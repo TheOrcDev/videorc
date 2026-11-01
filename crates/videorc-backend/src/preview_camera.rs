@@ -8457,7 +8457,7 @@ mod tests {
         let video = test_video();
         let (_, shared) = install_restartable_camera(&state, 7, &layout, &video).await;
         let mut event = crate::device_watch::CameraConnectionEvent {
-            unique_id: "other".to_string(), name: "iPhone".to_string(), connected: false,
+            unique_id: "other".to_string(), name: "iPhone".to_string(), connected: false, timestamp: Utc::now().to_rfc3339(), device_type: "AVCaptureDeviceTypeContinuityCamera".to_string(), transport: 0,
         };
         camera_connection_changed(&state, &event).await;
         assert_eq!(preview_camera_status(&state).await.state, PreviewCameraState::Live);
@@ -8486,7 +8486,7 @@ mod tests {
         let state = test_state();
         install_restartable_camera(&state, 7, &test_layout(false), &test_video()).await;
         let event = crate::device_watch::CameraConnectionEvent {
-            unique_id: "test".to_string(), name: "iPhone".to_string(), connected: false,
+            unique_id: "test".to_string(), name: "iPhone".to_string(), connected: false, timestamp: Utc::now().to_rfc3339(), device_type: "AVCaptureDeviceTypeContinuityCamera".to_string(), transport: 0,
         };
         camera_connection_changed(&state, &event).await;
         let mut slot = state.preview_camera.lock().await;

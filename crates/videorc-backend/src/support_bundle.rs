@@ -72,6 +72,7 @@ pub struct SupportBundle {
     pub app: SupportBundleApp,
     pub health: Value,
     pub devices: DeviceList,
+    pub camera_connections: Vec<crate::device_watch::CameraConnectionEvent>,
     pub last_audio_meter: Option<AudioMeterSampleSnapshot>,
     pub entitlements: Value,
     pub recording: Value,
@@ -256,6 +257,7 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
         },
         health,
         devices: input.devices,
+        camera_connections: crate::device_watch::recent_camera_connections(),
         last_audio_meter: input.last_audio_meter,
         entitlements,
         recording,
@@ -464,6 +466,7 @@ fn included_sections() -> Vec<String> {
         "app",
         "health",
         "devices",
+        "cameraConnections",
         "lastAudioMeter",
         "entitlements",
         "recording",
@@ -884,6 +887,7 @@ mod tests {
         assert!(!text.contains("sk-test"));
         assert!(!text.contains("password@example"));
         assert!(text.contains("\"rendererDiagnostics\""));
+        assert!(text.contains("\"cameraConnections\""));
         assert!(text.contains("Cam Link 4K"));
         assert!(text.contains("MacBook Pro Camera"));
         assert!(!text.contains("videorc.sqlite3"));

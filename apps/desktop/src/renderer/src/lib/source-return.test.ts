@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Device } from './backend'
+import type { Device, PreviewCameraStatus } from './backend'
 import {
   buildCameraSources,
   persistableCaptureConfig,
@@ -8,6 +8,7 @@ import {
 } from './capture'
 import {
   cameraIsAvailable,
+  cameraSelectionDiagnostics,
   cameraPreviewStartAllowed,
   returningSourceChoices,
   sourceReturnAction
@@ -115,3 +116,28 @@ it('lets the backend reconnect a disconnected camera without a renderer re-grab'
 function devicesForReconnect(): Device[] {
   return [camera, substitute]
 }
+
+it('records the wanted camera separately from the camera the backend holds', () => {
+  const status: PreviewCameraStatus = {
+    state: 'disconnected',
+    cameraId: 'builtin',
+    deviceUniqueId: 'builtin-uid',
+    targetFps: 30,
+    framesCaptured: 1,
+    droppedFrames: 0,
+    updatedAt: '2026-11-01T12:00:00Z'
+  }
+  expect(
+    cameraSelectionDiagnostics(
+      { cameraId: 'builtin', wantedCameraId: 'iphone', wantedCameraName: 'iPhone' },
+      status
+    )
+  ).toEqual({
+    wantedCameraId: 'iphone',
+    wantedCameraName: 'iPhone',
+    usedCameraId: 'builtin',
+    deviceUniqueId: 'builtin-uid',
+    state: 'disconnected'
+  })
+  expect(cameraSelectionDiagnostics({ cameraId: 'builtin' }, status).wantedCameraId).toBe('builtin')
+})
