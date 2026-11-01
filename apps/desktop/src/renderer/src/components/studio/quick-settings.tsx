@@ -1,4 +1,11 @@
-import { type AppIcon, CameraIcon, CaptionsIcon, DisplayIcon, HiddenIcon } from '@/components/icons'
+import {
+  type AppIcon,
+  CameraIcon,
+  CaptionsIcon,
+  ChatIcon,
+  DisplayIcon,
+  HiddenIcon
+} from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { DevicePicker } from '@/components/device-picker'
@@ -12,7 +19,12 @@ import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
-import { useStudioCore } from '@/hooks/use-studio'
+import {
+  useStudioChat,
+  useStudioCore,
+  useStudioRecordingState,
+  useStudioShell
+} from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
 import {
   SCREEN_HIDDEN_LABEL,
@@ -20,16 +32,19 @@ import {
   screenPrivacyActionLabel,
   screenPrivacyDisabledReason
 } from '@/lib/screen-privacy-view'
+import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel } from '@/lib/state-labels'
+import { chatDoorNewLabel } from '@/lib/studio-chat'
 import { toastUserError } from '@/lib/user-error'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { systemAudioRowDevice, systemAudioSwitchView } from '@/lib/system-audio'
+import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /**
  * The Studio inspector's mirrors of controls that own their own pages (SD2):
  * Sources (Screen and Camera, with Open Sources as the way home), then
- * Captions on its own, because captions aren't a source (plan 174 S3.3,
- * B-15 and B-25). They edit the SAME captureConfig via the shared builders /
+ * Captions and Chat on their own, because neither is a source (plan 174 S3.3,
+ * B-15 and B-25; plan 213 B1). They edit the SAME captureConfig via the shared builders /
  * setters (one state). Device source edits use the shared session controller.
  * Output is one row, the Session section's. Scene switching lives in the
  * Scenes gallery; the microphone and System audio, with their levels and
@@ -125,8 +140,8 @@ export function QuickSettings(): ReactElement {
         </GroupedList>
       </PanelSection>
 
-      {/* Captions, below Sources and under no heading of its own: the row
-        names it, and a captions switch is not a source (B-15). */}
+      {/* Captions and Chat, below Sources and under no heading of their own:
+        each row names itself, and neither is a source (B-15). */}
       <PanelSection>
         <GroupedList>
           {/* CAPTIONS — a door to the Captions page (plan 174 S3.2, B-13), where
@@ -141,10 +156,71 @@ export function QuickSettings(): ReactElement {
             })}
             onNavigate={() => openStudioPanel('captions')}
           />
+          <ChatDoorRow />
         </GroupedList>
       </PanelSection>
     </>
   )
+}
+
+/**
+ * CHAT — a door to the Stream Manager, built like Captions' (plan 213 B1,
+ * D1): a new streamer found no chat in the idle Studio. Never a switch: Chat
+ * in Studio stays a setting, off by default (plan 204 D3). Its own component,
+ * so a chat message re-renders this row and nothing else.
+ */
+export function ChatDoorRow(): ReactElement | null {
+  const door = useStudioChatDoor()
+  if (!door) return null
+  return (
+    <NavigableRow
+      hint={door.newLabel ? door.openLabel : undefined}
+      icon={ChatIcon}
+      label="Chat"
+      value={
+        door.newLabel ?? (
+          <span className="flex min-w-0 items-center gap-1.5" data-testid="studio-chat-door">
+            <span className="truncate">{WINDOW_NAMES.streamManager}</span>
+            <span aria-hidden className="text-muted-foreground">
+              ·
+            </span>
+            <ShortcutKeys
+              accelerator={door.accelerator}
+              className="font-normal text-muted-foreground"
+              platform={door.platform}
+              variant="text"
+            />
+          </span>
+        )
+      }
+      onNavigate={door.open}
+    />
+  )
+}
+
+/**
+ * What both looks' Chat rows show and do (plan 213 B1): "{n} new" while a
+ * livestream with chat is on air, else the door and its key. Null when this
+ * build has no Stream Manager, like the status bar's hint.
+ */
+export function useStudioChatDoor(): {
+  newLabel: string | null
+  openLabel: string
+  accelerator: string
+  platform?: string
+  open: () => void
+} | null {
+  const { liveChatSnapshot, chatNewCount } = useStudioChat()
+  const { recording } = useStudioRecordingState()
+  const { openCommentsWindow, runtimeInfo } = useStudioShell()
+  if (runtimeInfo?.commentsWindowEnabled === false) return null
+  return {
+    newLabel: chatDoorNewLabel({ recording, snapshot: liveChatSnapshot, newCount: chatNewCount }),
+    openLabel: `Open ${WINDOW_NAMES.streamManager}`,
+    accelerator: shortcutAccelerator('comments-window'),
+    platform: runtimeInfo?.platform,
+    open: () => void openCommentsWindow()
+  }
 }
 
 /** A label on the left, its value control filling the right (the inspector row). */
