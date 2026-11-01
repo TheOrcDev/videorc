@@ -29,6 +29,13 @@ pub struct NativePreviewHostBounds {
     // Corner radius in points; see PreviewSurfaceBounds::corner_radius.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corner_radius: Option<f64>,
+    // In-window origin and host height; see PreviewSurfaceBounds::host_x.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_height: Option<f64>,
     // Cross-process stacking target (detached preview window) + always-on-top.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_above_window_id: Option<u32>,
@@ -56,6 +63,9 @@ impl NativePreviewHostBounds {
             clip_height: bounds.clip_height.map(|height| height.max(0.0)),
             visible: bounds.visible,
             corner_radius: bounds.corner_radius,
+            host_x: bounds.host_x,
+            host_y: bounds.host_y,
+            host_height: bounds.host_height,
             order_above_window_id: bounds.order_above_window_id,
             order_above_window_handle: None,
             preview_generation: None,
@@ -907,6 +917,37 @@ pub use macos::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_window_placement_survives_the_helper_bounds_and_their_wire_form() {
+        // Plan 213 D2: the in-process layer is placed from these; a mirror
+        // that drops them puts the layer at its host's origin.
+        let bounds = PreviewSurfaceBounds {
+            screen_x: 320.0,
+            screen_y: 276.0,
+            width: 800.0,
+            height: 450.0,
+            scale_factor: 2.0,
+            host_x: Some(240.0),
+            host_y: Some(96.0),
+            host_height: Some(780.0),
+            ..Default::default()
+        };
+        let host = NativePreviewHostBounds::from_surface_bounds(&bounds);
+        assert_eq!(
+            (host.host_x, host.host_y, host.host_height),
+            (Some(240.0), Some(96.0), Some(780.0))
+        );
+        let wire = serde_json::to_value(&host).unwrap();
+        assert_eq!(wire["hostX"], 240.0);
+        assert_eq!(wire["hostY"], 96.0);
+        assert_eq!(wire["hostHeight"], 780.0);
+        let legacy = serde_json::to_value(NativePreviewHostBounds::from_surface_bounds(
+            &PreviewSurfaceBounds::default(),
+        ))
+        .unwrap();
+        assert!(legacy.get("hostX").is_none(), "absent stays absent on the wire");
+    }
 
     fn slot(screen_x: f64, screen_y: f64, scale: f64) -> NativePreviewHostBounds {
         NativePreviewHostBounds {

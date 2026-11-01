@@ -31,7 +31,10 @@
       "clipHeight": 500.0,
       "visible": true,
       "orderAboveWindowId": 4242,
-      "elevated": false
+      "elevated": false,
+      "hostX": 20.5,
+      "hostY": 12.25,
+      "hostHeight": 900
     },
     "normalized": {
       "screenX": 120.5,
@@ -46,7 +49,10 @@
       "clipHeight": 500.0,
       "visible": true,
       "orderAboveWindowId": 4242,
-      "elevated": false
+      "elevated": false,
+      "hostX": 20.5,
+      "hostY": 12.25,
+      "hostHeight": 900
     },
     "legacyWire": {
       "screenX": 0.0,

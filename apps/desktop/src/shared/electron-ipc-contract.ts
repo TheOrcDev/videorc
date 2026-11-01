@@ -840,7 +840,10 @@ const previewBoundsSchema = objectSchema(
     cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(nonNegativeSafeIntegerSchema),
-    elevated: optionalSchema(booleanSchema)
+    elevated: optionalSchema(booleanSchema),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -1097,6 +1100,7 @@ const previewSurfaceStatusFieldsSchema = objectSchema(
         'backend-d3d11-presenter'
       ])
     ),
+    nativePreviewHostWindow: optionalSchema(enumSchema(['main', 'preview'])),
     bounds: optionalSchema(previewBoundsSchema),
     updatedAt: stringSchema({ minLength: 1, maxLength: 128 })
   },

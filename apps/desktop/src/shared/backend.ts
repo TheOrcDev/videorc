@@ -2347,6 +2347,18 @@ export interface PreviewSurfaceBounds {
   /** Corner radius in points; docked previews pass the panel radius so the
    * native surface clips to the rounded slot. Absent/0 = square. */
   cornerRadius?: number
+  /** Where the in-process CAMetalLayer sits INSIDE its host window (plan 213
+   * D2): the surface's top-left origin in the host's content coordinates and
+   * the host content's height, in points. The layer is placed from these,
+   * never from screenX/screenY, so a window drag never touches it. The host
+   * height travels too because an AppKit layer measures its origin from the
+   * bottom edge: a taller host must re-place the layer even when the slot
+   * stayed put. The host is the Preview window (below its drag strip) or,
+   * stuck, the main window at the Studio slot. Absent = the layer fills its
+   * host from the origin. */
+  hostX?: number
+  hostY?: number
+  hostHeight?: number
 }
 
 /** Canonical lowercase, fixed-width pointer value. It is never renderer-facing. */
@@ -2385,6 +2397,10 @@ export type NativePreviewHostKind =
   | 'external-module'
   | 'proof-surface'
   | 'backend-d3d11-presenter'
+/** Which app window hosts the in-process CAMetalLayer (plan 213 D3): the main
+ * window while the Preview is stuck to the app, the Preview window otherwise.
+ * Only the in-process host sets it; status names the host, never silently. */
+export type NativePreviewHostWindow = 'main' | 'preview'
 export type CompositorState = 'stopped' | 'starting' | 'live' | 'failed'
 export type CompositorSourceKind = 'camera' | 'screen' | 'window'
 export type CompositorSceneSourceKind = SceneSourceKind | 'screen-image' | 'background-image'
@@ -2720,6 +2736,7 @@ export interface PreviewSurfaceStatus {
   nativePreviewMainLastSkippedFrameSceneRevision?: number
   nativePreviewHostKind?: NativePreviewHostKind
   nativePreviewHostAttached?: boolean
+  nativePreviewHostWindow?: NativePreviewHostWindow
   nativePreviewPlacementEventsReceived?: number
   nativePreviewPlacementsCoalesced?: number
   nativePreviewPlacementsApplied?: number

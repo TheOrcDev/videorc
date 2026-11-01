@@ -331,3 +331,60 @@ describe('previewSurfaceNativeDrawableMatchesBounds', () => {
     expect(previewSurfaceNativeDrawableMatchesBounds({}, docked)).toBe(false)
   })
 })
+
+describe('in-window placement fields (plan 213 D2)', () => {
+  // The in-process CAMetalLayer is placed from hostX/hostY and re-placed when
+  // the host's height changes; every mirror (normalization, comparison, the
+  // helper's serialized bounds) must carry them or the layer lands at its
+  // host's origin.
+  const hosted: PreviewSurfaceBounds = {
+    screenX: 320,
+    screenY: 276,
+    width: 800,
+    height: 450,
+    scaleFactor: 2,
+    visible: true,
+    cornerRadius: 12,
+    hostX: 240,
+    hostY: 96,
+    hostHeight: 780
+  }
+
+  it('survive normalization and a JSON round trip', () => {
+    const normalized = normalizePreviewSurfaceBounds(hosted)
+    expect(normalized).toMatchObject({ hostX: 240, hostY: 96, hostHeight: 780 })
+    expect(JSON.parse(JSON.stringify(normalized))).toMatchObject({
+      hostX: 240,
+      hostY: 96,
+      hostHeight: 780
+    })
+    expect(mainOwnedPreviewSurfaceBoundsParams(hosted, 3).bounds).toMatchObject({
+      hostX: 240,
+      hostY: 96,
+      hostHeight: 780
+    })
+  })
+
+  it('are dropped when absent or not finite, and a non-positive host height is dropped', () => {
+    const normalized = normalizePreviewSurfaceBounds({
+      ...hosted,
+      hostX: Number.NaN,
+      hostY: undefined,
+      hostHeight: 0
+    })
+    expect(normalized).not.toHaveProperty('hostX')
+    expect(normalized).not.toHaveProperty('hostY')
+    expect(normalized).not.toHaveProperty('hostHeight')
+  })
+
+  it('count as a placement change and as drawable work', () => {
+    expect(previewSurfaceBoundsChanged(hosted, { ...hosted, hostY: 120 })).toBe(true)
+    expect(previewSurfaceBoundsChanged(hosted, { ...hosted, hostHeight: 820 })).toBe(true)
+    expect(previewSurfaceDrawableBoundsChanged(hosted, { ...hosted, hostX: 250 })).toBe(true)
+    expect(previewSurfaceDrawableBoundsChanged(hosted, { ...hosted, hostHeight: 820 })).toBe(true)
+    // A main-window drag moves the screen rect only: no layer work.
+    expect(
+      previewSurfaceDrawableBoundsChanged(hosted, { ...hosted, screenX: 500, screenY: 400 })
+    ).toBe(false)
+  })
+})
