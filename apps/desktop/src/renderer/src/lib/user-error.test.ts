@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))
@@ -12,6 +15,7 @@ import {
   UNKNOWN_REASON,
   UserFacingError,
   couldNotTitle,
+  exportSpaceRefusal,
   offlineError,
   toastOffline,
   toastUserError,
@@ -68,6 +72,42 @@ describe('userErrorMessage', () => {
       description: SECURE_STORAGE_REASON,
       tone: 'error'
     })
+  })
+
+  it("keeps an MP4 export's disk-space refusal, which names the sizes and the next step", () => {
+    const EXPORT = { action: 'export', object: 'the MP4' }
+    for (const refusal of [
+      'Not enough disk space to finish the MP4 (needs 541 MB, 148 MB free). Your recording is safe as MKV; free some space and use Export MP4.',
+      'Not enough disk space to finish the MP4 (needs 19.0 GB, 2.1 GB free). Your recording is safe as MKV; free some space and use Export MP4.'
+    ]) {
+      expect(userErrorMessage(backendError('remux-failed', refusal), EXPORT)).toMatchObject({
+        kind: 'known',
+        title: "Couldn't export the MP4",
+        description: refusal,
+        tone: 'error'
+      })
+      expect(exportSpaceRefusal(refusal)).toBe(refusal)
+    }
+    // Only that sentence: another one that starts the same way stays generic.
+    const other = 'Not enough disk space to finish the MP4 at /home/me/take.mkv'
+    expect(userErrorMessage(backendError('remux-failed', other), EXPORT).description).toBe(
+      UNKNOWN_REASON
+    )
+    expect(exportSpaceRefusal(other)).toBeNull()
+    expect(exportSpaceRefusal(undefined)).toBeNull()
+  })
+
+  it("matches the sentence the engine's export check writes", () => {
+    const source = readFileSync(
+      join(__dirname, '../../../../../../crates/videorc-backend/src/disk_space.rs'),
+      'utf8'
+    )
+    const body = source.slice(source.indexOf('pub fn export_space_message('))
+    const template = /format!\(\s*"([^"]+)"/.exec(body)?.[1]
+    expect(template).toBeDefined()
+    const sizes = ['541 MB', '148 MB']
+    const sentence = (template ?? '').replace(/\{\}/g, () => sizes.shift() ?? '')
+    expect(exportSpaceRefusal(sentence)).toBe(sentence)
   })
 
   it('says Videorc is reconnecting for every offline shape, as a warning', () => {
