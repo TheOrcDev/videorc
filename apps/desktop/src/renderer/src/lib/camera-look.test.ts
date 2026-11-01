@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { cameraLookLayout, normalizeCameraLook } from './camera-look'
+import { describe, expect, it, vi } from 'vitest'
+import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from './camera-look'
 import { defaultCaptureConfig, normalizeLayoutSettings, persistableCaptureConfig } from './capture'
 import { normalizeSceneVisual } from './scene-presets'
 import { buildStartSessionParams } from './session-params'
@@ -57,5 +57,32 @@ describe('per-camera look', () => {
       contrast: 0.5,
       saturation: 2
     })
+  })
+})
+
+describe('live camera look cadence', () => {
+  it('sends the latest value while dragging at about 30 Hz and includes the trailing value', () => {
+    vi.useFakeTimers()
+    let latest = 0
+    const applied: number[] = []
+    const throttle = createCameraLookThrottle(() => applied.push(latest))
+    try {
+      for (let step = 1; step <= 10; step++) {
+        latest = step
+        throttle.schedule()
+        vi.advanceTimersByTime(10)
+      }
+      expect(applied).toEqual([4, 8])
+      vi.advanceTimersByTime(33)
+      expect(applied).toEqual([4, 8, 10])
+      latest = 11
+      throttle.schedule()
+      throttle.dispose()
+      vi.advanceTimersByTime(33)
+      expect(applied).toEqual([4, 8, 10])
+    } finally {
+      throttle.dispose()
+      vi.useRealTimers()
+    }
   })
 })

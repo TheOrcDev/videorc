@@ -26,3 +26,24 @@ export function cameraLookLayout(
   const cameraLook = normalizeCameraLook(cameraId ? looks?.[cameraId] : undefined)
   return cameraLook ? { ...base, cameraLook } : base
 }
+
+/** Latest value is read at each tick, including the final tick after release. */
+export function createCameraLookThrottle(apply: () => void): {
+  schedule: () => void
+  dispose: () => void
+} {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return {
+    schedule: () => {
+      if (timer !== undefined) return
+      timer = setTimeout(() => {
+        timer = undefined
+        apply()
+      }, 33)
+    },
+    dispose: () => {
+      clearTimeout(timer)
+      timer = undefined
+    }
+  }
+}
