@@ -31,6 +31,22 @@ export function parsePreviewWindowMode(raw: unknown): PreviewWindowMode {
   return raw === 'docked' ? 'docked' : 'floating'
 }
 
+/**
+ * What the Preview window remembers as it closes: its frame, and that the
+ * streamer closed it. Quitting closes every window without anyone choosing
+ * to, so a quit keeps `open` as it was and the next launch restores a Preview
+ * that was open (U3: the open/closed choice survives a relaunch).
+ */
+export function previewWindowClosePrefs(
+  frame: Rect | null,
+  appQuitting: boolean
+): { frame?: Rect; open?: false } {
+  return {
+    ...(frame ? { frame } : {}),
+    ...(appQuitting ? {} : { open: false })
+  }
+}
+
 export function parseDockSlot(raw: unknown): DockSlot | null {
   return typeof raw === 'string' && (DOCK_SLOTS as readonly string[]).includes(raw)
     ? (raw as DockSlot)

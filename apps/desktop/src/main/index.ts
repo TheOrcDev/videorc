@@ -391,6 +391,7 @@ import {
   decideDockVisibility,
   parseDockSlotReport,
   parsePreviewWindowMode,
+  previewWindowClosePrefs,
   type DockHiddenReason,
   type DockSlot,
   type DockSlotReport,
@@ -4778,10 +4779,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
         currentPreviewWindowMode() === 'docked'
           ? (previewWindowFloatingFrame ?? previewWindowLastFrame)
           : window.getBounds()
-      savePreviewWindowPrefs({
-        ...(previewWindowLastFrame ? { frame: previewWindowLastFrame } : {}),
-        open: false
-      })
+      savePreviewWindowPrefs(previewWindowClosePrefs(previewWindowLastFrame, appIsQuitting))
     }
   })
   window.on('closed', () => {
