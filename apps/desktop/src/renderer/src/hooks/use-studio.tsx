@@ -16649,12 +16649,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Not a failure: at launch the ring is asked for before the camera
         // preview starts. No strike and no toast; the camera's live edge
         // starts it (below). A camera that went live meanwhile retries now.
-        if (previewCameraStatusRef.current.state === 'live') {
+        const camera = previewCameraStatusRef.current
+        if (camera.state === 'live') {
           scheduleReplayReconcile()
-        } else {
-          replayWaitingForCameraRef.current = true
+          return
         }
-        return
+        if (
+          camera.state === 'starting' ||
+          !camera.cameraId ||
+          camera.cameraId !== captureConfigRef.current.sources.cameraId
+        ) {
+          replayWaitingForCameraRef.current = true
+          return
+        }
+        // A camera that reported failed, missing or denied brings no live
+        // edge: the start counts as failed, and says so like any other.
       }
       replayFailedStartsRef.current += 1
       console.warn('[replay-buffer] start failed', error)
@@ -16732,6 +16741,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // the record block clears, it tries again from a clean count.
   useEffect(() => {
     replayFailedStartsRef.current = 0
+    replayWaitingForCameraRef.current = false
     rearmReplayAfterErrorRef.current()
     scheduleReplayReconcile()
   }, [recordBlockedReason, replayGrantWait, scheduleReplayReconcile])
@@ -16786,6 +16796,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     replayShapeRef.current = replayShape
     if (sessionIsReplayOnly(recordingRef.current)) void stopReplayBuffer()
   }, [replayShape, stopReplayBuffer])
+
+  // A layout without the camera it waited for (screen-only) can start now.
+  const replayLayoutPreset = captureConfig.layout.layoutPreset
+  useEffect(() => {
+    if (!replayWaitingForCameraRef.current) return
+    replayWaitingForCameraRef.current = false
+    scheduleReplayReconcile()
+  }, [replayLayoutPreset, scheduleReplayReconcile])
 
   // A ring that waits for the camera starts on its live edge.
   const previewCameraState = previewCameraStatus.state
