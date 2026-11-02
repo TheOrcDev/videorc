@@ -110,7 +110,12 @@ jobs:
         # ffmpeg-spawning tests are #[ignore]d, so the default run needs no
         # ffmpeg binary and no capture devices.
         timeout-minutes: 15
-        run: cargo test -p videorc-backend
+        run: cargo test -p videorc-backend -- --skip a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths
+
+      - name: TEMP-DIAG benchmark arm hang
+        if: always()
+        timeout-minutes: 3
+        run: cargo test -p videorc-backend a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths -- --nocapture
 
       - name: Build backend for process/memory sentinel
         # The sentinel launches the dev app through `cargo run`. Build the
