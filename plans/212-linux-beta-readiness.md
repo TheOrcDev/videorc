@@ -2905,3 +2905,57 @@ Private receipts: `delayed-audio-reproduce-classification.json`,
 `linux-audio-job-125070218197-classification.json`,
 `handoff-receipt-clock-repetition-validation.json` and
 `handoff-clock-broad-eaecyiv4/report.json` in the existing evidence root.
+
+### Powered audio recheck and Linux resource sampling, 2026-11-02
+
+The delayed runtime-dispatch notification was the already handled refusal from
+03:38 UTC. No app had launched; its obsolete source/binary guards were not
+reused. With active CPU cores again observed near 3.9–4.1 GHz, five isolated
+repetitions of the unchanged delayed-system stop test pass. Per-thread CPU and
+scheduling samples are retained. A suspected denormal cost in the constant-tone
+echo envelope was tested in isolation and rejected; no DSP change was made.
+
+The unchanged current test executable then completes 4,199 backend tests with
+one failure and 19 ignored in 427.05 seconds. Both previously failing audio
+cases pass in this run. The remaining failure is the same GLES Beams comparison
+(mean 20.405, max 193). This does not erase the earlier short-tail failures or
+establish stable-host, packaged or physical acceptance.
+
+After the test executable finished, its `pnpm` wrapper remained alive while a
+process-tree inspection command was blocked in kernel `do_task_stat`. The
+backend resource sampler had also left an owned `ps -axo` command blocked there.
+Bounded cleanup signaled only the recorded supervisor and its descendants and
+reaped all of them. Forced termination was required; normal cleanup is not
+claimed and the guarded app comparison remains unstarted. Future native test
+runs use the direct Node render-node wrapper, avoiding the package manager's
+additional exit scan.
+
+Linux resource sampling now reads only the backend and descendants from
+`/proc`. It visits every owned process's task directories so children spawned
+by worker threads are included, validates parent/PID identity, and treats
+missing or malformed RSS as unavailable. A failed root read never falls back
+to a host-wide scan. Existing aggregation still supplies backend RSS and owned
+FFmpeg/FFprobe counts. Four focused tests cover nested/worker ownership,
+reparented and vanished children, malformed status, and real backend RSS.
+Full-crate validation passes all 41 diagnostics tests, including the four new
+procfs cases. Clippy passes with the four existing Linux platform allowances,
+and Rust formatting passes. The full backend suite then reports 4,203 passed,
+one failed and 19 ignored in 457.68 seconds. The only failure is the unchanged
+GLES Beams comparison; both audio regressions pass. All 253 native input hashes
+remain unchanged during verification. The test binary SHA-256 is
+`847dbd5b5058ca847a7b5d0811208450a0ef5957fd274d16db94516f245d7b96`.
+Owned cleanup completes normally, with no forced cleanup signals or leaked
+children. This is a source regression result, not a passing overall Beta gate.
+
+The optimized development executable for committed `2f8cdbed` built in
+497.98 seconds with normal owned cleanup and all 252 native inputs verified.
+Its SHA-256 is
+`98de8faaeae56547c571eb9ff4b609c381ec077fa0adc24b005c0795630c7da7`.
+It predates the new procfs sampler and cannot represent that change. No app or
+AppImage acceptance was performed in this slice. Physical Ubuntu/Hyprland,
+endurance, pilot, update/rollback and publication requirements remain open.
+
+Private receipts include `stop-tail-scheduling-classification.json`,
+`powered-audio-recheck-classification.json`,
+`powered-audio-recheck-cleanup.json`, `optimized-2f8cdbed-tf_77z4_/report.json`,
+and the `linux-procfs-native` verification under the existing evidence root.
