@@ -1201,6 +1201,9 @@ mod tests {
             clip_width: Some(640.0),
             clip_height: Some(200.0),
             visible: Some(true),
+            host_x: None,
+            host_y: None,
+            host_height: None,
             order_above_window_id: None,
             order_above_window_handle: None,
             preview_generation: None,
@@ -1283,6 +1286,9 @@ mod tests {
             visible: Some(true),
             order_above_window_id: None,
             elevated: None,
+            host_x: None,
+            host_y: None,
+            host_height: None,
         };
 
         let host_bounds = NativePreviewHostBounds::from_surface_bounds(&bounds);
