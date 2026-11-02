@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { PreviewSurfaceBounds } from '../shared/backend'
-import { withTrustedPreviewWindowStacking } from './native-preview-window-stacking'
+import {
+  proofSurfaceParentWindow,
+  withTrustedPreviewWindowStacking
+} from './native-preview-window-stacking'
 
 const bounds = (
   overrides: Partial<PreviewSurfaceBounds & Record<string, unknown>> = {}
@@ -149,5 +152,48 @@ describe('trusted preview-window stacking', () => {
 
     expect(result.bounds).toMatchObject({ orderAboveWindowId: 42, elevated: true })
     expect(result.bounds).not.toHaveProperty('orderAboveWindowHandle')
+  })
+})
+
+describe('proof surface parent window', () => {
+  const live = (name: string) => ({ name, isDestroyed: () => false })
+  const destroyed = (name: string) => ({ name, isDestroyed: () => true })
+
+  it('hangs off the main window while the Preview is docked inside it', () => {
+    // The preview window is hidden then; a child shown on it would bring it on screen.
+    expect(
+      proofSurfaceParentWindow({
+        dockedInMainWindow: true,
+        mainWindow: live('main'),
+        previewWindow: live('preview')
+      })?.name
+    ).toBe('main')
+  })
+
+  it('hangs off the preview window when it is the visible Preview', () => {
+    expect(
+      proofSurfaceParentWindow({
+        dockedInMainWindow: false,
+        mainWindow: live('main'),
+        previewWindow: live('preview')
+      })?.name
+    ).toBe('preview')
+  })
+
+  it('falls back to the main window without a preview window, and never a destroyed one', () => {
+    expect(
+      proofSurfaceParentWindow({
+        dockedInMainWindow: false,
+        mainWindow: live('main'),
+        previewWindow: null
+      })?.name
+    ).toBe('main')
+    expect(
+      proofSurfaceParentWindow({
+        dockedInMainWindow: true,
+        mainWindow: destroyed('main'),
+        previewWindow: live('preview')
+      })
+    ).toBeNull()
   })
 })

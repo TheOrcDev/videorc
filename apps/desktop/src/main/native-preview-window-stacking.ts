@@ -60,3 +60,21 @@ export function withTrustedPreviewWindowStacking<T>(
   const opaqueHandle = `0x${value.toString(16).padStart(16, '0')}`
   return apply(mainOwnedPreviewSurfaceBoundsParams(bounds, input.generation, opaqueHandle))
 }
+
+/**
+ * The window the Electron proof surface hangs off: the one the Preview is seen
+ * in. An in-window dock (plan 213 D3) keeps the preview window hidden, and on
+ * macOS showing a child window orders its hidden parent on screen too, so the
+ * empty Preview window appeared at its old floating frame beside the docked
+ * one. There the surface is a child of the main window, over the slot it covers.
+ */
+export function proofSurfaceParentWindow<T extends Pick<BrowserWindow, 'isDestroyed'>>(input: {
+  dockedInMainWindow: boolean
+  mainWindow: T | null
+  previewWindow: T | null
+}): T | null {
+  const parent = input.dockedInMainWindow
+    ? input.mainWindow
+    : (input.previewWindow ?? input.mainWindow)
+  return parent && !parent.isDestroyed() ? parent : null
+}
