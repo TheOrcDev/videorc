@@ -2108,7 +2108,14 @@ const previewCameraStatusSchema = boundedSemanticValue(
   'a preview camera status',
   objectSchema(
     {
-      state: enumSchema(['starting', 'live', 'permission-needed', 'device-missing', 'failed']),
+      state: enumSchema([
+        'starting',
+        'live',
+        'permission-needed',
+        'device-missing',
+        'disconnected',
+        'failed'
+      ]),
       targetFps: numberSchema({ min: 0, max: 1000 }),
       framesCaptured: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
@@ -5630,3 +5637,28 @@ function assertExactEnvelopeFields(
     }
   }
 }
+
+// Support bundle camera story (plan 213 H5). Camera type and transport are in
+// Device.detail. cameraConnections is a bundle-only history, never an event.
+export const cameraSelectionDiagnosticsSchema = objectSchema({
+  wantedCameraId: optionalSchema(stringSchema()),
+  wantedCameraName: optionalSchema(stringSchema()),
+  usedCameraId: optionalSchema(stringSchema()),
+  deviceUniqueId: optionalSchema(stringSchema()),
+  state: enumSchema([
+    'starting',
+    'live',
+    'permission-needed',
+    'device-missing',
+    'disconnected',
+    'failed'
+  ])
+})
+export const cameraConnectionHistoryEntrySchema = objectSchema({
+  deviceType: stringSchema(),
+  transport: numberSchema({ integer: true }),
+  uniqueId: stringSchema(),
+  name: stringSchema(),
+  connected: booleanSchema,
+  timestamp
+})

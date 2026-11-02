@@ -1,5 +1,6 @@
 import {
   cameraIsAvailable,
+  cameraSelectionDiagnostics,
   cameraPreviewStartAllowed,
   returningSourceChoices,
   sourceReturnAction
@@ -7125,6 +7126,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       (params) => {
         if (!clientRef.current) throw offlineError()
         return clientRef.current.requestTyped('sources.resolve_app_window', params)
+      },
+      {
+        disconnectedCameraId:
+          previewCameraStatusRef.current.state === 'disconnected'
+            ? previewCameraStatusRef.current.cameraId
+            : undefined
       }
     )
       .then(({ sources: nextSources, appState }) => {
@@ -10083,7 +10090,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               deviceListRef.current.devices,
               // Plan 213 D6: a stand-in never gives way mid-session without a
               // click, not even on a scene switch.
-              { holdStandIns: sessionOwnsTransport(recordingRef.current) }
+              {
+                holdStandIns: sessionOwnsTransport(recordingRef.current),
+                disconnectedCameraId:
+                  previewCameraStatusRef.current.state === 'disconnected'
+                    ? previewCameraStatusRef.current.cameraId
+                    : undefined
+              }
             )
           layout = cameraLookLayout(
             layout,
@@ -11319,7 +11332,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         deviceListRef.current.devices,
         key,
         nativePreviewCameraKeyRef.current,
-        current.state
+        current.state,
+        current.cameraId
       )
     )
       return current
@@ -12393,6 +12407,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // identifies the shipped build. Absent → backend degrades to crate.
         appVersion: freshRuntimeInfo?.version,
         rendererDiagnostics: {
+          cameraSelection: cameraSelectionDiagnostics(
+            captureConfigRef.current.sources,
+            previewCameraStatusRef.current
+          ),
           automaticSourceFallbacks: automaticSourceFallbacks.current,
           nativePreviewSurfaceStatus: previewSurfaceStatus,
           runtimeInfo: freshRuntimeInfo ?? undefined

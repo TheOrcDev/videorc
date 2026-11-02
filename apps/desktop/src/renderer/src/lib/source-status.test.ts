@@ -249,3 +249,15 @@ describe('missing choices', () => {
     expect(standInLine({ kind: 'window', wantedName: 'Keynote' })).toBe("Keynote isn't open")
   })
 })
+
+it('names a disconnected camera immediately, before the inventory refresh', () => {
+  expect(
+    videoSourceStatus({
+      kind: 'camera',
+      selected: true,
+      switching: false,
+      device: 'available',
+      preview: { state: 'disconnected', message: 'iPhone disconnected', frameAgeMs: 100 }
+    })
+  ).toEqual({ label: 'Disconnected', tone: 'warn', hint: 'iPhone disconnected' })
+})

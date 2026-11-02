@@ -463,7 +463,16 @@ export interface AutomaticSourceFallbackEvent {
   occurredAt?: string
 }
 
+export interface CameraSelectionDiagnostics {
+  wantedCameraId?: string
+  wantedCameraName?: string
+  usedCameraId?: string
+  deviceUniqueId?: string
+  state: PreviewCameraState
+}
+
 export interface RendererDiagnosticsSnapshot {
+  cameraSelection?: CameraSelectionDiagnostics
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
   nativePreviewSurfaceStatus?: PreviewSurfaceStatus
   runtimeInfo?: RuntimeInfo
@@ -2881,6 +2890,7 @@ export interface PreviewSurfaceBoundsParams {
 }
 
 export type PreviewCameraState =
+  | 'disconnected'
   | 'starting'
   | 'live'
   | 'permission-needed'
