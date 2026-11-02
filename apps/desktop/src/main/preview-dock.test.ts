@@ -48,25 +48,38 @@ describe('parsePreviewWindowMode', () => {
 })
 
 describe('initialPreviewWindowMode (plan 213 D5)', () => {
+  const fresh = { scripted: false, existingInstall: false }
+  const existing = { scripted: false, existingInstall: true }
+
   it('starts a fresh install stuck to the app', () => {
-    expect(initialPreviewWindowMode(undefined, { scripted: false })).toBe('docked')
+    expect(initialPreviewWindowMode(undefined, fresh)).toBe('docked')
+  })
+
+  it('keeps an existing install that never chose floating, as it was before the update', () => {
+    expect(initialPreviewWindowMode(undefined, existing)).toBe('floating')
   })
 
   it('keeps a saved floating choice', () => {
-    expect(initialPreviewWindowMode('floating', { scripted: false })).toBe('floating')
+    expect(initialPreviewWindowMode('floating', fresh)).toBe('floating')
   })
 
-  it('keeps a saved docked choice', () => {
-    expect(initialPreviewWindowMode('docked', { scripted: false })).toBe('docked')
+  it('keeps a saved docked choice, on an existing install too', () => {
+    expect(initialPreviewWindowMode('docked', fresh)).toBe('docked')
+    expect(initialPreviewWindowMode('docked', existing)).toBe('docked')
   })
 
   it('starts a scripted (smoke or probe) run floating unless a mode is saved', () => {
-    expect(initialPreviewWindowMode(undefined, { scripted: true })).toBe('floating')
-    expect(initialPreviewWindowMode('docked', { scripted: true })).toBe('docked')
+    expect(initialPreviewWindowMode(undefined, { scripted: true, existingInstall: false })).toBe(
+      'floating'
+    )
+    expect(initialPreviewWindowMode('docked', { scripted: true, existingInstall: false })).toBe(
+      'docked'
+    )
   })
 
   it('treats an unknown saved value as no choice', () => {
-    expect(initialPreviewWindowMode('attached', { scripted: false })).toBe('docked')
+    expect(initialPreviewWindowMode('attached', fresh)).toBe('docked')
+    expect(initialPreviewWindowMode('attached', existing)).toBe('floating')
   })
 })
 

@@ -2890,8 +2890,11 @@ type PreviewWindowPrefs = {
 // A new install starts stuck to the app (plan 213 D5); a saved choice wins.
 function currentPreviewWindowMode(): PreviewWindowMode {
   if (!previewWindowModeLoaded) {
-    previewWindowMode = initialPreviewWindowMode(loadPreviewWindowPrefs().mode, {
-      scripted: !previewWindowAutoRestoreEnabled
+    const prefs = loadPreviewWindowPrefs()
+    previewWindowMode = initialPreviewWindowMode(prefs.mode, {
+      scripted: !previewWindowAutoRestoreEnabled,
+      // Any remembered Preview state means this Mac ran Videorc before.
+      existingInstall: Object.keys(prefs).length > 0
     })
     previewWindowModeLoaded = true
   }

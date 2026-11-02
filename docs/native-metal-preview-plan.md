@@ -407,7 +407,9 @@ bottom edge. `cornerRadius` masks the layer to the slot's rounded panel. A
 window drag changes only `screenX`/`screenY`, which never touch the layer.
 
 New installs start stuck to the app (`initialPreviewWindowMode`); a saved mode
-wins. Smoke and probe runs start floating, the state every probe assumes.
+wins. An existing install with no saved mode (the mode is only written when the
+streamer toggles it) keeps floating, so an update never docks a Preview on its
+own. Smoke and probe runs start floating, the state every probe assumes.
 
 ### Tiling window managers (AeroSpace)
 

@@ -34,18 +34,22 @@ export function parsePreviewWindowMode(raw: unknown): PreviewWindowMode {
 /**
  * The mode a launch starts in (plan 213 D5). A saved choice wins. With none
  * saved, a new install starts stuck to the app: one window, as in OBS, and
- * nothing a tiling window manager can move on its own. Smoke and probe runs
- * (`scripted`: nothing is restored or saved) start floating, the state every
- * probe assumes before it sets the mode it tests.
+ * nothing a tiling window manager can move on its own. An existing install
+ * keeps floating: the mode is only written when the streamer toggles it, so
+ * one who never did has prefs (a frame, open/closed) but no mode, and their
+ * Preview must not dock itself after an update (D4: existing installs keep
+ * their mode). Smoke and probe runs (`scripted`: nothing is restored or
+ * saved) start floating, the state every probe assumes before it sets the
+ * mode it tests.
  */
 export function initialPreviewWindowMode(
   savedMode: unknown,
-  options: { scripted: boolean }
+  options: { scripted: boolean; existingInstall: boolean }
 ): PreviewWindowMode {
   if (savedMode === 'docked' || savedMode === 'floating') {
     return savedMode
   }
-  return options.scripted ? 'floating' : 'docked'
+  return options.scripted || options.existingInstall ? 'floating' : 'docked'
 }
 
 /**
