@@ -114,7 +114,7 @@ include `licenses/rnnoise-rs/LICENSE.txt`, `UPSTREAM-NOTICES.txt` and `SOURCE.tx
 every platform.
 Keep these notices with the backend binary when distributing it separately.
 See [RNNoise](rnnoise.md) for the source pin, model digest and capture-path
-restrictions, and [research](rnnoise-rust-research.md) for provenance checks.
+restrictions.
 
 ## Current macOS Beta Target
 

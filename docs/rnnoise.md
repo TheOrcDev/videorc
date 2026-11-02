@@ -49,8 +49,7 @@ published on crates.io at integration time.
 The embedded model has SHA-256
 `eb8687d6ec4a461c971c60dc1f576d68e05bda2bfac8d9d356a330de14d28f71`.
 It matches the float weights regenerated from the RNNoise model auditioned in
-the sandbox. [Research and comparison results](rnnoise-rust-research.md) record
-the upstream source, model archive and checks. Binary packages include the
+the sandbox. Binary packages include the
 original [port license](../licenses/rnnoise-rs/LICENSE.txt),
 [upstream DSP notices](../licenses/rnnoise-rs/UPSTREAM-NOTICES.txt) and
 [source record](../licenses/rnnoise-rs/SOURCE.txt).
@@ -110,9 +109,7 @@ is a separate check.
 The wrapper checks real-model delay, partial final frames, reset, finite input,
 headroom and noise suppression. The bus checks source positions, output retries,
 transitions, mute and source lifecycle. UI tests cover stored defaults, pending
-updates, acknowledgements and rollback. Final validation results and remaining
-platform limits are recorded in
-[the implementation acceptance record](acceptance/2026-10-04-rnnoise.md).
+updates, acknowledgements and rollback.
 
 If noise reduction fails, the shared audio transport stops both microphone and system
 audio. Videorc reports an error in session health and asks you to stop and restart
