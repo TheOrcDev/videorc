@@ -1547,8 +1547,11 @@ fn session_deletion_quarantine_directory<'a>(
 }
 
 /// Creates the private quarantine folder before the move. `false` means the
-/// name is taken by something that is not a real folder, so the file stays
-/// where it is instead of following a link out of the recordings folder.
+/// name is taken by a link, so the file stays where it is instead of
+/// following it out of the recordings folder. A plain file at the name is an
+/// error, so the deletion stays retryable: Unix already fails opening the
+/// quarantine path under it (`ENOTDIR`), but Windows reports that as not
+/// found and reaches this check.
 fn ensure_session_deletion_quarantine_directory(
     original_path: &Path,
     quarantine_path: &Path,
@@ -1569,7 +1572,21 @@ fn ensure_session_deletion_quarantine_directory(
             });
         }
     }
-    Ok(std::fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.file_type().is_dir()))
+    let file_type = std::fs::symlink_metadata(directory)
+        .with_context(|| {
+            format!(
+                "Could not inspect deletion quarantine {}",
+                directory.display()
+            )
+        })?
+        .file_type();
+    if file_type.is_file() {
+        bail!(
+            "Deletion quarantine {} is a file, not a folder",
+            directory.display()
+        );
+    }
+    Ok(file_type.is_dir())
 }
 
 /// Best effort: once its file is gone (trashed or renamed back), the empty

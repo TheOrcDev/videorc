@@ -53,6 +53,12 @@ jobs:
           opt-level = 0
           TOML
           cat "$HOME/.cargo/config.toml"
+          # At opt-level 0 the RPC dispatcher's unoptimized frame alone
+          # outgrows the 2 MiB default thread stack, so every test that calls
+          # it (and the sentinel backend's tokio workers) overflows. Give
+          # those threads the 8 MiB the macOS backend thread already gets
+          # (BACKEND_THREAD_STACK_BYTES); opt-level 2 builds need ~256 KiB.
+          echo "RUST_MIN_STACK=8388608" >> "$GITHUB_ENV"
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -104,7 +110,12 @@ jobs:
         # ffmpeg-spawning tests are #[ignore]d, so the default run needs no
         # ffmpeg binary and no capture devices.
         timeout-minutes: 15
-        run: cargo test -p videorc-backend
+        run: cargo test -p videorc-backend -- --skip a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths
+
+      - name: TEMP-DIAG benchmark arm hang
+        if: always()
+        timeout-minutes: 3
+        run: cargo test -p videorc-backend a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths -- --nocapture
 
       - name: Build backend for process/memory sentinel
         # The sentinel launches the dev app through `cargo run`. Build the

@@ -28207,6 +28207,11 @@ mod tests {
     /// The same refusal through the real start path: a 4K60 recording
     /// (legacy FFmpeg) requested while hidden fails with the exact copy and
     /// leaves no session, before any capture or encoder process spawns.
+    /// Not on Windows: the start first sizes a record-only request to what
+    /// the host's encoder can record (`resolve_windows_recordable_video`),
+    /// and a host without a GPU encoder lowers 4K60 to a bridge profile,
+    /// which records the gated still and so is not refused.
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn a_legacy_session_start_while_hidden_is_refused_through_the_start_path() {
         let state = test_state();
