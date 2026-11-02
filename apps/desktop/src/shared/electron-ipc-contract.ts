@@ -896,6 +896,16 @@ const layoutSettingsSchema = objectSchema(
     cameraShape: enumSchema(['rectangle', 'rounded', 'circle']),
     cameraCornerRadiusPct: numberSchema(),
     cameraAspect: enumSchema(['source', 'square', 'portrait']),
+    cameraLook: optionalSchema(
+      objectSchema(
+        {
+          brightness: numberSchema({ min: -0.25, max: 0.25 }),
+          contrast: numberSchema({ min: 0.5, max: 1.5 }),
+          saturation: numberSchema({ min: 0, max: 2 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraChromaKeyEnabled: booleanSchema,
     cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
     cameraChromaKeySimilarityPct: numberSchema(),

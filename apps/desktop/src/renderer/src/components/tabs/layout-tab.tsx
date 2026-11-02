@@ -1,3 +1,4 @@
+import { CameraLookControls } from '@/components/scene/camera-look-controls'
 import {
   AdjustIcon,
   ArrowDownIcon,
@@ -227,6 +228,7 @@ export function LayoutTab(): ReactElement {
     captureConfig,
     patchLayout,
     applyLayoutPatch,
+    applyCameraLook,
     undoLayoutPatch,
     previewWindow,
     togglePreviewWindow,
@@ -928,6 +930,14 @@ export function LayoutTab(): ReactElement {
               stageDragging={stageDragging}
               onApplyCameraPreset={applyCameraPreset}
               onApplyLayoutPatch={applyLayoutPatch}
+              onCameraLookChange={applyCameraLook}
+              cameraLookDisabledReason={
+                wsStatus !== 'connected'
+                  ? 'Videorc is reconnecting.'
+                  : !captureConfig.sources.cameraId
+                    ? 'Choose a camera in Sources.'
+                    : undefined
+              }
               onAspectLockedChange={setAspectLocked}
               onPatchLayout={patchLayout}
               onTransformCommit={(patch) =>
@@ -1110,6 +1120,8 @@ function CameraInspector({
   onAspectLockedChange,
   onApplyCameraPreset,
   onApplyLayoutPatch,
+  onCameraLookChange,
+  cameraLookDisabledReason,
   onPatchLayout,
   onTransformCommit,
   onVisibilityChange
@@ -1131,6 +1143,8 @@ function CameraInspector({
   onAspectLockedChange: (locked: boolean) => void
   onApplyCameraPreset: (patch: Partial<CameraLayout>) => void
   onApplyLayoutPatch: (patch: Partial<CameraLayout>) => void
+  onCameraLookChange: (look: NonNullable<CameraLayout['cameraLook']>) => void
+  cameraLookDisabledReason?: string
   onPatchLayout: (patch: Partial<CameraLayout>) => void
   onTransformCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
   onVisibilityChange: (sourceId: string, visible: boolean) => Promise<void>
@@ -1367,6 +1381,11 @@ function CameraInspector({
           onCommit={(cameraOffsetY) => onApplyLayoutPatch({ cameraOffsetY })}
         />
       </PanelSection>
+      <CameraLookControls
+        look={layout.cameraLook}
+        onChange={onCameraLookChange}
+        disabledReason={cameraLookDisabledReason}
+      />
       <PanelSection className="min-w-0" headingLevel={3} title="Green screen">
         <Field orientation="horizontal">
           <FieldContent>

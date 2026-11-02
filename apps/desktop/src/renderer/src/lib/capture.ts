@@ -1,3 +1,4 @@
+import { normalizeCameraLook } from './camera-look'
 import type { GlobalShortcutsConfig } from '../../../shared/backend'
 import { formatBitrate, formatResolution, formatVideoQuality, resolutionName } from './format-video'
 import { normalizeLayoutFramingMemory, type LayoutFramingMemory } from './layout-framing-memory'
@@ -7,6 +8,7 @@ import type {
   CaptionStyleId,
   AutomaticSourceFallbackEvent,
   AutomaticSourceFallbackSourceKind,
+  CameraLook,
   CameraTransform,
   CameraTransformMode,
   Device,
@@ -38,6 +40,7 @@ import {
 import { STREAM_PLATFORMS } from '../../../shared/stream-platforms'
 
 export type SettingsState = {
+  cameraLooks?: Record<string, CameraLook>
   /** Human-readable picker label only; never a filesystem path. */
   outputDirectory: string
   outputDirectoryHandle?: string
@@ -1909,7 +1912,9 @@ export function normalizeSourceVisibility(raw: unknown): { camera: boolean; capt
 }
 
 export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
-  const candidate = layout && typeof layout === 'object' ? (layout as Partial<LayoutSettings>) : {}
+  const { cameraLook: storedLook, ...candidate } =
+    layout && typeof layout === 'object' ? (layout as Partial<LayoutSettings>) : {}
+  const cameraLook = normalizeCameraLook(storedLook)
   const cameraTransform = normalizeCameraTransform(candidate.cameraTransform)
   const cameraTransformMode: CameraTransformMode =
     candidate.cameraTransformMode === 'custom' && cameraTransform ? 'custom' : 'preset'
@@ -1917,6 +1922,7 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
   return {
     ...defaultCaptureConfig.layout,
     ...candidate,
+    ...(cameraLook ? { cameraLook } : {}),
     layoutPreset: isLayoutPreset(candidate.layoutPreset)
       ? candidate.layoutPreset
       : (typeof candidate.layoutPreset === 'string' &&
@@ -2373,6 +2379,7 @@ export function applyStoredManualStreamKeyResult(
 }
 
 export function persistableCaptureConfig(config: CaptureConfig): CaptureConfig {
+  const { cameraLook: _cameraLook, ...layout } = config.layout
   // Plan 213 E1: a stand-in is for this session; the pick is what persists.
   const { testPattern: _testPattern, ...sources } = wantedSourceSelection(config.sources)
   const targets = config.streaming.targets.map((item) => {
@@ -2391,6 +2398,7 @@ export function persistableCaptureConfig(config: CaptureConfig): CaptureConfig {
   const primary = streaming.targets.find((target) => target.platform === config.rtmpPreset)
   return {
     ...config,
+    layout,
     sources,
     streaming,
     rtmpServerUrl:

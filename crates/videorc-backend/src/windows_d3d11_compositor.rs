@@ -360,6 +360,8 @@ pub(crate) struct WindowsD3d11SpriteTransform {
 pub(crate) struct WindowsD3d11LayerEffects {
     pub(crate) opacity: f32,
     pub(crate) saturation: f32,
+    pub(crate) brightness: f32,
+    pub(crate) contrast: f32,
     pub(crate) dim: f32,
     pub(crate) vignette: f32,
     pub(crate) blur_radius_px: f32,
@@ -373,6 +375,8 @@ impl Default for WindowsD3d11LayerEffects {
         Self {
             opacity: 1.0,
             saturation: 1.0,
+            brightness: 0.0,
+            contrast: 1.0,
             dim: 0.0,
             vignette: 0.0,
             blur_radius_px: 0.0,
@@ -749,6 +753,8 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
     if ![
         effects.opacity,
         effects.saturation,
+        effects.brightness,
+        effects.contrast,
         effects.dim,
         effects.vignette,
         effects.blur_radius_px,
@@ -757,6 +763,8 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
     .all(f32::is_finite)
         || !(0.0..=1.0).contains(&effects.opacity)
         || effects.saturation < 0.0
+        || !(-0.25..=0.25).contains(&effects.brightness)
+        || !(0.5..=1.5).contains(&effects.contrast)
         || !(0.0..=1.0).contains(&effects.dim)
         || !(0.0..=1.0).contains(&effects.vignette)
         || !(0.0..=MAX_BLUR_RADIUS_PX).contains(&effects.blur_radius_px)
@@ -1104,6 +1112,7 @@ mod runtime {
         sprite_affine: [f32; 4],
         /// Sprite pivot x, y (normalized output), enabled (1), reserved.
         sprite_pivot: [f32; 4],
+        camera_look: [f32; 4],
     }
 
     pub(crate) struct WindowsD3d11Compositor {
@@ -1997,6 +2006,7 @@ mod runtime {
             sprite_pivot: layer.effects.sprite.map_or([0.0; 4], |sprite| {
                 [sprite.pivot[0], sprite.pivot[1], 1.0, 0.0]
             }),
+            camera_look: [layer.effects.brightness, layer.effects.contrast, 0.0, 0.0],
         }
     }
 
@@ -2893,7 +2903,7 @@ mod runtime {
                     .unwrap_or_else(|error| panic!("{entry_point}: {}", error.detail));
                 assert!(!bytecode.is_empty(), "{entry_point} has bytecode");
             }
-            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 11 * 16);
+            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 12 * 16);
             assert_eq!(
                 std::mem::offset_of!(super::DrawConstants, sprite_affine),
                 9 * 16

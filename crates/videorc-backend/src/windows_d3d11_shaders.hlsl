@@ -30,6 +30,8 @@ cbuffer DrawConstants : register(b0)
     // output pixels, y down) and its pivot x, y (normalized output), enabled.
     float4 spriteAffine;
     float4 spritePivot;
+    // brightness, contrast, reserved, reserved
+    float4 cameraLook;
 };
 
 Texture2D<float4> sourceTexture : register(t0);
@@ -207,19 +209,20 @@ float4 ScenePs(VertexOutput input) : SV_TARGET
         color = sampleSource(input.uv);
     }
 
-    float luma = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
-    color.rgb = lerp(float3(luma, luma, luma), color.rgb, max(effects.y, 0.0));
-    color.rgb *= saturate(1.0 - effects.z);
-    float2 vignetteVector = input.uv - float2(0.5, 0.5);
-    float vignette = saturate(1.0 - dot(vignetteVector, vignetteVector) * effects.w * 2.8);
-    color.rgb *= vignette;
-
     float keyAlpha = chromaKeyAlpha(color.rgb);
     if (chromaKeyColor.w > 0.5 && keyAlpha < 1.0)
     {
         float spill = (1.0 - keyAlpha) * saturate(chromaKeyControls.z);
         color.g = lerp(color.g, max(color.r, color.b), spill);
     }
+    // Key the original pixel, then grade the despilled gamma-encoded RGB.
+    float luma = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
+    color.rgb = saturate(luma + cameraLook.x + (cameraLook.y - 1.0) * (luma - 0.5)
+        + effects.y * (color.rgb - luma));
+    color.rgb *= saturate(1.0 - effects.z);
+    float2 vignetteVector = input.uv - float2(0.5, 0.5);
+    float vignette = saturate(1.0 - dot(vignetteVector, vignetteVector) * effects.w * 2.8);
+    color.rgb *= vignette;
     color.a *= saturate(effects.x) * maskAlpha(input.uv) * keyAlpha;
     return color;
 }

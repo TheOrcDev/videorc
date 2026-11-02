@@ -7790,6 +7790,7 @@ struct PreparedGpuSource<'a> {
     /// Camera chroma key; forces `blend` semantics via the shader's computed
     /// alpha, so keyed camera quads set both.
     chroma_key: Option<crate::metal_compositor::GpuChromaKey>,
+    camera_look: Option<[f32; 3]>,
     /// A turned quad (the Buddy sprite, plan 168 S-B2); see `GpuSource`.
     corners: Option<[[f32; 2]; 4]>,
     sampler: crate::metal_compositor::GpuSourceSampler,
@@ -7840,6 +7841,7 @@ impl<'a> PreparedGpuSource<'a> {
             mask: scene_mask_into_metal(self.mask),
             blend: self.blend,
             chroma_key: self.chroma_key,
+            camera_look: self.camera_look,
             corners: self.corners,
             sampler: self.sampler,
             opacity: self.opacity,
@@ -8029,6 +8031,7 @@ fn push_overlay_gpu_source_at<'a>(
         // its alpha-0 pixels overwrite the frame as an opaque black box.
         blend: true,
         chroma_key: None,
+        camera_look: None,
         corners: None,
         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
         opacity: 1.0,
@@ -8104,6 +8107,7 @@ fn push_banner_gpu_sources<'a>(
             // show what is beneath.
             blend: true,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Linear,
             opacity: draw.opacity,
@@ -8198,6 +8202,7 @@ fn push_buddy_sprite_gpu_source<'a>(
         // the linear filter's edge clean.
         blend: true,
         chroma_key: None,
+        camera_look: None,
         corners: Some(corners),
         sampler: crate::metal_compositor::GpuSourceSampler::Linear,
         opacity: draw.opacity,
@@ -8417,6 +8422,7 @@ fn push_editor_chrome_gpu_sources<'a>(
             // picture through, not stamp opaque boxes.
             blend: true,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8517,6 +8523,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Linear,
                     opacity: 1.0,
@@ -8565,6 +8572,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -8628,6 +8636,7 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8708,6 +8717,7 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8821,6 +8831,11 @@ fn try_gpu_compose_with_chrome(
                         chroma_key: camera_chroma_key(layout)
                             .as_ref()
                             .and_then(scene_chroma_key_into_metal),
+                        camera_look: (!layout.camera_look.is_neutral()).then_some([
+                            layout.camera_look.brightness as f32,
+                            layout.camera_look.contrast as f32,
+                            layout.camera_look.saturation as f32,
+                        ]),
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8852,6 +8867,7 @@ fn try_gpu_compose_with_chrome(
                         mask: camera_mask(layout),
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8909,6 +8925,7 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8940,6 +8957,7 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8978,6 +8996,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -11202,6 +11221,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         )
@@ -11269,6 +11289,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: false,
                             mask: SceneMask::None,
                             chroma_key: None,
+                            camera_look: crate::protocol::CameraLook::default(),
                             linear: false,
                         },
                     )
@@ -11291,6 +11312,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: false,
                             mask: SceneMask::None,
                             chroma_key: None,
+                            camera_look: crate::protocol::CameraLook::default(),
                             linear: false,
                         },
                     )
@@ -11322,6 +11344,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: snapshot.layout.camera_mirror,
                             mask: camera_mask(&snapshot.layout),
                             chroma_key: camera_chroma_key(&snapshot.layout),
+                            camera_look: snapshot.layout.camera_look,
                             // Plan 200 D3: a scaled camera reads bilinear (CPU agrees
                             // with the Metal linear sampler in kind).
                             linear: true,
@@ -11370,6 +11393,7 @@ fn render_unavailable_source_rect(
             mirror_x: false,
             mask,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -11650,12 +11674,28 @@ struct SourceRenderOptions {
     /// Camera chroma key from the shared spec; keyed pixels blend fractionally
     /// into the frame instead of overwriting (mirrors the Metal shader keyer).
     chroma_key: Option<ChromaKeySpec>,
+    camera_look: crate::protocol::CameraLook,
     /// Plan 200 D3: a scaled draw reads bilinear, like the Metal compositor's
     /// linear sampler for scaled draws; a 1:1 draw stays point-sampled. Only
     /// the camera asks for it: the CPU compositor is the production path on
     /// Windows and Linux, and a full-frame bilinear screen would spend the
     /// per-pixel budget Linux plan 0014 won back (see `map_source_axis`).
     linear: bool,
+}
+
+fn camera_look_rgb(r: u8, g: u8, b: u8, look: crate::protocol::CameraLook) -> (u8, u8, u8) {
+    if look.is_neutral() {
+        return (r, g, b);
+    }
+    let rgb = [r, g, b].map(|value| f64::from(value) / 255.0);
+    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let [r, g, b] = rgb.map(|value| {
+        ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5) + look.saturation * (value - y))
+            .clamp(0.0, 1.0)
+            * 255.0)
+            .round() as u8
+    });
+    (r, g, b)
 }
 
 struct RgbaSource<'a> {
@@ -11683,6 +11723,7 @@ pub(crate) fn render_camera_overlay_bgra(
     contain: bool,
     mirror_x: bool,
     mask: SceneMask,
+    look: crate::protocol::CameraLook,
     output: &mut Vec<u8>,
 ) -> bool {
     let source = RgbaSource {
@@ -11733,6 +11774,7 @@ pub(crate) fn render_camera_overlay_bgra(
                     continue;
                 };
                 let (r, g, b, alpha) = read_source_rgba(&source, source_x, source_y);
+                let (r, g, b) = camera_look_rgb(r, g, b, look);
                 let offset = dest_x * 4;
                 row[offset] = b;
                 row[offset + 1] = g;
@@ -11821,6 +11863,7 @@ fn render_scene_background_with_cache(
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -12016,6 +12059,7 @@ fn render_synthetic_source_rect(
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -12303,6 +12347,7 @@ fn blit_rgba_to_yuv420p(
     let draw_bottom = fit.y.saturating_add(fit.height).min(canvas_height as u32) as usize;
     if options.mask == SceneMask::None
         && options.chroma_key.is_none()
+        && options.camera_look.is_neutral()
         && !options.mirror_x
         && fit.source_x == 0.0
         && fit.source_y == 0.0
@@ -12336,17 +12381,20 @@ fn blit_rgba_to_yuv420p(
     }
 
     // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
-    // None means the pixel keys fully out. Without a spec every pixel is the
-    // historical opaque overwrite (alpha 255) — byte-identical to before.
+    // None means the pixel keys fully out. Grade after despill, keeping the
+    // original pixel's key alpha unchanged.
     let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
-        let Some(spec) = options.chroma_key.as_ref() else {
-            return Some((r, g, b, 255));
+        let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+            let alpha = chroma_key_alpha(spec, r, g, b);
+            if alpha == 0 {
+                return None;
+            }
+            let (r, g, b) = chroma_key_despill(spec, r, g, b);
+            (r, g, b, alpha)
+        } else {
+            (r, g, b, 255)
         };
-        let key_alpha = chroma_key_alpha(spec, r, g, b);
-        if key_alpha == 0 {
-            return None;
-        }
-        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
         Some((r, g, b, key_alpha))
     };
 
@@ -12564,14 +12612,17 @@ fn blit_linear_rgba_to_yuv420p(
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
     let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
-        let Some(spec) = options.chroma_key.as_ref() else {
-            return Some((r, g, b, 255));
+        let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+            let alpha = chroma_key_alpha(spec, r, g, b);
+            if alpha == 0 {
+                return None;
+            }
+            let (r, g, b) = chroma_key_despill(spec, r, g, b);
+            (r, g, b, alpha)
+        } else {
+            (r, g, b, 255)
         };
-        let key_alpha = chroma_key_alpha(spec, r, g, b);
-        if key_alpha == 0 {
-            return None;
-        }
-        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
         Some((r, g, b, key_alpha))
     };
     let uv_left = draw_left / 2;
@@ -13255,7 +13306,7 @@ fn active_source_iso_capture_needs(
 /// Derives the ISO leg from confirmed capture selection, including sources
 /// omitted by the primary preset. It is visible and full-frame, under a layout
 /// that contains (never crops), draws no bubble mask, no chroma key and no
-/// background. Mirror is preserved (it is the camera's own orientation).
+/// background. Mirror and look are preserved (the camera's own settings).
 /// `None` when the role is unselected. Generic scenes without selection
 /// authority retain their device-bound source behavior.
 fn source_iso_snapshot(
@@ -13723,6 +13774,11 @@ mod tests {
         snapshot.layout.camera_offset_x = 12;
         snapshot.layout.camera_chroma_key_enabled = true;
         snapshot.layout.camera_mirror = true;
+        snapshot.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05,
+            contrast: 1.1,
+            saturation: 0.8,
+        };
         if let Some(scene) = snapshot.scene.as_mut() {
             for source in scene.sources.iter_mut() {
                 if matches!(source.kind, SceneSourceKind::Camera) {
@@ -13769,6 +13825,7 @@ mod tests {
             camera.layout.camera_mirror,
             "mirror is the camera's own orientation"
         );
+        assert_eq!(camera.layout.camera_look, snapshot.layout.camera_look);
         assert_eq!(camera.revision, snapshot.revision);
     }
 
@@ -14159,6 +14216,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -14284,6 +14342,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14329,6 +14388,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear,
             },
         ));
@@ -14494,6 +14554,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14574,6 +14635,186 @@ mod tests {
         }
     }
 
+    fn camera_look_reference(rgb: [u8; 3], look: crate::protocol::CameraLook) -> [u8; 3] {
+        let rgb = rgb.map(|v| f64::from(v) / 255.0);
+        let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        rgb.map(|v| {
+            ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5) + look.saturation * (v - y))
+                .clamp(0.0, 1.0)
+                * 255.0)
+                .round() as u8
+        })
+    }
+
+    #[test]
+    fn camera_look_cpu_and_metal_agree_with_float_law() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
+                .unwrap();
+        let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
+        let (width, height) = (palette.len() as u32 * 4, 4);
+        #[cfg(target_os = "macos")]
+        let gpu = new_gpu_compositor(false);
+        let mut snapshot = test_scene_snapshot(LayoutPreset::CameraOnly, None, Some("camera-look"));
+        snapshot.layout.camera_look = serde_json::from_value(fixture["look"].clone()).unwrap();
+        let mut bgra = Vec::new();
+        let mut expected = Vec::new();
+        for _ in 0..height {
+            for &rgb in &palette {
+                for _ in 0..4 {
+                    bgra.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+                    expected.push(camera_look_reference(rgb, snapshot.layout.camera_look));
+                }
+            }
+        }
+        let camera =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width,
+                height,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: bgra,
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
+        let inputs = CompositorRenderInputs {
+            sequence: 1,
+            width,
+            height,
+            snapshot: Some(&snapshot),
+            camera_frame: Some(&camera),
+            active_image_source: None,
+            background_image_source: None,
+            screen_frame: None,
+            caption_overlay: None,
+            highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
+        };
+        let mut cpu = vec![0; raw_yuv420p_len(width, height)];
+        render_compositor_yuv420p_frame(inputs, &mut cpu);
+        let decode_cpu = |pixel: usize| {
+            let uv =
+                (pixel / width as usize / 2) * (width as usize / 2) + (pixel % width as usize / 2);
+            let y_len = (width * height) as usize;
+            let (b, g, r) = crate::color::ycbcr_bt709_video_to_bgr(
+                cpu[pixel],
+                cpu[y_len + uv],
+                cpu[y_len + y_len / 4 + uv],
+            );
+            [r, g, b]
+        };
+        let mut cpu_max = 0;
+        for (pixel, reference) in expected.iter().enumerate() {
+            for (actual, expected) in decode_cpu(pixel).into_iter().zip(reference) {
+                cpu_max = cpu_max.max(i16::from(actual).abs_diff(i16::from(*expected)));
+            }
+        }
+        assert!(cpu_max <= 2, "CPU vs float law: {cpu_max}/255");
+        eprintln!("camera look CPU vs float law: {cpu_max}/255");
+        #[cfg(target_os = "macos")]
+        {
+            let Some(mut gpu) = gpu else {
+                eprintln!("skipping Metal: no Metal device");
+                return;
+            };
+            let output =
+                try_gpu_compose(Some(&mut gpu), &inputs, true).expect("camera Metal compose");
+            let pixels = gpu
+                .latest_target_pixel_buffer()
+                .and_then(|target| target.copy_bgra())
+                .expect("Metal target readback");
+            let mut metal_max = 0;
+            let mut parity_max = 0;
+            for (pixel, reference) in expected.iter().enumerate() {
+                let offset = pixel * 4;
+                let metal = [pixels[offset + 2], pixels[offset + 1], pixels[offset]];
+                for ((actual, expected), cpu) in
+                    metal.into_iter().zip(reference).zip(decode_cpu(pixel))
+                {
+                    metal_max = metal_max.max(i16::from(actual).abs_diff(i16::from(*expected)));
+                    parity_max = parity_max.max(i16::from(actual).abs_diff(i16::from(cpu)));
+                }
+            }
+            assert!(metal_max <= 2, "Metal vs float law: {metal_max}/255");
+            assert!(parity_max <= 2, "CPU vs Metal: {parity_max}/255");
+            assert!(
+                cpu.iter()
+                    .zip(&output.yuv)
+                    .all(|(a, b)| a.abs_diff(*b) <= 2)
+            );
+            eprintln!(
+                "camera look Metal vs float law: {metal_max}/255; CPU vs Metal: {parity_max}/255"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_look_preserves_original_key_alpha_in_both_cpu_samplers() {
+        let look = crate::protocol::CameraLook {
+            brightness: 0.1,
+            contrast: 1.2,
+            saturation: 0.0,
+        };
+        for (side, linear) in [(2, false), (4, true)] {
+            for rgb in [[0, 255, 0], [128, 128, 128]] {
+                let source = [rgb[0], rgb[1], rgb[2], 255].repeat(side * side);
+                let mut output = blue_yuv_canvas_2x2();
+                assert!(blit_rgba_to_yuv420p(
+                    &RgbaSource {
+                        bytes: &source,
+                        width: side as u32,
+                        height: side as u32,
+                        format: SourcePixelFormat::Rgba
+                    },
+                    &mut output,
+                    2,
+                    2,
+                    PixelRect {
+                        x: 0,
+                        y: 0,
+                        width: 2,
+                        height: 2
+                    },
+                    SourceRenderOptions {
+                        crop: SceneCrop::none(),
+                        pan: (0.0, 0.0),
+                        contain: false,
+                        mirror_x: false,
+                        mask: SceneMask::None,
+                        chroma_key: Some(chroma_key_test_spec()),
+                        camera_look: look,
+                        linear
+                    },
+                ));
+                if rgb[1] == 255 {
+                    assert_eq!(
+                        output,
+                        blue_yuv_canvas_2x2(),
+                        "grade must not move the key (linear={linear})"
+                    );
+                } else {
+                    let [r, g, b] = camera_look_reference(rgb, look);
+                    let (y, u, v) = rgb_to_yuv(r, g, b);
+                    assert_eq!(
+                        output,
+                        vec![y, y, y, y, u, v],
+                        "foreground grade (linear={linear})"
+                    );
+                }
+            }
+        }
+    }
+
     /// A 2×2 blue YUV canvas the chroma-key blit tests composite onto.
     fn blue_yuv_canvas_2x2() -> Vec<u8> {
         let (y, u, v) = rgb_to_yuv(0, 0, 255);
@@ -14626,6 +14867,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: Some(chroma_key_test_spec()),
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14686,6 +14928,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: Some(spec),
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14714,6 +14957,7 @@ mod tests {
                     mask: SourceMask::None,
                     blend: true,
                     chroma_key: scene_chroma_key_into_metal(&spec),
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -14861,6 +15105,7 @@ mod tests {
             false,
             true,
             SceneMask::None,
+            crate::protocol::CameraLook::default(),
             &mut mirrored,
         ));
         assert_eq!(
@@ -14881,6 +15126,7 @@ mod tests {
             false,
             false,
             SceneMask::Circle,
+            crate::protocol::CameraLook::default(),
             &mut circle,
         ));
         assert_eq!(circle[3], 0, "top-left corner must be transparent");

@@ -139,12 +139,18 @@ describe('simulcastLegLiveRequest (the leg of a running session)', () => {
     const config = dualOrientationConfig()
     const cameraOnly = {
       ...config,
-      layout: { ...config.layout, layoutPreset: 'camera-only' as const, cameraMirror: true }
+      layout: {
+        ...config.layout,
+        layoutPreset: 'camera-only' as const,
+        cameraMirror: true,
+        cameraLook: { brightness: 0.05, contrast: 1.1, saturation: 0.8 }
+      }
     }
     const followed = simulcastLegLiveRequest(cameraOnly)
     expect(followed?.layout.layoutPreset).toBe('vertical-camera-only')
     // Shared camera settings travel with the program.
     expect(followed?.layout.cameraMirror).toBe(true)
+    expect(followed?.layout.cameraLook).toEqual(cameraOnly.layout.cameraLook)
     // Back to Screen + Cam: the remembered vertical scene, never a stale twin.
     const back = simulcastLegLiveRequest({
       ...config,
@@ -156,5 +162,8 @@ describe('simulcastLegLiveRequest (the leg of a running session)', () => {
       simulcastLegLiveRequest({ ...cameraOnly, simulcastFollowsProgram: false })?.layout
         .layoutPreset
     ).toBe('vertical-camera-bottom')
+    expect(
+      simulcastLegLiveRequest({ ...cameraOnly, simulcastFollowsProgram: false })?.layout.cameraLook
+    ).toEqual(cameraOnly.layout.cameraLook)
   })
 })
