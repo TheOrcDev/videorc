@@ -3252,3 +3252,56 @@ in the existing evidence root. No Beta candidate is accepted or
 published. The queue reconciliation-fence failure, OpenH264 motion, audio,
 shaders, physical Ubuntu/Hyprland acceptance and release gates remain
 open; the six unpublished workflow edits are preserved.
+
+### Main through `b7e68a2c` and bundle filter names, 2026-11-03
+
+Main was integrated through `b7e68a2c` (#1041 to #1048) in merge
+`5152161d`. Main's #1047 also replaced the GPL-only `eq` camera grade,
+with a full-range `lutyuv` chain. The merge takes main's chain over this
+branch's planar-RGB `geq` grade. On Ogre, with default threading on 12
+threads, the `geq` grade took about 970 ms per 1080p frame against about
+7 ms for `lutyuv` and 2 ms with no grade; single-threaded, about 2.3 s
+against 27 ms. It could not run in real time. The parity fixture keeps
+this branch's alpha rows (0, 63, 127 and 255) and main's 8/255 limit. It
+spawns FFmpeg, so per main's rule it is ignored in CI; `smoke:recording-studio` runs it with the bundled binary
+pinned, and on Linux x64 a plain `--ignored` run prefers the provisioned
+bundle. Package capability checks require main's camera-look filters plus
+`geq`, which the circle and rounded camera masks still use. The replay
+ring root takes main's database instance key; both isolation tests remain.
+
+One finding against #1047 is open and unfixed. At saturation 2.0, the UI
+maximum, saturated primaries leave the float law by up to 53 to 61/255,
+because U and V clip per plane before conversion back to RGB. Saturation
+0.0 stays within 1/255 and the shared fixture palette within 2/255; every
+alpha value is preserved. The extremes check is a private probe and is not
+committed.
+
+The branch's per-filter checks then failed on macOS and Windows. Their
+bundle gates matched a filter name anywhere in `ffmpeg -filters`, so
+main's new `scale` line ("convert the image format.") let a bundle without
+`format` pass. The Linux pin had the same gap in real output, where
+`scale2ref` carries a bare "format". Follow-up `5a2bc7ce` reads only the
+name column on all three platforms, as the muxer checks already did. A new
+Linux case fails on the old parser, and the pinned Linux bundle still
+passes.
+
+Validation on the merged tree (Rust sources identical at `5152161d` and
+`5a2bc7ce`): Node script tests pass 3,082 with zero failures or skips.
+Formatting and Clippy with CI's flags pass. The camera recording tests
+pass 19 with the parity fixture ignored. Run with `--ignored --exact`
+against the pinned Linux bundle, the parity fixture passes. The replay
+buffer tests pass 32 with two ignored. The first full backend run reported
+4,239 passed, two failed and 20 ignored. One failure was the known GLES
+Beams golden (mean 20.405, max 193). The other was
+`source_iso_stop_flushes_delayed_system_without_future_microphone`: its
+microphone lost 7,200 frames to overlap and the residual-trim check
+failed. That test then passed 20 of 20 isolated runs; an earlier 20-run
+loop used a wrong target flag, ran nothing and is not counted. A second
+full run reported 4,240 passed, only the GLES failure, and 20 ignored.
+The mixer failure is intermittent and remains open, not waived. Cargo
+stops at the first failing test target, so the bridge and wire targets did
+not run in either full run.
+
+The six unpublished workflow edits are preserved. Private evidence is
+retained under `merge-b7e68a2c/` in the existing evidence root. No Beta
+candidate is accepted or published; the open gates above are unchanged.
