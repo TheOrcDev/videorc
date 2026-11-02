@@ -240,6 +240,23 @@ export function proofPresentationFallbackReason(params: {
   return `Windows preview source frame liveness did not update within ${Math.round(params.pendingElapsedMs)}ms.`
 }
 
+// The proof surface also presents the Linux Preview; its source-frame status
+// is shown in the Preview window, so it names the platform the user is on.
+function proofPreviewName(platform: NodeJS.Platform): string {
+  return platform === 'linux' ? 'Linux preview' : 'Windows preview'
+}
+
+export function proofSourceLiveReason(platform: NodeJS.Platform): string {
+  return `${proofPreviewName(platform)} pixels are live.`
+}
+
+export function proofSourceStalledReason(
+  platform: NodeJS.Platform,
+  sourceFrameAgeMs: number
+): string {
+  return `${proofPreviewName(platform)} source frames have not advanced for ${Math.round(sourceFrameAgeMs)}ms; keeping the last good frame while polling retries.`
+}
+
 export function boundedProofWatchdogRead<T>(
   read: Promise<T>,
   timeoutMs = DEFAULT_PROOF_WATCHDOG_READ_TIMEOUT_MS

@@ -621,6 +621,7 @@ import {
 } from '@/lib/background-assets'
 import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
+import { useChatNewCount } from '@/hooks/use-chat-new-count'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
 import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
 import {
@@ -1798,6 +1799,8 @@ interface StudioDiagnosticsContextValue {
 
 interface StudioChatContextValue {
   liveChatSnapshot: LiveChatSnapshot
+  /** Chat messages since the Stream Manager last showed (plan 213 B1): the Studio's Chat row. */
+  chatNewCount: number
   /** Latest `cohost.state`; null until the engine reports for the first time. */
   cohostState: CohostState | null
 }
@@ -11151,14 +11154,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : buildCaptureSources(current, deviceListRef.current.devices, device.id)
         void switchSourceDeviceLive(kind, next).catch((error) => toastUserError(error))
       }
-      if (
-        sourceReturnAction({ state: recording.state, replayOnly: recording.replayOnly }) ===
-        'restore'
-      ) {
-        if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current) {
-          keys.delete(key)
-          continue
-        }
+      const action = sourceReturnAction(
+        { state: recording.state, replayOnly: recording.replayOnly },
+        Boolean(sourceSwitchReason(kind))
+      )
+      if (action === 'wait') {
+        keys.delete(key)
+        continue
+      }
+      if (action === 'restore') {
         applyDevice()
         continue
       }
@@ -11177,6 +11181,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sourceStatusKnown,
     startRequestPending,
     stopRequestPending,
+    sourceSwitchReason,
     switchSourceDeviceLive
   ])
 
@@ -18279,9 +18284,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamHealth
     ]
   )
+  const chatNewCount = useChatNewCount(
+    liveChatSnapshot,
+    commentsWindow.open && commentsWindow.visible
+  )
   const chatValue = useMemo<StudioChatContextValue>(
-    () => ({ cohostState, liveChatSnapshot }),
-    [cohostState, liveChatSnapshot]
+    () => ({ chatNewCount, cohostState, liveChatSnapshot }),
+    [chatNewCount, cohostState, liveChatSnapshot]
   )
   const audioValue = useMemo<StudioAudioContextValue>(
     () => ({ audioMeter, audioMeterLoading, meterLevel }),

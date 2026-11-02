@@ -7,6 +7,7 @@ import {
   createFirstRunStartup,
   FIRST_RUN_STEPS,
   firstRunDecision,
+  firstRunReplayDescription,
   firstRunShellSurface,
   firstRunStepPosition,
   firstRunStepsFor,
@@ -165,6 +166,19 @@ describe('first-run step logic', () => {
       count: 4
     })
     expect(nextFirstRunStep('sound', { ...context, goal: 'record' })).toBeNull()
+  })
+
+  it('describes Linux sharing guidance without promising permission controls', () => {
+    for (const platform of ['darwin', 'win32', 'linux', undefined]) {
+      const [first] = firstRunStepsFor({ goal: null, platform, mode: modes[1] })
+      expect(firstRunReplayDescription(platform).includes('permissions')).toBe(
+        first === 'permissions' && platform !== 'linux'
+      )
+    }
+    expect(firstRunReplayDescription('linux')).toBe('Go through the welcome steps again.')
+    expect(firstRunReplayDescription('darwin')).toBe(
+      'Go through the welcome steps again, starting with permissions.'
+    )
   })
 
   it('keeps Linux sharing guidance and handles saved steps excluded by the goal', () => {

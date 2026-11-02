@@ -94,3 +94,10 @@ it('restores while idle with Clips on, and offers a click for recordings and str
     expect(sourceReturnAction({ state })).toBe('offer')
   }
 })
+
+it('waits for an idle scene change to finish, then restores without a click', () => {
+  const clips = { state: 'recording' as const, replayOnly: true }
+  expect(sourceReturnAction(clips, true)).toBe('wait')
+  expect(sourceReturnAction(clips, false)).toBe('restore')
+  expect(sourceReturnAction({ state: 'recording' }, true)).toBe('offer')
+})

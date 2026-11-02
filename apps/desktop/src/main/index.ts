@@ -498,6 +498,8 @@ import {
   previewHoldHandback,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
+  proofSourceLiveReason,
+  proofSourceStalledReason,
   proofWatchdogRendererReadAllowed,
   WatchdogTickOwnership,
   type FirstFrameLedger,
@@ -7756,13 +7758,13 @@ async function presentNativePreviewSurfaceCompositor(
   })
   if (proofSourceAssessment === 'met') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'met') {
-      setFirstFrameStatus('met', 'Windows preview pixels are live.')
+      setFirstFrameStatus('met', proofSourceLiveReason(process.platform))
       updatePreviewWindowWaitDetail(null)
       logBackend('info', '[proof-preview] source frame delivery is live')
     }
   } else if (proofSourceAssessment === 'stalled') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
-      const reason = `Windows preview source frames have not advanced for ${Math.round(sourceFrameAgeMs ?? 0)}ms; keeping the last good frame while polling retries.`
+      const reason = proofSourceStalledReason(process.platform, sourceFrameAgeMs ?? 0)
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
