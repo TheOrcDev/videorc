@@ -1685,18 +1685,23 @@ fn assemble_pcm(
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
+            // Receive before judging the deadline: after this thread was
+            // descheduled, PCM that arrived in time is already queued.
+            match raw.recv_timeout(Duration::from_millis(5)) {
+                Ok(bytes) => {
+                    queued.extend(bytes);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("Capture PCM ended in a partial timestamped packet")
+                }
+            }
             if Instant::now() >= deadline {
                 bail!(
                     "Capture PCM did not match its timestamp metadata within {}ms",
                     match_budget.as_millis()
                 );
-            }
-            match raw.recv_timeout(Duration::from_millis(5)) {
-                Ok(bytes) => queued.extend(bytes),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    bail!("Capture PCM ended in a partial timestamped packet")
-                }
             }
         }
         let bytes: Vec<_> = queued.drain(..wanted).collect();
@@ -2632,9 +2637,12 @@ mod tests {
             drop(meta_tx);
             let (raw_tx, raw_rx) = mpsc::channel();
             let bytes = bytes.clone();
+            let started = Instant::now();
             let sender = thread::spawn(move || {
                 thread::sleep(late);
+                let sent = Instant::now();
                 let _ = raw_tx.send(bytes);
+                sent
             });
             let (out_tx, out_rx) = mpsc::sync_channel(4);
             let stats = Arc::new(AudioCaptureStats::default());
@@ -2647,19 +2655,31 @@ mod tests {
                 &AtomicBool::new(false),
                 &stats,
             );
-            sender.join().unwrap();
-            (result, out_rx.try_iter().collect::<Vec<_>>())
+            let arrived_after = sender.join().unwrap().saturating_duration_since(started);
+            (result, out_rx.try_iter().collect::<Vec<_>>(), arrived_after)
         };
-        let wall_us = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        let pts = i64::try_from(i128::from(wall_us - 10_000) * 48_000 / 1_000_000).unwrap();
-        let (result, frames) = run(
-            CaptureProtocol::Pulse,
-            ClockPair::sample().unwrap(),
-            vec![pcm(0, pts, 480)],
-        );
+        // A loaded CI host (macOS runners, the full suite in parallel) can
+        // oversleep the 130 ms past the whole 250 ms budget; that attempt
+        // proves nothing about the budget, so it is retried. A miss with the
+        // PCM inside the budget still fails.
+        let mut attempts = 0;
+        let (result, frames) = loop {
+            attempts += 1;
+            let wall_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+            let pts = i64::try_from(i128::from(wall_us - 10_000) * 48_000 / 1_000_000).unwrap();
+            let (result, frames, arrived_after) = run(
+                CaptureProtocol::Pulse,
+                ClockPair::sample().unwrap(),
+                vec![pcm(0, pts, 480)],
+            );
+            let host_overslept = arrived_after >= PULSE_MAX_CAPTURE_AGE;
+            if !(host_overslept && result.is_err()) || attempts == 5 {
+                break (result, frames);
+            }
+        };
         assert!(
             result.as_ref().map_or_else(
                 |error| error.to_string().contains("stopped producing"),
@@ -2670,7 +2690,7 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].samples, vec![0.25; 960]);
         // macOS and Windows keep their 100 ms match budget.
-        let (result, frames) = run(
+        let (result, frames, _) = run(
             CaptureProtocol::AvFoundation,
             pair(Instant::now()),
             vec![metadata(), pcm(0, 0, 480)],
