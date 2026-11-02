@@ -34,6 +34,7 @@ import { existsSync, mkdtempSync, readFileSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { runSmokeCargoTest } from './lib/smoke-cargo-test.mjs'
 import { spawnProcessGroup } from './lib/process-group.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { assertSceneSwitchPixels } from './lib/scene-switch-pixels.mjs'
@@ -74,8 +75,7 @@ const roleSize = (role) =>
     : { width: WIDTH, height: HEIGHT }
 
 console.log(`Separate source fixture evidence: ${directory}`)
-await run(
-  'cargo',
+await runSmokeCargoTest(
   [
     'test',
     '-p',
@@ -88,7 +88,7 @@ await run(
     'session_audio::mix_tests::source_iso_audio_artifact_fixture',
     '--nocapture'
   ],
-  { ...process.env, VIDEORC_SOURCE_ISO_ARTIFACT_DIR: directory }
+  { cwd: root, env: { ...process.env, VIDEORC_SOURCE_ISO_ARTIFACT_DIR: directory } }
 )
 for (const role of TAKE_ROLES) {
   if (!existsSync(audioPcm(role))) {

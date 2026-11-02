@@ -65,10 +65,15 @@ const RENDER_FILTER_LINES = [
   ' ... asetpts          A->A       Set PTS for the output audio frame.',
   ' ... format           V->V       Convert the input video to one of the specified pixel formats.'
 ]
+const CAMERA_LOOK_FILTER_LINES = [
+  ' ... scale            V->V       Scale the input video size and/or convert the image format.',
+  ' TS. lutyuv           V->V       Compute and apply a lookup table to the YUV input video.'
+]
 const FILTERS_WITH_NOISE_CLEANUP = [
   'Filters:',
   ' TS afftdn A->A Denoise audio samples using FFT.',
-  ...RENDER_FILTER_LINES
+  ...RENDER_FILTER_LINES,
+  ...CAMERA_LOOK_FILTER_LINES
 ].join('\n')
 
 test('a fully capable ffmpeg passes', () => {
@@ -104,6 +109,20 @@ test('Quick Sync and the OpenH264 fallback are reported but never required', () 
   })
   assert.equal(withBoth.ok, true)
   assert.deepEqual(withBoth.optionalMissing, [])
+})
+
+test('the Windows bundle requires every filter the legacy camera look chain uses (plan 213 I)', () => {
+  const withoutLutyuv = assessWindowsFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_WITH_MF,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
+      .filter((line) => !/ lutyuv /.test(line))
+      .join('\n'),
+    ...RING
+  })
+  assert.deepEqual(withoutLutyuv.missing, ['filter:lutyuv'])
+  assert.ok(!REQUIRED_WINDOWS_FFMPEG_FILTERS.includes('eq'))
+  assert.ok(!/ eq /.test(FILTERS_WITH_NOISE_CLEANUP))
 })
 
 test('the Windows bundle requires every filter the Clean cut render uses (plan 119 S13)', () => {
@@ -242,7 +261,8 @@ test('the Windows bundle requires the model-free noise cleanup filter', () => {
     filtersOutput: [
       'Filters:',
       ' T. loudnorm A->A EBU R128 loudness normalization',
-      ...RENDER_FILTER_LINES
+      ...RENDER_FILTER_LINES,
+      ...CAMERA_LOOK_FILTER_LINES
     ].join('\n')
   })
   assert.deepEqual(result.missing, ['filter:afftdn'])

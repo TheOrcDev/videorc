@@ -546,9 +546,6 @@ impl Drop for ReplayRuntime {
 #[derive(Debug, Default)]
 pub struct ReplayRegistry {
     pub active: Option<ReplayRuntime>,
-    // In-memory databases share a process, but never a ring namespace. Clones
-    // of one AppState share this registry and therefore keep the same root.
-    memory_root: Option<PathBuf>,
     rowless: VecDeque<String>,
     /// The last published event, so `replay.status` and a fresh socket get
     /// the same answer the renderer last saw.
@@ -595,16 +592,16 @@ pub fn start_in_flight(state: &AppState) -> bool {
 }
 
 /// The ring root: under the backend's managed app data, beside the
-/// database; a temp directory for the in-memory test database.
+/// database; a temp directory of its own for each in-memory test database,
+/// so parallel tests never create and remove one shared root.
 pub fn ring_root(state: &AppState) -> PathBuf {
     let database = state.database.path();
     if database.to_string_lossy() == ":memory:" {
-        return lock(state)
-            .memory_root
-            .get_or_insert_with(|| {
-                std::env::temp_dir().join(format!("videorc-replay-buffer-{}", uuid::Uuid::new_v4()))
-            })
-            .clone();
+        return std::env::temp_dir().join(format!(
+            "videorc-replay-buffer-{}-{:x}",
+            std::process::id(),
+            state.database.instance_key()
+        ));
     }
     database
         .parent()
@@ -1721,6 +1718,30 @@ mod runtime_tests {
             })
             .collect::<String>();
         std::fs::write(dir.join(SEGMENT_LIST_FILE), list).unwrap();
+    }
+
+    #[test]
+    fn in_memory_states_own_isolated_ring_roots() {
+        // CI flake (2026-11-02): every in-memory state shared one root keyed
+        // on the process id, so one test's clean_leftovers removed it while
+        // another's prepare was creating it ("File exists").
+        let state = test_state();
+        let other = test_state();
+        let clone = state.clone();
+        let root = ring_root(&state);
+        let other_root = ring_root(&other);
+        assert_eq!(ring_root(&clone), root, "clones share their state's ring");
+        assert_ne!(root, other_root, "independent states must not share a ring");
+
+        let dir = ring_dir(&state, "same-session");
+        let other_dir = ring_dir(&other, "same-session");
+        write_ring(&dir, 0..1, 0..1);
+        write_ring(&other_dir, 0..1, 0..1);
+        clean_leftovers(&state);
+        assert!(!root.exists());
+        assert!(other_dir.join("seg-000000.ts").is_file());
+        clean_leftovers(&other);
+        assert!(!other_root.exists());
     }
 
     #[test]

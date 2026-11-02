@@ -1697,6 +1697,13 @@ impl Database {
         &self.path
     }
 
+    /// One key per opened database, shared by its clones. Tests run in one
+    /// process on parallel threads, so a scratch path for an in-memory
+    /// database keyed on the process id alone is shared by every test.
+    pub fn instance_key(&self) -> usize {
+        Arc::as_ptr(&self.conn) as usize
+    }
+
     pub fn create_session(&self, session: &NewSession) -> Result<()> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;

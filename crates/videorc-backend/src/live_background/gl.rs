@@ -411,7 +411,7 @@ pub(crate) fn choose_live_node(
         vaapi_quarantined
             .iter()
             .chain(live_quarantined)
-            .any(|entry| entry.node == node)
+            .any(|entry| entry.names(&node))
     };
     candidates
         .iter()
@@ -1586,6 +1586,13 @@ mod tests {
         );
         assert_eq!(
             choose_live_node(&nodes, None, &[], &[quarantined("renderD128")])
+                .unwrap()
+                .node_name(),
+            "renderD129"
+        );
+        // An entry planted by hand may name the node by path.
+        assert_eq!(
+            choose_live_node(&nodes, None, &[quarantined("/dev/dri/renderD128")], &[])
                 .unwrap()
                 .node_name(),
             "renderD129"

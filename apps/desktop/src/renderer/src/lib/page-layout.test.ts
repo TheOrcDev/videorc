@@ -15,7 +15,10 @@ import {
   PAGE_LEAD_COLUMN,
   PAGE_TRAIL_COLUMN,
   PAGE_WIDE_MIN_PX,
-  SCENE_GRID
+  SCENE_GRID,
+  SCENE_INSPECTOR,
+  SCENE_INSPECTOR_PAIR,
+  SCENE_INSPECTOR_PAIR_MIN_PX
 } from './page-layout'
 
 const read = (path: string): string => readFileSync(new URL(path, import.meta.url), 'utf8')
@@ -112,6 +115,51 @@ describe('Page layout (plan 213 C3)', () => {
     expect(PAGE_TRAIL_COLUMN).toMatch(/(^|\s)border-t(\s|$)/)
     expect(PAGE_TRAIL_COLUMN).toContain(`${WIDE}border-t-0`)
     expect(CONFIG_GRID_PAIR).toContain(`${WIDE}content-stretch`)
+  })
+
+  describe("Scene inspector: the camera's Size and Shape", () => {
+    // One-line widths of the camera's three-option controls at 13 px (the
+    // segment label), measured in the app, plus the gap between the pair and
+    // the section's two 16 px gutters.
+    const SHAPE_ONE_LINE_PX = 235
+    const SIZE_ONE_LINE_PX = 201
+    const PAIR_GAP_PX = 16
+    const GUTTERS_PX = 32
+    const PAIR = `@min-[${SCENE_INSPECTOR_PAIR_MIN_PX}px]/inspector:`
+    const layoutTab = read('../components/tabs/layout-tab.tsx')
+
+    /** The inspector's width in a main window this wide: the trailing 1fr of 2.3fr when wide. */
+    const inspector = (windowWidth: number): number => {
+      const page = content(windowWidth)
+      return page >= PAGE_WIDE_MIN_PX ? page / 2.3 : page
+    }
+    const pairColumnsAt = (windowWidth: number): number =>
+      inspector(windowWidth) >= SCENE_INSPECTOR_PAIR_MIN_PX ? 2 : 1
+
+    it('keys the pair on the inspector column, never the viewport or the page', () => {
+      expect(SCENE_INSPECTOR).toContain('@container/inspector')
+      expect(SCENE_INSPECTOR_PAIR).toContain(`${PAIR}grid-cols-2`)
+      expect(SCENE_INSPECTOR_PAIR).not.toMatch(/(^|\s)grid-cols-2(\s|$)/)
+      expect(layoutTab).toContain('<FieldSet className={SCENE_INSPECTOR}')
+      expect(layoutTab).toContain('<div key="size-shape" className={SCENE_INSPECTOR_PAIR}>')
+    })
+
+    it('goes two-up only where both controls fit on one line', () => {
+      const column = (SCENE_INSPECTOR_PAIR_MIN_PX - GUTTERS_PX - PAIR_GAP_PX) / 2
+      expect(column).toBeGreaterThanOrEqual(SHAPE_ONE_LINE_PX)
+      expect(column).toBeGreaterThanOrEqual(SIZE_ONE_LINE_PX)
+    })
+
+    it('stacks beside the canvas in the default 1,180 px and a 1,280 px window', () => {
+      expect(pairColumnsAt(1180)).toBe(1)
+      expect(pairColumnsAt(1280)).toBe(1)
+      expect(pairColumnsAt(PAGE_WIDE_MIN_PX + SIDEBAR_PX)).toBe(1)
+    })
+
+    it('stays side by side on a stacked page, at the 960 px minimum and in a 1,100 px window', () => {
+      expect(pairColumnsAt(960)).toBe(2)
+      expect(pairColumnsAt(1100)).toBe(2)
+    })
   })
 
   it('pins the Captions preview only beside the controls', () => {

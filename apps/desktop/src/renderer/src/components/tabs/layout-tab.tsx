@@ -94,7 +94,12 @@ import {
   overlaySnapRect
 } from '@/lib/overlay-layout'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
-import { PAGE_LEAD_COLUMN, SCENE_GRID } from '@/lib/page-layout'
+import {
+  PAGE_LEAD_COLUMN,
+  SCENE_GRID,
+  SCENE_INSPECTOR,
+  SCENE_INSPECTOR_PAIR
+} from '@/lib/page-layout'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
 
@@ -877,7 +882,7 @@ export function LayoutTab(): ReactElement {
         {/* The inspector: one section named after the selection, then the
             camera's Placement, Lens and Green screen (plan 174 S3.9, C-33 and
             C-35). Inert only during a pointer gesture (C-5). */}
-        <FieldSet className="min-w-0 gap-0" inert={stageDragging}>
+        <FieldSet className={SCENE_INSPECTOR} inert={stageDragging}>
           {selectedBanner ? (
             <BannerInspector
               key={selectedBanner.id}
@@ -1248,7 +1253,7 @@ function CameraInspector({
   }
   if (showCameraBubbleControls) {
     placement.push(
-      <div key="size-shape" className="grid min-w-0 grid-cols-2 gap-4">
+      <div key="size-shape" className={SCENE_INSPECTOR_PAIR}>
         {!isFreeform ? (
           <Field className="min-w-0">
             <FieldLabel>Size</FieldLabel>

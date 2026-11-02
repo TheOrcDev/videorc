@@ -23480,26 +23480,27 @@ fn camera_circle_mask_applies(layout: &LayoutSettings) -> bool {
     matches!(camera_mask(layout), SceneMask::Circle)
 }
 
+/// The legacy FFmpeg leg of plan 213 I's camera look. Every FFmpeg Videorc
+/// ships is an LGPL build, so the chain may only name the filters every
+/// bundle policy requires (`ffmpegFilters` in protocol-fixtures/camera-look.json,
+/// mirrored by scripts/lib/camera-look-ffmpeg-filters.mjs): `format`,
+/// `scale` and `lutyuv`. 0.18.0 graded with FFmpeg's `eq`, which is
+/// GPL-only, and a take on this path with a non-neutral look failed to start
+/// with `No such filter: 'eq'`.
 fn camera_look_filter(layout: &LayoutSettings) -> String {
     let look = layout.camera_look;
     if look.is_neutral() {
         return String::new();
     }
-    // `eq` is GPL-only and absent from our LGPL bundles. Apply the same
-    // BT.709 luma law as the compositor directly in planar RGB instead;
-    // clamp only the final result and preserve the chroma key's alpha.
-    let luma = "(0.2126*r(X,Y)+0.7152*g(X,Y)+0.0722*b(X,Y))";
-    let channel = |name| {
-        format!(
-            "clip({}*{name}(X,Y)+({}-{})*{luma}+255*({}-({}-1)/2),0,255)",
-            look.saturation, look.contrast, look.saturation, look.brightness, look.contrast
-        )
-    };
+    // The float law in full-range BT.709 YUV: brightness and contrast move
+    // luma only (the 0.5 pivot is 127.5), saturation scales chroma about
+    // neutral, which is the RGB mix toward BT.709 luma the CPU and Metal
+    // paths compute. `lutyuv` builds one 8-bit lookup table per plane (the
+    // cost of the `eq` it replaces) and rounds every entry.
+    let luma_offset = 127.5 + look.brightness * 255.0;
     format!(
-        "format=gbrap,geq=r='{}':g='{}':b='{}':a='alpha(X,Y)',format=rgba,",
-        channel("r"),
-        channel("g"),
-        channel("b")
+        "format=rgba,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva444p,lutyuv=y='clip(round((val-127.5)*{}+({:.4})),0,255)':u='clip(round((val-128)*{}+128),0,255)':v='clip(round((val-128)*{}+128),0,255)',scale=in_range=full:out_range=full:in_color_matrix=bt709,format=rgba,",
+        look.contrast, luma_offset, look.saturation, look.saturation
     )
 }
 
@@ -39119,74 +39120,35 @@ mod tests {
             params.layout.layout_preset = preset.clone();
             let filter = video_filter(Some(1), &params, false);
             assert!(
-                filter.contains(&camera_look_filter(&params.layout)),
+                filter.contains(
+                    "lutyuv=y='clip(round((val-127.5)*1.1+(140.2500)),0,255)':u='clip(round((val-128)*0.8+128),0,255)':v='clip(round((val-128)*0.8+128),0,255)'"
+                ),
                 "{preset:?}: camera grade missing from {filter}"
             );
+            assert!(!filter.contains(",eq="), "{preset:?}: GPL eq in {filter}");
         }
     }
 
+    /// Spawns FFmpeg (CI has none on PATH), so it is ignored.
+    /// `smoke:recording-studio` runs it with `VIDEORC_BUNDLED_FFMPEG_PATH`
+    /// pinned to the bundled LGPL binary: a PATH ffmpeg with GPL `eq` is how
+    /// 0.18.0 shipped a chain the bundle refused (`No such filter: 'eq'`).
     #[test]
-    fn camera_look_ffmpeg_agrees_with_float_law() {
+    #[ignore = "spawns ffmpeg; run on recording-studio hosts"]
+    fn camera_look_ffmpeg_lut_agrees_with_float_law() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
                 .unwrap();
         let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
         let look: crate::protocol::CameraLook =
             serde_json::from_value(fixture["look"].clone()).unwrap();
-        assert_ffmpeg_camera_look(&palette, look);
-    }
-
-    #[test]
-    fn camera_look_ffmpeg_clamps_only_after_grading_and_preserves_key_alpha() {
-        let palette = [
-            [0, 0, 0],
-            [255, 255, 255],
-            [255, 0, 0],
-            [0, 255, 0],
-            [0, 0, 255],
-            [1, 254, 127],
-        ];
-        for brightness in [-0.25, 0.25] {
-            for contrast in [0.5, 1.5] {
-                for saturation in [0.0, 2.0] {
-                    assert_ffmpeg_camera_look(
-                        &palette,
-                        crate::protocol::CameraLook {
-                            brightness,
-                            contrast,
-                            saturation,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    fn camera_look_fixture_ffmpeg() -> std::path::PathBuf {
-        // Linux CI provisions this exact LGPL bundle before cargo test, but
-        // does not add it to PATH. Exercise the shipping filters in ordinary
-        // local/CI test runs too, while preserving an explicit binary override.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if std::env::var("VIDEORC_BUNDLED_FFMPEG_PATH")
-            .ok()
-            .is_none_or(|path| path.trim().is_empty())
-        {
-            let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../vendor/ffmpeg/linux-x64/bin/ffmpeg");
-            if bundled.is_file() {
-                return bundled;
-            }
-        }
-        crate::ffmpeg::default_ffmpeg_path().into()
-    }
-
-    fn assert_ffmpeg_camera_look(palette: &[[u8; 3]], look: crate::protocol::CameraLook) {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
         let width = palette.len() * 4;
         let mut frame = Vec::new();
+        // One row per chroma-key alpha, from fully keyed out to opaque.
         for alpha in [0, 63, 127, 255] {
-            for rgb in palette {
+            for rgb in &palette {
                 for _ in 0..4 {
                     frame.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
                 }
@@ -39252,19 +39214,116 @@ mod tests {
                     + look.brightness
                     + (look.contrast - 1.0) * (y - 0.5)
                     + look.saturation * (value - y))
-                    .clamp(0.0, 1.0)
                     * 255.0)
                     .round() as u8;
+                assert!(
+                    (1..255).contains(&expected),
+                    "fixture must stay away from clipping"
+                );
                 maximum = maximum.max(expected.abs_diff(output.stdout[index * 4 + channel]));
             }
         }
-        // RGB evaluation avoids the old eq path's RGB/YUV round-trip loss.
-        // Keep the same 2/255 precision bound as the CPU/Metal paths.
+        // Orchestrator call, plan 213 I, 2026-11-01: the legacy FFmpeg leg
+        // gets 8/255; the swscale RGB -> YUV -> RGB identity baseline alone
+        // is 2/255. CPU/Metal keep the strict 2/255 bound. Measured against
+        // the bundled FFmpeg 8.1.1, the lutyuv chain is 2/255 on this palette.
+        assert!(maximum <= 8, "FFmpeg lutyuv vs float law: {maximum}/255");
+        eprintln!("camera look FFmpeg lutyuv vs float law: {maximum}/255 (limit 8)");
+    }
+
+    fn camera_look_fixture_ffmpeg() -> std::path::PathBuf {
+        // Linux CI provisions this exact LGPL bundle but does not add it to
+        // PATH. Prefer it on a plain `--ignored` run too, while preserving an
+        // explicit binary override.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if std::env::var("VIDEORC_BUNDLED_FFMPEG_PATH")
+            .ok()
+            .is_none_or(|path| path.trim().is_empty())
+        {
+            let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vendor/ffmpeg/linux-x64/bin/ffmpeg");
+            if bundled.is_file() {
+                return bundled;
+            }
+        }
+        crate::ffmpeg::default_ffmpeg_path().into()
+    }
+
+    /// The filter names of one FFmpeg chain fragment: each comma-separated
+    /// segment up to its first `=`, with the commas inside single quotes
+    /// (the lutyuv expressions) left alone.
+    fn ffmpeg_chain_filter_names(chain: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut segment = String::new();
+        let mut quoted = false;
+        for ch in chain.chars() {
+            match ch {
+                '\'' => {
+                    quoted = !quoted;
+                    segment.push(ch);
+                }
+                ',' if !quoted => names.push(std::mem::take(&mut segment)),
+                _ => segment.push(ch),
+            }
+        }
+        names.push(segment);
+        names
+            .into_iter()
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.split('=').next().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// Every shipped FFmpeg is an LGPL build: the chain may only name the
+    /// filters every bundle policy requires (`ffmpegFilters` in the fixture,
+    /// mirrored by scripts/lib/camera-look-ffmpeg-filters.mjs), so a GPL
+    /// filter such as `eq` (0.18.0: `No such filter: 'eq'`) cannot return.
+    #[test]
+    fn camera_look_chain_names_only_bundle_policy_filters() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
+                .unwrap();
+        let policy: Vec<String> = serde_json::from_value(fixture["ffmpegFilters"].clone()).unwrap();
+        assert_eq!(policy, ["format", "scale", "lutyuv"]);
+        assert!(!policy.iter().any(|name| name == "eq"), "eq is GPL-only");
+        let fixture_look: crate::protocol::CameraLook =
+            serde_json::from_value(fixture["look"].clone()).unwrap();
+        for look in [
+            fixture_look,
+            crate::protocol::CameraLook {
+                brightness: -0.25,
+                contrast: 0.5,
+                saturation: 0.0,
+            },
+            crate::protocol::CameraLook {
+                brightness: 0.25,
+                contrast: 1.5,
+                saturation: 2.0,
+            },
+        ] {
+            let mut layout = crate::protocol::default_layout_settings();
+            layout.camera_look = look;
+            let chain = camera_look_filter(&layout);
+            let names = ffmpeg_chain_filter_names(&chain);
+            assert_eq!(
+                names,
+                ["format", "scale", "format", "lutyuv", "scale", "format"],
+                "{chain}"
+            );
+            for name in &names {
+                assert!(
+                    policy.contains(name),
+                    "{name} is outside the bundle policy: {chain}"
+                );
+            }
+            assert!(!chain.contains("eq="), "{chain}");
+        }
         assert!(
-            maximum <= 2,
-            "FFmpeg camera look vs float law: {maximum}/255"
+            ffmpeg_chain_filter_names(&camera_look_filter(
+                &crate::protocol::default_layout_settings()
+            ))
+            .is_empty()
         );
-        eprintln!("camera look FFmpeg vs float law: {maximum}/255 (limit 2)");
     }
 
     /// The FFmpeg-leg twin of scene_geometry's realistic-palette pin: under
@@ -39353,7 +39412,7 @@ mod tests {
         let key_at = layer.find("chromakey=").expect("scene layer keys");
         let scale_at = layer.find("scale=").expect("scene layer scales");
         assert!(key_at < scale_at, "key must run before scaling: {layer}");
-        let look_at = layer.find("geq=r=").expect("camera look");
+        let look_at = layer.find("lutyuv=").expect("camera look");
         assert!(
             key_at < look_at && look_at < layer.rfind("scale=").unwrap(),
             "key, look, then frame scale: {layer}"
@@ -39367,7 +39426,7 @@ mod tests {
         let key_at = chain.find("chromakey=").expect("camera chain keys");
         let scale_at = chain.find("scale=").expect("camera chain scales");
         assert!(key_at < scale_at, "key must run before scaling: {chain}");
-        let look_at = chain.find("geq=r=").expect("camera look");
+        let look_at = chain.find("lutyuv=").expect("camera look");
         assert!(
             key_at < look_at && look_at < chain.rfind("scale=").unwrap(),
             "key, look, then frame scale: {chain}"
@@ -39385,7 +39444,7 @@ mod tests {
             180,
             &params,
         );
-        assert!(!screen.contains("geq=r="), "the screen must stay ungraded");
+        assert!(!screen.contains("lutyuv="), "the screen must stay ungraded");
     }
 
     #[test]

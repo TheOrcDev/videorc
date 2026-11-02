@@ -634,6 +634,15 @@ fn camera_is_builtin(device_type: &str, is_continuity: bool) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn continuity_camera_label(name: &str) -> String {
+    if name.to_ascii_lowercase().contains("iphone") {
+        name.to_string()
+    } else {
+        format!("{name} · iPhone camera")
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn camera_device_type_label(device_type: &str) -> &str {
     match device_type {
         "AVCaptureDeviceTypeContinuityCamera" => "iPhone camera",
@@ -715,7 +724,7 @@ mod macos {
             );
             let transport = unsafe { camera.transportType() };
             let name = if is_continuity {
-                format!("{name} · iPhone camera")
+                continuity_camera_label(&name)
             } else {
                 name
             };
@@ -940,6 +949,20 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuity_camera_label_only_adds_the_tag_when_iphone_is_absent() {
+        for (name, expected) in [
+            ("iPhone Camera", "iPhone Camera"),
+            ("Uroš's iPhone Camera", "Uroš's iPhone Camera"),
+            ("IPHONE Camera", "IPHONE Camera"),
+            ("My iPhOnE", "My iPhOnE"),
+            ("Orc phone", "Orc phone · iPhone camera"),
+            ("", " · iPhone camera"),
+        ] {
+            assert_eq!(continuity_camera_label(name), expected, "name: {name:?}");
+        }
+    }
 
     #[test]
     fn camera_defaults_prefer_the_system_then_builtin_then_discovery_order() {
