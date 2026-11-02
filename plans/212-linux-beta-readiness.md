@@ -3108,3 +3108,42 @@ without cleanup signals or leaked descendants.
 No full local backend suite or physical app smoke is claimed for this
 test-only follow-up. The earlier strict GLES and recording failures remain
 open, and no Beta candidate is accepted or published.
+
+### Microphone stall diagnostics and current source CI, 2026-11-02
+
+macOS Rust job `125454302289` at `68d34a7e` reports 4,400 backend passes,
+five failures and 22 ignored tests. Two camera fixtures cannot launch
+FFmpeg, two strict Metal golden comparisons fail, and the microphone stall
+test finds only 47,520 of 48,000 expected frames before the deliberate stall.
+Its inspected post-stall second is intact. Whole-run producer lateness
+cannot identify the cause of that earlier 10 ms mismatch. Job `125478204350`
+at `d5e38235` passes the microphone test but retains the other four failures
+(4,401 passed, 22 ignored); this does not waive the intermittent audio failure.
+Both jobs pass the separate 85-test library target.
+
+The microphone stall test now retains the existing bounded packet/write
+trace for its exact pre-stall assertion interval, frames 24,000 through
+71,999. Original sample assertions, autonomous producer timing, playout
+budgets and production code are unchanged. Five repetitions before this
+diagnostic change pass on Linux. With the trace enabled, four of five pass;
+the first has 1,440 zero frames (30 ms) in both post-stall lanes and 1,440
+overlap frames in that counter window. Its pre-stall interval is intact.
+All nine completed trace observations retain the full pre-stall interval
+and its predecessor/successor records, without truncation or zeros.
+
+The full mixer test group passes all 56 tests with zero ignored tests.
+Compilation and Rust formatting pass; all 258 native input hashes and the
+test executable hash match. Owned cleanup finishes without signals or
+leaked descendants. The verification command still exits unsuccessfully
+because of the failed first repetition; later passes do not erase it.
+Private reports are under `microphone-prestall-reproduce-nm2j59hj/` and
+`microphone-prestall-trace-1curfmqv/` in the evidence root. This change adds
+diagnostic coverage, not an audio fix or macOS/physical acceptance. No full
+backend suite or app smoke is claimed for this test-only change.
+
+Windows source job `125478646014` at `d5e38235` repeats the missing-FFmpeg
+fixture failure: 98 passed, two failed and four ignored in the first
+`ffmpeg_` stability pass. The three full-suite passes and later gates never
+run. The six prepared workflow fixes remain unpublished because the GitHub
+credential lacks `workflow` scope. Shader, audio/motion, physical acceptance
+and release gates remain open; no Beta is accepted or published.

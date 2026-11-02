@@ -10195,12 +10195,15 @@ mod mix_tests {
         for options in [SessionAudioOptions::default(), system_options()] {
             let epoch = Instant::now() + Duration::from_millis(100);
             let microphone = signal_packets(epoch, 0, 48_000 * 30, 480, |_| (0.2, 0.2));
-            let (bus, evidence) = start_observed_bus(
+            // Keep packet/write evidence for the exact "before" assertion too:
+            // run-wide lateness cannot attribute a gap in this interval.
+            let (bus, evidence) = start_observed_bus_with_trace(
                 epoch,
                 Some(microphone),
                 AudioProcessingSettings::default(),
                 options,
                 Some((72_000, Duration::from_secs(3))),
+                Some((24_000, 72_000)),
             )
             .await;
             let (losses, stalls, input_state, caught_up) = observe_until_stall_reported(&bus).await;
