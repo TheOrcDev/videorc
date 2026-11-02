@@ -3273,8 +3273,10 @@ One finding against #1047 is open and unfixed. At saturation 2.0, the UI
 maximum, saturated primaries leave the float law by up to 53 to 61/255,
 because U and V clip per plane before conversion back to RGB. Saturation
 0.0 stays within 1/255 and the shared fixture palette within 2/255; every
-alpha value is preserved. The extremes check is a private probe and is not
-committed.
+alpha value is preserved. This branch's eight-combination slider-extremes
+fixture was dropped with the `geq` grade, because main's chain fails its
+2/255 bound at saturation 2.0; the extremes check above is a private probe
+and is not committed.
 
 The branch's per-filter checks then failed on macOS and Windows. Their
 bundle gates matched a filter name anywhere in `ffmpeg -filters`, so
