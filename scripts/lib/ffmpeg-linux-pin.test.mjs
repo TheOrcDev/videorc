@@ -84,6 +84,8 @@ describe('Linux FFmpeg capability policy', () => {
     ' ... setpts           V->V       Set PTS for the output video frame.',
     ' ... asetpts          A->A       Set PTS for the output audio frame.',
     ' ... format           V->V       Convert the input video to one of the specified pixel formats.',
+    ' ... scale            V->V       Scale the input video size and/or convert the image format.',
+    ' TS. lutyuv           V->V       Compute and apply a lookup table to the YUV input video.',
     ' ... hwupload         V->V       Upload a normal frame to a hardware frame'
   ].join('\n')
   const muxersOutput = [
@@ -125,6 +127,8 @@ describe('Linux FFmpeg capability policy', () => {
       'setpts',
       'asetpts',
       'format',
+      'scale',
+      'lutyuv',
       'hwupload'
     ])
   })
@@ -147,6 +151,20 @@ describe('Linux FFmpeg capability policy', () => {
       }).problems.join('\n'),
       /configuration line/
     )
+  })
+
+  it('fails closed on a missing camera look filter (plan 213 I)', () => {
+    const withoutLutyuv = assessLinuxFfmpegCapabilities({
+      versionOutput,
+      encodersOutput,
+      filtersOutput: filtersOutput
+        .split('\n')
+        .filter((line) => !/ lutyuv /.test(line))
+        .join('\n'),
+      ...ring
+    })
+    assert.deepEqual(withoutLutyuv.problems, ['missing filter lutyuv'])
+    assert.ok(!/ eq /.test(filtersOutput), 'the LGPL listing has no GPL eq filter')
   })
 
   it('fails closed on a missing filter or a missing -filters listing (plan 119 S13)', () => {

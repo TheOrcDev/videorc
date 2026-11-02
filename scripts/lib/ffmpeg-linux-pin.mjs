@@ -1,3 +1,4 @@
+import { CAMERA_LOOK_FFMPEG_FILTERS } from './camera-look-ffmpeg-filters.mjs'
 import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
 
 const AUTOBUILD_DOWNLOAD =
@@ -15,9 +16,13 @@ export const REQUIRED_LINUX_FFMPEG_CONFIGURATION = [
 
 export const REQUIRED_LINUX_H264_ENCODERS = ['h264_vaapi', 'libopenh264']
 
-/** The filters Clean cut renders with (plan 119 S13), plus `hwupload` for the
- * VAAPI arm. Required from `ffmpeg -filters`; a missing listing fails closed. */
-export const REQUIRED_LINUX_FFMPEG_FILTERS = [...CLEAN_CUT_FFMPEG_FILTERS, 'hwupload']
+/** The filters Clean cut renders with (plan 119 S13), the full-range YUV
+ * lookup-table chain the legacy recording path grades the camera look with
+ * (plan 213 I; never the GPL-only `eq`), plus `hwupload` for the VAAPI arm.
+ * Required from `ffmpeg -filters`; a missing listing fails closed. */
+export const REQUIRED_LINUX_FFMPEG_FILTERS = [
+  ...new Set([...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS, 'hwupload'])
+]
 
 export function lastDayOfMonth(year, month) {
   return new Date(Date.UTC(year, month, 0)).getUTCDate()

@@ -4,6 +4,7 @@ import { describe, it } from 'node:test'
 
 import {
   buildRecordingStudioGateSteps,
+  bundledFfmpegPath,
   formatRecordingStudioGatePlan
 } from './recording-studio-gates.mjs'
 
@@ -19,6 +20,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend live layout tests',
       'backend scene layout tests',
       'backend recording pipeline tests',
+      'backend camera look parity against the bundled FFmpeg',
       'backend audio pipeline tests',
       'backend noise cleanup tests',
       'scene switch recording and stream pixel artifacts',
@@ -76,6 +78,16 @@ describe('buildRecordingStudioGateSteps', () => {
     ])
     assert.deepEqual(steps[1].args, ['test:scripts'])
     assert.deepEqual(steps[2].args, ['probe:live-audio-controls'])
+    assert.deepEqual(steps[6].args, [
+      'test',
+      '-p',
+      'videorc-backend',
+      'recording::tests::camera_look_ffmpeg_lut_agrees_with_float_law',
+      '--',
+      '--ignored',
+      '--exact'
+    ])
+    assert.equal(steps[6].env.VIDEORC_BUNDLED_FFMPEG_PATH, bundledFfmpegPath())
     assert.deepEqual(steps.at(-28).args, ['smoke:captions-contract'])
     assert.deepEqual(steps.at(-27).args, ['smoke:captions-live'])
     assert.deepEqual(steps.at(-26).args, ['smoke:noise-cleanup'])
@@ -111,6 +123,31 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.deepEqual(steps.at(-1).args, ['smoke:system-audio'])
   })
 
+  it('pins the camera look parity test to the bundled FFmpeg, never PATH (plan 213 I)', () => {
+    const steps = buildRecordingStudioGateSteps({
+      includeAppSmoke: false,
+      bundledFfmpeg: '/bundle/bin/ffmpeg'
+    })
+    const parity = steps.find((step) => /camera look parity/.test(step.label))
+    assert.ok(parity)
+    assert.equal(parity.command, 'cargo')
+    assert.ok(parity.args.includes('--ignored'))
+    assert.ok(parity.args.includes('--exact'))
+    assert.deepEqual(parity.env, { VIDEORC_BUNDLED_FFMPEG_PATH: '/bundle/bin/ffmpeg' })
+    assert.equal(
+      bundledFfmpegPath({ repoRoot: '/repo', platform: 'darwin' }),
+      '/repo/vendor/ffmpeg/current/bin/ffmpeg'
+    )
+    assert.equal(
+      bundledFfmpegPath({ repoRoot: '/repo', platform: 'linux' }),
+      '/repo/vendor/ffmpeg/linux-x64/bin/ffmpeg'
+    )
+    assert.match(
+      bundledFfmpegPath({ repoRoot: 'C:\\repo', platform: 'win32' }),
+      /windows-x64[\\/]bin[\\/]ffmpeg\.exe$/
+    )
+  })
+
   it('can include the heavier native preview layout-stress smoke', () => {
     const steps = buildRecordingStudioGateSteps({ includeDeviceSmoke: true })
     const interactionDeviceSmoke = steps.at(-3)
@@ -143,6 +180,10 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /test:scripts/)
     assert.match(report, /probe:live-audio-controls/)
     assert.match(report, /live_layout::tests::/)
+    assert.match(
+      report,
+      /VIDEORC_BUNDLED_FFMPEG_PATH=\S+ cargo test -p videorc-backend recording::tests::camera_look_ffmpeg_lut_agrees_with_float_law -- --ignored --exact/
+    )
     assert.match(report, /smoke:freeform-editor/)
     assert.match(report, /smoke:captions-contract/)
     assert.match(report, /smoke:captions-live/)
