@@ -2373,6 +2373,8 @@ pub const EDITOR_DRAFT_REFUSED_CODE: &str = "editor-draft-refused";
 pub struct EditorDraft {
     pub source_id: String,
     pub transform: Option<CameraTransform>,
+    /// An ⌥-drag crop's live crop (plan 213 G2); `None` keeps the committed one.
+    pub crop: Option<crate::protocol::SceneCropDraft>,
     pub chrome: EditorChrome,
     pub refreshed_at: Instant,
     pub release_at_revision: Option<u64>,
@@ -2442,9 +2444,10 @@ fn editor_draft_applies(frame_consumer: CompositorFrameConsumer, has_stream_outp
 }
 
 /// Replace the named source's rect with the draft rect, keeping the committed
-/// crops (the same rule as `scene::apply_transform_override`). Other sources
-/// and a snapshot without that source are untouched, and a chrome-only draft
-/// (no `transform`) leaves every rect as committed.
+/// crops (the same rule as `scene::apply_transform_override`) unless the draft
+/// is an ⌥-drag crop, whose crop replaces them too (plan 213 G2). Other
+/// sources and a snapshot without that source are untouched, and a
+/// chrome-only draft (no `transform`) leaves every rect as committed.
 fn snapshot_with_editor_draft(
     snapshot: Option<CompositorSceneSnapshot>,
     draft: Option<&EditorDraft>,
@@ -2464,8 +2467,37 @@ fn snapshot_with_editor_draft(
         source.transform.y = transform.y;
         source.transform.width = transform.width;
         source.transform.height = transform.height;
+        if let Some(crop) = draft.crop {
+            source.transform.crop_left = crop.crop_left;
+            source.transform.crop_top = crop.crop_top;
+            source.transform.crop_right = crop.crop_right;
+            source.transform.crop_bottom = crop.crop_bottom;
+        }
     }
     Some(snapshot)
+}
+
+/// A draft crop under the same 95% ceiling per axis as a committed one, so a
+/// live crop never shows what the commit would refuse.
+fn sanitize_editor_draft_crop(
+    crop: crate::protocol::SceneCropDraft,
+) -> crate::protocol::SceneCropDraft {
+    let transform = crate::scene::sanitize_crop(SceneTransform {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+        crop_left: crop.crop_left,
+        crop_top: crop.crop_top,
+        crop_right: crop.crop_right,
+        crop_bottom: crop.crop_bottom,
+    });
+    crate::protocol::SceneCropDraft {
+        crop_left: transform.crop_left,
+        crop_top: transform.crop_top,
+        crop_right: transform.crop_right,
+        crop_bottom: transform.crop_bottom,
+    }
 }
 
 impl CompositorRuntime {
@@ -2496,6 +2528,7 @@ impl CompositorRuntime {
         self.editor_draft = Some(EditorDraft {
             source_id: params.source_id,
             transform: params.transform.map(sanitize_editor_draft_transform),
+            crop: params.crop.map(sanitize_editor_draft_crop),
             chrome: params.chrome,
             refreshed_at: now,
             release_at_revision: None,
@@ -2698,6 +2731,7 @@ mod editor_draft_tests {
                 width: 0.3,
                 height: 0.4,
             }),
+            crop: None,
             chrome: chrome(),
         }
     }
@@ -2716,6 +2750,7 @@ mod editor_draft_tests {
             transform: params(source_id)
                 .transform
                 .map(sanitize_editor_draft_transform),
+            crop: None,
             chrome: chrome(),
             refreshed_at: now,
             release_at_revision: None,
@@ -2775,6 +2810,43 @@ mod editor_draft_tests {
             snapshot_with_editor_draft(Some(snapshot(3)), None),
             Some(snapshot(3))
         );
+    }
+
+    #[test]
+    fn crop_editor_draft_shows_its_crop_under_the_committed_ceiling() {
+        // Plan 213 G2: an ⌥-drag on the screen's edge drafts its crop with
+        // its rect, so the Preview shows the crop before the commit lands.
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(3));
+        runtime.set_editor_draft(
+            SceneEditorDraftParams {
+                crop: Some(crate::protocol::SceneCropDraft {
+                    crop_left: 0.25,
+                    crop_top: 0.0,
+                    crop_right: 0.9,
+                    crop_bottom: f64::NAN,
+                }),
+                ..params("source:screen")
+            },
+            now,
+        );
+        let drafted = snapshot_with_editor_draft(Some(snapshot(3)), runtime.editor_draft.as_ref())
+            .expect("snapshot survives");
+        let screen = &drafted.scene.as_ref().unwrap().sources[0];
+        assert_eq!(
+            (screen.transform.x, screen.transform.width),
+            (0.1, 0.3),
+            "the rect is drafted with the crop"
+        );
+        assert!(
+            screen.transform.crop_left + screen.transform.crop_right <= 0.95 + 1e-9,
+            "the pair keeps the committed ceiling: {:?}",
+            screen.transform
+        );
+        assert!(screen.transform.crop_left > 0.2 && screen.transform.crop_right > 0.6);
+        assert_eq!(screen.transform.crop_top, 0.0);
+        assert_eq!(screen.transform.crop_bottom, 0.0, "NaN is no crop");
     }
 
     #[test]
@@ -13385,6 +13457,9 @@ fn source_iso_snapshot(
     layout.camera_shape = crate::protocol::CameraShape::Rectangle;
     layout.camera_chroma_key_enabled = false;
     layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::default();
+    // The Screen file is the raw source for editing (plan 213 D5): whole,
+    // never filled or cropped like the scene's screen.
+    layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::default();
     Some(CompositorSceneSnapshot {
         synthetic_hard_content: false,
         selected_sources: snapshot.selected_sources.clone(),
@@ -13828,6 +13903,75 @@ mod tests {
         );
         assert_eq!(camera.layout.camera_look, snapshot.layout.camera_look);
         assert_eq!(camera.revision, snapshot.revision);
+    }
+
+    #[test]
+    fn source_iso_screen_leg_records_the_whole_uncropped_screen() {
+        // Plan 213 G5 (D5): the Screen file is the raw source for editing.
+        // A scene that crops its screen and fills it in landscape still
+        // records the whole screen, uncropped and fitted, on the Screen leg,
+        // whether the selection is known or only the scene's own source.
+        use crate::scene_geometry::screen_crop_fixture::{CYAN, MAGENTA, RED, WHITE, sample_pixel};
+        let mut cropped = screen_crop_fixture_snapshot();
+        cropped.layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::Fill;
+        cropped.layout.source_transform_overrides.insert(
+            "source:base".to_string(),
+            crate::protocol::SourceTransformOverride {
+                crop_left: 0.25,
+                crop_top: 0.25,
+                crop_right: 0.25,
+                crop_bottom: 0.25,
+                ..crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x: 0.25,
+                    y: 0.25,
+                    width: 0.5,
+                    height: 0.5,
+                })
+            },
+        );
+        let mut selected = cropped.clone();
+        selected.selected_sources = Some(SourceSelection {
+            screen_id: Some("screen-1".to_string()),
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        });
+        let frame = screen_crop_fixture_frame();
+        for snapshot in [cropped, selected] {
+            let iso = source_iso_snapshot(Some(&snapshot), SourceIsoRole::Screen)
+                .expect("screen ISO snapshot");
+            let source = &iso.scene.as_ref().expect("scene").sources[0];
+            assert_eq!(source.transform, full_frame_transform(), "no box, no crop");
+            assert_eq!(
+                iso.layout.horizontal_screen_framing,
+                crate::protocol::HorizontalScreenFraming::Fit
+            );
+            assert!(iso.layout.source_transform_overrides.is_empty());
+            assert_eq!(
+                scene_source_fit(&SceneSourceKind::Screen, &iso.layout),
+                SceneFit::Contain
+            );
+
+            // And it draws so: every edge of the picture reaches the file.
+            let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+            render_compositor_yuv420p_frame(screen_crop_inputs(&iso, &frame, 128, 72), &mut bytes);
+            for (point, [r, g, b]) in [
+                ((0.05, 0.50), RED),
+                ((0.95, 0.50), WHITE),
+                ((0.50, 0.05), MAGENTA),
+                ((0.50, 0.95), CYAN),
+            ] {
+                let (x, y) = sample_pixel(point, 128, 72);
+                let (expected, _, _) = rgb_to_yuv(r, g, b);
+                let luma = bytes[y * 128 + x];
+                assert!(
+                    (i16::from(luma) - i16::from(expected)).abs() <= 8,
+                    "the Screen file shows {:?} at {point:?}: Y {luma} vs {expected}",
+                    [r, g, b]
+                );
+            }
+        }
     }
 
     #[test]
@@ -14991,6 +15135,176 @@ mod tests {
             partial_alpha > 0 && partial_alpha < 255,
             "fixture pixel must ramp, got {partial_alpha}"
         );
+    }
+
+    /// Plan 213 G1: the cropped-screen fixture as a Freeform scene on a
+    /// Screen only canvas, the one screen source carrying the fixture's box
+    /// and crop.
+    fn screen_crop_fixture_snapshot() -> CompositorSceneSnapshot {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::ScreenOnly;
+        layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        let transform = crate::scene_geometry::screen_crop_fixture::transform();
+        CompositorSceneSnapshot {
+            synthetic_hard_content: false,
+            selected_sources: None,
+            revision: 1,
+            scene: Some(Scene {
+                id: "scene:screen-crop".to_string(),
+                name: "Screen crop".to_string(),
+                sources: vec![SceneSource {
+                    id: "source:base".to_string(),
+                    name: "Screen capture".to_string(),
+                    kind: SceneSourceKind::Screen,
+                    device_id: Some("screen-1".to_string()),
+                    transform: transform.clone(),
+                    default_transform: transform,
+                    visible: true,
+                    locked: false,
+                }],
+                outputs: Vec::new(),
+                background: None,
+            }),
+            layout,
+            active_screen: None,
+        }
+    }
+
+    fn screen_crop_fixture_frame() -> FrameHandle<PreviewScreenPixelFormat> {
+        use crate::scene_geometry::screen_crop_fixture::{
+            SOURCE_HEIGHT, SOURCE_WIDTH, source_bgra,
+        };
+        crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+            storage: crate::frame_store::FrameStorage::untracked(),
+            sequence: 1,
+            width: SOURCE_WIDTH,
+            height: SOURCE_HEIGHT,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: source_bgra(),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            source_d3d11_texture: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        })
+    }
+
+    fn screen_crop_inputs<'a>(
+        snapshot: &'a CompositorSceneSnapshot,
+        screen_frame: &'a FrameHandle<PreviewScreenPixelFormat>,
+        width: u32,
+        height: u32,
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence: 1,
+            width,
+            height,
+            snapshot: Some(snapshot),
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: Some(screen_frame),
+            caption_overlay: None,
+            highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
+        }
+    }
+
+    /// Every fixture sample's Y, U and V on a YUV420p frame, within the
+    /// rounding two linear colour conversions leave.
+    fn assert_screen_crop_samples(path: &str, yuv: &[u8], width: u32, height: u32) {
+        use crate::scene_geometry::screen_crop_fixture::{expected_samples, sample_pixel};
+        assert_eq!(
+            yuv.len(),
+            raw_yuv420p_len(width, height),
+            "{path}: frame size"
+        );
+        let (w, h) = (width as usize, height as usize);
+        let (chroma_w, chroma_h) = (w.div_ceil(2), h.div_ceil(2));
+        for (point, [r, g, b]) in expected_samples() {
+            let (x, y) = sample_pixel(point, width, height);
+            let expected = rgb_to_yuv(r, g, b);
+            let chroma = (y / 2) * chroma_w + x / 2;
+            let actual = (
+                yuv[y * w + x],
+                yuv[w * h + chroma],
+                yuv[w * h + chroma_w * chroma_h + chroma],
+            );
+            let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 8;
+            assert!(
+                close(actual.0, expected.0)
+                    && close(actual.1, expected.1)
+                    && close(actual.2, expected.2),
+                "{path}: at {point:?} ({x}, {y}) expected {:?} (YUV {expected:?}), got YUV {actual:?}",
+                [r, g, b]
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_compositor_draws_the_screen_crop_fixture() {
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+        render_compositor_yuv420p_frame(screen_crop_inputs(&snapshot, &frame, 128, 72), &mut bytes);
+        assert_screen_crop_samples("cpu", &bytes, 128, 72);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_compositor_draws_the_screen_crop_fixture_or_skips() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let composed = try_gpu_compose(
+            Some(&mut gpu),
+            &screen_crop_inputs(&snapshot, &frame, 128, 72),
+            true,
+        )
+        .expect("the cropped screen composes on Metal");
+        assert_screen_crop_samples("metal", &composed.yuv, 128, 72);
+    }
+
+    /// The aux leg (a record + stream session's stream leg on macOS) re-renders
+    /// the program snapshot at its own canvas through its own publisher: the
+    /// crop must land there too, on the CPU fallback and on Metal.
+    #[test]
+    fn auxiliary_leg_draws_the_screen_crop_fixture() {
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut gpu = new_gpu_compositor(false);
+        let mut legs = vec![("aux cpu", None)];
+        if let Some(gpu) = gpu.as_mut() {
+            legs.push(("aux metal", Some(gpu)));
+        } else {
+            eprintln!("aux metal: skipped, no GPU compositor here");
+        }
+        for (path, gpu) in legs {
+            let store = Arc::new(std::sync::Mutex::new(FrameStore::new(2)));
+            publish_auxiliary_compositor_frame(
+                1,
+                Instant::now(),
+                Instant::now(),
+                store.clone(),
+                screen_crop_inputs(&snapshot, &frame, 64, 36),
+                gpu,
+                CompositorFrameConsumer::RawYuvEncoder,
+                &[],
+                3,
+            );
+            let published = store.lock().unwrap().latest().expect("aux frame");
+            assert_eq!((published.width, published.height), (64, 36), "{path}");
+            assert_screen_crop_samples(path, &published.bytes, 64, 36);
+        }
     }
 
     #[test]
@@ -22987,6 +23301,7 @@ mod buddy_sprite_tests {
         EditorDraft {
             source_id: source_id.to_string(),
             transform,
+            crop: None,
             chrome: EditorChrome {
                 selected: CameraTransform {
                     x: 0.0,
@@ -23962,6 +24277,7 @@ mod banner_tests {
                 width: dragged.w,
                 height: dragged.h,
             }),
+            crop: None,
             chrome: chrome.clone(),
             refreshed_at: now,
             release_at_revision: None,

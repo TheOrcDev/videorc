@@ -689,6 +689,8 @@ export const LAYOUT_PRESET_VALUES = [
 export type CameraTransformMode = 'preset' | 'custom'
 export type SideBySideSplit = '50-50' | '60-40' | '70-30'
 export type VerticalScreenFraming = 'fill' | 'fit'
+/** The landscape screen scenes' framing (plan 213 G3); Fit by default. */
+export type HorizontalScreenFraming = 'fit' | 'fill'
 export type ArrangementMode = 'preset' | 'freeform'
 export type SideBySideCameraSide = 'left' | 'right'
 
@@ -698,6 +700,20 @@ export interface CameraTransform {
   width: number
   height: number
 }
+
+/** A screen's crop, as fractions of its own picture (plan 213 G2). */
+export interface SourceCrop {
+  cropLeft: number
+  cropTop: number
+  cropRight: number
+  cropBottom: number
+}
+
+/**
+ * One source's freeform box. The screen also keeps its crop; a box with no
+ * crop (and every camera, whose crop comes from zoom and pan) omits it.
+ */
+export interface SourceTransformOverride extends CameraTransform, Partial<SourceCrop> {}
 
 export interface SourceVisibility {
   camera: boolean
@@ -749,6 +765,13 @@ export interface LayoutSettings {
    */
   verticalScreenFraming: VerticalScreenFraming
   /**
+   * How the SCREEN is framed in the landscape screen scenes (Screen + camera,
+   * Screen only, and Freeform over them), plan 213 G3. 'fit' (default) shows
+   * the whole screen; 'fill' fills the frame and centre-crops the rest.
+   * Side by side always fills; vertical scenes ignore it.
+   */
+  horizontalScreenFraming: HorizontalScreenFraming
+  /**
    * 'preset' (default) composes the fixed layoutPreset arrangement.
    * 'freeform' composes the screen + camera base and applies
    * sourceTransformOverrides: the "arrange it yourself" mode. layoutPreset
@@ -759,7 +782,7 @@ export interface LayoutSettings {
    * Per-source transforms for freeform, keyed by the stable scene source id
    * ('source:base', 'source:camera'). Empty means the base arrangement.
    */
-  sourceTransformOverrides: Record<string, CameraTransform>
+  sourceTransformOverrides: Record<string, SourceTransformOverride>
   /** Independent visual roles; legacy layouts show both. */
   sourceVisibility?: SourceVisibility
 }
@@ -947,6 +970,8 @@ export interface EditorChrome {
 export interface SceneEditorDraftParams {
   sourceId: string
   transform?: CameraTransform
+  /** An ⌥-drag crop's live crop (plan 213 G2); absent keeps the committed crop. */
+  crop?: SourceCrop
   chrome: EditorChrome
 }
 

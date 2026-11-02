@@ -13661,6 +13661,7 @@ function smokePreviewSceneParams(
     sideBySideSplit: '60-40',
     sideBySideCameraSide: 'right',
     verticalScreenFraming: 'fill',
+    horizontalScreenFraming: 'fit',
     arrangementMode: 'preset',
     sourceTransformOverrides: {}
   }

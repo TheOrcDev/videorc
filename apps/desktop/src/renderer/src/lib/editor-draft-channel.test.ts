@@ -142,6 +142,29 @@ describe('editor draft channel', () => {
     expect(h.clear).not.toHaveBeenCalled()
   })
 
+  it('an ⌥-drag crop carries its crop on every sample and on the release (plan 213 G2)', async () => {
+    const h = harness()
+    const crop = { cropLeft: 0.25, cropTop: 0, cropRight: 0, cropBottom: 0 }
+    h.channel.begin('source:base')
+    // A ghost spread from a scene transform: only the four crop fields go out.
+    h.channel.sample({ ...draft(0.1), crop: { ...crop, x: 9 } as typeof crop })
+    expect(h.sets[0]).toMatchObject({ sourceId: 'source:base', crop })
+    expect(Object.keys(h.sets[0]!.crop!)).toEqual([
+      'cropLeft',
+      'cropTop',
+      'cropRight',
+      'cropBottom'
+    ])
+    await h.settle(0)
+    h.channel.release(rect(0.2), { ...crop, cropLeft: 0.3 })
+    expect(h.sets[1]).toMatchObject({ transform: rect(0.2), crop: { ...crop, cropLeft: 0.3 } })
+    // A plain move or resize sends no crop at all.
+    await h.settle(1)
+    h.channel.begin('source:base')
+    h.channel.sample(draft(0.4))
+    expect('crop' in h.sets[2]!).toBe(false)
+  })
+
   it('release sends one final set with the rounded rect and never clears', async () => {
     const h = harness()
     h.channel.begin('source:camera')

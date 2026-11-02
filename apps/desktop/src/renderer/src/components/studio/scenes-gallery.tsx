@@ -225,22 +225,34 @@ export function ScenesGallery(): ReactElement {
  * Fill / Fit for the screen in vertical scenes. Fill is the short-form look
  * (the screen fills its area and is cropped); Fit keeps the whole screen
  * visible. A SegmentedControl, with no Tabs primitive, like the mode toggle.
+ * The landscape screen scenes offer the same choice (plan 213 G3), Fit by
+ * default there: a screen of another shape fills the frame with Fill.
  */
 export function ScreenFramingControl({
   value,
+  orientation = 'vertical',
   onChange
 }: {
   value: VerticalScreenFraming
+  orientation?: 'vertical' | 'horizontal'
   onChange: (value: VerticalScreenFraming) => void
 }): ReactElement {
   return (
-    <div className="flex items-center justify-between gap-3" data-slot="screen-framing-control">
+    <div
+      className="flex items-center justify-between gap-3"
+      data-slot="screen-framing-control"
+      data-videorc-screen-framing={orientation}
+    >
       <div className="flex min-w-0 flex-col gap-0.5">
         <span className="text-sm font-medium">Screen</span>
         <span className="text-xs text-muted-foreground">
-          {value === 'fit'
-            ? 'Shows your whole screen. The camera takes the rest.'
-            : 'Fills the area and crops the sides of your screen.'}
+          {orientation === 'horizontal'
+            ? value === 'fit'
+              ? 'Shows your whole screen. A screen of another shape gets bars.'
+              : "Fills the frame and crops the edges of your screen that don't fit."
+            : value === 'fit'
+              ? 'Shows your whole screen. The camera takes the rest.'
+              : 'Fills the area and crops the sides of your screen.'}
         </span>
       </div>
       <SegmentedControl

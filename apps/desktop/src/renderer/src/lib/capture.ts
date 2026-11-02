@@ -20,7 +20,9 @@ import type {
   SideBySideSplit,
   SimulcastParams,
   StreamOutputOrientation,
+  SourceCrop,
   SourceSelection,
+  SourceTransformOverride,
   StreamingSettings,
   StreamPlatform,
   StoreManualStreamKeyResult,
@@ -1469,6 +1471,7 @@ export const defaultCaptureConfig: CaptureConfig = {
     sideBySideSplit: '70-30',
     sideBySideCameraSide: 'right',
     verticalScreenFraming: 'fill',
+    horizontalScreenFraming: 'fit',
     arrangementMode: 'preset',
     sourceTransformOverrides: {},
     sourceVisibility: { camera: true, capture: true }
@@ -2012,6 +2015,10 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     verticalScreenFraming: isVerticalScreenFraming(candidate.verticalScreenFraming)
       ? candidate.verticalScreenFraming
       : defaultCaptureConfig.layout.verticalScreenFraming,
+    horizontalScreenFraming:
+      candidate.horizontalScreenFraming === 'fill'
+        ? 'fill'
+        : defaultCaptureConfig.layout.horizontalScreenFraming,
     arrangementMode: candidate.arrangementMode === 'freeform' ? 'freeform' : 'preset',
     sourceTransformOverrides: normalizeSourceTransformOverrides(candidate.sourceTransformOverrides),
     sourceVisibility: normalizeSourceVisibility(candidate.sourceVisibility)
@@ -2020,18 +2027,39 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
 
 /** Keep only well-formed override entries; anything else falls back to the
  * base arrangement for that source instead of poisoning the scene commit. */
-function normalizeSourceTransformOverrides(overrides: unknown): Record<string, CameraTransform> {
+function normalizeSourceTransformOverrides(
+  overrides: unknown
+): Record<string, SourceTransformOverride> {
   if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
     return {}
   }
-  const normalized: Record<string, CameraTransform> = {}
+  const normalized: Record<string, SourceTransformOverride> = {}
   for (const [sourceId, value] of Object.entries(overrides as Record<string, unknown>)) {
     const transform = normalizeCameraTransform(value)
     if (sourceId && transform) {
-      normalized[sourceId] = transform
+      normalized[sourceId] = { ...transform, ...normalizeSourceCrop(value) }
     }
   }
   return normalized
+}
+
+const SOURCE_CROP_SIDES = ['cropLeft', 'cropTop', 'cropRight', 'cropBottom'] as const
+
+/**
+ * A screen's saved crop (plan 213 G2): each side clamped to the backend's 95%
+ * ceiling, and a side that crops nothing left out, as the backend writes it,
+ * so a box saved before crops existed keeps its exact shape.
+ */
+export function normalizeSourceCrop(value: unknown): Partial<SourceCrop> {
+  const candidate = (value && typeof value === 'object' ? value : {}) as Partial<
+    Record<keyof SourceCrop, unknown>
+  >
+  const crop: Partial<SourceCrop> = {}
+  for (const side of SOURCE_CROP_SIDES) {
+    const amount = Number(candidate[side])
+    if (Number.isFinite(amount) && amount > 0) crop[side] = Math.min(amount, 0.95)
+  }
+  return crop
 }
 
 export function normalizeVideoSettings(video: unknown): VideoSettings {

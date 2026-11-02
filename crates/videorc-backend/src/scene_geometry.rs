@@ -189,11 +189,21 @@ pub fn vertical_screen_fits(layout: &LayoutSettings) -> bool {
         )
 }
 
+/// True when a landscape scene fills its screen (plan 213 G3): the user's
+/// `HorizontalScreenFraming::Fill`. Vertical presets never consult the field.
+pub fn horizontal_screen_fills(layout: &LayoutSettings) -> bool {
+    !layout.layout_preset.is_vertical()
+        && matches!(
+            layout.horizontal_screen_framing,
+            crate::protocol::HorizontalScreenFraming::Fill
+        )
+}
+
 /// The shared fit policy for source status, FFmpeg filters, CPU blits, and
 /// Metal placement. Side-by-side and ALL vertical presets cover their regions
 /// (short-form bands are filled, center-cropped — never letterboxed); the
 /// horizontal full-frame screen/window presets contain so UI edges are never
-/// cropped. Vertical BAND cameras cover unconditionally — a contain camera
+/// cropped, unless the user chose Fill for them (plan 213 G3). Vertical BAND cameras cover unconditionally — a contain camera
 /// band letterboxes exactly like the reported bug; zoom/pan still frame the
 /// crop. The vertical screen+camera inset bubble keeps the user's Fit choice
 /// like its horizontal twin.
@@ -228,6 +238,7 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
                 SceneFit::Contain
             } else if matches!(layout.layout_preset, LayoutPreset::SideBySide)
                 || vertical_fill_preset(&layout.layout_preset)
+                || horizontal_screen_fills(layout)
             {
                 SceneFit::Cover
             } else {
@@ -748,6 +759,59 @@ mod tests {
 
     fn layout() -> LayoutSettings {
         default_layout_settings()
+    }
+
+    #[test]
+    fn horizontal_fill_covers_the_landscape_screen_scenes_only() {
+        // Plan 213 G3: Fill makes the landscape screen scenes cover; the
+        // default stays Fit (contain), side by side always covers, and a
+        // vertical scene ignores the landscape field.
+        use crate::protocol::HorizontalScreenFraming;
+        assert_eq!(
+            layout().horizontal_screen_framing,
+            HorizontalScreenFraming::Fit
+        );
+        for preset in [LayoutPreset::ScreenCamera, LayoutPreset::ScreenOnly] {
+            for freeform in [false, true] {
+                let mut layout = layout();
+                layout.layout_preset = preset.clone();
+                if freeform {
+                    layout.arrangement_mode = ArrangementMode::Freeform;
+                }
+                for kind in [SceneSourceKind::Screen, SceneSourceKind::Window] {
+                    assert_eq!(scene_source_fit(&kind, &layout), SceneFit::Contain);
+                    layout.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+                    assert_eq!(
+                        scene_source_fit(&kind, &layout),
+                        SceneFit::Cover,
+                        "{preset:?}"
+                    );
+                    layout.horizontal_screen_framing = HorizontalScreenFraming::Fit;
+                }
+                // The camera keeps its own Fit choice.
+                layout.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+                layout.camera_fit = CameraFit::Fit;
+                assert_eq!(
+                    scene_source_fit(&SceneSourceKind::Camera, &layout),
+                    SceneFit::Contain
+                );
+            }
+        }
+        let mut side_by_side = layout();
+        side_by_side.layout_preset = LayoutPreset::SideBySide;
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::Screen, &side_by_side),
+            SceneFit::Cover
+        );
+        let mut vertical = layout();
+        vertical.layout_preset = LayoutPreset::VerticalScreenOnly;
+        vertical.vertical_screen_framing = crate::protocol::VerticalScreenFraming::Fit;
+        vertical.horizontal_screen_framing = HorizontalScreenFraming::Fill;
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::Screen, &vertical),
+            SceneFit::Contain,
+            "a vertical scene reads only its own framing"
+        );
     }
 
     #[test]
@@ -1489,5 +1553,86 @@ mod tests {
             allowed > 0 && rejected > 0,
             "{allowed} allowed, {rejected} rejected"
         );
+    }
+}
+
+/// Plan 213 G1: the one cropped-screen fixture every render path draws (CPU,
+/// Metal, the FFmpeg legacy graph and the aux leg), so a crop that one path
+/// ignores shows up as a wrong colour at a known point.
+#[cfg(test)]
+pub(crate) mod screen_crop_fixture {
+    use crate::protocol::SceneTransform;
+
+    pub const SOURCE_WIDTH: u32 = 64;
+    pub const SOURCE_HEIGHT: u32 = 36;
+
+    pub const RED: [u8; 3] = [255, 0, 0];
+    pub const GREEN: [u8; 3] = [0, 255, 0];
+    pub const BLUE: [u8; 3] = [0, 0, 255];
+    pub const WHITE: [u8; 3] = [255, 255, 255];
+    pub const MAGENTA: [u8; 3] = [255, 0, 255];
+    pub const CYAN: [u8; 3] = [0, 255, 255];
+    pub const BLACK: [u8; 3] = [0, 0, 0];
+
+    /// The screen picture as RGB: four 16 px columns (red, green, blue,
+    /// white) between a magenta band on top and a cyan band at the bottom,
+    /// 9 rows each.
+    pub fn source_rgb(x: u32, y: u32) -> [u8; 3] {
+        if y < 9 {
+            MAGENTA
+        } else if y >= SOURCE_HEIGHT - 9 {
+            CYAN
+        } else {
+            [RED, GREEN, BLUE, WHITE][(x / 16) as usize]
+        }
+    }
+
+    pub fn source_bgra() -> Vec<u8> {
+        (0..SOURCE_HEIGHT)
+            .flat_map(|y| (0..SOURCE_WIDTH).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let [r, g, b] = source_rgb(x, y);
+                [b, g, r, 255]
+            })
+            .collect()
+    }
+
+    /// A box in the middle half of the canvas with a quarter cropped off
+    /// every side. What is left is the green and blue columns, 32×18: the
+    /// box's own 16:9, so Fit fills the box exactly.
+    pub fn transform() -> SceneTransform {
+        SceneTransform {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            crop_left: 0.25,
+            crop_top: 0.25,
+            crop_right: 0.25,
+            crop_bottom: 0.25,
+        }
+    }
+
+    /// Canvas points (fractions, so any canvas size) and the colour each
+    /// shows. Without the crop the four points next to the box's edges would
+    /// show red, magenta, cyan and white instead.
+    pub fn expected_samples() -> [((f64, f64), [u8; 3]); 7] {
+        [
+            ((0.30, 0.50), GREEN),
+            ((0.45, 0.30), GREEN),
+            ((0.45, 0.70), GREEN),
+            ((0.55, 0.50), BLUE),
+            ((0.70, 0.50), BLUE),
+            ((0.10, 0.10), BLACK),
+            ((0.90, 0.90), BLACK),
+        ]
+    }
+
+    /// The sample's pixel on a `width`×`height` canvas.
+    pub fn sample_pixel(point: (f64, f64), width: u32, height: u32) -> (usize, usize) {
+        (
+            (point.0 * f64::from(width)).floor() as usize,
+            (point.1 * f64::from(height)).floor() as usize,
+        )
     }
 }
