@@ -422,6 +422,7 @@ fn windows_gdigrab_desktop_device() -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: WINDOWS_GDIGRAB_DESKTOP_ID.to_string(),
         name: "Desktop".to_string(),
         kind: DeviceKind::Screen,
@@ -470,6 +471,71 @@ fn should_include_window_metadata(
 
 pub(crate) fn is_foreign_session_window_app(app_name: Option<&str>) -> bool {
     app_name.is_some_and(|value| value.eq_ignore_ascii_case("loginwindow"))
+}
+
+/// A display's name in the source picker (plan 213 F1): the name macOS gives
+/// it and its pixel size, so two displays can be told apart. `Display N`
+/// stands in when macOS gives no name; a display that mirrors another says so.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn display_device_name(
+    ordinal: usize,
+    system_name: Option<&str>,
+    pixel_size: (u32, u32),
+    mirrors_another: bool,
+) -> String {
+    let name = system_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| format!("Display {ordinal}"), str::to_string);
+    let (width, height) = pixel_size;
+    let size = if width > 0 && height > 0 {
+        format!(" · {width} × {height}")
+    } else {
+        String::new()
+    };
+    let mirrored = if mirrors_another { " · mirrored" } else { "" };
+    format!("{name}{size}{mirrored}")
+}
+
+/// What macOS says of one display (plan 213 F3), for the support bundle.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayFacts {
+    pub id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its rectangle in points, in the global display space.
+    pub frame: DisplayFrame,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    /// Pixels per point.
+    pub scale: f64,
+    pub main: bool,
+    /// The display it mirrors, when it mirrors one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirrors: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct DisplayFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Every display the system has online (plan 213 F3). Blocks for up to the
+/// display-name wait, so async callers run it off the runtime.
+#[cfg(target_os = "macos")]
+pub fn display_facts() -> Vec<DisplayFacts> {
+    macos::display_facts()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn display_facts() -> Vec<DisplayFacts> {
+    Vec::new()
 }
 
 #[cfg(target_os = "windows")]
@@ -583,6 +649,7 @@ mod windows_native {
             devices.push(Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: windows_dxgi_screen_device_id(adapter_luid, output_index),
                 name: format!("Display {}", devices.len() + 1),
                 kind: DeviceKind::Screen,
@@ -670,16 +737,143 @@ pub(crate) mod macos {
     // Scoped here (not at the top of the file) so the Windows arm never sees
     // an unused import — PR #59 deleted the top-level `use std::sync::mpsc`
     // as apparently-unused and broke the macOS build.
+    use dispatch2::DispatchQueue;
+    use objc2::MainThreadMarker;
+    use objc2::rc::autoreleasepool;
+    use objc2_app_kit::NSScreen;
+    use objc2_core_foundation::{CFRetained, CFUUID};
     use objc2_core_graphics::{
-        CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayMode, CGPreflightScreenCaptureAccess,
+        CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMirrorsDisplay,
+        CGDisplayMode, CGError, CGGetOnlineDisplayList, CGMainDisplayID,
+        CGPreflightScreenCaptureAccess,
     };
-    use objc2_foundation::{NSError, NSString};
+    use objc2_foundation::{NSError, NSNumber, NSString, ns_string};
     use objc2_screen_capture_kit::{SCShareableContent, SCWindow};
+    use std::collections::HashMap;
+    use std::ptr::NonNull;
     use std::sync::mpsc;
 
     use objc2::rc::Retained;
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
+
+    /// How long a listing waits for AppKit's display names (plan 213 F1).
+    const DISPLAY_NAMES_TIMEOUT: Duration = Duration::from_millis(500);
+
+    #[link(name = "ColorSync", kind = "framework")]
+    unsafe extern "C" {
+        fn CGDisplayCreateUUIDFromDisplayID(display: CGDirectDisplayID) -> Option<NonNull<CFUUID>>;
+    }
+
+    /// The display's UUID (plan 213 F1): its identity across a reconnect,
+    /// which may hand it a new display id.
+    pub(crate) fn display_uuid(display_id: CGDirectDisplayID) -> Option<String> {
+        // SAFETY: the caller owns the returned CFUUID; null for no display.
+        let uuid = unsafe { CGDisplayCreateUUIDFromDisplayID(display_id) }?;
+        let uuid = unsafe { CFRetained::from_raw(uuid) };
+        let bytes = uuid.uuid_bytes();
+        let uuid = uuid::Uuid::from_bytes([
+            bytes.byte0,
+            bytes.byte1,
+            bytes.byte2,
+            bytes.byte3,
+            bytes.byte4,
+            bytes.byte5,
+            bytes.byte6,
+            bytes.byte7,
+            bytes.byte8,
+            bytes.byte9,
+            bytes.byte10,
+            bytes.byte11,
+            bytes.byte12,
+            bytes.byte13,
+            bytes.byte14,
+            bytes.byte15,
+        ]);
+        Some(format!("{:X}", uuid.hyphenated()))
+    }
+
+    /// The name macOS gives each display (`NSScreen.localizedName`), by
+    /// display id (plan 213 F1). AppKit answers on the main thread, whose run
+    /// loop the backend keeps turning (main.rs); where nothing turns it the
+    /// wait times out and the names fall back to `Display N`.
+    pub(crate) fn display_names() -> HashMap<CGDirectDisplayID, String> {
+        if let Some(mtm) = MainThreadMarker::new() {
+            return screen_names(mtm);
+        }
+        let (tx, rx) = mpsc::channel();
+        DispatchQueue::main().exec_async(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                let _ = tx.send(screen_names(mtm));
+            }
+        });
+        rx.recv_timeout(DISPLAY_NAMES_TIMEOUT).unwrap_or_default()
+    }
+
+    /// Every display macOS has online (plan 213 F3), mirrored ones included.
+    pub(crate) fn display_facts() -> Vec<DisplayFacts> {
+        let mut ids: [CGDirectDisplayID; 32] = [0; 32];
+        let mut count = 0_u32;
+        // SAFETY: the list holds `ids.len()` ids and the count is one u32.
+        let listed =
+            unsafe { CGGetOnlineDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
+        if listed != CGError::Success {
+            return Vec::new();
+        }
+        let names = display_names();
+        let main = CGMainDisplayID();
+        ids.iter()
+            .take(count as usize)
+            .map(|&id| {
+                let bounds = CGDisplayBounds(id);
+                let (pixel_width, pixel_height) = display_capture_dimensions(
+                    id,
+                    bounds.size.width.max(0.0) as u32,
+                    bounds.size.height.max(0.0) as u32,
+                );
+                let mirrors = CGDisplayMirrorsDisplay(id);
+                DisplayFacts {
+                    id,
+                    uuid: display_uuid(id),
+                    name: names.get(&id).cloned(),
+                    frame: DisplayFrame {
+                        x: bounds.origin.x,
+                        y: bounds.origin.y,
+                        width: bounds.size.width,
+                        height: bounds.size.height,
+                    },
+                    pixel_width,
+                    pixel_height,
+                    scale: if bounds.size.width > 0.0 {
+                        f64::from(pixel_width) / bounds.size.width
+                    } else {
+                        0.0
+                    },
+                    main: id == main,
+                    mirrors: (mirrors != 0).then_some(mirrors),
+                }
+            })
+            .collect()
+    }
+
+    fn screen_names(mtm: MainThreadMarker) -> HashMap<CGDirectDisplayID, String> {
+        autoreleasepool(|_| {
+            NSScreen::screens(mtm)
+                .iter()
+                .filter_map(|screen| {
+                    let number = screen
+                        .deviceDescription()
+                        .objectForKey(ns_string!("NSScreenNumber"))?
+                        .downcast::<NSNumber>()
+                        .ok()?;
+                    Some((
+                        number.unsignedIntValue(),
+                        screen.localizedName().to_string(),
+                    ))
+                })
+                .collect()
+        })
+    }
 
     // SCK content is an immutable discovery snapshot. Access is serialized by
     // the cache lock; retaining keeps it alive beyond its completion callback.
@@ -922,6 +1116,7 @@ pub(crate) mod macos {
                     Device {
                         app: None,
                         window_title: None,
+                        display_uuid: None,
                         id: "screen:screencapturekit-permission".to_string(),
                         name: "Primary Display".to_string(),
                         kind: DeviceKind::Screen,
@@ -933,6 +1128,7 @@ pub(crate) mod macos {
                     Device {
                         app: None,
                         window_title: None,
+                        display_uuid: None,
                         id: "window:screencapturekit-permission".to_string(),
                         name: "Window Capture".to_string(),
                         kind: DeviceKind::Window,
@@ -958,6 +1154,7 @@ pub(crate) mod macos {
                         Device {
                             app: None,
                             window_title: None,
+                            display_uuid: None,
                             id: "screen:screencapturekit-unavailable".to_string(),
                             name: "Primary Display".to_string(),
                             kind: DeviceKind::Screen,
@@ -971,6 +1168,7 @@ pub(crate) mod macos {
                         Device {
                             app: None,
                             window_title: None,
+                            display_uuid: None,
                             id: "window:screencapturekit-unavailable".to_string(),
                             name: "Window Capture".to_string(),
                             kind: DeviceKind::Window,
@@ -1008,6 +1206,11 @@ pub(crate) mod macos {
     unsafe fn devices_from_shareable_content(content: &SCShareableContent) -> Vec<Device> {
         let mut devices = Vec::new();
         let displays = unsafe { content.displays() };
+        let names = if displays.count() > 0 {
+            display_names()
+        } else {
+            HashMap::new()
+        };
         for index in 0..displays.count() {
             let display = displays.objectAtIndex(index);
             let display_id = unsafe { display.displayID() };
@@ -1024,8 +1227,14 @@ pub(crate) mod macos {
             devices.push(Device {
                 app: None,
                 window_title: None,
+                display_uuid: display_uuid(display_id),
                 id: format!("{SCREEN_CAPTUREKIT_PREFIX}{display_id}"),
-                name: format!("Display {}", index + 1),
+                name: super::display_device_name(
+                    index + 1,
+                    names.get(&display_id).map(String::as_str),
+                    (capture_width, capture_height),
+                    CGDisplayMirrorsDisplay(display_id) != 0,
+                ),
                 kind: DeviceKind::Screen,
                 status: DeviceStatus::Available,
                 detail: Some(format!(
@@ -1059,6 +1268,7 @@ pub(crate) mod macos {
             devices.push(Device {
                 app: window_application(&window),
                 window_title: window_title(&window),
+                display_uuid: None,
                 id: format!("{WINDOW_CAPTUREKIT_PREFIX}{window_id}"),
                 name,
                 kind: DeviceKind::Window,
@@ -1076,6 +1286,7 @@ pub(crate) mod macos {
             devices.push(Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit-missing".to_string(),
                 name: "Primary Display".to_string(),
                 kind: DeviceKind::Screen,
@@ -1096,6 +1307,7 @@ pub(crate) mod macos {
             devices.push(Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "window:screencapturekit-missing".to_string(),
                 name: "Window Capture".to_string(),
                 kind: DeviceKind::Window,
@@ -1390,6 +1602,7 @@ mod tests {
         let mut device = Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: "screen:test".into(),
             name: "Screen".into(),
             kind: DeviceKind::Screen,
@@ -1417,6 +1630,7 @@ mod tests {
             pid: 42,
         });
         device.window_title = Some("Editor".into());
+        device.display_uuid = Some("37D8832A-2D66-02CA-B9F7-8F30A301B230".into());
         let present = serde_json::to_value(device).unwrap();
         assert_eq!(
             present["app"],
@@ -1424,10 +1638,80 @@ mod tests {
         );
         assert_eq!(present["windowTitle"], "Editor");
         assert_eq!(
+            present["displayUuid"],
+            "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        );
+        assert_eq!(
             serde_json::to_value(select_app_window(&resolve_params(), true, &[app_window(7)]))
                 .unwrap(),
             serde_json::json!({"ok":true,"windowId":"window:screencapturekit:7","title":"Window 7","width":800,"height":600})
         );
+    }
+
+    #[test]
+    fn displays_are_named_as_macos_names_them_with_their_pixel_size() {
+        assert_eq!(
+            display_device_name(1, Some("LG ULTRAWIDE"), (3440, 1440), false),
+            "LG ULTRAWIDE · 3440 × 1440"
+        );
+        // Two of the same monitor keep the numbers macOS gives them.
+        assert_eq!(
+            display_device_name(2, Some(" DELL U2720Q (2) "), (3840, 2160), false),
+            "DELL U2720Q (2) · 3840 × 2160"
+        );
+        assert_eq!(
+            display_device_name(1, Some("Built-in Retina Display"), (3024, 1964), true),
+            "Built-in Retina Display · 3024 × 1964 · mirrored"
+        );
+    }
+
+    #[test]
+    fn a_display_macos_gives_no_name_falls_back_to_its_place() {
+        // AppKit did not answer in time, or no screen carried this id.
+        assert_eq!(
+            display_device_name(2, None, (1920, 1080), false),
+            "Display 2 · 1920 × 1080"
+        );
+        assert_eq!(
+            display_device_name(3, Some("   "), (2560, 1440), true),
+            "Display 3 · 2560 × 1440 · mirrored"
+        );
+        // No size to give: the name alone.
+        assert_eq!(
+            display_device_name(1, Some("Projector"), (0, 0), false),
+            "Projector"
+        );
+        assert_eq!(display_device_name(4, None, (1920, 0), false), "Display 4");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_display_uuid_reads_as_macos_writes_it() {
+        let main = objc2_core_graphics::CGMainDisplayID();
+        // A headless host may have no display to name.
+        if let Some(uuid) = macos::display_uuid(main) {
+            assert_eq!(uuid.len(), 36);
+            assert_eq!(uuid, uuid.to_uppercase());
+            assert!(uuid::Uuid::parse_str(&uuid).is_ok());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_online_display_reports_its_facts_plan_213_f3() {
+        let facts = display_facts();
+        // A headless host may have no display online.
+        assert!(facts.iter().filter(|display| display.main).count() <= 1);
+        for display in &facts {
+            assert!(
+                display.pixel_width > 0 && display.pixel_height > 0,
+                "{display:?}"
+            );
+            assert!(display.frame.width > 0.0 && display.frame.height > 0.0);
+            assert!(display.scale > 0.0, "{display:?}");
+            assert_eq!(display.uuid, macos::display_uuid(display.id));
+            assert_ne!(display.mirrors, Some(display.id));
+        }
     }
 
     #[test]

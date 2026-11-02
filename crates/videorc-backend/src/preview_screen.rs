@@ -476,6 +476,19 @@ enum NativeScreenCommand {
     /// as a stop.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Swap(ScreenSwapRequest),
+    /// Plan 213 F2 (macOS): the running display's new pixel size, in place.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Resize(ScreenResizeRequest),
+}
+
+/// Plan 213 F2: the capture a display's new resolution or scale calls for,
+/// answered on `reply` with the session's message once the stream took it.
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct ScreenResizeRequest {
+    capture_request: PreviewScreenCaptureRequest,
+    display_id: Option<u32>,
+    reply: std_mpsc::Sender<Result<String, String>>,
 }
 
 /// Plan 210 S3: the next window or display for a running ScreenCaptureKit
@@ -3057,6 +3070,183 @@ async fn note_screen_switch_restart(
     .await;
 }
 
+/// Plan 213 F2: a display's resolution or scale changed, and the device
+/// watch lists it at its new pixel size. A running capture of that display
+/// takes the new size in place: the same stream, filter and generation, so
+/// the compositor keeps the last frame until one at the new size arrives and
+/// the picture never goes black. When ScreenCaptureKit refuses the update,
+/// the capture restarts under that held frame instead.
+pub(crate) async fn follow_display_size(state: &AppState, devices: &[crate::protocol::Device]) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(completion) = queue_display_resize(state, devices).await else {
+            return;
+        };
+        if let Ok(Some(refused)) = completion.await {
+            restart_resized_display(state, &refused).await;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (state, devices);
+}
+
+/// Admits the resize on the FIFO like any screen transition, so no start,
+/// stop or swap runs beside it. Answers the snapshot to restart when the
+/// stream refused its new size.
+#[cfg(target_os = "macos")]
+async fn queue_display_resize(
+    state: &AppState,
+    devices: &[crate::protocol::Device],
+) -> Option<oneshot::Receiver<Option<PreviewScreenRestartSnapshot>>> {
+    let transition = acquire_preview_screen_transition(state).await;
+    let (expected, capture_request, ticket) = {
+        let mut slot = state.preview_screen.lock().await;
+        let expected = screen_restart_snapshot_from_slot(&slot)?;
+        let capture_request = followed_display_capture_request(
+            &expected.config.source,
+            (slot.status.native_width, slot.status.native_height),
+            devices,
+            &expected.config.video,
+            expected.config.include_cursor,
+            expected.config.exclude_current_process_windows,
+        )?;
+        let ticket = allocate_screen_transition_ticket(&mut slot);
+        (expected, capture_request, ticket)
+    };
+    let source_transition_guard = state.source_transition_fence.begin();
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let supervisor_state = state.clone();
+    state.spawn_process_task(async move {
+        let _source_transition_guard = source_transition_guard;
+        wait_for_screen_transition_turn(&ticket.order, ticket.sequence).await;
+        let turn = PreviewScreenTransitionTurn::new(Arc::clone(&ticket.order), ticket.sequence);
+        let refused = {
+            let supervisor = ticket.native_supervisor.lock().await;
+            resize_followed_display(&supervisor_state, &supervisor, &expected, capture_request)
+                .await
+        };
+        drop(turn);
+        let _ = completion_tx.send(refused.then_some(expected));
+    });
+    drop(transition);
+    Some(completion_rx)
+}
+
+/// Under the FIFO turn: the running stream takes its new size, then the
+/// status says what it captures at. `true` when ScreenCaptureKit refused or
+/// never answered.
+#[cfg(target_os = "macos")]
+async fn resize_followed_display(
+    state: &AppState,
+    supervisor: &PreviewScreenNativeSupervisor,
+    expected: &PreviewScreenRestartSnapshot,
+    capture_request: PreviewScreenCaptureRequest,
+) -> bool {
+    let source = &expected.config.source;
+    let reply_rx = {
+        let slot = state.preview_screen.lock().await;
+        // A start, stop, swap or restart got there first, at the size it found.
+        if screen_restart_snapshot_from_slot(&slot).as_ref() != Some(expected) {
+            return false;
+        }
+        let Some(owner) = supervisor.active.as_ref() else {
+            return false;
+        };
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let request = ScreenResizeRequest {
+            capture_request,
+            display_id: source.display_id,
+            reply: reply_tx,
+        };
+        if owner
+            .stop_tx
+            .send(NativeScreenCommand::Resize(request))
+            .is_err()
+        {
+            return false;
+        }
+        reply_rx
+    };
+    let reply =
+        tokio::task::spawn_blocking(move || reply_rx.recv_timeout(SCREEN_SWAP_REPLY_TIMEOUT)).await;
+    let message = match reply {
+        Ok(Ok(Ok(message))) => message,
+        Ok(Ok(Err(reason))) => {
+            tracing::warn!(
+                "[videorc-capture-sizing] kind={:?} source_id={} resize=refused detail={reason:?}",
+                source.source_kind,
+                source.source_id,
+            );
+            return true;
+        }
+        Ok(Err(_)) | Err(_) => {
+            tracing::warn!(
+                "[videorc-capture-sizing] kind={:?} source_id={} resize=unanswered within_ms={}",
+                source.source_kind,
+                source.source_id,
+                SCREEN_SWAP_REPLY_TIMEOUT.as_millis(),
+            );
+            return true;
+        }
+    };
+    let status = {
+        let mut slot = state.preview_screen.lock().await;
+        if screen_restart_snapshot_from_slot(&slot).as_ref() != Some(expected) {
+            return false;
+        }
+        slot.status.native_width = Some(capture_request.native_width);
+        slot.status.native_height = Some(capture_request.native_height);
+        slot.status.requested_width = Some(capture_request.requested_width);
+        slot.status.requested_height = Some(capture_request.requested_height);
+        slot.status.message = Some(message);
+        slot.status.updated_at = Utc::now().to_rfc3339();
+        slot.status.clone()
+    };
+    tracing::info!(
+        "[videorc-capture-sizing] kind={:?} native={}x{} requested={}x{} session={}x{} scales_to_fit={} resize=true",
+        source.source_kind,
+        capture_request.native_width,
+        capture_request.native_height,
+        capture_request.requested_width,
+        capture_request.requested_height,
+        expected.config.video.width,
+        expected.config.video.height,
+        capture_request.scales_to_fit,
+    );
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+    }
+    state.emit_event("preview.screen.status", status);
+    false
+}
+
+/// A refused resize: the same display, restarted at the size it has now,
+/// as a stream the system stopped is.
+#[cfg(target_os = "macos")]
+async fn restart_resized_display(state: &AppState, expected: &PreviewScreenRestartSnapshot) {
+    let attempt = {
+        let _session_start_source_transition_fence = state
+            .session_start_source_transition_fence
+            .clone()
+            .lock_owned()
+            .await;
+        if state.process_shutdown_requested() {
+            return;
+        }
+        let transition = acquire_preview_screen_transition(state).await;
+        let prepared = begin_forced_screen_restart(state, expected, None).await;
+        let attempt = prepared.map(|prepared| {
+            queue_forced_preview_screen_restart(state, prepared, "display-resized")
+        });
+        drop(transition);
+        attempt
+    };
+    if let Some(attempt) = attempt {
+        let _ = complete_force_restart_preview_screen(state, attempt).await;
+    }
+}
+
 async fn detach_screen_runtime_for_native_transition(state: &AppState, clear_starting: bool) {
     let poll_task = {
         let mut slot = state.preview_screen.lock().await;
@@ -4688,6 +4878,40 @@ fn select_preview_screen_capture_request(
         preserves_aspect_ratio: true,
         scales_to_fit: matches!(source_kind, PreviewScreenSourceKind::Window),
     }
+}
+
+/// Plan 213 F2: the capture a running display's listed pixel size calls
+/// for once its resolution or scale changed, planned as a start at that size
+/// would be. `None` for a window, a display listed without a size, or one
+/// the capture already has.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn followed_display_capture_request(
+    source: &SelectedScreenSource,
+    running: (Option<u32>, Option<u32>),
+    devices: &[crate::protocol::Device],
+    video: &VideoSettings,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
+) -> Option<PreviewScreenCaptureRequest> {
+    if source.source_kind != PreviewScreenSourceKind::Screen || source.display_id.is_none() {
+        return None;
+    }
+    let listed = devices.iter().find(|device| {
+        matches!(device.kind, crate::protocol::DeviceKind::Screen) && device.id == source.source_id
+    })?;
+    let width = listed.width.filter(|width| *width > 0)?;
+    let height = listed.height.filter(|height| *height > 0)?;
+    if running == (Some(width), Some(height)) {
+        return None;
+    }
+    Some(select_preview_screen_capture_request(
+        &source.source_kind,
+        width,
+        height,
+        video,
+        include_cursor,
+        exclude_current_process_windows,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6579,7 +6803,8 @@ mod macos {
     use objc2::{AnyThread, DefinedClass, define_class, msg_send};
     use objc2_core_foundation::{CFDictionary, CFNumber, CFType, CGRect};
     use objc2_core_graphics::{
-        CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayMode, CGPreflightScreenCaptureAccess,
+        CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode,
+        CGPreflightScreenCaptureAccess,
     };
     use objc2_core_media::{CMSampleBuffer, CMTime};
     use objc2_core_video::{
@@ -6800,13 +7025,25 @@ mod macos {
                     message: session.message.clone(),
                 });
                 // Plan 210 S3: the stream serves until it is stopped, changing
-                // its target in place on request. Each swap drains its own
-                // pool, or the content, filter and configuration of every
-                // past target would live until the stop.
+                // its target in place on request, and its size when its
+                // display's resolution or scale changed (plan 213 F2). Each
+                // change drains its own pool, or the content, filter and
+                // configuration of every past target would live until the stop.
                 // A Stop, or a dropped supervisor, ends the loop.
-                while let Ok(NativeScreenCommand::Swap(request)) = stop_rx.recv() {
-                    let outcome = autoreleasepool(|_| swap_stream(&mut session, &request, &shared));
-                    let _ = request.reply.send(outcome);
+                loop {
+                    match stop_rx.recv() {
+                        Ok(NativeScreenCommand::Swap(request)) => {
+                            let outcome =
+                                autoreleasepool(|_| swap_stream(&mut session, &request, &shared));
+                            let _ = request.reply.send(outcome);
+                        }
+                        Ok(NativeScreenCommand::Resize(request)) => {
+                            let outcome =
+                                autoreleasepool(|_| resize_stream(&mut session, &request));
+                            let _ = request.reply.send(outcome);
+                        }
+                        Ok(NativeScreenCommand::Stop) | Err(_) => break,
+                    }
                 }
                 stop_stream(&session.stream);
                 unsafe {
@@ -6906,7 +7143,11 @@ mod macos {
         let start_handler = start_capture(&stream, &shared);
 
         let selected_fps = f64::from(capture_request.requested_fps);
-        let message = Some(session_message(&config, &capture_request, selected_fps));
+        let message = Some(session_message(
+            &config.source_kind,
+            &capture_request,
+            selected_fps,
+        ));
 
         Ok(ScreenSession {
             stream,
@@ -7232,13 +7473,13 @@ mod macos {
     }
 
     fn session_message(
-        config: &NativeScreenPreviewConfig,
+        source_kind: &PreviewScreenSourceKind,
         capture_request: &PreviewScreenCaptureRequest,
         selected_fps: f64,
     ) -> String {
         format!(
             "Native {} preview running at {}x{} from {}x{} source and {:.0} fps. Cursor {}, Videorc windows excluded {}.",
-            match config.source_kind {
+            match source_kind {
                 PreviewScreenSourceKind::Screen => "screen",
                 PreviewScreenSourceKind::Window => "window",
             },
@@ -7247,12 +7488,12 @@ mod macos {
             capture_request.native_width,
             capture_request.native_height,
             selected_fps,
-            if config.include_cursor {
+            if capture_request.include_cursor {
                 "visible"
             } else {
                 "hidden"
             },
-            if config.exclude_current_process_windows {
+            if capture_request.exclude_current_process_windows {
                 "yes"
             } else {
                 "no"
@@ -7383,7 +7624,7 @@ mod macos {
         };
         session.screen_rect = selected.screen_rect;
         let selected_fps = f64::from(capture_request.requested_fps);
-        let message = session_message(&config, &capture_request, selected_fps);
+        let message = session_message(&config.source_kind, &capture_request, selected_fps);
         session._filter = selected.filter;
         session._configuration = stream_config;
         session.native_width = capture_request.native_width;
@@ -7406,6 +7647,59 @@ mod macos {
             update_ms,
             stamped_at,
         })
+    }
+
+    /// Plan 213 F2: the display's resolution or scale changed under the
+    /// running stream. The filter still names the display; only the output
+    /// size follows, under the same generation, so frames keep flowing into
+    /// the same store.
+    fn resize_stream(
+        session: &mut ScreenSession,
+        request: &ScreenResizeRequest,
+    ) -> Result<String, String> {
+        let capture_request = &request.capture_request;
+        let stream_config = unsafe { SCStreamConfiguration::new() };
+        configure_stream(&stream_config, capture_request);
+        let (config_tx, config_rx) = std_mpsc::channel::<Result<(), String>>();
+        let config_handler = RcBlock::new(move |error: *mut NSError| {
+            let _ = config_tx.send(if error.is_null() {
+                Ok(())
+            } else {
+                Err(error_description(error))
+            });
+        });
+        let update_started_at = Instant::now();
+        unsafe {
+            session
+                .stream
+                .updateConfiguration_completionHandler(&stream_config, Some(&config_handler));
+        }
+        await_stream_update(
+            &config_rx,
+            update_started_at + SCREEN_SWAP_UPDATE_TIMEOUT,
+            "configuration",
+        )?;
+        let selected_fps = f64::from(capture_request.requested_fps);
+        let message = session_message(
+            &PreviewScreenSourceKind::Screen,
+            capture_request,
+            selected_fps,
+        );
+        session._configuration = stream_config;
+        session.native_width = capture_request.native_width;
+        session.native_height = capture_request.native_height;
+        session.requested_width = capture_request.requested_width;
+        session.requested_height = capture_request.requested_height;
+        session.width = capture_request.requested_width;
+        session.height = capture_request.requested_height;
+        session.selected_fps = selected_fps;
+        session.message = Some(message.clone());
+        // A new scale moves the display's rectangle in points; a later swap
+        // tells its frames apart by it.
+        if let Some(display_id) = request.display_id {
+            session.screen_rect = Some(screen_rect_of(&CGDisplayBounds(display_id)));
+        }
+        Ok(message)
     }
 
     fn startup_failure_reason(startup: NativeScreenStartup) -> String {
@@ -8715,6 +9009,88 @@ mod tests {
             screen_swap_eligibility(&active, &portal, &key(&video), true),
             Err("the next source is not a ScreenCaptureKit window or display")
         );
+    }
+
+    #[test]
+    fn a_display_listed_at_a_new_pixel_size_recomputes_its_capture_plan_213_f2() {
+        use crate::protocol::{Device, DeviceKind, DeviceStatus};
+
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6000,
+        };
+        let display = SelectedScreenSource {
+            source_id: "screen:screencapturekit:5".to_string(),
+            source_kind: PreviewScreenSourceKind::Screen,
+            callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+            display_id: Some(5),
+            window_id: None,
+        };
+        let listed = |size: Option<(u32, u32)>| {
+            vec![Device {
+                app: None,
+                window_title: None,
+                display_uuid: None,
+                id: "screen:screencapturekit:5".to_string(),
+                name: "LG ULTRAWIDE".to_string(),
+                kind: DeviceKind::Screen,
+                status: DeviceStatus::Available,
+                detail: None,
+                width: size.map(|(width, _)| width),
+                height: size.map(|(_, height)| height),
+            }]
+        };
+        let follow = |source: &SelectedScreenSource, devices: &[Device]| {
+            followed_display_capture_request(
+                source,
+                (Some(3440), Some(1440)),
+                devices,
+                &video,
+                true,
+                true,
+            )
+        };
+
+        // Its resolution changed: planned as a start at the new size would be.
+        let request = follow(&display, &listed(Some((2560, 1080)))).expect("a new size");
+        assert_eq!(
+            request,
+            select_preview_screen_capture_request(
+                &PreviewScreenSourceKind::Screen,
+                2560,
+                1080,
+                &video,
+                true,
+                true,
+            )
+        );
+        assert_eq!((request.native_width, request.native_height), (2560, 1080));
+        assert_eq!(
+            (request.requested_width, request.requested_height),
+            choose_preview_dimensions(2560, 1080, &video)
+        );
+        assert_ne!(
+            (request.requested_width, request.requested_height),
+            choose_preview_dimensions(3440, 1440, &video)
+        );
+        assert!(!request.scales_to_fit);
+
+        // The size it already captures, no size, another display or a window: nothing.
+        assert_eq!(follow(&display, &listed(Some((3440, 1440)))), None);
+        assert_eq!(follow(&display, &listed(None)), None);
+        assert_eq!(follow(&display, &listed(Some((0, 1080)))), None);
+        assert_eq!(follow(&display, &[]), None);
+        let window = SelectedScreenSource {
+            source_id: "screen:screencapturekit:5".to_string(),
+            source_kind: PreviewScreenSourceKind::Window,
+            callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
+            display_id: None,
+            window_id: Some(5),
+        };
+        assert_eq!(follow(&window, &listed(Some((2560, 1080)))), None);
     }
 
     #[test]

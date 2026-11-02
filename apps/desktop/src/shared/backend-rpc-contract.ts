@@ -871,6 +871,8 @@ const deviceSchema = objectSchema(
       )
     ),
     windowTitle: optionalText,
+    // Plan 213 F1: a display's UUID, its identity across reconnects.
+    displayUuid: optionalText,
     id: boundedString,
     name: boundedString,
     kind: enumSchema(['screen', 'window', 'camera', 'microphone', 'system-audio']),
@@ -1600,6 +1602,9 @@ const sourceSelectionSchema = objectSchema(
   {
     screenId: optionalText,
     screenName: optionalText,
+    // Plan 213 F1: the chosen display's UUID. Renderer intent; the backend
+    // ignores it.
+    screenUuid: optionalText,
     windowId: optionalText,
     windowName: optionalText,
     captureOff: optionalSchema(booleanSchema),
@@ -1610,6 +1615,7 @@ const sourceSelectionSchema = objectSchema(
     // flags; the backend ignores it.
     wantedScreenId: optionalText,
     wantedScreenName: optionalText,
+    wantedScreenUuid: optionalText,
     wantedWindowId: optionalText,
     wantedWindowName: optionalText,
     wantedCameraId: optionalText,

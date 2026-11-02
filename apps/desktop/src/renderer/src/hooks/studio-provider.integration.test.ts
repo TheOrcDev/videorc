@@ -2353,6 +2353,11 @@ describe('real StudioProvider lifecycle', () => {
   it('moves Buddy and a banner from an agent with the editor snaps, and reads them back', async () => {
     const { backend, latest } = await mountBannerProvider([testBanner('sponsor', 0)])
     await waitForObservation(() => latest().core.wsStatus === 'connected')
+    // The agents' link listens only once its module has loaded; an intent
+    // before that is lost.
+    await act(async () => {
+      await import('@/lib/agent-studio-link')
+    })
     const pushIntent = async (intentId: string, tool: string, args: Record<string, unknown>) => {
       await act(async () => {
         backend.sockets[0]?.onmessage?.({

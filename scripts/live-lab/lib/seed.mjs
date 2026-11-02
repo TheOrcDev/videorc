@@ -57,7 +57,11 @@ export function pickLabDevices(deviceList, labDisplayName) {
   }
   const wanted = labDisplayName.trim().toLowerCase()
   const screens = devices.filter((device) => device.kind === 'screen')
-  const screen = screens.find((device) => String(device.name).trim().toLowerCase() === wanted)
+  // Plan 213 F1: macOS displays are listed as "<name> · <width> × <height>".
+  const screen = screens.find((device) => {
+    const name = String(device.name).trim().toLowerCase()
+    return name === wanted || name.startsWith(`${wanted} · `)
+  })
   if (!screen) {
     throw new SeedRefused(
       'lab-display-missing',

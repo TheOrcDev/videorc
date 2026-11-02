@@ -67,6 +67,7 @@ import {
   sceneSourceProblems,
   sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
+  withSceneDisplay,
   type SceneApp,
   type SceneVisual,
   type SavedScene
@@ -4399,6 +4400,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ...current.sources,
           screenId: source.kind === 'screen' ? source.id : undefined,
           screenName: source.kind === 'screen' ? source.name : undefined,
+          screenUuid: source.kind === 'screen' ? source.displayUuid : undefined,
           windowId: source.kind === 'window' ? source.id : undefined,
           windowName: source.kind === 'window' ? source.name : undefined,
           testPattern: false
@@ -4659,7 +4661,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const {
     save: saveSceneEntry,
     remove: removeSceneEntry,
-    autosave: autosaveSavedScene
+    autosave: autosaveSavedScene,
+    refreshDisplay: refreshSavedSceneDisplay
   } = sceneLibrary
   const [activeSavedSceneId, setActiveSavedSceneId] = useState<string | null>(
     () => hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.sceneId ?? null
@@ -10657,7 +10660,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // or a capture restart (the Clips ring, recovery) may have superseded
       // this switch's own start.
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        visual = normalizeSceneVisual(repaired ?? saved.visual)
+        // Plan 213 F1: the scene's display as listed now, found by its UUID first.
+        visual = withSceneDisplay(
+          normalizeSceneVisual(repaired ?? saved.visual),
+          deviceListRef.current.devices
+        )
         try {
           const resolved = await sceneApply.resolveSceneWindowForApply(
             visual,
@@ -10751,6 +10758,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         layoutIntentBefore = intent
       }
       if (applied) {
+        if (!repaired) refreshSavedSceneDisplay(id, deviceListRef.current.devices)
         rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
           rememberedAppsRef.current,
           id,
@@ -10818,6 +10826,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [
       sceneLibrary.scenes,
+      refreshSavedSceneDisplay,
       requestLayoutTransaction,
       setSystemAudioEnabled,
       sourceSelectionController,
@@ -11052,6 +11061,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           current.sources.captureOff === sources.captureOff &&
           current.sources.wantedScreenId === sources.wantedScreenId &&
           current.sources.wantedScreenName === sources.wantedScreenName &&
+          current.sources.wantedScreenUuid === sources.wantedScreenUuid &&
           current.sources.wantedWindowId === sources.wantedWindowId &&
           current.sources.wantedWindowName === sources.wantedWindowName
             ? current
@@ -11062,6 +11072,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                   captureOff: sources.captureOff,
                   wantedScreenId: sources.wantedScreenId,
                   wantedScreenName: sources.wantedScreenName,
+                  wantedScreenUuid: sources.wantedScreenUuid,
                   wantedWindowId: sources.wantedWindowId,
                   wantedWindowName: sources.wantedWindowName
                 }

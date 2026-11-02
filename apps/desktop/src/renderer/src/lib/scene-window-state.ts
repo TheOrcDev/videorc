@@ -91,6 +91,7 @@ export async function reconcileWorkingSceneSources(
         windowName: result.title,
         screenId: undefined,
         screenName: undefined,
+        screenUuid: undefined,
         captureOff: false,
         testPattern: false
       }
@@ -100,6 +101,7 @@ export async function reconcileWorkingSceneSources(
         windowName: undefined,
         screenId: undefined,
         screenName: undefined,
+        screenUuid: undefined,
         captureOff: true
       }
   const reconciled = reconcileSourceSelection(next, devices)

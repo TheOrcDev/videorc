@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import type { AppPreviewsParams, AppPreviewsResult } from '@/lib/backend'
+import type { AppPreviewsParams, AppPreviewsResult, Device } from '@/lib/backend'
 import { toast } from '@/lib/toast'
 import { loadJson } from '@/lib/capture'
 import { sceneAutosave } from '@/lib/scene-autosave'
@@ -8,6 +8,7 @@ import {
   hydrateSceneLibrary,
   normalizeSceneAudio,
   normalizeSceneVisual,
+  sceneDisplayRefresh,
   sceneNameError,
   SCENE_LIBRARY_KEY,
   type SceneAudio,
@@ -150,6 +151,26 @@ export function useScenePresets() {
     },
     [replace]
   )
+  /**
+   * Plan 213 F1: a scene's display found under a new id, or before the scene
+   * kept its UUID, is written as it is listed now. Not an edit: `updatedAt`
+   * stays.
+   */
+  const refreshDisplay = useCallback(
+    (id: string, devices: readonly Device[]): boolean => {
+      const scene = current.current.library.scenes.find((entry) => entry.id === id)
+      const display = scene ? sceneDisplayRefresh(scene.visual.sources, devices) : null
+      if (!scene || !display) return false
+      return replace({
+        ...scene,
+        visual: normalizeSceneVisual({
+          ...scene.visual,
+          sources: { ...scene.visual.sources, ...display }
+        })
+      })
+    },
+    [replace]
+  )
   return {
     scenes: state.library.scenes,
     error: state.error,
@@ -160,6 +181,7 @@ export function useScenePresets() {
     insert,
     move,
     replace,
-    autosave
+    autosave,
+    refreshDisplay
   }
 }
