@@ -14,7 +14,10 @@
 //
 // Pure and electron-free so it is unit-testable; index.ts does the IO.
 
-import { join } from 'node:path'
+// XDG paths are Linux paths: posix joins keep them so on every host.
+import { posix } from 'node:path'
+
+const { join } = posix
 
 export const VIDEORC_DESKTOP_FILE_NAME = 'videorc.desktop'
 export const VIDEORC_URL_MIME_TYPE = 'x-scheme-handler/videorc'
