@@ -2806,6 +2806,20 @@ describe('real StudioProvider lifecycle', () => {
     }
   )
 
+  // The engine closes a slow peer and keeps running; Main pushes no new
+  // connection then, so the Studio must ask for it again.
+  it('reconnects when the running engine drops its socket', async () => {
+    const { backend, latest } = await mountFreeformTransformProvider()
+    await waitForObservation(() => latest().core.wsStatus === 'connected')
+    const socketsBefore = backend.sockets.length
+    await act(async () => backend.sockets[0]?.close())
+    expect(latest().core.wsStatus).toBe('closed')
+    await waitForObservation(
+      () => backend.sockets.length > socketsBefore && latest().core.wsStatus === 'connected'
+    )
+    expect(latest().core.scene).not.toBeNull()
+  }, 15_000)
+
   it('freeform transform rejects editing without a backend connection', async () => {
     const { backend, latest } = await mountFreeformTransformProvider(false)
     await act(async () => {
