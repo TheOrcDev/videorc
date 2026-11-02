@@ -251,6 +251,7 @@ impl WindowsD3d11MediaRoleHandle {
         self.client.clone()
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub(crate) fn generation(&self) -> u64 {
         self.lease.as_ref().map_or(0, |lease| lease.generation)
     }

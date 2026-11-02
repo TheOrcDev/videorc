@@ -5,6 +5,7 @@
 /// and the standalone macOS native-preview helper do not need to reach through
 /// the macOS-only Metal implementation to compile shared scene code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub enum SourceMask {
     None,
     Circle,

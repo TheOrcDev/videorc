@@ -29,6 +29,7 @@ use crate::protocol::Banner;
 pub(crate) const BANNER_BITMAP_BUDGET_BYTES: u64 = 160 * 1024 * 1024;
 /// The key-addressed Metal namespace banners draw from (`metal_compositor`
 /// asserts it is keyed, with four slots).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) const BANNER_METAL_NAMESPACE: u64 = 9;
 /// An entry a tick touched this recently is in use.
 const BITMAP_HOT_FOR: Duration = Duration::from_secs(1);

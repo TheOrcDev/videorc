@@ -1612,6 +1612,7 @@ fn distinct_nonempty_paths<const N: usize>(paths: [Option<String>; N]) -> Vec<St
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
 fn sync_directory(directory: &Path) -> Result<()> {
     #[cfg(unix)]
     {

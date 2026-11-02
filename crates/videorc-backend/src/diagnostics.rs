@@ -861,6 +861,7 @@ pub fn apply_runtime_diagnostics_snapshot(
     )))
 }
 
+#[cfg_attr(target_os = "windows", allow(unused_mut))]
 fn apply_metal_retention_snapshot(mut stats: DiagnosticStats) -> DiagnosticStats {
     #[cfg(target_os = "macos")]
     {
