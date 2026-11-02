@@ -4,6 +4,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { once } from 'node:events'
+import { runSmokeCargoTest } from './lib/smoke-cargo-test.mjs'
 import { spawnProcessGroup } from './lib/process-group.mjs'
 import { assertSceneSwitchPixels } from './lib/scene-switch-pixels.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
@@ -13,8 +14,7 @@ const directory = mkdtempSync(join(tmpdir(), 'videorc-scene-switch-pixels-'))
 const ffmpeg = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobe = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 console.log(`Scene switch artifact evidence: ${directory}`)
-await run(
-  'cargo',
+await runSmokeCargoTest(
   [
     'test',
     '-p',
@@ -26,7 +26,7 @@ await run(
     '--exact',
     '--nocapture'
   ],
-  { ...process.env, VIDEORC_SCENE_SWITCH_ARTIFACT_DIR: directory }
+  { cwd: root, env: { ...process.env, VIDEORC_SCENE_SWITCH_ARTIFACT_DIR: directory } }
 )
 
 for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {

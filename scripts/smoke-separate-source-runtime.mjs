@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path'
 import { once } from 'node:events'
 import { mkdirSync } from 'node:fs'
 import { spawnProcessGroup } from './lib/process-group.mjs'
+import { runSmokeCargoTest } from './lib/smoke-cargo-test.mjs'
 import './lib/smoke-env.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { summarizeRecordCycles, evaluateRecordLatencyBudget } from './lib/record-latency-gate.mjs'
@@ -169,8 +170,7 @@ if (controlsOnly) {
 const suppliedExecutable = process.env.VIDEORC_SOURCE_ISO_RUNTIME_EXECUTABLE
 const build = suppliedExecutable
   ? null
-  : await run(
-      'cargo',
+  : await runSmokeCargoTest(
       [
         'test',
         '-p',
@@ -180,8 +180,7 @@ const build = suppliedExecutable
         '--no-run',
         '--message-format=json'
       ],
-      process.env,
-      true
+      { cwd: root, env: process.env, capture: true }
     )
 const executable =
   suppliedExecutable ??
@@ -928,7 +927,7 @@ async function run(command, args, env = process.env, capture = false, timeoutMs)
     cwd: root,
     env,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-    timeoutMs: timeoutMs ?? (command === 'cargo' ? 600_000 : 120_000),
+    timeoutMs: timeoutMs ?? 120_000,
     onTimeout: () => {
       failure = new Error(`${command} exceeded its execution deadline`)
     },
