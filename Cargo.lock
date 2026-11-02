@@ -3109,6 +3109,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-segmentation",
  "uuid",
+ "videorc-wer-helper",
  "windows",
  "windows-core",
 ]
@@ -3129,6 +3130,13 @@ dependencies = [
  "objc2-io-surface",
  "objc2-metal",
  "objc2-quartz-core",
+]
+
+[[package]]
+name = "videorc-wer-helper"
+version = "0.9.0"
+dependencies = [
+ "windows",
 ]
 
 [[package]]
