@@ -39162,6 +39162,24 @@ mod tests {
         }
     }
 
+    fn camera_look_fixture_ffmpeg() -> std::path::PathBuf {
+        // Linux CI provisions this exact LGPL bundle before cargo test, but
+        // does not add it to PATH. Exercise the shipping filters in ordinary
+        // local/CI test runs too, while preserving an explicit binary override.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if std::env::var("VIDEORC_BUNDLED_FFMPEG_PATH")
+            .ok()
+            .is_none_or(|path| path.trim().is_empty())
+        {
+            let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vendor/ffmpeg/linux-x64/bin/ffmpeg");
+            if bundled.is_file() {
+                return bundled;
+            }
+        }
+        crate::ffmpeg::default_ffmpeg_path().into()
+    }
+
     fn assert_ffmpeg_camera_look(palette: &[[u8; 3]], look: crate::protocol::CameraLook) {
         use std::io::Write;
         use std::process::{Command, Stdio};
@@ -39179,7 +39197,8 @@ mod tests {
         let filter = camera_look_filter(&layout)
             .trim_end_matches(',')
             .to_string();
-        let mut child = Command::new(crate::ffmpeg::default_ffmpeg_path())
+        let ffmpeg = camera_look_fixture_ffmpeg();
+        let mut child = Command::new(&ffmpeg)
             .args([
                 "-v",
                 "error",
@@ -39205,7 +39224,12 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("FFmpeg parity fixture requires FFmpeg");
+            .unwrap_or_else(|error| {
+                panic!(
+                    "FFmpeg parity fixture requires {}: {error}",
+                    ffmpeg.display()
+                )
+            });
         child.stdin.take().unwrap().write_all(&frame).unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(

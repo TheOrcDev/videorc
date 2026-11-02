@@ -83,7 +83,7 @@ file size or successful build is not a pass.
 | Separate source recordings         | macOS-only                                                                                        | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
 | Preview                            | CPU/BMP proof presenter                                                                           | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
 | Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix                           | Prove shared-bus mix and fallback warning.                                                                  |
-| First run                          | Linux sharing guidance enabled; intermittent reload and full motion failures remain     | Packaged physical proof and real OAuth still required.                                                      |
+| First run                          | Linux sharing guidance enabled; intermittent reload and full motion failures remain               | Packaged physical proof and real OAuth still required.                                                      |
 | Notes protection                   | Capture exclusion unsupported                                                                     | Tell users Notes may be captured; prove behavior.                                                           |
 | Split profiles / dual orientation  | Restricted encoded paths                                                                          | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
 
@@ -2369,7 +2369,6 @@ No Linux Beta candidate has been accepted or published. Physical Ubuntu and
 Hyprland AppImage acceptance, endurance, the seven-day pilot, updates/rollback,
 and protected publication remain open alongside the feature/runtime ledger.
 
-
 ### Main integration and macOS CI follow-up, 2026-11-01
 
 The shutdown fix `c22bb0c1` was tested on merge `45420f99` with newer main
@@ -2854,7 +2853,6 @@ At `0cf62464`, macOS CI passes 4,367 backend tests, including both queue regress
 
 Private receipts: `queue-capacity-native-o5u33dm7/report.json`, `queue-capacity-published-inputs.json`, `buddy-readiness-source-validation.json`, `buddy-readiness-source-181brl9q/report.json` and `rust-job-125070199854-classification.json`. The full backend suite finishes with 4,195 passed, three failed and 19 ignored. In addition to the GLES Beams mismatch, delayed microphone replacement fails its exact PCM assertion and the delayed system-audio stop flush falls short of its required sample count. The guarded recording dispatcher refuses before app launch. Against the original test executable (SHA-256 `1a0223e457030876a2d7eac5717c58f4c95daf12c9e88d839618b0b93911bca3`), ten isolated repetitions pass the microphone case, while three of ten stop-flush attempts fail. The full-suite microphone failure remains unresolved; the isolated passes do not waive it. Diagnostic observations now retain loss counters and the sample/deadline mismatch without changing any assertion, producer clock or runtime budget. Fresh exact-binary recording comparisons remain blocked. These source checks do not establish packaged, physical or Beta acceptance.
 
-
 ### Microphone handoff clock investigation, 2026-11-02
 
 A diagnostic build of the two failed audio tests retains bus loss counters,
@@ -3072,3 +3070,41 @@ on the supported platforms; macOS device smokes cannot run on Ogre. Shader,
 audio/motion, latency, exact AppImage Ubuntu/Hyprland acceptance, endurance,
 pilot, updates/rollback and protected public delivery remain open. No Beta
 version is selected, accepted or published.
+
+### Linux camera fixture discovery, 2026-11-02
+
+Linux CI job `125454342445` at `68d34a7e` fetched and verified the pinned
+FFmpeg and passed Clippy, then reported 4,235 backend passes, two failures
+and 19 ignored tests. Both failures were camera-look fixture launches:
+`ffmpeg` was absent from PATH, despite the bundle being present. This is
+fixture discovery, not a new camera-filter parity failure. The headless CI
+run does not establish physical GPU or recording acceptance.
+
+The camera fixture now discovers the provisioned Linux x64 bundle relative
+to its compile-time crate directory when no explicit FFmpeg override is
+set. Explicit overrides retain priority and an invalid override still fails.
+The production binary resolver, camera graph and 2/255 parity limit are
+unchanged. This removes the Linux fixture's dependency on the unpublished
+workflow environment edit; macOS/Windows provisioning and the release-shell
+correction still require the separately preserved workflow changes.
+
+Fresh verification runs all 220 camera-related tests successfully with no
+skips or ignored tests. Both actual FFmpeg parity tests also pass with PATH
+removed and the override unset, and pass with the bundle explicitly selected.
+A negative control with a nonexistent explicit override fails both fixture
+launches as expected; it is not counted as a passing camera test. Rust
+formatting passes. Private reports and cleanup receipts are under
+`fixture-ffmpeg-discovery-89n6acjw/`; the original failed CI log and
+classification are retained as `linux-job-125454342445*` in the evidence root.
+
+An additional `cargo clippy --tests` check fails on 96 test-code lints. All
+113 reported locations map to unchanged code in the preceding commit; the
+failed log is preserved rather than counted as a pass. This extra check is
+broader than the repository's required Clippy command. The required command
+passes with the four existing Linux platform allowances. Native and fixture
+input hashes remain unchanged, and both verification supervisors complete
+without cleanup signals or leaked descendants.
+
+No full local backend suite or physical app smoke is claimed for this
+test-only follow-up. The earlier strict GLES and recording failures remain
+open, and no Beta candidate is accepted or published.
