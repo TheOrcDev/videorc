@@ -28,7 +28,11 @@ import { useVideorcAccount } from '@/hooks/use-account'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { accountDisplayName, isSignedIn } from '@/lib/account'
 import type { RuntimeInfo } from '@/lib/backend'
-import { FIRST_RUN_REPLAY_LOCKED_REASON, firstRunReplayLocked } from '@/lib/first-run'
+import {
+  FIRST_RUN_REPLAY_LOCKED_REASON,
+  firstRunReplayDescription,
+  firstRunReplayLocked
+} from '@/lib/first-run'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
 import { platformCopy } from '@/lib/platform-copy'
 import { studioChatOn } from '@/lib/studio-chat'
@@ -157,7 +161,7 @@ export function GeneralSettings(): ReactElement {
           </ChatEmoteSettingsFields>
         </PanelSection>
 
-        <SetupSection />
+        <SetupSection platform={runtimeInfo?.platform} />
       </PageStack>
 
       <PageStack>
@@ -195,16 +199,13 @@ export function GeneralSettings(): ReactElement {
  * First-run setup again (plan 203 D5): the same screen over the workspace,
  * returning here. Setup holds capture back, so it waits for a session to end.
  */
-function SetupSection(): ReactElement {
+function SetupSection({ platform }: { platform: string | undefined }): ReactElement {
   const { recording } = useStudioRecordingState()
   const locked = firstRunReplayLocked(recording)
   return (
     <PanelSection description="The steps from the first time Videorc opened." title="Setup">
       <FieldGroup variant="grouped">
-        <SettingsRow
-          description="Go through the welcome steps again, starting with permissions."
-          label="First-run setup"
-        >
+        <SettingsRow description={firstRunReplayDescription(platform)} label="First-run setup">
           <DisabledReason reason={locked ? FIRST_RUN_REPLAY_LOCKED_REASON : null}>
             <Button
               disabled={locked}
