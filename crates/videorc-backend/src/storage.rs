@@ -1573,7 +1573,12 @@ fn ensure_session_deletion_quarantine_directory(
         }
     }
     let file_type = std::fs::symlink_metadata(directory)
-        .with_context(|| format!("Could not inspect deletion quarantine {}", directory.display()))?
+        .with_context(|| {
+            format!(
+                "Could not inspect deletion quarantine {}",
+                directory.display()
+            )
+        })?
         .file_type();
     if file_type.is_file() {
         bail!(
