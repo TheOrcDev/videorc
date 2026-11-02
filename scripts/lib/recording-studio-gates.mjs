@@ -1,6 +1,27 @@
+import { join, resolve } from 'node:path'
+
+/** The FFmpeg the app ships on this platform: the staged macOS build, or the
+ * pinned Windows or Linux archive. The camera look parity test must run
+ * against it and never against PATH's ffmpeg: a Homebrew GPL build has
+ * `eq`, so the test passed while the 0.18.0 bundle could not start a
+ * recording with a non-neutral look (`No such filter: 'eq'`). */
+export function bundledFfmpegPath({
+  repoRoot = resolve(import.meta.dirname, '..', '..'),
+  platform = process.platform
+} = {}) {
+  const bundle =
+    platform === 'win32'
+      ? ['windows-x64', 'bin', 'ffmpeg.exe']
+      : platform === 'linux'
+        ? ['linux-x64', 'bin', 'ffmpeg']
+        : ['current', 'bin', 'ffmpeg']
+  return join(repoRoot, 'vendor', 'ffmpeg', ...bundle)
+}
+
 export function buildRecordingStudioGateSteps({
   includeAppSmoke = true,
-  includeDeviceSmoke = false
+  includeDeviceSmoke = false,
+  bundledFfmpeg = bundledFfmpegPath()
 } = {}) {
   const steps = [
     {
@@ -49,6 +70,26 @@ export function buildRecordingStudioGateSteps({
       label: 'backend recording pipeline tests',
       command: 'cargo',
       args: ['test', '-p', 'videorc-backend', 'recording::tests::']
+    },
+    {
+      // Plan 213 I: the legacy FFmpeg camera look grades on the shipped LGPL
+      // bundle within 8/255 of the float law. The test is #[ignore]d because
+      // it spawns FFmpeg, so it runs here, pinned to the bundled binary; a
+      // missing bundle fails the step instead of falling back to PATH.
+      label: 'backend camera look parity against the bundled FFmpeg',
+      command: 'cargo',
+      args: [
+        'test',
+        '-p',
+        'videorc-backend',
+        'recording::tests::camera_look_ffmpeg_lut_agrees_with_float_law',
+        '--',
+        '--ignored',
+        '--exact'
+      ],
+      env: {
+        VIDEORC_BUNDLED_FFMPEG_PATH: bundledFfmpeg
+      }
     },
     {
       label: 'backend audio pipeline tests',

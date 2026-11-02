@@ -10,6 +10,7 @@
 // Pure parsing lives here (covered by test:scripts); running the .exe is the
 // caller's job and only possible on a Windows host.
 
+import { CAMERA_LOOK_FFMPEG_FILTERS } from './camera-look-ffmpeg-filters.mjs'
 import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
 
 /** Protocols every shipped Windows ffmpeg must expose. rtmps implies a TLS
@@ -22,9 +23,13 @@ export const REQUIRED_WINDOWS_FFMPEG_PROTOCOLS = ['rtmp', 'rtmps', 'tls']
  * renders with `h264_mf` too and falls back to `libopenh264`, which is
  * reported with the optional set below rather than required. */
 export const REQUIRED_WINDOWS_FFMPEG_ENCODERS = ['h264_mf', 'aac', 'pcm_s16le']
-/** `afftdn` for Noise Cleanup plus the trim/concat set Clean cut renders with
- * (plan 119 S13). */
-export const REQUIRED_WINDOWS_FFMPEG_FILTERS = ['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS]
+/** `afftdn` for Noise Cleanup, the trim/concat set Clean cut renders with
+ * (plan 119 S13), and the full-range YUV lookup-table chain the legacy
+ * recording path grades the camera look with (plan 213 I; never the GPL-only
+ * `eq`). */
+export const REQUIRED_WINDOWS_FFMPEG_FILTERS = [
+  ...new Set(['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS])
+]
 
 /** Encoders the app uses when present and lives without when absent: Intel
  * Quick Sync for the Windows raw path (plan 090 C). Reported, never required,
