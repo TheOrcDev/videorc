@@ -227,6 +227,10 @@ pub struct Device {
     pub app: Option<DeviceApp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_title: Option<String>,
+    /// A display's UUID (plan 213 F1), the identity that survives a
+    /// reconnect; macOS can hand the same display a new id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_uuid: Option<String>,
     pub id: String,
     pub name: String,
     pub kind: DeviceKind,

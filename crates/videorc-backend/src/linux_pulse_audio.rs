@@ -134,6 +134,7 @@ pub fn pulse_microphone_devices(sources: &[PulseSource]) -> Vec<Device> {
         .map(|source| Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: linux_pulse_microphone_id(&source.name),
             name: if source.description.is_empty() {
                 source.name.clone()
@@ -244,6 +245,7 @@ pub async fn list_linux_microphones(ffmpeg_path: &str) -> Vec<Device> {
     vec![Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: "microphone:linux-pulse-unavailable".to_string(),
         name: "Microphone".to_string(),
         kind: DeviceKind::Microphone,

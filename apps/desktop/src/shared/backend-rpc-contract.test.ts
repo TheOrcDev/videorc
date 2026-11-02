@@ -938,6 +938,18 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcParams('scene.layout.apply_preview', layoutParams)).toEqual(
       layoutParams
     )
+    // Plan 213 F1: the chosen display's UUID rides the sources as renderer intent.
+    const withDisplayUuid = {
+      ...layoutParams,
+      sources: {
+        ...layoutParams.sources,
+        screenUuid: '37D8832A-2D66-02CA-B9F7-8F30A301B230',
+        wantedScreenUuid: '6C1A9E2B-58F4-4D0E-9B7A-2F3C4D5E6F70'
+      }
+    }
+    expect(validateBackendRpcParams('scene.layout.apply_preview', withDisplayUuid)).toEqual(
+      withDisplayUuid
+    )
     expect(() =>
       validateBackendRpcParams('scene.layout.apply_live', { ...layoutParams, transitionMs: 2000 })
     ).toThrow()
@@ -3415,6 +3427,29 @@ describe('banner backend wire contract (plan 186)', () => {
     }
     expect(validateBackendRpcResult('discord.links.preview', preview)).toStrictEqual(preview)
     expect(validateBackendRpcResult('discord.webhook.sendTest', {})).toStrictEqual({})
+  })
+})
+
+describe('display identity contracts (plan 213 F1)', () => {
+  it('accepts a display UUID on a listed display, never null', () => {
+    const display = {
+      displayUuid: '37D8832A-2D66-02CA-B9F7-8F30A301B230',
+      id: 'screen:screencapturekit:1',
+      name: 'Built-in Retina Display · 3024 × 1964',
+      kind: 'screen',
+      status: 'available',
+      width: 3024,
+      height: 1964
+    }
+    const payload = { devices: [display], warnings: [] }
+    expect(validateBackendRpcResult('devices.list', payload)).toEqual(payload)
+    expect(validateBackendEventPayload('devices.changed', payload)).toEqual(payload)
+    expect(() =>
+      validateBackendRpcResult('devices.list', {
+        devices: [{ ...display, displayUuid: null }],
+        warnings: []
+      })
+    ).toThrow()
   })
 })
 

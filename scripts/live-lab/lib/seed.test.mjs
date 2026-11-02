@@ -74,6 +74,20 @@ test('only the lab display and BlackHole are picked; anything else is a refusal'
   )
 })
 
+test('plan 213 F1: the lab display is found under its macOS name with its size', () => {
+  const sized = {
+    devices: DEVICES.devices.map((d) =>
+      d.id === 'screen:2' ? { ...d, name: 'Lab Dummy · 1920 × 1080' } : d
+    )
+  }
+  assert.deepEqual(pickLabDevices(sized, 'Lab Dummy').screen, {
+    id: 'screen:2',
+    name: 'Lab Dummy · 1920 × 1080'
+  })
+  assert.equal(pickLabDevices(sized, 'Lab Dummy · 1920 × 1080').screen.id, 'screen:2')
+  assert.throws(() => pickLabDevices(sized, 'Lab'), { code: 'lab-display-missing' })
+})
+
 test('local-sink scenarios stream only to the loopback sink; YouTube ones use the configured keys over RTMPS', () => {
   const local = plannedTargets({
     scenario: LOCAL,

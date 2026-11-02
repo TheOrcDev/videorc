@@ -520,6 +520,7 @@ function SceneRepairDialog({
                   ...repair.sources,
                   screenId: device?.kind === 'screen' ? id : undefined,
                   screenName: device?.kind === 'screen' ? device.name : undefined,
+                  screenUuid: device?.kind === 'screen' ? device.displayUuid : undefined,
                   windowId: device?.kind === 'window' ? id : undefined,
                   windowName: device?.kind === 'window' ? device.name : undefined,
                   testPattern: false

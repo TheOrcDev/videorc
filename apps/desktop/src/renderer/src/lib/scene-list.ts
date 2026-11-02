@@ -235,6 +235,7 @@ export function sceneWithApp(
         ...scene.visual.sources,
         screenId: undefined,
         screenName: undefined,
+        screenUuid: undefined,
         windowId: app.frontWindowId,
         windowName: app.frontWindowTitle,
         captureOff: false,

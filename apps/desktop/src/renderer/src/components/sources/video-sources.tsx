@@ -327,6 +327,7 @@ export function VideoSources(): ReactElement {
                         ...current.sources,
                         screenId: undefined,
                         screenName: undefined,
+                        screenUuid: undefined,
                         windowId: undefined,
                         windowName: undefined,
                         testPattern

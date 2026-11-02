@@ -404,6 +404,11 @@ export interface AppPreviewsResult {
 export interface Device {
   app?: DeviceApp
   windowTitle?: string
+  /**
+   * A display's UUID (plan 213 F1), the identity that survives a reconnect;
+   * macOS can hand the same display a new id.
+   */
+  displayUuid?: string
   id: string
   name: string
   kind: DeviceKind
@@ -577,6 +582,12 @@ export interface StartRecordingParams {
 export interface SourceSelection {
   screenId?: string
   screenName?: string
+  /**
+   * The chosen display's UUID (plan 213 F1). The choice resolves by it
+   * first, then by id, then by name, so a display macOS gave a new id is
+   * still the same choice. Renderer intent only: the backend ignores it.
+   */
+  screenUuid?: string
   windowId?: string
   windowName?: string
   /**
@@ -607,6 +618,7 @@ export interface SourceSelection {
    */
   wantedScreenId?: string
   wantedScreenName?: string
+  wantedScreenUuid?: string
   wantedWindowId?: string
   wantedWindowName?: string
   wantedCameraId?: string
