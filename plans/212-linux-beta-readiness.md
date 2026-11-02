@@ -2599,3 +2599,29 @@ resolution for `aarch64-apple-darwin` and the CI audit entrypoint
 1,395 advisories with the existing policy unchanged. Fresh native CI and runtime
 verification remain required; this fixes dependency resolution and does not
 resolve the earlier Metal image failures or establish Linux Beta acceptance.
+
+### Linux unit-test compile timeout, 2026-11-02
+
+The targeted Linux retry on `43193870` passes all seven FFmpeg policy tests,
+provisioning and Clippy, but never executes Rust tests. GitHub's check annotation
+identifies the cancellation as the 45-minute job deadline, not a failing test:
+<https://github.com/TheOrcDev/videorc/actions/runs/41357361156/job/125004363206>.
+The retained runner log ends earlier with a shutdown signal and exit 143;
+its truncated timestamps do not establish the full compile duration.
+
+The test profile now disables optimization for the backend test binary and
+omits debug symbols. Debug assertions and overflow checks remain enabled,
+dependencies retain their existing optimization, and the development/release
+profiles are unchanged. This addresses the unit-test compiler workload without
+changing the job deadline, test selection, or recording/preview quality budgets.
+macOS CI already disables backend optimization for its source checks.
+
+Local Rust formatting passes. The active compiler invocation confirms the
+intended backend test settings, and 321 cached compiler artifacts are reused.
+The full Linux Rust compile/test command is still running on Ogre at the time
+of this commit; no compile completion or test pass is claimed. A preliminary
+line-table debug configuration was deliberately cancelled during dependency
+compilation, with all owned descendants reaped and no test credit. The retained
+run uses normal stack limits and the approved Intel render node. Hosted CI must
+also verify the new profile before this correction can be accepted. Runtime,
+cross-platform failures and the remaining Beta acceptance gates stay open.
