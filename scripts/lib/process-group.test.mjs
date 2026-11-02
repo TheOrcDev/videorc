@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
+import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 import { spawnProcessGroup } from './process-group.mjs'
@@ -24,6 +26,9 @@ for (const ignoresTerm of [false, true]) {
       skip: process.platform === 'win32'
     },
     async (t) => {
+      // Startup on a busy host must not consume the timeout under test. Keep
+      // real child processes, but advance the clock only after both are ready.
+      t.mock.timers.enable({ apis: ['setTimeout'] })
       const grandchildSource = `
       ${ignoresTerm ? "process.on('SIGTERM', () => {})" : ''}
       console.log(process.pid)
@@ -42,11 +47,14 @@ for (const ignoresTerm of [false, true]) {
         timeoutMs: 1000,
         graceMs: 100
       })
+      const lines = createInterface({ input: child.stdout })
+      const ready = once(lines, 'line', { signal: AbortSignal.timeout(10_000) })
       let output = ''
       child.stdout.on('data', (chunk) => {
         output += chunk
       })
       t.after(() => {
+        lines.close()
         // Also reap the deliberately surviving descendant during red verification.
         for (const pid of [-child.pid, Number(output.trim())]) {
           if (!pid) continue
@@ -57,10 +65,18 @@ for (const ignoresTerm of [false, true]) {
           }
         }
       })
-      const outcome = await result
-      assert.equal(outcome.timedOut, true)
+      await ready
       const grandchildPid = Number(output.trim())
       assert.ok(grandchildPid > 0, 'grandchild reported readiness and PID')
+      const leaderExit = once(child, 'exit', { signal: AbortSignal.timeout(5000) })
+      t.mock.timers.tick(1000)
+      await leaderExit
+      // The group leader is gone before escalation. A TERM-resistant child
+      // still needs the group-wide KILL; cancelling it on leader exit leaks.
+      t.mock.timers.tick(100)
+      t.mock.timers.reset()
+      const outcome = await result
+      assert.equal(outcome.timedOut, true)
       await assertGone(child.pid)
       await assertGone(grandchildPid)
     }
