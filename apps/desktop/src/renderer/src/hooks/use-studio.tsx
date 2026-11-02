@@ -4285,6 +4285,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const layoutIntentAwaitingProofRef = useRef<number | null>(null)
   const latestLayoutTransactionCommitRef = useRef<LayoutTransactionSnapshot | null>(null)
   const skipNextConfigSceneReloadRef = useRef(false)
+  const sceneLoadsInFlightRef = useRef(new Set<Promise<void>>())
   useEffect(() => {
     captureConfigRef.current = captureConfig
   }, [captureConfig])
@@ -9053,25 +9054,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       config: Pick<CaptureConfig, 'sources' | 'layout' | 'video'>,
       requestedSources = config.sources
     ) => {
-      if (!client || wsStatus !== 'connected') {
+      if (!client || wsStatus !== 'connected' || layoutIntentAwaitingProofRef.current !== null) {
         return
       }
 
+      const intentId = layoutIntentIdRef.current
       const params: SceneConfigParams = {
         ...config,
         background: activeSceneBackground
       }
-      const status = await client.request<SceneCommitStatus>(
-        'scene.load_from_capture_config',
-        params
-      )
-      applyCommittedScene(status)
-      persistWorkingVisual(
-        config.layout,
-        requestedSources,
-        status.scene.background ?? null,
-        activeSavedSceneIdRef.current
-      )
+      const pending = (async () => {
+        const status = await client.request<SceneCommitStatus>(
+          'scene.load_from_capture_config',
+          params
+        )
+        // A newer layout owns the working visual even while it waits for this
+        // earlier backend load. Its response must not restore the old look.
+        if (layoutIntentIdRef.current !== intentId) return
+        applyCommittedScene(status)
+        persistWorkingVisual(
+          config.layout,
+          requestedSources,
+          status.scene.background ?? null,
+          activeSavedSceneIdRef.current
+        )
+      })()
+      sceneLoadsInFlightRef.current.add(pending)
+      try {
+        await pending
+      } finally {
+        sceneLoadsInFlightRef.current.delete(pending)
+      }
     },
     [activeSceneBackground, applyCommittedScene, client, wsStatus, persistWorkingVisual]
   )
@@ -9463,6 +9476,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const checkRunning = (): boolean => performanceCheckHoldRef.current || performanceCheckRunning
     if (
       !client ||
+      visualTransactionPending ||
       !shouldReloadSceneFromCaptureConfig({
         connected: wsStatus === 'connected',
         sceneEditMode,
@@ -9479,8 +9493,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
 
+    const scheduledLayoutIntent = layoutIntentIdRef.current
     const timer = window.setTimeout(() => {
       if (
+        scheduledLayoutIntent !== layoutIntentIdRef.current ||
+        layoutIntentAwaitingProofRef.current !== null ||
         !shouldReloadSceneFromCaptureConfig({
           connected: wsStatusRef.current === 'connected',
           sceneEditMode,
@@ -9518,6 +9535,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sceneEditMode,
     startRequestPending,
     stopRequestPending,
+    visualTransactionPending,
     wsStatus
   ])
 
@@ -10077,6 +10095,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         let sceneRevisionBeforeRequest: number | undefined
         let sceneRequestDispatched = false
         try {
+          // Idle reloads and layout transactions use different backend lanes.
+          // Drain already dispatched loads before sending the newer layout;
+          // the pending intent prevents another idle reload from overtaking it.
+          if (sceneLoadsInFlightRef.current.size > 0) {
+            await Promise.allSettled([...sceneLoadsInFlightRef.current])
+            if (layoutIntentIdRef.current !== intentId) return
+          }
           const requestedConfig = captureConfigRef.current
           const requestedSources =
             options?.sourcesOverride ??

@@ -7505,6 +7505,104 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().settings.globalShortcuts?.scenes?.[saved.id]).toBeUndefined()
   }, 15000)
 
+  it('holds an idle scene reload behind a layout awaiting presentation confirmation', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    const latest = (): StudioCoreContextValue => observation!.core
+    await waitForObservation(() => observation?.core.canSaveScene === true)
+
+    let releaseProof!: () => void
+    const proof = new Promise<void>((resolve) => {
+      releaseProof = resolve
+    })
+    api.getPreviewWindowState = async () => {
+      await proof
+      return previewWindowClosed
+    }
+    // Source selection arms the idle reload with the previous layout. The
+    // layout commits on the backend while its presentation query is pending.
+    await act(async () =>
+      latest().setCaptureConfig((current) => ({
+        ...current,
+        sources: { ...current.sources, screenId: undefined, testPattern: true }
+      }))
+    )
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(() => backend.currentLayout.layoutPreset === 'screen-only')
+    try {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 350))
+      })
+      expect(backend.currentLayout.layoutPreset).toBe('screen-only')
+    } finally {
+      await act(async () => releaseProof())
+    }
+    await waitForObservation(() => latest().canSaveScene)
+    expect(latest().captureConfig.layout.layoutPreset).toBe('screen-only')
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.layoutPreset).toBe(
+      'screen-only'
+    )
+  })
+
+  it('finishes an in-flight idle scene load before dispatching a newer layout', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    const latest = (): StudioCoreContextValue => observation!.core
+    await waitForObservation(() => observation?.core.canSaveScene === true)
+    const releaseLoad = backend.deferResponse('scene.load_from_capture_config', BACKEND_RESPONSE)
+    let reload!: Promise<void>
+    await act(async () => {
+      reload = latest().reloadSceneFromCaptureConfig()
+    })
+    const start = backend.sentCommands.length
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-only' }))
+    try {
+      expect(
+        backend.sentCommands
+          .slice(start)
+          .filter((command) => command.method.startsWith('scene.layout.apply_'))
+      ).toEqual([])
+    } finally {
+      await act(async () => {
+        releaseLoad()
+        await reload
+      })
+    }
+    await waitForObservation(
+      () => latest().canSaveScene && latest().captureConfig.layout.layoutPreset === 'screen-only'
+    )
+    expect(backend.currentLayout.layoutPreset).toBe('screen-only')
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.layoutPreset).toBe(
+      'screen-only'
+    )
+  })
+
   it('restores an auto-saved checkpoint and saveability across a renderer remount with synthetic preview mapping', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

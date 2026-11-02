@@ -3147,3 +3147,58 @@ fixture failure: 98 passed, two failed and four ignored in the first
 run. The six prepared workflow fixes remain unpublished because the GitHub
 credential lacks `workflow` scope. Shader, audio/motion, physical acceptance
 and release gates remain open; no Beta is accepted or published.
+
+### Idle scene reload ordering, 2026-11-02
+
+A fixed three-launch VAAPI diagnostic cohort on Ogre reproduces the matrix
+fixture failure once: the renderer briefly confirms `screen-only`, then a
+later scene revision restores its confirmed look to `screen-camera` while
+the selected layout remains `screen-only`. The unchanged 90-second fixture
+deadline fails; no recording is produced by that attempt. The other two
+scene-fixture attempts pass. A separate cohort with sanitized RPC tracing
+retains two passes and one reconciliation-fence expiration after the scene
+and microphone match. That queue failure remains open.
+
+The renderer now holds idle scene reloads while a layout transaction awaits
+confirmation, discards reload timers from earlier layout intents, waits for
+already-dispatched scene loads before sending a newer layout, and prevents
+older load responses from persisting a stale working look. Fast successive
+layout requests retain their existing behavior when no scene load is pending.
+Two provider regressions fail on the original code and pass with this fix.
+The first broad run caught a rapid-switch regression in the initial fix;
+its failure is retained, and the corrected conditional wait passes that case.
+On the final source, typecheck, lint and format checks pass; desktop unit
+tests pass 6,890 with one skipped across 624 files, and Node script tests
+pass 3,069 with none failed or skipped.
+
+The existing optimized backend from `593fbca8` is reused; native inputs are
+unchanged. The first candidate recheck stops at its power preflight before
+any app launch (AC disconnected, battery discharging); that refusal is
+retained. With AC restored and the lid open, the same three-launch cohort
+passes all three attempts: each confirms the `screen-only` renderer and
+backend scene within 1.4 to 1.8 seconds and then selects the owned
+microphone. The VAAPI 1080p30 matrix then passes (level 4.0, BT.709 TV
+range, 18 ms tail). OpenH264 1080p30 still fails motion with a 333 ms
+freeze (limit 100 ms, 15 segments) and a nine-frame identical burst (limit
+two, 12 bursts); its encoder runs at 0.79x real time and capture cadence
+falls to 12.3 fps. The scene committed before that recording and no audio
+check fails. Both independent Pulse controls exit cleanly for each encoder.
+Every core sits near 800 MHz for all VAAPI samples and 92% of OpenH264
+samples while load reaches 14.67; as in earlier runs, the cause is
+unproven, so neither result is evidence at normal clocks.
+
+One follow-up remains. A scene-edit-mode source selection made while a
+layout awaits confirmation now skips its backend scene load instead of
+sending the previous layout, which could revert the pending one; nothing
+reconciles that selection until the next scene load. It needs a settle
+point for the pending layout. macOS ScreenCaptureKit/native-preview coverage
+and the full recording-studio/device verification also need a macOS host.
+
+Private evidence is retained under `scene-confirmation-trace-dtye56_4/`,
+`scene-rpc-trace-fqps525b/`, and `scene-reload-validation-vh9qzrv5/` in the
+existing evidence root. All diagnostic apps were closed and owned children
+reaped without signaled orphans; app shutdown signal exits remain in the
+cleanup records. No Beta candidate is accepted or published. OpenH264
+motion, audio, shaders, the independent queue failure, physical
+Ubuntu/Hyprland acceptance and release gates remain open; the six
+unpublished workflow edits are preserved.
