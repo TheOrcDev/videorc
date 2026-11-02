@@ -2843,3 +2843,65 @@ The Linux capture output queue held only four requested 10 ms packets, less than
 Private evidence: `pulse-source-control-sVrmDG/report.json`, `pulse-app-control-classification.json`, `pulse-transient-analysis.json`, `pulse-queue-regression-jdmci96c/report.json`, and the source/native queue-capacity receipts under `~/.cache/videorc-linux-beta-evidence/`. Ogre remains powered but near 800 MHz while another worktree compiles. This is development diagnosis, not stable-host performance or exact AppImage acceptance. All physical desktop, endurance, pilot, update/rollback and publication gates remain open.
 
 At this draft-PR update, Rust formatting and the extracted before/after queue regression pass. Typecheck, lint and formatting pass after the main merge. The full desktop suite has reported four five-second timeouts and is still running; no passing full-suite result is claimed. Native adapter tests are still compiling, with Clippy and the optimized backend build following in the same owned queue. Fresh full backend and recording comparison results remain pending. The earlier source/native results above are historical evidence, not proof for this correction. No timing threshold is raised and no timeout is classified as harmless before follow-up.
+
+### Queue validation and lazy-import test readiness, 2026-11-02
+
+The Pulse queue correction passes all 42 capture-adapter tests, including both new queue regressions; two hardware tests remain ignored. Rust format and Clippy pass with the existing four documented Linux platform allowances. The optimized development backend builds successfully. All 252 tracked native input hashes and the executable hash match the published-source mapping for `0cf62464`; the binary SHA-256 is `1a5b569335e700af8e424bc43f1d9274b1b314119a6756c9066d82f4efb99d7f`. Native cleanup completes normally with no forced signals or leaked descendants.
+
+The first-open Buddy onboarding test now waits for its real lazy import inside React `act`, after committing the request. Production code and the existing five-second test / one-second assertion timeouts are unchanged. All 64 tests across the four previously failing files pass. The full desktop suite then passes 6,814 tests in 620 files, with one skipped Windows-only OBS directory-junction test. Typecheck, lint, formatting and the production build pass. Source cleanup reaps its exited children without forced signals or leaks. The earlier 22-failure full run and 63/64 focused run remain retained; their failures are not reclassified as harmless host contention.
+
+At `0cf62464`, macOS CI passes 4,367 backend tests, including both queue regressions, but still fails the same two Beams/Ghost Fibers Metal comparisons, with 22 tests ignored. Error values are unchanged from earlier runs. The original background implementation explicitly relied on the M4's default fast math matching its WebGL reference and documented sine-hash portability risk. This supports further numeric diagnosis; it is not a confirmed complete cause or a waiver. No reference or tolerance changed.
+
+Private receipts: `queue-capacity-native-o5u33dm7/report.json`, `queue-capacity-published-inputs.json`, `buddy-readiness-source-validation.json`, `buddy-readiness-source-181brl9q/report.json` and `rust-job-125070199854-classification.json`. The full backend suite finishes with 4,195 passed, three failed and 19 ignored. In addition to the GLES Beams mismatch, delayed microphone replacement fails its exact PCM assertion and the delayed system-audio stop flush falls short of its required sample count. The guarded recording dispatcher refuses before app launch. Against the original test executable (SHA-256 `1a0223e457030876a2d7eac5717c58f4c95daf12c9e88d839618b0b93911bca3`), ten isolated repetitions pass the microphone case, while three of ten stop-flush attempts fail. The full-suite microphone failure remains unresolved; the isolated passes do not waive it. Diagnostic observations now retain loss counters and the sample/deadline mismatch without changing any assertion, producer clock or runtime budget. Fresh exact-binary recording comparisons remain blocked. These source checks do not establish packaged, physical or Beta acceptance.
+
+
+### Microphone handoff clock investigation, 2026-11-02
+
+A diagnostic build of the two failed audio tests retains bus loss counters,
+packet delivery timing and sample coverage with the same producer clocks,
+assertions and stop deadlines. Ten repetitions per case yield three microphone
+failures and eight stop-flush failures. The stop runs reach the bounded drain
+window without writing all the already captured delayed system samples;
+reported stop duration is 283–452 ms, including cleanup. This remains a failed
+gate. The data does not justify extending the deadline or accepting a short tail.
+
+The microphone handoff drains its candidate queue using one `Instant` sampled
+before the loop. A producer can publish another packet during that loop, so
+its legitimate capture time is newer than that saved instant and the packet
+is rejected as future-dated. The correction samples time after each receipt,
+matching the active microphone ingestion path. Rejected freshness is also
+included in the detailed loss counters. A deterministic regression simulates
+successive packet receipts and still rejects genuinely future or stale PCM.
+The extracted production poll/freshness functions pass the new clock test;
+restoring the frozen-clock behavior fails it. Other clock/PCM collaborators
+are stubbed in that small probe, so it does not replace full-crate validation.
+The full-crate build passes. All 25 actual-bus microphone replacements pass,
+including both zero and one-second microphone delay; both deterministic clock
+checks pass 25 times each. All 75 exact-filter invocations are verified to
+execute one test, and owned cleanup completes without forced signals or leaks.
+The test executable SHA-256 is
+`513e69cbc96948996611f7876f9599d499976dd241ffde7646793108a6566f42`.
+The broader backend suite completes with 4,198 passed, two failed and 19 ignored
+in 548.57 seconds. Microphone replacement and both new clock tests pass; the
+remaining failures are GLES Beams and delayed system-audio stop coverage.
+The latter writes 97,920 frames against at least 127,358 required, with
+441.7 ms stop/cleanup duration. Clippy passes with the existing four Linux
+platform allowances, and Rust formatting and tracked-text integrity pass.
+Broad verification cleanup is complete with no forced signals or leaked
+descendants. The optimized app executable
+still predates this correction and cannot supply its recording evidence.
+
+The completed Linux CI job `125070218197` on pushed `0cf62464` genuinely runs
+Clippy and tests: 4,198 backend tests pass in 103.18 seconds, including both
+local failing audio cases, with 19 ignored. Other test binaries pass 24/1/1.
+This is source CI evidence before the microphone clock correction, not a
+waiver of the local failures or physical acceptance. Ogre is connected to AC,
+but all 12 cores are near 800 MHz and recorded load reaches 35.57. The local
+timing failures and the stable-host requirement remain open.
+
+Private receipts: `delayed-audio-reproduce-classification.json`,
+`delayed-audio-observed-classification.json`, `delayed-audio-host-samples.jsonl`,
+`handoff-clock-extracted-w1i7i8m4/report.json`, and
+`linux-audio-job-125070218197-classification.json`,
+`handoff-receipt-clock-repetition-validation.json` and
+`handoff-clock-broad-eaecyiv4/report.json` in the existing evidence root.
