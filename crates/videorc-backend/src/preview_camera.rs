@@ -15,9 +15,11 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::camera_capture::{
-    CameraFormatSummary, CameraFrameRateEndpoint, camera_capability_matrix_for_id,
-    parse_native_camera_id, parse_windows_dshow_camera_id, resolve_camera_frame_rate,
+    CameraFormatSummary, camera_capability_matrix_for_id, parse_native_camera_id,
+    parse_windows_dshow_camera_id,
 };
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
+use crate::camera_capture::{CameraFrameRateEndpoint, resolve_camera_frame_rate};
 use crate::color::{ycbcr_bt709_full_to_bgr, ycbcr_bt709_video_to_bgr};
 use crate::diagnostics::{
     PreviewCameraCaptureStats, PreviewCameraCaptureTimingStats,
@@ -44,6 +46,7 @@ const PREVIEW_CAMERA_MAX_PNG_WIDTH: u32 = 1920;
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
 #[cfg(any(target_os = "windows", test))]
 const CAMERA_REFERENCE_HEIGHT: u32 = 720;
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
 /// Must stay inside the 10 s mutation contract together with the up-to-2 s
 /// device inventory that precedes it: past that contract the whole backend
@@ -102,6 +105,7 @@ fn native_camera_preview_thread_startup_timeout() -> Duration {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn native_preview_surface_env_enabled() -> bool {
     // v1 default: the native CAMetalLayer surface IS the production preview. The env
     // var remains a developer kill switch only (VIDEORC_NATIVE_PREVIEW_SURFACE=0).
@@ -111,10 +115,12 @@ fn native_preview_surface_env_enabled() -> bool {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn forced_camera_capture_cpu_copy_enabled() -> bool {
     truthy_env_value(std::env::var(CAMERA_CAPTURE_CPU_COPY_ENV).ok().as_deref())
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn truthy_env_value(value: Option<&str>) -> bool {
     matches!(
         value.map(|value| value.trim().to_ascii_lowercase()),
@@ -122,6 +128,7 @@ fn truthy_env_value(value: Option<&str>) -> bool {
     )
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn should_skip_camera_capture_cpu_copy_for_config(
     zero_copy_source_handle_available: bool,
     source_zerocopy_enabled: bool,
@@ -134,6 +141,7 @@ fn should_skip_camera_capture_cpu_copy_for_config(
         && !forced_cpu_copy_enabled
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn should_skip_camera_capture_cpu_copy(zero_copy_source_handle_available: bool) -> bool {
     should_skip_camera_capture_cpu_copy_for_config(
         zero_copy_source_handle_available,
@@ -148,6 +156,7 @@ use crate::metal_compositor::source_zerocopy_enabled;
 
 /// Zero-copy source handoff is Metal/IOSurface-backed and exists only on macOS.
 #[cfg(not(target_os = "macos"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn source_zerocopy_enabled() -> bool {
     false
 }
@@ -499,6 +508,7 @@ pub enum PreviewCameraPixelFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 enum CameraCaptureDropReason {
     FrameWasLate,
     OutOfBuffers,
@@ -515,6 +525,7 @@ struct CameraCaptureDropReasonCounts {
 }
 
 impl CameraCaptureDropReasonCounts {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record(&mut self, reason: CameraCaptureDropReason) {
         let counter = match reason {
             CameraCaptureDropReason::FrameWasLate => &mut self.frame_was_late,
@@ -658,6 +669,7 @@ impl CameraCaptureTimingWindow {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_sample_pts(&mut self, sample_pts_seconds: Option<f64>) {
         let Some(sample_pts_seconds) = sample_pts_seconds else {
             return;
@@ -794,6 +806,7 @@ fn stable_effective_camera_fps(selected_fps: f64, requested_fps: u32) -> u32 {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn negotiated_camera_fps(
     active_duration_fps: Option<f64>,
     applied_fps: Option<f64>,
@@ -4152,6 +4165,7 @@ fn downscale_rgba_for_preview(
     (next.into_raw(), next_width, next_height)
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn fit_camera_source_in_target_box(
     source_width: u32,
     source_height: u32,
@@ -4175,6 +4189,7 @@ fn fit_camera_source_in_target_box(
     )
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_basis: u32) -> u32 {
     if source_basis == 0 {
         return target_dimension;
@@ -4186,6 +4201,7 @@ fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_
 
 #[derive(Clone)]
 struct NativeCameraPreviewConfig {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     camera_id: String,
     unique_id: String,
     ffmpeg_path: String,
@@ -4234,7 +4250,7 @@ fn windows_camera_preview_output_dimensions(config: &NativeCameraPreviewConfig) 
     camera_capture_target_dimensions(&config.layout, &config.video)
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn windows_camera_preview_ffmpeg_args(
     config: &NativeCameraPreviewConfig,
     width: u32,
@@ -4244,7 +4260,7 @@ fn windows_camera_preview_ffmpeg_args(
     windows_camera_preview_ffmpeg_args_opts(config, width, height, fps, Some(fps))
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn windows_camera_preview_ffmpeg_args_opts(
     config: &NativeCameraPreviewConfig,
     width: u32,
@@ -4618,7 +4634,9 @@ enum NativeCameraStartup {
         selected_fps: f64,
         message: Option<String>,
     },
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     PermissionNeeded(String),
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     DeviceMissing(String),
     Failed(String),
 }
@@ -5484,6 +5502,7 @@ mod windows {
 /// pixel seam available to future Linux PipeWire capture without importing an
 /// Apple framework module.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn nv12_to_bgra(
     y: &[u8],
     y_stride: usize,
@@ -5521,6 +5540,7 @@ fn nv12_to_bgra(
 /// Packed 4:2:2 Y'CbCr -> BGRA, parallelized by row. `uyvy` selects the byte
 /// order: UYVY (`2vuy`, Cb Y0 Cr Y1) when true, YUY2 (`yuvs`, Y0 Cb Y1 Cr)
 /// when false.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn yuv422_to_bgra(
     plane: &[u8],
     stride: usize,

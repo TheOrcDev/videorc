@@ -262,6 +262,7 @@ pub struct ResolveAppWindowParams {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ResolveAppWindowResult {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Found {
         ok: bool,
         #[serde(rename = "windowId")]
@@ -280,7 +281,9 @@ pub enum ResolveAppWindowResult {
 #[serde(rename_all = "kebab-case")]
 pub enum AppWindowUnavailableReason {
     NotRunning,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     NoWindow,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Minimized,
 }
 
@@ -288,6 +291,7 @@ pub enum AppWindowUnavailableReason {
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceKind {
     Screen,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Window,
     Camera,
     Microphone,

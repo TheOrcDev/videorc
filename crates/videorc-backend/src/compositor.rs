@@ -73,6 +73,7 @@ use crate::scene_geometry::{
     chroma_key_alpha, chroma_key_despill, scene_crop_from_transform, scene_source_fit,
     scene_source_rect_pixels, scene_source_render_transform,
 };
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
 pub use crate::source_mask::SourceMask;
 use crate::source_registry::SourceKey;
 use crate::state::AppState;
@@ -91,7 +92,9 @@ const COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER: Duration = Duration::from_sec
 const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER: Duration = Duration::from_millis(67);
 const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES: u32 = 1;
 const COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER: Duration = Duration::from_secs(2);
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const MISSING_SOURCE_PLACEHOLDER_WIDTH: usize = 2;
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const MISSING_SOURCE_PLACEHOLDER_HEIGHT: usize = 2;
 const COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET: usize = 256;
@@ -308,7 +311,11 @@ pub enum CompositorPixelFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompositorFrameExportKind {
     CpuYuv420p,
-    MetalIosurfaceTarget { width: u32, height: u32 },
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    MetalIosurfaceTarget {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl CompositorPixelFormat {
@@ -318,6 +325,7 @@ impl CompositorPixelFormat {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub const fn yuv420p_with_metal_iosurface_target(width: u32, height: u32) -> Self {
         Self::Yuv420p {
             export: CompositorFrameExportKind::MetalIosurfaceTarget { width, height },
@@ -1453,6 +1461,7 @@ struct CompositorRenderCache {
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
     /// Plan 205 S6: the program leg's store (see `CompositorRuntime`).
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     program_frame_store: CompositorFrameStore,
     program_picture_waiters: ProgramPictureWaiters,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
@@ -4797,6 +4806,7 @@ pub async fn compositor_status(state: &AppState) -> CompositorStatus {
 
 /// Plan 210 S3: record how the last screen or window switch changed the
 /// capture (in place, or a restart and why), for `compositor.status`.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) async fn note_screen_switch(
     state: &AppState,
     switch: crate::protocol::ScreenSwitchStatus,
@@ -4988,6 +4998,7 @@ pub(crate) fn yuv420p_to_rgb(width: u32, height: u32, bytes: &[u8]) -> Option<Ve
 }
 
 /// Packed BGRA to packed RGB (alpha dropped).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(bgra.len() / 4 * 3);
     for pixel in bgra.chunks_exact(4) {
@@ -7407,6 +7418,7 @@ struct CompositorPublishResult {
 /// not), the program's verdict for the two layout-driven items, and whether
 /// a Preview surface is live to show the picture (no surface, no twin).
 struct ProgramLeg<'a> {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     gpu: &'a mut Option<GpuCompositor>,
     highlight_on_program: bool,
     buddy_on_program: bool,
@@ -7456,10 +7468,12 @@ fn should_emit_preview_surface_compositor_progress(
 
 /// Whether the Metal/GPU compositor path is requested. Metal is default-on for OBS
 /// parity; the env var is now an escape hatch for debugging CPU fallback.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn metal_compositor_enabled() -> bool {
     metal_compositor_enabled_from_env(std::env::var("VIDEORC_METAL_COMPOSITOR").ok().as_deref())
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn metal_compositor_enabled_from_env(value: Option<&str>) -> bool {
     !matches!(
         value.map(|value| value.trim().to_ascii_lowercase()),
@@ -9141,6 +9155,7 @@ struct SyntheticTestPatternBgra {
     height: usize,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 struct MissingSourcePlaceholderBgra {
     bytes: Vec<u8>,
     width: usize,
@@ -9170,6 +9185,7 @@ fn evidence_fingerprint(
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn missing_source_black_bgra() -> MissingSourcePlaceholderBgra {
     let width = MISSING_SOURCE_PLACEHOLDER_WIDTH;
     let height = MISSING_SOURCE_PLACEHOLDER_HEIGHT;
