@@ -2626,7 +2626,15 @@ export function findRememberedSource(
     return undefined
   }
 
-  return candidates.find((device) => device.name.trim() === normalizedName)
+  return (
+    candidates.find((device) => device.name.trim() === normalizedName) ??
+    // 0.18.0 saved this tag even when the name already said iPhone. Keep
+    // those picks working after an id change, behind id and exact-name matches.
+    candidates.find(
+      (device) =>
+        device.kind === 'camera' && `${device.name.trim()} · iPhone camera` === normalizedName
+    )
+  )
 }
 
 function sourceIdentityFor(device: Device | undefined): { id?: string; name?: string } {
