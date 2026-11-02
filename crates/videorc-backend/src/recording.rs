@@ -16023,6 +16023,51 @@ static LINUX_ENCODER_DECISIONS: std::sync::OnceLock<
     >,
 > = std::sync::OnceLock::new();
 
+/// Held while a decision is resolved. The probe sentinel is one file, and a
+/// resolution adopts any sentinel it finds as a probe that never returned,
+/// so a second resolution running beside the first (the replay ring's start
+/// and the renderer's output check at launch) would quarantine the node the
+/// first is still probing, for good.
+#[cfg(target_os = "linux")]
+static LINUX_ENCODER_PROBE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The cached decision for `key`, or the one `resolve` makes. Resolutions run
+/// one at a time; a caller that waited reads the answer the one before made.
+#[cfg(target_os = "linux")]
+async fn cached_linux_encoder_decision(
+    decisions: &StdMutex<
+        std::collections::HashMap<String, std::result::Result<ResolvedFfmpegH264Encoder, String>>,
+    >,
+    gate: &tokio::sync::Mutex<()>,
+    key: String,
+    resolve: impl std::future::Future<Output = Result<ResolvedFfmpegH264Encoder>>,
+) -> Result<ResolvedFfmpegH264Encoder> {
+    let cached = || {
+        decisions
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+    };
+    if let Some(cached) = cached() {
+        return cached.map_err(anyhow::Error::msg);
+    }
+    let _resolving = gate.lock().await;
+    if let Some(cached) = cached() {
+        return cached.map_err(anyhow::Error::msg);
+    }
+    let resolved = resolve.await;
+    if let Ok(mut cache) = decisions.lock() {
+        cache.insert(
+            key,
+            resolved
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(|error| error.to_string()),
+        );
+    }
+    resolved
+}
+
 #[cfg(target_os = "linux")]
 async fn resolve_linux_h264_encoder_uncached(
     ffmpeg_path: &str,
@@ -16144,25 +16189,13 @@ async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpeg
                 .unwrap_or_default()
         );
         let decisions = LINUX_ENCODER_DECISIONS.get_or_init(|| StdMutex::new(Default::default()));
-        if let Some(cached) = decisions
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(&key).cloned())
-        {
-            return cached.map_err(anyhow::Error::msg);
-        }
-        let resolved =
-            resolve_linux_h264_encoder_uncached(ffmpeg_path, preference, pin.as_deref()).await;
-        if let Ok(mut cache) = decisions.lock() {
-            cache.insert(
-                key,
-                resolved
-                    .as_ref()
-                    .map(Clone::clone)
-                    .map_err(|error| error.to_string()),
-            );
-        }
-        resolved
+        cached_linux_encoder_decision(
+            decisions,
+            &LINUX_ENCODER_PROBE_GATE,
+            key,
+            resolve_linux_h264_encoder_uncached(ffmpeg_path, preference, pin.as_deref()),
+        )
+        .await
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -29693,6 +29726,79 @@ mod tests {
         let recovered =
             blocking_probe_with_deadline(&WEDGED, Duration::from_secs(5), || "ok").await;
         assert!(matches!(recovered, BlockingProbeOutcome::Finished("ok")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_decision_asked_for_during_a_probe_waits_and_never_quarantines_that_node() {
+        use crate::linux_vaapi::{ProbeQuarantine, RenderNodeCandidate};
+
+        let directory =
+            std::env::temp_dir().join(format!("videorc-vaapi-probe-gate-{}", uuid::Uuid::new_v4()));
+        let quarantine = ProbeQuarantine::new(directory.clone());
+        let intel = RenderNodeCandidate {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            driver: Some("i915".to_string()),
+        };
+        let decisions = StdMutex::new(std::collections::HashMap::new());
+        let gate = tokio::sync::Mutex::new(());
+        let resolutions = std::sync::atomic::AtomicUsize::new(0);
+        // What resolve_linux_h264_encoder_uncached does with the sentinel:
+        // adopt a stale one, arm its own, probe, clear it.
+        let (quarantine_ref, intel_ref, resolutions_ref) = (&quarantine, &intel, &resolutions);
+        let resolve = move |probe_returns: Option<oneshot::Receiver<()>>,
+                            armed: Option<oneshot::Sender<()>>| {
+            let (quarantine, intel, resolutions) = (quarantine_ref, intel_ref, resolutions_ref);
+            async move {
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                quarantine.adopt_stale_sentinel()?;
+                quarantine.begin_probe(intel, "/opt/ffmpeg")?;
+                if let Some(armed) = armed {
+                    let _ = armed.send(());
+                }
+                if let Some(probe_returns) = probe_returns {
+                    let _ = probe_returns.await;
+                }
+                quarantine.finish_probe()?;
+                select_linux_h264_encoder(
+                    LinuxH264EncoderPreference::Auto,
+                    Some((intel.path.clone(), LinuxVaapiArgProfile::Standard)),
+                    None,
+                )
+            }
+        };
+        let (armed_tx, armed) = oneshot::channel();
+        let (returns_tx, probe_returns) = oneshot::channel();
+
+        // The renderer's output check starts the probe; the replay ring's
+        // start asks for the same decision while it runs.
+        let (first, second, ()) = tokio::join!(
+            cached_linux_encoder_decision(
+                &decisions,
+                &gate,
+                "ffmpeg|Auto|".to_string(),
+                resolve(Some(probe_returns), Some(armed_tx)),
+            ),
+            cached_linux_encoder_decision(
+                &decisions,
+                &gate,
+                "ffmpeg|Auto|".to_string(),
+                resolve(None, None),
+            ),
+            async {
+                armed.await.expect("the first probe armed its sentinel");
+                tokio::task::yield_now().await;
+                let _ = returns_tx.send(());
+            },
+        );
+
+        let quarantined = quarantine.quarantined();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(quarantined, Vec::new(), "a live probe was quarantined");
+        assert_eq!(resolutions.load(Ordering::SeqCst), 1, "probed twice");
+        let first = first.expect("the probe passed");
+        assert_eq!(first.platform, FfmpegH264Platform::LinuxVaapi);
+        assert_eq!(second.expect("the waiter reads the same answer"), first);
     }
 
     #[test]
