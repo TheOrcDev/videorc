@@ -2928,7 +2928,12 @@ export function reconcileSourceSelection(
         ? selectableCaptureDevices.find((device) => device.id === usingId)
         : undefined
     const rememberedCapture =
-      heldStandIn ?? findRememberedSource(pick.id, pick.name, selectableCaptureDevices)
+      heldStandIn ??
+      findRememberedSource(
+        pick.id,
+        pick.name,
+        selectableCaptureDevices.filter((device) => device.kind === pick.kind)
+      )
     const holdingCapture = options.holdStandIns && pick.standIn
     const selectedCapture = holdingCapture
       ? selectableCaptureDevices.find((device) => device.id === usingId)

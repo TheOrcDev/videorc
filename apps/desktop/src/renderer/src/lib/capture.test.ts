@@ -254,6 +254,19 @@ describe('reconcileSourceSelection', () => {
       expect(persisted(window).wantedWindowId).toBeUndefined()
     })
 
+    it('does not mistake a display with the same name for the wanted window', () => {
+      const next = reconcileSourceSelection({ windowId: keynote.id, windowName: display1.name }, [
+        display1
+      ])
+      expect(next.screenId).toBe(display1.id)
+      expect(persisted(next)).toMatchObject({
+        windowId: keynote.id,
+        windowName: display1.name,
+        screenId: undefined
+      })
+      expect(next.wantedWindowId).toBe(keynote.id)
+    })
+
     it('a pick with no stand-in at all is still the pick', () => {
       const next = reconcileSourceSelection({ cameraId: iphone.id, cameraName: iphone.name }, [
         display1

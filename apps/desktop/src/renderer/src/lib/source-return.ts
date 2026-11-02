@@ -54,7 +54,8 @@ export function cameraPreviewStartAllowed(
 }
 
 export function sourceReturnAction(
-  status: Pick<RecordingStatus, 'state' | 'replayOnly'>
-): 'offer' | 'restore' {
-  return sessionOwnsTransport(status) ? 'offer' : 'restore'
+  status: Pick<RecordingStatus, 'state' | 'replayOnly'>,
+  blocked = false
+): 'offer' | 'restore' | 'wait' {
+  return sessionOwnsTransport(status) ? 'offer' : blocked ? 'wait' : 'restore'
 }

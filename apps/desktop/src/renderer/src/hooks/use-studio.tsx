@@ -11136,14 +11136,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : buildCaptureSources(current, deviceListRef.current.devices, device.id)
         void switchSourceDeviceLive(kind, next).catch((error) => toastUserError(error))
       }
-      if (
-        sourceReturnAction({ state: recording.state, replayOnly: recording.replayOnly }) ===
-        'restore'
-      ) {
-        if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current) {
-          keys.delete(key)
-          continue
-        }
+      const action = sourceReturnAction(
+        { state: recording.state, replayOnly: recording.replayOnly },
+        Boolean(sourceSwitchReason(kind))
+      )
+      if (action === 'wait') {
+        keys.delete(key)
+        continue
+      }
+      if (action === 'restore') {
         applyDevice()
         continue
       }
@@ -11162,6 +11163,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sourceStatusKnown,
     startRequestPending,
     stopRequestPending,
+    sourceSwitchReason,
     switchSourceDeviceLive
   ])
 
