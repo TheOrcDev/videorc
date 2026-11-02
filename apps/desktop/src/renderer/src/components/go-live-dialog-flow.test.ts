@@ -24,14 +24,15 @@ import { GO_LIVE_EXCLUDED_NOTE, GoLiveConfirmationDialog } from './go-live-dialo
 const mocked = vi.hoisted(() => ({
   captureConfig: undefined as unknown,
   banners: [] as unknown[],
-  sharedVideo: null as unknown
+  sharedVideo: null as unknown,
+  topology: { state: 'idle' } as unknown
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioBanners: () => ({ banners: mocked.banners }),
   useStudioCore: () => ({
     captureConfig: mocked.captureConfig,
     performanceCheck: undefined,
-    streamOutputTopologyPreflight: { state: 'idle' },
+    streamOutputTopologyPreflight: mocked.topology,
     streamSharedEncodeFallbackVideo: mocked.sharedVideo,
     overlayLayout: DEFAULT_OVERLAY_LAYOUT
   })
@@ -108,6 +109,7 @@ beforeEach(() => {
   mocked.captureConfig = twitchOn()
   mocked.banners = []
   mocked.sharedVideo = null
+  mocked.topology = { state: 'idle' }
 })
 
 afterEach(() => {
@@ -294,6 +296,52 @@ describe('Go Live dialog destinations (B-8, B-12, D-7)', () => {
       )
     })
     expect(dialog().textContent).not.toContain('Streaming both orientations')
+  })
+
+  it('says on the vertical row when this computer cannot encode the vertical leg (#691)', () => {
+    // Linux (ogre, 2026-11-01): "3 of 3 ready", then the engine refused the
+    // start because the raw path has no second encoder for the vertical leg.
+    const vertical = withTargets((target) =>
+      target.id === 'youtube' || target.id === 'youtube-vertical'
+        ? { ...target, enabled: true }
+        : target
+    )
+    mocked.captureConfig = { ...vertical, streamEnabled: true }
+    const preflight: GoLivePreflight = {
+      valid: true,
+      issues: [],
+      destinations: [
+        destination({ targetId: 'youtube', platform: 'youtube', label: 'YouTube' }),
+        destination({
+          targetId: 'youtube-vertical',
+          platform: 'youtube',
+          label: 'YouTube Vertical'
+        })
+      ]
+    }
+    const topology = (effectiveBridgeOutput: string): unknown => ({
+      state: 'ready',
+      requestKey: 'key',
+      result: { outputRoles: ['stream'], effectiveBridgeOutput }
+    })
+
+    mocked.topology = topology('raw-yuv420p')
+    const props = render({ preflight })
+    expect(dialog().textContent).toContain('1 of 2 ready')
+    const row = dialog().querySelector('[data-target-id=youtube-vertical]')!
+    expect(row.getAttribute('data-ready')).toBe('false')
+    expect(row.textContent).toContain("can't encode a separate vertical stream")
+    expect(dialog().textContent).not.toContain('Streaming both orientations')
+    expect(primary().disabled).toBe(true)
+    act(() => button('Go live without YouTube Vertical').click())
+    expect(props.onResolveBlocker).toHaveBeenCalledWith('youtube-vertical', 'exclude')
+
+    // An encoder with a second leg (VideoToolbox, Media Foundation) streams both.
+    mocked.topology = topology('videotoolbox-h264-mpegts')
+    render({ preflight })
+    expect(dialog().textContent).toContain('2 of 2 ready')
+    expect(dialog().textContent).toContain('Streaming both orientations')
+    expect(primary().disabled).toBe(false)
   })
 
   it('reminds a Facebook stream-key session to press Go live in Live Producer, in any orientation', () => {
