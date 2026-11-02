@@ -1477,6 +1477,7 @@ export const defaultCaptureConfig: CaptureConfig = {
     sourceVisibility: { camera: true, capture: true }
   },
   audio: {
+    microphoneNoiseSuppression: 'off',
     microphoneGainDb: 0,
     microphoneMuted: false,
     // Pure manual trim: structural A/V alignment happens in the backend (the audio
@@ -1670,6 +1671,8 @@ export function normalizeAudioSettings(audio: unknown): AudioSettings {
   // (Comments stay out of these object literals: the bundler keeps those in
   // the eager Studio chunk.)
   return {
+    microphoneNoiseSuppression:
+      candidate.microphoneNoiseSuppression === 'rnnoise' ? 'rnnoise' : 'off',
     microphoneGainDb: clampNumber(
       candidate.microphoneGainDb,
       defaultCaptureConfig.audio.microphoneGainDb,

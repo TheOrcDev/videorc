@@ -1,0 +1,24 @@
+RNNoise Rust implementation
+
+Repository: https://github.com/lovelace-labs/rnnoise-rs
+Revision: 74b46b1065630f68464ee60dd542e3ce175743db
+Cargo package: rnnoise-rs 0.1.0, default features disabled
+Runtime: pure Rust, default floating-point model, no C ABI
+
+Embedded model SHA-256:
+eb8687d6ec4a461c971c60dc1f576d68e05bda2bfac8d9d356a330de14d28f71
+
+The embedded float model was independently regenerated from Xiph RNNoise
+revision 70f1d256acd4b34a572f999a05c87bf00b67730d and matched byte for byte.
+Upstream model archive SHA-256:
+0a8755f8e2d834eff6a54714ecc7d75f9932e845df35f8b59bc52a7cfe6e8b37
+Archive: https://media.xiph.org/rnnoise/models/rnnoise_data-0a8755f8e2d834eff6a54714ecc7d75f9932e845df35f8b59bc52a7cfe6e8b37.tar.gz
+
+LICENSE.txt is preserved verbatim from the pinned Rust implementation and
+includes its code and embedded-model notice. UPSTREAM-NOTICES.txt preserves
+additional copyright and redistribution notices from the translated upstream
+DSP files and headers. Each preserved header identifies its upstream filename;
+coverage includes FFT, pitch/LPC, denoising, neural-network kernels, model
+loading, and generated-table source.
+Source revision: https://github.com/xiph/rnnoise/tree/70f1d256acd4b34a572f999a05c87bf00b67730d
+Research and verification: docs/rnnoise-rust-research.md and docs/rnnoise.md

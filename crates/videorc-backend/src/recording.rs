@@ -167,8 +167,8 @@ const AUDIO_LEVELS_INTERVAL: Duration = Duration::from_millis(50);
 /// Level ticks between checks that the session is still the active one.
 const AUDIO_LEVELS_LIVENESS_TICKS: u32 = 20;
 /// Silent-mic health check (plan 021 F3): how deep into a recording the mic may
-/// stay silent before the session gets a truthful warning, and the session-peak
-/// floor below which a track counts as silence (TCC-unauthorized processes get
+/// stay silent before the session gets a truthful warning, and the raw-input
+/// peak floor below which capture counts as silence (TCC-unauthorized processes get
 /// silent zeros from CoreAudio — frames advance, the track holds nothing).
 const MIC_SILENT_CHECK_AFTER: Duration = Duration::from_secs(10);
 const MIC_SILENT_PEAK_EPSILON: f32 = 0.001;
@@ -201,11 +201,14 @@ enum SilentMicKind {
     AllSilence,
 }
 
-fn silent_mic_verdict(captured_frames: u64, session_peak: f32) -> Option<SilentMicKind> {
-    if captured_frames == 0 {
+fn silent_mic_verdict(
+    received_capture_frames: u64,
+    capture_session_peak: f32,
+) -> Option<SilentMicKind> {
+    if received_capture_frames == 0 {
         return Some(SilentMicKind::NoFrames);
     }
-    if session_peak < MIC_SILENT_PEAK_EPSILON {
+    if capture_session_peak < MIC_SILENT_PEAK_EPSILON {
         return Some(SilentMicKind::AllSilence);
     }
     None
@@ -3224,6 +3227,27 @@ pub async fn active_capture_elapsed_seconds(state: &AppState) -> Option<f64> {
     Some(active.capture_elapsed_seconds())
 }
 
+/// Report audio transport failure with the last confirmed values without
+/// claiming that the video session ended.
+fn reject_closed_microphone_controls(
+    result: &mut AudioProcessingUpdateResult,
+    state: crate::audio::NativeAudioInputState,
+    confirmed: AudioProcessingSettings,
+) -> bool {
+    if !matches!(
+        state,
+        crate::audio::NativeAudioInputState::DownstreamClosed
+            | crate::audio::NativeAudioInputState::Stopped
+    ) {
+        return false;
+    }
+    result.reason_code = Some("live-audio-control-unavailable".into());
+    result.confirmed_microphone_gain_db = Some(confirmed.gain_db);
+    result.confirmed_microphone_muted = Some(confirmed.muted);
+    result.confirmed_microphone_noise_suppression = Some(confirmed.noise_suppression);
+    true
+}
+
 /// Applies renderer mic controls to the active CoreAudio or FFmpeg-owned
 /// capture session. The session id and recording lock make delayed websocket
 /// commands harmless across stop/start boundaries. CoreAudio consumes updates
@@ -3232,9 +3256,12 @@ pub async fn update_active_audio_processing(
     state: &AppState,
     params: AudioProcessingUpdateParams,
 ) -> AudioProcessingUpdateResult {
-    let settings =
+    let mut settings =
         normalized_audio_processing_settings(params.microphone_gain_db, params.microphone_muted);
+    settings.noise_suppression = params.microphone_noise_suppression.unwrap_or_default();
     let mut result = AudioProcessingUpdateResult {
+        confirmed_microphone_noise_suppression: None,
+        microphone_noise_suppression: settings.noise_suppression,
         applied: false,
         session_id: params.session_id.clone(),
         microphone_gain_db: settings.gain_db,
@@ -3257,6 +3284,26 @@ pub async fn update_active_audio_processing(
         }
         if active.stop_requested {
             result.reason_code = Some("session-ended".to_string());
+            return result;
+        }
+
+        if let Some(native_audio) = active.native_audio.as_ref() {
+            if reject_closed_microphone_controls(
+                &mut result,
+                native_audio.input_state(),
+                native_audio.processing_settings(),
+            ) {
+                return result;
+            }
+            settings.noise_suppression = params
+                .microphone_noise_suppression
+                .unwrap_or_else(|| native_audio.processing_settings().noise_suppression);
+            result.microphone_noise_suppression = settings.noise_suppression;
+        } else if settings.noise_suppression == crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+        {
+            result.reason_code = Some("microphone-noise-suppression-unavailable".to_string());
+            result.confirmed_microphone_noise_suppression =
+                Some(crate::protocol::MicrophoneNoiseSuppression::Off);
             return result;
         }
 
@@ -3284,6 +3331,7 @@ pub async fn update_active_audio_processing(
 
         if let Some(native_audio) = active.native_audio.as_ref() {
             native_audio.update_processing_settings(settings);
+            result.confirmed_microphone_noise_suppression = Some(settings.noise_suppression);
             result.applied = true;
             return result;
         }
@@ -3352,6 +3400,8 @@ pub async fn update_active_audio_processing(
     }
 
     result.applied = true;
+    result.confirmed_microphone_noise_suppression =
+        Some(crate::protocol::MicrophoneNoiseSuppression::Off);
     result
 }
 
@@ -4457,6 +4507,17 @@ async fn start_session_with_timeline(
         None
     };
     let has_session_audio = has_native_audio || silent_audio_fifo.is_some();
+    // An empty microphone selection still owns a persistent SessionPcm bus.
+    // Keep the remembered mode for a later source attachment; reject only
+    // routes that actually bypass that bus (such as direct FFmpeg capture).
+    if params.audio.microphone_noise_suppression
+        == crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+        && !has_session_audio
+    {
+        anyhow::bail!(
+            "Noise reduction is unavailable for the selected microphone. Turn it off or select a supported microphone."
+        );
+    }
     let audio_tracks = capture_audio_tracks(&capture);
     let active_screen = state.database.active_stream_screen()?;
     // Plan 186 S4: the banners showing when the session starts decide whether
@@ -10407,7 +10468,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             observation.captured_frames,
                             observation.dropped_frames,
                             observation.live_peak,
-                            observation.session_peak,
+                            observation.capture_session_peak,
+                            observation.received_capture_frames,
                             observation.device_name,
                             observation.elapsed_secs,
                             observation.input_state,
@@ -10417,6 +10479,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             system_audio_sample(active),
                             observation.recoveries,
                             observation.output_stalls,
+                            observation.processor_failure,
                         )
                     })
                 }
@@ -10427,7 +10490,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             captured_frames,
             dropped_frames,
             live_peak,
-            session_peak,
+            capture_session_peak,
+            received_capture_frames,
             device_name,
             capture_elapsed_secs,
             input_state,
@@ -10437,6 +10501,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             system_audio,
             recoveries,
             output_stalls,
+            processor_failure,
         )) = counters
         else {
             return;
@@ -10448,6 +10513,10 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         if let Some(sample) = system_audio.as_ref()
             && emit_system_audio_sample_events(&state, &session_id, sample)
         {
+            reemit_active_recording_status(&state, &session_id).await;
+        }
+        if let Some(message) = processor_failure.as_deref() {
+            emit_audio_processor_failed_health_event(&state, &session_id, message);
             reemit_active_recording_status(&state, &session_id).await;
         }
         for report in &output_stalls {
@@ -10488,14 +10557,14 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         // Early truthful warning (plan 021 F3): a mic that has produced nothing
         // this deep into the recording will not fix itself — tell the user NOW,
         // while stopping and fixing still saves the take. A TCC-unauthorized
-        // process receives silent zeros (frames count, peak stays 0), so both
+        // process receives silent zeros (frames count, raw peak stays 0), so both
         // "no frames" and "all-silence" trip the check. Fires at most once.
         if matches!(
             input_state,
             NativeAudioInputState::Starting | NativeAudioInputState::Live
         ) && !silent_mic_reported
             && capture_elapsed_secs.unwrap_or_default() >= MIC_SILENT_CHECK_AFTER.as_secs_f64()
-            && let Some(kind) = silent_mic_verdict(captured_frames, session_peak)
+            && let Some(kind) = silent_mic_verdict(received_capture_frames, capture_session_peak)
         {
             silent_mic_reported = true;
             let message = match kind {
@@ -10628,6 +10697,22 @@ fn emit_audio_output_stalled_health_event(
         Some(session_id),
         HealthLevel::Warn,
         AUDIO_OUTPUT_STALLED_CODE,
+        &message,
+    );
+}
+
+const AUDIO_PROCESSOR_FAILED_CODE: &str = "audio-processor-failed";
+
+fn emit_audio_processor_failed_health_event(state: &AppState, session_id: &str, detail: &str) {
+    let message = format!(
+        "Noise reduction failed: {detail}. Microphone and system audio stopped. Stop and restart the session to restore audio."
+    );
+    state.emit_log("error", &message);
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Error,
+        AUDIO_PROCESSOR_FAILED_CODE,
         &message,
     );
 }
@@ -11169,12 +11254,14 @@ async fn monitor_session(
                     device_name: observation.device_name,
                     captured_frames: observation.captured_frames,
                     dropped_frames: observation.dropped_frames,
-                    session_peak: observation.session_peak,
+                    capture_session_peak: observation.capture_session_peak,
+                    received_capture_frames: observation.received_capture_frames,
                     input_state: observation.input_state,
                     source_loss_after_ms: observation.source_loss_after_ms,
                     unreported_source_loss_after_ms: observation.losses,
                     unreported_recoveries: observation.recoveries,
                     unreported_output_stalls: observation.output_stalls,
+                    unreported_processor_failure: observation.processor_failure,
                     system_audio: system_audio_sample(active),
                 }
             });
@@ -11208,6 +11295,12 @@ async fn monitor_session(
             .stop(&session_id);
     }
     drop(guard);
+    let final_audio = retired_active.as_ref().and_then(|active| {
+        active
+            .native_audio
+            .as_ref()
+            .map(|audio| audio.switch_handle())
+    });
     #[cfg(target_os = "windows")]
     if monitored_recording.is_some() {
         state
@@ -11471,6 +11564,11 @@ async fn monitor_session(
         }
     }
 
+    // SessionAudio Drop has joined the writer. Claim any fault published
+    // after the initial stats snapshot, including a fault racing user Stop.
+    if let Some(detail) = final_audio.and_then(|audio| audio.claim_processor_failure()) {
+        emit_audio_processor_failed_health_event(&state, &session_id, &detail);
+    }
     mark_stop_timeline(&state, RecordingStopPhase::BridgeStopped);
     // Dropping ActiveRecording stops the native post-controls audio producer.
     // Close the caption bus now, drain the provider's final utterance within a
@@ -11520,6 +11618,9 @@ async fn monitor_session(
         );
         if let Some(sample) = native_audio_stats.system_audio.as_ref() {
             emit_system_audio_sample_events(&state, &session_id, sample);
+        }
+        if let Some(message) = native_audio_stats.unreported_processor_failure.as_deref() {
+            emit_audio_processor_failed_health_event(&state, &session_id, message);
         }
         for report in &native_audio_stats.unreported_output_stalls {
             emit_audio_output_stalled_health_event(&state, &session_id, report);
@@ -13972,13 +14073,15 @@ struct NativeAudioStats {
     device_name: String,
     captured_frames: u64,
     dropped_frames: u64,
-    session_peak: f32,
+    capture_session_peak: f32,
+    received_capture_frames: u64,
     input_state: NativeAudioInputState,
     source_loss_after_ms: Option<u64>,
     unreported_source_loss_after_ms: Vec<crate::session_audio::SourceLoss>,
     /// Recoveries and output stalls the sampler had not reported (plan 076).
     unreported_recoveries: Vec<crate::session_audio::SourceRecovery>,
     unreported_output_stalls: Vec<crate::session_audio::OutputStallReport>,
+    unreported_processor_failure: Option<String>,
     /// Final system-audio counters and events the sampler had not reported
     /// (plan 069 S4); `None` where the session cannot mix system audio.
     system_audio: Option<SystemAudioSample>,
@@ -13989,7 +14092,7 @@ impl NativeAudioStats {
         if !self.selected_input || self.input_state == NativeAudioInputState::SourceLost {
             return None;
         }
-        silent_mic_verdict(self.captured_frames, self.session_peak)
+        silent_mic_verdict(self.received_capture_frames, self.capture_session_peak)
     }
 }
 
@@ -22714,6 +22817,7 @@ fn capture_audio_filter(input_layout: &InputLayout, audio: &AudioSettings) -> St
 
 fn normalized_audio_processing_settings(gain_db: f32, muted: bool) -> AudioProcessingSettings {
     AudioProcessingSettings {
+        noise_suppression: Default::default(),
         gain_db: if gain_db.is_finite() {
             gain_db.clamp(-24.0, 24.0)
         } else {
@@ -26506,10 +26610,13 @@ fn output_mode(record_enabled: bool, stream_enabled: bool) -> &'static str {
 }
 
 fn audio_processing_settings(params: &StartSessionParams) -> AudioProcessingSettings {
-    normalized_audio_processing_settings(
-        params.audio.microphone_gain_db,
-        params.audio.microphone_muted,
-    )
+    AudioProcessingSettings {
+        noise_suppression: params.audio.microphone_noise_suppression,
+        ..normalized_audio_processing_settings(
+            params.audio.microphone_gain_db,
+            params.audio.microphone_muted,
+        )
+    }
 }
 
 fn parse_avfoundation_id(id: &str) -> Option<usize> {
@@ -27375,17 +27482,26 @@ mod tests {
             device_name: "No microphone".into(),
             captured_frames: 0,
             dropped_frames: 0,
-            session_peak: 0.0,
+            capture_session_peak: 0.0,
+            received_capture_frames: 0,
             input_state: NativeAudioInputState::Stopped,
             source_loss_after_ms: None,
             unreported_source_loss_after_ms: vec![],
             unreported_recoveries: vec![],
             unreported_output_stalls: vec![],
+            unreported_processor_failure: None,
             system_audio: None,
         };
         assert_eq!(stats.silence_verdict(), None);
         stats.selected_input = true;
         assert_eq!(stats.silence_verdict(), Some(SilentMicKind::NoFrames));
+        stats.received_capture_frames = 480;
+        assert_eq!(stats.silence_verdict(), Some(SilentMicKind::AllSilence));
+        stats.capture_session_peak = 0.004;
+        // Placement/output counters may remain zero after a blocked writer.
+        assert_eq!(stats.captured_frames, 0);
+        assert_eq!(stats.silence_verdict(), None);
+        stats.capture_session_peak = 0.0;
         stats.input_state = NativeAudioInputState::SourceLost;
         assert_eq!(stats.silence_verdict(), None);
     }
@@ -31633,7 +31749,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             system.detach().await.expect("live system Off acknowledged");
             let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
-                session_id: session_id.into(), microphone_gain_db: -6.0, microphone_muted: false,
+                session_id: session_id.into(), microphone_noise_suppression: None, microphone_gain_db: -6.0, microphone_muted: false,
                 system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
             }).await;
             assert!(changed.applied);
@@ -31648,7 +31764,7 @@ mod tests {
             )), Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap();
             system.attach(source).await.expect("live system On acknowledged");
             let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
-                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: true,
+                session_id: session_id.into(), microphone_noise_suppression: None, microphone_gain_db: 0.0, microphone_muted: true,
                 system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
             }).await;
             assert!(changed.applied);
@@ -31656,7 +31772,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             control_intervals.push(serde_json::json!({"start": mute_at + 0.2, "duration": 0.4, "microphone": 0.0, "system": 0.2 * 10_f64.powf(f64::from(params.audio.system_audio_gain_db) / 20.0)}));
             let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
-                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: false,
+                session_id: session_id.into(), microphone_noise_suppression: None, microphone_gain_db: 0.0, microphone_muted: false,
                 system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
             }).await;
             assert!(changed.applied);
@@ -39744,6 +39860,7 @@ mod tests {
     fn ffmpeg_live_microphone_commands_are_broadcast_clamped_and_injection_safe() {
         assert_eq!(
             ffmpeg_live_microphone_command(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 6.5,
                 muted: false,
             }),
@@ -39751,6 +39868,7 @@ mod tests {
         );
         assert_eq!(
             ffmpeg_live_microphone_command(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 99.0,
                 muted: false,
             }),
@@ -39758,6 +39876,7 @@ mod tests {
         );
         assert_eq!(
             ffmpeg_live_microphone_command(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: f32::NAN,
                 muted: false,
             }),
@@ -39765,6 +39884,7 @@ mod tests {
         );
         assert_eq!(
             ffmpeg_live_microphone_command(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: -12.0,
                 muted: true,
             }),
@@ -41097,6 +41217,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 6.0,
                     muted: false,
                 },
@@ -41137,6 +41258,7 @@ mod tests {
                 .apply(
                     &mut stdin,
                     AudioProcessingSettings {
+                        noise_suppression: Default::default(),
                         gain_db,
                         muted: false,
                     },
@@ -41154,6 +41276,7 @@ mod tests {
     async fn ffmpeg_live_audio_control_confirms_identical_healthy_settings_without_io() {
         let (_sender, replies) = mpsc::unbounded_channel();
         let initial = AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 6.0,
             muted: false,
         };
@@ -41221,6 +41344,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 3.0,
                     muted: false,
                 },
@@ -41231,6 +41355,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: -6.0,
                     muted: false,
                 },
@@ -41270,6 +41395,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: -6.0,
                     muted: false,
                 },
@@ -41300,6 +41426,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 6.0,
                     muted: false,
                 },
@@ -41315,6 +41442,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: -6.0,
                     muted: true,
                 },
@@ -41375,6 +41503,7 @@ mod tests {
             tokio::spawn(async move {
                 session
                     .apply(AudioProcessingSettings {
+                        noise_suppression: Default::default(),
                         gain_db: 6.0,
                         muted: false,
                     })
@@ -41433,6 +41562,7 @@ mod tests {
         let failure = session
             .apply_with_ready_timeout(
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 6.0,
                     muted: false,
                 },
@@ -41479,6 +41609,7 @@ mod tests {
             tokio::spawn(async move {
                 session
                     .apply(AudioProcessingSettings {
+                        noise_suppression: Default::default(),
                         gain_db: 6.0,
                         muted: false,
                     })
@@ -41579,6 +41710,7 @@ mod tests {
             update_active_audio_processing(
                 &update_state,
                 AudioProcessingUpdateParams {
+                    microphone_noise_suppression: None,
                     session_id: "live-audio-lock-test".to_string(),
                     microphone_gain_db: 6.0,
                     microphone_muted: false,
@@ -41628,6 +41760,7 @@ mod tests {
         let late_result = update_active_audio_processing(
             &state,
             AudioProcessingUpdateParams {
+                microphone_noise_suppression: None,
                 session_id: "live-audio-lock-test".to_string(),
                 microphone_gain_db: -3.0,
                 microphone_muted: true,
@@ -41648,6 +41781,71 @@ mod tests {
         drop(live_audio_session);
     }
 
+    #[test]
+    fn rnnoise_dead_audio_transport_does_not_claim_video_session_ended() {
+        for state in [
+            crate::audio::NativeAudioInputState::DownstreamClosed,
+            crate::audio::NativeAudioInputState::Stopped,
+        ] {
+            let mut result = AudioProcessingUpdateResult {
+                applied: false,
+                session_id: "active-video".into(),
+                microphone_gain_db: 6.0,
+                microphone_muted: false,
+                microphone_noise_suppression: crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+                reason_code: None,
+                confirmed_microphone_gain_db: None,
+                confirmed_microphone_muted: None,
+                confirmed_microphone_noise_suppression: None,
+            };
+            assert!(reject_closed_microphone_controls(
+                &mut result,
+                state,
+                AudioProcessingSettings::default()
+            ));
+            assert_eq!(
+                result.reason_code.as_deref(),
+                Some("live-audio-control-unavailable")
+            );
+            assert_eq!(result.confirmed_microphone_gain_db, Some(0.0));
+            assert_eq!(result.confirmed_microphone_muted, Some(false));
+            assert_eq!(
+                result.confirmed_microphone_noise_suppression,
+                Some(crate::protocol::MicrophoneNoiseSuppression::Off)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rnnoise_live_update_rejects_bypassed_microphone_without_claiming_applied() {
+        let state = test_state();
+        *state.recording.lock().await = Some(test_active_recording_stub("rnnoise-unavailable"));
+        let result = update_active_audio_processing(
+            &state,
+            AudioProcessingUpdateParams {
+                session_id: "rnnoise-unavailable".into(),
+                microphone_gain_db: 6.0,
+                microphone_muted: false,
+                microphone_noise_suppression: Some(
+                    crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+                ),
+                system_audio_enabled: None,
+                system_audio_gain_db: None,
+                system_audio_echo_guard: None,
+            },
+        )
+        .await;
+        assert!(!result.applied);
+        assert_eq!(
+            result.reason_code.as_deref(),
+            Some("microphone-noise-suppression-unavailable")
+        );
+        assert_eq!(
+            result.confirmed_microphone_noise_suppression,
+            Some(crate::protocol::MicrophoneNoiseSuppression::Off)
+        );
+    }
+
     #[tokio::test]
     async fn live_audio_stop_marker_rejects_a_precloned_late_update() {
         let (mut child, stdin) = spawn_test_stdin_sink().await;
@@ -41662,6 +41860,7 @@ mod tests {
         let error = timeout(
             Duration::from_millis(100),
             precloned_session.apply(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 6.0,
                 muted: false,
             }),
@@ -41681,6 +41880,7 @@ mod tests {
         }
         let sticky_error = precloned_session
             .apply(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: -6.0,
                 muted: true,
             })
@@ -47589,6 +47789,14 @@ mod tests {
         /// A published session whose bus is the paced-silence path (no
         /// microphone): the system-only shape.
         async fn live_session(session_id: &str) -> LiveSession {
+            live_session_with_source(session_id, None, AudioProcessingSettings::default()).await
+        }
+
+        async fn live_session_with_source(
+            session_id: &str,
+            source: Option<crate::audio::NativeAudioSource>,
+            settings: AudioProcessingSettings,
+        ) -> LiveSession {
             let state = test_state();
             state
                 .database
@@ -47611,10 +47819,10 @@ mod tests {
             let mut audio = AudioSettings::default();
             audio.system_audio_enabled = false;
             let session_audio = crate::session_audio::attach_prepared_with(
-                None,
+                source.map(crate::session_audio::InitialAudioSource::warm),
                 path,
                 None,
-                AudioProcessingSettings::default(),
+                settings,
                 crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
                 session_audio_options(&audio, true),
             );
@@ -47644,6 +47852,7 @@ mod tests {
                 update_active_audio_processing(
                     &self.state,
                     AudioProcessingUpdateParams {
+                        microphone_noise_suppression: None,
                         session_id: self.session_id.clone(),
                         microphone_gain_db: 2.0,
                         microphone_muted: false,
@@ -47796,6 +48005,195 @@ mod tests {
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rnnoise_fault_reports_without_controls_and_closes_mixed_audio() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let settings = AudioProcessingSettings {
+                noise_suppression: crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+                ..Default::default()
+            };
+            for policy in ["sampler", "finalizer", "fresh"] {
+                let fail = policy != "fresh";
+                let mut source = crate::audio::test_native_audio_source(settings);
+                let (sender, receiver) = std::sync::mpsc::channel();
+                source.receiver = Some(receiver);
+                let fault = Arc::new(AtomicBool::new(false));
+                let produce_fault = fault.clone();
+                let producer = tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(Duration::from_millis(10));
+                    let mut position = 0_u64;
+                    loop {
+                        ticker.tick().await;
+                        let bad = produce_fault.load(Ordering::Acquire);
+                        let samples = (0..480)
+                            .flat_map(|i| {
+                                let sample = if bad {
+                                    65.0
+                                } else {
+                                    ((position + i) as f32 * 0.071).sin() * 0.12
+                                };
+                                [sample, sample]
+                            })
+                            .collect();
+                        if sender
+                            .send(crate::audio::AudioFrame {
+                                timestamp_micros: position * 1_000_000 / 48_000,
+                                captured_at: std::time::Instant::now(),
+                                sample_rate: 48_000,
+                                channels: 2,
+                                samples,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        position += 480;
+                    }
+                });
+                let session = live_session_with_source(
+                    if fail {
+                        "rnnoise-fault"
+                    } else {
+                        "rnnoise-fresh"
+                    },
+                    Some(source),
+                    settings,
+                )
+                .await;
+                session.toggle(Some(true)).await;
+                if policy != "finalizer" {
+                    tokio::spawn(sample_native_audio_during_recording(
+                        session.state.clone(),
+                        session.session_id.clone(),
+                    ));
+                }
+                timeout(Duration::from_secs(10), async {
+                    loop {
+                        let ready = {
+                            let recording = session.state.recording.lock().await;
+                            recording
+                                .as_ref()
+                                .unwrap()
+                                .native_audio
+                                .as_ref()
+                                .unwrap()
+                                .status()
+                                .counters
+                                .captured_frames
+                                >= 4800
+                                && session.fake.live() > 0
+                        };
+                        if ready {
+                            break;
+                        }
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("healthy mixed audio before fault");
+                if fail {
+                    let final_audio = {
+                        let recording = session.state.recording.lock().await;
+                        let audio = recording.as_ref().unwrap().native_audio.as_ref().unwrap();
+                        if policy == "finalizer" {
+                            assert!(
+                                audio.observation(true).processor_failure.is_none(),
+                                "initial finalizer snapshot precedes fault"
+                            );
+                        }
+                        audio.switch_handle()
+                    };
+                    fault.store(true, Ordering::Release);
+                    if policy == "finalizer" {
+                        // FFmpeg may observe PCM EOF before the sampler ticks.
+                        // Exercise the finalizer's one-time observation path.
+                        let detail = timeout(Duration::from_secs(10), async {
+                            loop {
+                                let detail = {
+                                    let recording = session.state.recording.lock().await;
+                                    let audio =
+                                        recording.as_ref().unwrap().native_audio.as_ref().unwrap();
+                                    if audio.input_state()
+                                        == NativeAudioInputState::DownstreamClosed
+                                    {
+                                        final_audio.claim_processor_failure()
+                                    } else {
+                                        None
+                                    }
+                                };
+                                if let Some(detail) = detail {
+                                    break detail;
+                                }
+                                sleep(Duration::from_millis(10)).await;
+                            }
+                        })
+                        .await
+                        .expect("finalizer observes failure before EOF cleanup");
+                        emit_audio_processor_failed_health_event(
+                            &session.state,
+                            &session.session_id,
+                            &detail,
+                        );
+                        tokio::spawn(sample_native_audio_during_recording(
+                            session.state.clone(),
+                            session.session_id.clone(),
+                        ));
+                    }
+                    let event = health_event(
+                        &session.state,
+                        &session.session_id,
+                        AUDIO_PROCESSOR_FAILED_CODE,
+                    )
+                    .await;
+                    assert!(matches!(event.level, HealthLevel::Error));
+                    assert!(
+                        event
+                            .message
+                            .contains("Microphone and system audio stopped")
+                    );
+                    assert!(event.message.contains("Stop and restart"));
+                    {
+                        let recording = session.state.recording.lock().await;
+                        let active = recording
+                            .as_ref()
+                            .expect("audio fault does not pretend video ended");
+                        let audio = active.native_audio.as_ref().unwrap();
+                        assert_eq!(audio.input_state(), NativeAudioInputState::DownstreamClosed);
+                        assert!(audio.status().processor_failure.is_some());
+                        let system = audio.system_audio().observation();
+                        assert!(!system.attached);
+                        assert!(system.device_name.is_none());
+                        assert!(system.cutover_sample.is_none());
+                        assert!(
+                            audio.observation(true).processor_failure.is_none(),
+                            "sampler claimed fault exactly once"
+                        );
+                    }
+                    let result = session.toggle(None).await;
+                    assert!(!result.applied);
+                    assert_eq!(
+                        result.reason_code.as_deref(),
+                        Some("live-audio-control-unavailable")
+                    );
+                    timeout(Duration::from_secs(10), async {
+                        while session.fake.live() != 0 {
+                            sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("system owner closed after DSP failure");
+                } else {
+                    let recording = session.state.recording.lock().await;
+                    let audio = recording.as_ref().unwrap().native_audio.as_ref().unwrap();
+                    assert!(audio.status().processor_failure.is_none());
+                    assert_eq!(audio.input_state(), NativeAudioInputState::Live);
+                }
+                session.end().await;
+                producer.abort();
+                let _ = producer.await;
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn a_missing_permission_is_a_health_event_and_the_session_continues() {
             let session = live_session("system-audio-permission").await;
             session
@@ -47895,6 +48293,7 @@ mod tests {
             let result = update_active_audio_processing(
                 &state,
                 AudioProcessingUpdateParams {
+                    microphone_noise_suppression: None,
                     session_id: "no-system".into(),
                     microphone_gain_db: 1.0,
                     microphone_muted: true,
@@ -48064,6 +48463,7 @@ mod tests {
             // The renderer's System audio toggle carries the unchanged mic
             // values: no FFmpeg command, and the reply is a success.
             let update = |enabled: Option<bool>| AudioProcessingUpdateParams {
+                microphone_noise_suppression: None,
                 session_id: session_id.into(),
                 microphone_gain_db: 0.0,
                 microphone_muted: false,

@@ -1385,6 +1385,7 @@ describe('system audio settings (plan 069)', () => {
       microphoneSyncOffsetMs: 0
     })
     expect(legacy).toStrictEqual({
+      microphoneNoiseSuppression: 'off',
       microphoneGainDb: 4,
       microphoneMuted: true,
       microphoneSyncOffsetMs: 0,
@@ -2755,5 +2756,22 @@ describe('canvas orientation lock (the Studio mode owns the orientation)', () =>
       width: 1920,
       height: 1080
     })
+  })
+})
+
+describe('microphone noise suppression settings', () => {
+  it('keeps old and invalid settings Off and preserves explicit RNNoise', () => {
+    for (const value of [
+      undefined,
+      null,
+      {},
+      { microphoneNoiseSuppression: true },
+      { microphoneNoiseSuppression: 'other' }
+    ]) {
+      expect(normalizeAudioSettings(value).microphoneNoiseSuppression).toBe('off')
+    }
+    expect(
+      normalizeAudioSettings({ microphoneNoiseSuppression: 'rnnoise' }).microphoneNoiseSuppression
+    ).toBe('rnnoise')
   })
 })

@@ -41,6 +41,7 @@ import {
   ParameterSliderReset,
   type ParameterChangeReason
 } from '@/components/ui/parameter-slider'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav } from '@/components/workspace-nav'
@@ -56,7 +57,8 @@ import { formatDb } from '@/lib/audio/decibels'
 import {
   SOUNDBOARD_VOLUME_DB_MAX,
   SOUNDBOARD_VOLUME_DB_MIN,
-  type AudioSettings
+  type AudioSettings,
+  type MicrophoneNoiseSuppression
 } from '@/lib/backend'
 import {
   MICROPHONE_SYNC_OFFSET_MAX_MS,
@@ -237,6 +239,10 @@ export function SourcesAudioMixer(): ReactElement {
                   muteShortcut={settings.globalShortcuts?.micToggle}
                   platform={platform}
                   muted={audio.microphoneMuted}
+                  noiseSuppression={audio.microphoneNoiseSuppression ?? 'off'}
+                  onNoiseSuppressionChange={(microphoneNoiseSuppression) =>
+                    setAudio((current) => ({ ...current, microphoneNoiseSuppression }))
+                  }
                   picker={
                     <DevicePicker
                       description={<SourceSwitchStatus kind="microphone" />}
@@ -341,6 +347,8 @@ export function MicrophoneChannel({
   unavailableReason,
   gainDb,
   muted,
+  noiseSuppression = 'off',
+  onNoiseSuppressionChange,
   muteShortcut,
   platform,
   syncOffsetMs,
@@ -362,6 +370,8 @@ export function MicrophoneChannel({
   unavailableReason: MicStreamFailureReason | undefined
   gainDb: number
   muted: boolean
+  noiseSuppression?: MicrophoneNoiseSuppression
+  onNoiseSuppressionChange?: (value: MicrophoneNoiseSuppression) => void
   /** The bound global mute shortcut (an accelerator); absent when none is bound. */
   muteShortcut?: string
   platform?: string
@@ -464,6 +474,24 @@ export function MicrophoneChannel({
             data-videorc-mic-level-reason={unavailableReason}
           >
             {micLevelUnavailableCopy(unavailableReason)}
+          </p>
+        ) : null}
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-muted-foreground">Noise reduction</span>
+          <SegmentedControl
+            aria-label="Microphone noise reduction"
+            options={[
+              { value: 'off', label: 'Off' },
+              { value: 'rnnoise', label: 'On', disabled: !microphoneSelected }
+            ]}
+            size="sm"
+            value={noiseSuppression}
+            onValueChange={(value) => onNoiseSuppressionChange?.(value)}
+          />
+        </div>
+        {!sessionActive && noiseSuppression === 'rnnoise' ? (
+          <p className="text-xs text-muted-foreground">
+            Applies while recording or live. The idle meter shows input level.
           </p>
         ) : null}
       </SourceItem>

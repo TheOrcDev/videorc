@@ -2,8 +2,11 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
-import { normalizeLayoutSettings } from '../renderer/src/lib/capture'
+import { normalizeAudioSettings, normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
+  AudioSettings,
+  AudioProcessingUpdateParams,
+  AudioProcessingUpdateResult,
   AccountCallbackEnvelope,
   CleanCutEdl,
   CleanCutGetResult,
@@ -103,6 +106,14 @@ import { normalizePreviewSurfaceBounds } from './native-preview-bounds'
 interface HighRiskContractFixtures {
   cameraLook: NonNullable<LayoutSettings['cameraLook']>
   schemaVersion: 2
+  microphoneNoiseSuppression: {
+    audioSettings: AudioSettings
+    legacyAudioSettings: Partial<AudioSettings>
+    update: AudioProcessingUpdateParams
+    legacyUpdate: AudioProcessingUpdateParams
+    applied: AudioProcessingUpdateResult
+    unavailable: AudioProcessingUpdateResult
+  }
   sessionChatTotals: {
     params: { sessionId: string }
     available: SessionChatTotals
@@ -1899,4 +1910,23 @@ describe('Buddy pet creator wire (plan 168, Phase F)', () => {
       })
     ).toThrow('cohost.pet.build.progress')
   })
+})
+
+it('preserves RNNoise audio settings, live requests and confirmed rejection in the shared fixture', () => {
+  const fixture = fixtures.microphoneNoiseSuppression
+  expect(normalizeAudioSettings(fixture.audioSettings).microphoneNoiseSuppression).toBe('rnnoise')
+  expect(normalizeAudioSettings(fixture.legacyAudioSettings).microphoneNoiseSuppression).toBe('off')
+  expect(validateBackendRpcParams('audio.processing.update', fixture.update)).toEqual(
+    fixture.update
+  )
+  expect(validateBackendRpcParams('audio.processing.update', fixture.legacyUpdate)).toEqual(
+    fixture.legacyUpdate
+  )
+  expect(validateBackendRpcResult('audio.processing.update', fixture.applied)).toEqual(
+    fixture.applied
+  )
+  expect(validateBackendRpcResult('audio.processing.update', fixture.unavailable)).toEqual(
+    fixture.unavailable
+  )
+  expect(fixture.unavailable.confirmedMicrophoneNoiseSuppression).toBe('off')
 })

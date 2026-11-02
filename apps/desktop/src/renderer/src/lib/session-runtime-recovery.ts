@@ -585,7 +585,13 @@ function showLiveOutputNews(event: HealthEvent): void {
  * recovered microphone are news the interface shows nowhere else.
  */
 function showSessionAudioNews(event: HealthEvent): void {
-  if (event.code === 'system-audio-echo-paused') {
+  if (event.code === 'audio-processor-failed') {
+    toast.error('Session audio stopped', {
+      id: `audio-processor-failed-${event.sessionId ?? 'active'}`,
+      description: event.message,
+      duration: Infinity
+    })
+  } else if (event.code === 'system-audio-echo-paused') {
     toast.warning('System audio paused: your stream was echoing', {
       id: SYSTEM_AUDIO_ECHO_TOAST_ID,
       description: event.message,

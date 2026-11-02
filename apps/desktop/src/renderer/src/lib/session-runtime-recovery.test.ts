@@ -351,6 +351,21 @@ describe('session audio news (plan 076)', () => {
     }
   })
 
+  it('keeps a processor failure visible with the backend recovery instructions', () => {
+    const event = {
+      ...healthEvent('audio-processor-failed', 'error'),
+      message:
+        'Noise reduction failed. Microphone and system audio stopped. Stop and restart the session to restore audio.'
+    }
+    showSessionHealthEvent(event, false)
+    expect(toastSpies.error).toHaveBeenCalledWith('Session audio stopped', {
+      id: 'audio-processor-failed-live',
+      description: event.message,
+      duration: Infinity,
+      action: expect.objectContaining({ label: 'Copy' })
+    })
+  })
+
   it('reports a stalled output and a recovered microphone once each', () => {
     showSessionHealthEvent(healthEvent('audio-output-stalled'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(

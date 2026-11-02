@@ -1545,14 +1545,24 @@ class StudioBackend {
       case 'events.setIncluded':
       case 'events.setExcluded':
         return null
-      case 'audio.processing.update':
+      case 'audio.processing.update': {
+        const reasonCode =
+          this.audioProcessingReasonCode === 'microphone-noise-suppression-unavailable' &&
+          params.microphoneNoiseSuppression !== 'rnnoise'
+            ? null
+            : this.audioProcessingReasonCode
         return {
           sessionId: params.sessionId,
-          applied: this.audioProcessingReasonCode === null,
+          applied: reasonCode === null,
+          microphoneNoiseSuppression: params.microphoneNoiseSuppression ?? 'off',
           microphoneGainDb: params.microphoneGainDb,
           microphoneMuted: params.microphoneMuted,
-          ...(this.audioProcessingReasonCode ? { reasonCode: this.audioProcessingReasonCode } : {})
+          ...(reasonCode ? { reasonCode } : {}),
+          ...(reasonCode === 'microphone-noise-suppression-unavailable'
+            ? { confirmedMicrophoneNoiseSuppression: 'off' }
+            : {})
         }
+      }
       case 'session.start': {
         if (this.sessionStartError) {
           throw new Error(this.sessionStartError)
@@ -11967,7 +11977,12 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       latest()?.core.setCaptureConfig((current) => ({
         ...current,
-        audio: { ...current.audio, microphoneGainDb: 6, microphoneMuted: true }
+        audio: {
+          ...current.audio,
+          microphoneGainDb: 6,
+          microphoneMuted: true,
+          microphoneNoiseSuppression: 'rnnoise'
+        }
       }))
     })
     await act(async () => {
@@ -11985,6 +12000,7 @@ describe('real StudioProvider lifecycle', () => {
       expect.objectContaining({
         params: {
           sessionId: 'session-1',
+          microphoneNoiseSuppression: 'rnnoise',
           microphoneGainDb: 6,
           microphoneMuted: true
         }
@@ -12070,6 +12086,7 @@ describe('real StudioProvider lifecycle', () => {
       expect.objectContaining({
         params: {
           sessionId: 'session-1',
+          microphoneNoiseSuppression: 'off',
           microphoneGainDb: 0,
           microphoneMuted: false,
           systemAudioEnabled: true,
@@ -12115,6 +12132,7 @@ describe('real StudioProvider lifecycle', () => {
           payload: {
             id: 'health-system-audio-lost',
             sessionId: 'session-1',
+            microphoneNoiseSuppression: 'off',
             level: 'warn',
             code: 'system-audio-lost',
             message: 'System audio stopped. The session continues with the microphone.',
@@ -12416,6 +12434,36 @@ describe('real StudioProvider lifecycle', () => {
       await waitForObservation(() => updates().length === 5)
       expect(updates()[4]).toMatchObject({ systemAudioEnabled: false })
       expect(latest().systemAudioIssue).toBeNull()
+    })
+
+    it('restores Off after unavailable RNNoise while keeping gain and mute live', async () => {
+      const backend = new StudioBackend()
+      backend.audioProcessingReasonCode = 'microphone-noise-suppression-unavailable'
+      const { latest, updates } = await startSystemAudioSession(backend)
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneNoiseSuppression: 'rnnoise' }
+        }))
+      })
+      await waitForObservation(
+        () =>
+          updates().length >= 1 && latest().captureConfig.audio.microphoneNoiseSuppression === 'off'
+      )
+      expect(latest().lastError).toContain('Noise reduction is unavailable')
+      backend.audioProcessingReasonCode = null
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneGainDb: 6, microphoneMuted: true }
+        }))
+      })
+      await waitForObservation(() => updates().at(-1)?.microphoneGainDb === 6)
+      expect(updates().at(-1)).toMatchObject({
+        microphoneNoiseSuppression: 'off',
+        microphoneGainDb: 6,
+        microphoneMuted: true
+      })
     })
 
     it('sends a rejected system audio update again instead of treating it as sent', async () => {

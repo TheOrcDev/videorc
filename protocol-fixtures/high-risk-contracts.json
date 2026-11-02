@@ -1,5 +1,46 @@
 {
   "schemaVersion": 2,
+  "microphoneNoiseSuppression": {
+    "audioSettings": {
+      "microphoneNoiseSuppression": "rnnoise",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneSyncOffsetMs": 0,
+      "systemAudioEnabled": false,
+      "systemAudioGainDb": -6
+    },
+    "legacyAudioSettings": { "microphoneGainDb": 0, "microphoneMuted": false },
+    "update": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "systemAudioEnabled": true
+    },
+    "legacyUpdate": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 3,
+      "microphoneMuted": true
+    },
+    "applied": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "applied": true
+    },
+    "unavailable": {
+      "sessionId": "session-fixture",
+      "microphoneGainDb": 6,
+      "microphoneMuted": false,
+      "microphoneNoiseSuppression": "rnnoise",
+      "applied": false,
+      "reasonCode": "microphone-noise-suppression-unavailable",
+      "confirmedMicrophoneGainDb": 0,
+      "confirmedMicrophoneMuted": false,
+      "confirmedMicrophoneNoiseSuppression": "off"
+    }
+  },
   "sessionChatTotals": {
     "params": { "sessionId": "session-fixture" },
     "available": {

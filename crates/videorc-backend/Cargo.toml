@@ -27,6 +27,7 @@ if-addrs = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
 libc = "0.2"
 rayon = "1"
+rnnoise = { package = "rnnoise-rs", git = "https://github.com/lovelace-labs/rnnoise-rs", rev = "74b46b1065630f68464ee60dd542e3ce175743db", default-features = false }
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
 # Plan 209: Videorc MCP for AI agents. The server side only (JSON-RPC over
 # Streamable HTTP, stateless); the client apps speak stdio through

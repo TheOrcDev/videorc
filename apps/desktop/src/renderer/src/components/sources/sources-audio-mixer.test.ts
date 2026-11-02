@@ -407,6 +407,36 @@ describe('syncOffsetTag (plan 173)', () => {
   })
 })
 
+describe('microphone noise reduction control', () => {
+  it('offers only Off and On, with the saved value selected', () => {
+    const off = renderMicrophone()
+    expect(off).toContain('aria-label="Microphone noise reduction"')
+    expect(off).toContain('>Noise reduction<')
+    expect(off).not.toContain('>RNNoise<')
+    expect(off).toMatch(/aria-checked="true"[^>]*>Off</)
+    expect(renderMicrophone({ noiseSuppression: 'rnnoise' })).toMatch(
+      /aria-checked="true"[^>]*>On</
+    )
+  })
+  it('keeps Off available after removing a microphone while noise reduction is On', () => {
+    const markup = renderMicrophone({ noiseSuppression: 'rnnoise', microphoneSelected: false })
+    const off = markup.match(/<button[^>]*>Off<\/button>/)?.[0]
+    const rnnoise = markup.match(/<button[^>]*>On<\/button>/)?.[0]
+    expect(off).toBeDefined()
+    expect(off).not.toContain('disabled=""')
+    expect(rnnoise).toContain('disabled=""')
+  })
+
+  it('explains the idle meter only when noise reduction is On outside a session', () => {
+    expect(renderMicrophone({ noiseSuppression: 'rnnoise' })).toContain(
+      'The idle meter shows input level.'
+    )
+    expect(renderMicrophone({ noiseSuppression: 'rnnoise', sessionActive: true })).not.toContain(
+      'The idle meter shows input level.'
+    )
+  })
+})
+
 describe('applySyncChange (plan 093)', () => {
   const audio = {
     ...defaultCaptureConfig.audio,

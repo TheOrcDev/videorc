@@ -1908,7 +1908,11 @@ export interface CaptionsSessionParams {
   textSize?: 's' | 'm' | 'l'
 }
 
+export type MicrophoneNoiseSuppression = 'off' | 'rnnoise'
+
 export interface AudioSettings {
+  /** Older saved settings default to Off. */
+  microphoneNoiseSuppression?: MicrophoneNoiseSuppression
   microphoneGainDb: number
   microphoneMuted: boolean
   microphoneSyncOffsetMs: number
@@ -1929,6 +1933,8 @@ export const SYSTEM_AUDIO_GAIN_DB_MAX = 12
 export const SYSTEM_AUDIO_GAIN_DB_DEFAULT = -6
 
 export interface AudioProcessingUpdateParams {
+  /** Omitted means unchanged, including requests from older clients. */
+  microphoneNoiseSuppression?: MicrophoneNoiseSuppression
   sessionId: string
   microphoneGainDb: number
   microphoneMuted: boolean
@@ -1946,6 +1952,7 @@ export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams
     | 'no-active-session'
     | 'stale-session'
     | 'native-audio-unavailable'
+    | 'microphone-noise-suppression-unavailable'
     | 'live-audio-control-unavailable'
     | 'live-audio-control-state-unknown'
     | 'session-ended'
@@ -1953,6 +1960,7 @@ export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams
   confirmedMicrophoneGainDb?: number
   /** Present when the backend can conclusively report settings remaining after rejection. */
   confirmedMicrophoneMuted?: boolean
+  confirmedMicrophoneNoiseSuppression?: MicrophoneNoiseSuppression
 }
 
 export interface RemuxSessionParams {
@@ -8045,6 +8053,7 @@ export interface SourceSwitchOperation {
 }
 export interface SessionSources {
   audio: {
+    processorFailure?: string
     sampleCursor: number
     generation: number
     deviceId: string | null
