@@ -3202,3 +3202,53 @@ cleanup records. No Beta candidate is accepted or published. OpenH264
 motion, audio, shaders, the independent queue failure, physical
 Ubuntu/Hyprland acceptance and release gates remain open; the six
 unpublished workflow edits are preserved.
+
+### Portal stop during CreateSession and held source picks, 2026-11-03
+
+A Videorc stop during an unanswered portal `CreateSession` no longer waits
+out the 10-second call bound. Previously only the picker steps watched the
+stop, so the screen transition, and the `session.start` fenced behind it,
+stayed held until `CreateSession` timed out. The proxy and `CreateSession`
+calls now race the stop. Their call keeps running, and a session the
+portal creates after the stop is closed. Three new unit tests cover the
+unanswered call, the late session and an answer before any stop. All ten
+portal-session tests pass; formatting and Clippy with the four existing
+Linux allowances pass. The full backend suite was not rerun locally for
+this change.
+
+A private probe drives the real debug backend against a fake ScreenCast
+portal on a private D-Bus daemon. Each run stops 500 ms after
+`CreateSession` arrives, then starts a replay-only test-pattern session.
+At `593fbca8` (backend source unchanged at `695a5905`), with `CreateSession`
+never answered, the stop took 2,002 ms and `session.start` answered
+7,739 ms after it; the start ended on the 10 s bound. With the fix, the
+stop took 6 ms, `session.start` answered after 212 ms and the start ended
+5 ms after the stop. When the fake answers 2.5 s late, the stop took 8 ms,
+`session.start` answered after 214 ms, and Videorc closed the late session
+4 ms after it arrived. An earlier run of all three stopped before any
+backend launch because the bus socket path exceeded the Unix limit; that
+harness failure is retained. Every owned process group exited on SIGTERM
+without escalation. This is a fake-portal check, not physical
+GNOME/Hyprland portal acceptance.
+
+Source picks made while a layout awaits presentation confirmation were
+lost. When the layout settled, it wrote back the sources it was sent
+with, so a microphone picked during a preset switch (the only pick a
+preset switch allows), or any pick during a background-only commit,
+silently reverted. The edit-mode follow-up from the previous entry had the
+same cause. Picks made during the wait are now reapplied after the layout
+settles. A scene source pick then loads once with the settled layout and
+background; a microphone pick loads no scene. Three provider regressions
+fail on the original code and pass with the fix. Desktop unit tests pass
+6,892 with one skipped across 624 files; the provider file then passes
+211 of 211 with the microphone case added. Typecheck, lint and format
+checks pass. Node script tests were not rerun for this renderer-only
+change.
+
+No app-level run on Ogre exercised either change, and macOS
+ScreenCaptureKit, native-preview and recording-studio coverage still need
+a macOS host. Private evidence is retained under `portal-cancel-probe/`
+in the existing evidence root. No Beta candidate is accepted or
+published. The queue reconciliation-fence failure, OpenH264 motion, audio,
+shaders, physical Ubuntu/Hyprland acceptance and release gates remain
+open; the six unpublished workflow edits are preserved.

@@ -4286,6 +4286,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const latestLayoutTransactionCommitRef = useRef<LayoutTransactionSnapshot | null>(null)
   const skipNextConfigSceneReloadRef = useRef(false)
   const sceneLoadsInFlightRef = useRef(new Set<Promise<void>>())
+  const layoutTransactionSettledRef = useRef<Promise<void>>(Promise.resolve())
+  const heldSourcePicksRef = useRef<
+    { kind: LiveSourceDeviceSwitchPending; sources: SourceSelection }[]
+  >([])
   useEffect(() => {
     captureConfigRef.current = captureConfig
   }, [captureConfig])
@@ -9089,6 +9093,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [activeSceneBackground, applyCommittedScene, client, wsStatus, persistWorkingVisual]
   )
 
+  // Resolves once no layout awaits presentation proof, following any newer
+  // layout that starts while an earlier one settles.
+  const waitForLayoutTransactions = useCallback(async () => {
+    let settled: Promise<void> | null = null
+    while (
+      layoutIntentAwaitingProofRef.current !== null &&
+      layoutTransactionSettledRef.current !== settled
+    ) {
+      settled = layoutTransactionSettledRef.current
+      await settled
+    }
+  }, [])
+
   const reloadSceneFromCaptureConfig = useCallback(async () => {
     const config = {
       sources: captureConfig.sources,
@@ -9538,6 +9555,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     visualTransactionPending,
     wsStatus
   ])
+
+  // Edit-mode source picks held behind a pending layout load here, from the
+  // render that holds both the settled layout and the reapplied picks.
+  const [heldSourcePickLoad, setHeldSourcePickLoad] = useState(0)
+  const loadedHeldSourcePickRef = useRef(0)
+  useEffect(() => {
+    if (heldSourcePickLoad === loadedHeldSourcePickRef.current) return
+    loadedHeldSourcePickRef.current = heldSourcePickLoad
+    void reloadSceneFromCaptureConfig().catch(reportError)
+  }, [heldSourcePickLoad, reloadSceneFromCaptureConfig, reportError])
 
   const resetSceneSource = useCallback(
     async (sourceId = selectedSceneSourceId ?? undefined) => {
@@ -10090,7 +10117,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         resolveCommitReceipt(committed)
       }
 
-      void (async () => {
+      layoutTransactionSettledRef.current = (async () => {
         let requestedSceneEvidence: LayoutTransactionSceneEvidence | null = null
         let sceneRevisionBeforeRequest: number | undefined
         let sceneRequestDispatched = false
@@ -11161,6 +11188,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           captureConfigRef.current = next
           return next
         })
+        if (layoutIntentAwaitingProofRef.current !== null) {
+          // A layout awaiting proof writes back the sources it was sent with
+          // when it settles, and holds scene loads until then. Reapply every
+          // pick made meanwhile after it settles, then load the result once.
+          heldSourcePicksRef.current.push({ kind: sourceKind, sources })
+          await waitForLayoutTransactions()
+          const held = heldSourcePicksRef.current.splice(0)
+          if (held.length === 0) return
+          setCaptureConfig((current) => {
+            const next = {
+              ...current,
+              sources: held.reduce(
+                (merged, pick) => mergeSourceKind(merged, pick.sources, pick.kind),
+                current.sources
+              )
+            }
+            captureConfigRef.current = next
+            return next
+          })
+          if (!held.some((pick) => pick.kind !== 'microphone')) return
+          if (sceneEditMode) {
+            // Edit mode has no idle reload; load once React has the result.
+            setHeldSourcePickLoad((count) => count + 1)
+          } else {
+            // The settled layout's commit skips the next idle reload as a
+            // repeat of itself; this one carries the picks.
+            skipNextConfigSceneReloadRef.current = false
+          }
+          return
+        }
         if (sceneEditMode && sourceKind !== 'microphone') {
           await loadScene({
             sources: mergeSourceKind(captureConfigRef.current.sources, sources, sourceKind),
@@ -11250,7 +11307,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       loadScene,
       reportError,
       sceneEditMode,
-      persistWorkingVisual
+      persistWorkingVisual,
+      waitForLayoutTransactions
     ]
   )
 

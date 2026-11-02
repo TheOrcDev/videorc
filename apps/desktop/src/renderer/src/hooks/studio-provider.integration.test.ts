@@ -7603,6 +7603,235 @@ describe('real StudioProvider lifecycle', () => {
     )
   })
 
+  it('loads an edit-mode source pick once a pending layout settles, with its background', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        { id: 'camera:2', name: 'Camera 2', kind: 'camera', status: 'available' }
+      ]
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    const latest = (): StudioCoreContextValue => observation!.core
+    await waitForObservation(
+      () =>
+        observation?.core.canSaveScene === true &&
+        observation.core.captureConfig.sources.cameraId === 'camera:1'
+    )
+    await act(async () => latest().setSceneEditMode(true))
+    await waitForObservation(() => latest().sceneEditMode)
+
+    let releaseProof!: () => void
+    const proof = new Promise<void>((resolve) => {
+      releaseProof = resolve
+    })
+    api.getPreviewWindowState = async () => {
+      await proof
+      return previewWindowClosed
+    }
+    // The background commits on the backend while its presentation query is
+    // pending; edit mode has no idle reload to apply a pick made meanwhile.
+    await act(async () => latest().applyBackgroundSlot('bg-01'))
+    await waitForObservation(() => backend.currentScene.background?.assetId === 'builtin-bg-01')
+    const start = backend.sentCommands.length
+    const loads = (): BackendCommand[] =>
+      backend.sentCommands
+        .slice(start)
+        .filter((command) => command.method === 'scene.load_from_capture_config')
+    let pick!: Promise<void>
+    try {
+      await act(async () => {
+        pick = latest().switchSourceDeviceLive('camera', {
+          ...latest().captureConfig.sources,
+          cameraId: 'camera:2',
+          cameraName: 'Camera 2'
+        })
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      })
+      expect(loads()).toEqual([])
+    } finally {
+      await act(async () => releaseProof())
+    }
+    await act(async () => pick)
+    await waitForObservation(() => loads().length > 0 && latest().canSaveScene)
+    expect(loads()).toHaveLength(1)
+    expect(loads()[0].params).toMatchObject({
+      sources: { cameraId: 'camera:2' },
+      background: { assetId: 'builtin-bg-01' }
+    })
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:2')
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.sources.cameraId).toBe(
+      'camera:2'
+    )
+  })
+
+  it('keeps a source pick made while a background awaits presentation confirmation', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        { id: 'camera:2', name: 'Camera 2', kind: 'camera', status: 'available' }
+      ]
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    const latest = (): StudioCoreContextValue => observation!.core
+    await waitForObservation(
+      () =>
+        observation?.core.canSaveScene === true &&
+        observation.core.captureConfig.sources.cameraId === 'camera:1'
+    )
+
+    let releaseProof!: () => void
+    const proof = new Promise<void>((resolve) => {
+      releaseProof = resolve
+    })
+    api.getPreviewWindowState = async () => {
+      await proof
+      return previewWindowClosed
+    }
+    // A background-only commit leaves source picks open (a preset change
+    // refuses them). It commits with Camera 1 and settles after the pick; its
+    // write-back must not undo the pick, nor the pick's load the background.
+    await act(async () => latest().applyBackgroundSlot('bg-01'))
+    await waitForObservation(() => backend.currentScene.background?.assetId === 'builtin-bg-01')
+    const start = backend.sentCommands.length
+    const loads = (): BackendCommand[] =>
+      backend.sentCommands
+        .slice(start)
+        .filter((command) => command.method === 'scene.load_from_capture_config')
+    let pick!: Promise<void>
+    try {
+      await act(async () => {
+        pick = latest().switchSourceDeviceLive('camera', {
+          ...latest().captureConfig.sources,
+          cameraId: 'camera:2',
+          cameraName: 'Camera 2'
+        })
+      })
+      // Past the idle reload's 250 ms debounce.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 350))
+      })
+      expect(loads()).toEqual([])
+      expect(latest().captureConfig.sources.cameraId).toBe('camera:2')
+    } finally {
+      await act(async () => releaseProof())
+    }
+    await act(async () => pick)
+    await waitForObservation(() => loads().length > 0 && latest().canSaveScene)
+    expect(loads()).toHaveLength(1)
+    expect(loads()[0].params).toMatchObject({
+      sources: { cameraId: 'camera:2' },
+      background: { assetId: 'builtin-bg-01' }
+    })
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:2')
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.sources.cameraId).toBe(
+      'camera:2'
+    )
+  })
+
+  it('keeps a microphone pick made while a layout switch awaits presentation confirmation', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        { id: 'mic:2', name: 'Microphone 2', kind: 'microphone', status: 'available' }
+      ]
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    let observation: StudioObservation | undefined
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observation = value
+    })
+    const latest = (): StudioCoreContextValue => observation!.core
+    await waitForObservation(
+      () =>
+        observation?.core.canSaveScene === true &&
+        observation.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+
+    let releaseProof!: () => void
+    const proof = new Promise<void>((resolve) => {
+      releaseProof = resolve
+    })
+    api.getPreviewWindowState = async () => {
+      await proof
+      return previewWindowClosed
+    }
+    // A layout switch refuses scene source picks but not an idle microphone,
+    // which is not part of the scene. The layout commits with Microphone 1;
+    // its write-back must not undo the pick, and the pick loads no scene.
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(() => backend.currentLayout.layoutPreset === 'screen-only')
+    const start = backend.sentCommands.length
+    let pick!: Promise<void>
+    try {
+      await act(async () => {
+        pick = latest().switchSourceDeviceLive('microphone', {
+          ...latest().captureConfig.sources,
+          microphoneId: 'mic:2',
+          microphoneName: 'Microphone 2'
+        })
+      })
+      expect(latest().captureConfig.sources.microphoneId).toBe('mic:2')
+    } finally {
+      await act(async () => releaseProof())
+    }
+    await act(async () => pick)
+    await waitForObservation(() => latest().layoutSwitchPending === null && latest().canSaveScene)
+    // Past the idle reload's 250 ms debounce.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350))
+    })
+    expect(latest().captureConfig.sources.microphoneId).toBe('mic:2')
+    expect(latest().captureConfig.layout.layoutPreset).toBe('screen-only')
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .filter((command) => command.method === 'scene.load_from_capture_config')
+    ).toEqual([])
+  })
+
   it('restores an auto-saved checkpoint and saveability across a renderer remount with synthetic preview mapping', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
