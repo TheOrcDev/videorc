@@ -44,6 +44,11 @@ const inputs = [
     remedy: 'pnpm package:backend'
   },
   {
+    // The WER module that dumps fail-fast backend crashes (heap corruption).
+    path: join(repoRoot, 'target', 'release', 'videorc_wer_helper.dll'),
+    remedy: 'pnpm package:backend'
+  },
+  {
     path: ffmpegExe,
     remedy: 'pnpm ffmpeg:fetch:windows'
   },

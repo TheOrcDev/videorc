@@ -154,6 +154,10 @@ win:
     # extraResources); agent apps point at resources\videorc-mcp.exe.
     - from: ../../target/release/videorc-mcp.exe
       to: videorc-mcp.exe
+    # The WER module the backend registers beside itself so heap-corruption
+    # (fail-fast) crashes still leave a minidump; see crates/videorc-wer-helper.
+    - from: ../../target/release/videorc_wer_helper.dll
+      to: videorc_wer_helper.dll
     - from: ../../vendor/ffmpeg/windows-x64
       to: ffmpeg
       filter:

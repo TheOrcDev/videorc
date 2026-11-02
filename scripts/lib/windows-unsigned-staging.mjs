@@ -24,7 +24,9 @@ const REQUIRED_FILES = [
   'resources/videorc-backend.exe',
   // Plan 209 S4: the stdio bridge agent apps run. Required here so the
   // signing job's recursive *.exe Authenticode pass provably covers it.
-  'resources/videorc-mcp.exe'
+  'resources/videorc-mcp.exe',
+  // The WER module the backend registers so fail-fast crashes leave a dump.
+  'resources/videorc_wer_helper.dll'
 ]
 
 export async function createWindowsUnsignedStagingManifest({
