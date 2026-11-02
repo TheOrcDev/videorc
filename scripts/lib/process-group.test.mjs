@@ -67,6 +67,39 @@ for (const ignoresTerm of [false, true]) {
   )
 }
 
+for (const code of ['EPERM', 'ESRCH', 'EINVAL']) {
+  test(
+    `timeout resolves after ${code} during group escalation`,
+    { skip: process.platform === 'win32' },
+    async (t) => {
+      const failure = Object.assign(new Error(`kill ${code}`), { code })
+      const kill = process.kill
+      let escalated = false
+      const { child, result } = spawnProcessGroup(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        { stdio: 'ignore', timeoutMs: 100, graceMs: 20 }
+      )
+      t.after(() => child.kill('SIGKILL'))
+      t.mock.method(process, 'kill', (pid, signal) => {
+        if (pid === -child.pid && signal === 'SIGKILL') {
+          escalated = true
+          throw failure
+        }
+        return kill.call(process, pid, signal)
+      })
+
+      const outcome = await result
+      assert.equal(escalated, true, 'SIGKILL escalation was attempted')
+      assert.equal(outcome.timedOut, true)
+      assert.equal(outcome.signal, 'SIGTERM')
+      const ignored = code === 'ESRCH' || (code === 'EPERM' && process.platform === 'darwin')
+      assert.equal(outcome.error, ignored ? undefined : failure)
+      await assertGone(child.pid)
+    }
+  )
+}
+
 test('spawn failure removes parent signal listeners', async () => {
   const before = ['SIGINT', 'SIGTERM'].map((name) => process.listenerCount(name))
   const { result } = spawnProcessGroup('/nonexistent-videorc-test-executable', [])
@@ -76,6 +109,38 @@ test('spawn failure removes parent signal listeners', async () => {
     before
   )
 })
+
+test(
+  'unexpected group signal errors still throw to the direct caller',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const failure = Object.assign(new Error('kill EINVAL'), { code: 'EINVAL' })
+    const kill = process.kill
+    const { child, result } = spawnProcessGroup(
+      process.execPath,
+      ['-e', 'console.log("ready"); setInterval(() => {}, 1000)'],
+      { stdio: ['ignore', 'pipe', 'ignore'] }
+    )
+    t.after(() => child.kill('SIGKILL'))
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve)
+      child.once('error', reject)
+    })
+    const mockedKill = t.mock.method(process, 'kill', (pid, signal) => {
+      if (pid === -child.pid && signal === 'SIGTERM') throw failure
+      return kill.call(process, pid, signal)
+    })
+
+    assert.throws(
+      () => process.emit('SIGTERM'),
+      (error) => error === failure
+    )
+    mockedKill.mock.restore()
+    child.kill('SIGKILL')
+    assert.equal((await result).interrupted, true)
+    await assertGone(child.pid)
+  }
+)
 
 for (const name of ['SIGINT', 'SIGTERM']) {
   test(
