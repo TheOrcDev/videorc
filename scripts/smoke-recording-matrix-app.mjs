@@ -82,8 +82,8 @@ const MATRIX_GATES = Object.freeze({
   requireMotion: false,
   requireColorTags: true,
   requireValidLevel: true,
-  // The test tone is never silent, so any mid-take digital-zero run is a
-  // dropped audio packet (plan 056).
+  // Every pass opts into the debug FFmpeg tone below: without it, no-mic
+  // sessions carry paced silence. A digital-zero run in the tone is a dropout.
   requireNoDigitalZeroRuns: true,
   minDurationSeconds: (recordingMs / 1000) * (1 - DEFAULT_GATES.frameCountTolerance),
   requireKeyframeEvidence: true,
@@ -391,6 +391,7 @@ async function runPass({
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
         VIDEORC_SMOKE_STATE_DIR: outputDirectory,
         VIDEORC_USER_DATA_DIR: userDataDir,
+        VIDEORC_INCIDENT_FFMPEG_TONE: '1',
         ...extraEnv
       },
       timeoutMs,
