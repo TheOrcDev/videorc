@@ -497,6 +497,47 @@ fn display_device_name(
     format!("{name}{size}{mirrored}")
 }
 
+/// What macOS says of one display (plan 213 F3), for the support bundle.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayFacts {
+    pub id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its rectangle in points, in the global display space.
+    pub frame: DisplayFrame,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    /// Pixels per point.
+    pub scale: f64,
+    pub main: bool,
+    /// The display it mirrors, when it mirrors one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirrors: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct DisplayFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Every display the system has online (plan 213 F3). Blocks for up to the
+/// display-name wait, so async callers run it off the runtime.
+#[cfg(target_os = "macos")]
+pub fn display_facts() -> Vec<DisplayFacts> {
+    macos::display_facts()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn display_facts() -> Vec<DisplayFacts> {
+    Vec::new()
+}
+
 #[cfg(target_os = "windows")]
 mod windows_native {
     use super::*;
@@ -702,7 +743,8 @@ pub(crate) mod macos {
     use objc2_app_kit::NSScreen;
     use objc2_core_foundation::{CFRetained, CFUUID};
     use objc2_core_graphics::{
-        CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayMirrorsDisplay, CGDisplayMode,
+        CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMirrorsDisplay,
+        CGDisplayMode, CGError, CGGetOnlineDisplayList, CGMainDisplayID,
         CGPreflightScreenCaptureAccess,
     };
     use objc2_foundation::{NSError, NSNumber, NSString, ns_string};
@@ -766,6 +808,52 @@ pub(crate) mod macos {
             }
         });
         rx.recv_timeout(DISPLAY_NAMES_TIMEOUT).unwrap_or_default()
+    }
+
+    /// Every display macOS has online (plan 213 F3), mirrored ones included.
+    pub(crate) fn display_facts() -> Vec<DisplayFacts> {
+        let mut ids: [CGDirectDisplayID; 32] = [0; 32];
+        let mut count = 0_u32;
+        // SAFETY: the list holds `ids.len()` ids and the count is one u32.
+        let listed =
+            unsafe { CGGetOnlineDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
+        if listed != CGError::Success {
+            return Vec::new();
+        }
+        let names = display_names();
+        let main = CGMainDisplayID();
+        ids.iter()
+            .take(count as usize)
+            .map(|&id| {
+                let bounds = CGDisplayBounds(id);
+                let (pixel_width, pixel_height) = display_capture_dimensions(
+                    id,
+                    bounds.size.width.max(0.0) as u32,
+                    bounds.size.height.max(0.0) as u32,
+                );
+                let mirrors = CGDisplayMirrorsDisplay(id);
+                DisplayFacts {
+                    id,
+                    uuid: display_uuid(id),
+                    name: names.get(&id).cloned(),
+                    frame: DisplayFrame {
+                        x: bounds.origin.x,
+                        y: bounds.origin.y,
+                        width: bounds.size.width,
+                        height: bounds.size.height,
+                    },
+                    pixel_width,
+                    pixel_height,
+                    scale: if bounds.size.width > 0.0 {
+                        f64::from(pixel_width) / bounds.size.width
+                    } else {
+                        0.0
+                    },
+                    main: id == main,
+                    mirrors: (mirrors != 0).then_some(mirrors),
+                }
+            })
+            .collect()
     }
 
     fn screen_names(mtm: MainThreadMarker) -> HashMap<CGDirectDisplayID, String> {
@@ -1605,6 +1693,24 @@ mod tests {
             assert_eq!(uuid.len(), 36);
             assert_eq!(uuid, uuid.to_uppercase());
             assert!(uuid::Uuid::parse_str(&uuid).is_ok());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn every_online_display_reports_its_facts_plan_213_f3() {
+        let facts = display_facts();
+        // A headless host may have no display online.
+        assert!(facts.iter().filter(|display| display.main).count() <= 1);
+        for display in &facts {
+            assert!(
+                display.pixel_width > 0 && display.pixel_height > 0,
+                "{display:?}"
+            );
+            assert!(display.frame.width > 0.0 && display.frame.height > 0.0);
+            assert!(display.scale > 0.0, "{display:?}");
+            assert_eq!(display.uuid, macos::display_uuid(display.id));
+            assert_ne!(display.mirrors, Some(display.id));
         }
     }
 
