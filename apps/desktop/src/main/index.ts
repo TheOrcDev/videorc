@@ -497,7 +497,8 @@ import {
   nativePreviewFirstFrameWatchdogEnabled,
   nativePreviewProofWatchdogEnabled,
   PREVIEW_HOLD_REASON,
-  previewHoldHandback,
+  firstFrameStandDownHandback,
+  firstFrameStandDownReason,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
   proofSourceLiveReason,
@@ -506,6 +507,7 @@ import {
   WatchdogTickOwnership,
   type FirstFrameLedger,
   type FirstFrameSnapshot,
+  type FirstFrameStandDown,
   type PresentingAssessment,
   type PresentingWatchState,
   type WatchdogRunToken
@@ -654,7 +656,6 @@ import type {
   PreviewSurfaceSceneState,
   PreviewSurfaceSceneUpdateParams,
   PreviewSurfaceStatus,
-  PreviewHoldReason,
   MediaAccessSnapshot,
   MediaAccessStatus,
   PermissionRecheckResult,
@@ -1460,8 +1461,11 @@ let firstFrameLastHint: string | null | undefined
 // Plan 212 S5: whether the floating Preview's strip says a check holds the
 // picture. `undefined`: nothing published to this window's document yet.
 let previewWindowStripHeld: boolean | undefined
-/** Plan 212 S2: the hold the last watchdog tick saw, for the hand-back. */
-let firstFrameLastPreviewHold: PreviewHoldReason | null = null
+/**
+ * What made the last watchdog tick stand down (plan 212 S2: a Preview hold;
+ * plan 213 D: the docked surface hidden on purpose), for the hand-back.
+ */
+let firstFrameLastStandDown: FirstFrameStandDown = { previewHold: null, dockHidden: null }
 const firstFrameTickOwnership = new WatchdogTickOwnership()
 const firstFrameProofRendererReads = new ProofWatchdogRendererReadSingleFlight<Record<
   string,
@@ -1486,7 +1490,7 @@ function startFirstFrameWatchdog(): void {
   firstFrameLastPresentedFrameId = null
   firstFrameLastHint = undefined
   previewWindowStripHeld = undefined
-  firstFrameLastPreviewHold = null
+  firstFrameLastStandDown = { previewHold: null, dockHidden: null }
   firstFrameWatchdogMode = 'first-frame'
   presentingWatch = emptyPresentingWatch()
   presentingWatchLastKind = 'presenting'
@@ -1821,15 +1825,19 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
     }
     // Plan 212 S2: under a Preview hold the compositor's frames advance on
     // the benchmark's canvas while no present-driving event is due, so the
-    // quiet socket is not a stalled pump. When the hold ends, the clock and
-    // the heartbeat start fresh before anything is judged.
+    // quiet socket is not a stalled pump. Plan 213 D: a docked surface hidden
+    // on purpose (another page, a scrolled-away slot, a dialog over it)
+    // presents nothing, which is not a broken chain either. When the hold
+    // ends, or the surface shows again, the clock and the heartbeat start
+    // fresh before anything is judged.
     const previewHold = compositor?.previewHold ?? null
-    const handback = previewHoldHandback({
-      previousHold: firstFrameLastPreviewHold,
-      hold: previewHold,
+    const standDown: FirstFrameStandDown = { previewHold, dockHidden: firstFrameDockHidden() }
+    const handback = firstFrameStandDownHandback({
+      previous: firstFrameLastStandDown,
+      current: standDown,
       nowMs: Date.now()
     })
-    firstFrameLastPreviewHold = previewHold
+    firstFrameLastStandDown = standDown
     if (handback) {
       firstFrameWatchdogStartedAtMs = handback.startedAtMs
       firstFrameLedger = emptyFirstFrameLedger()
@@ -1849,7 +1857,8 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       compositorSceneRevision: compositor?.sceneRevision ?? null,
       compositorFrameSceneRevision: compositor?.frameSceneRevision ?? null,
       metalTargetPresent: Boolean(compositor?.metalTargetIosurfaceId),
-      previewHold
+      previewHold,
+      dockHidden: standDown.dockHidden
     }
 
     if (firstFrameWatchdogMode === 'presenting-watch') {
@@ -1907,6 +1916,13 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
 function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
   const { assessment, watch } = assessPresenting(snapshot, presentingWatch, FIRST_FRAME_TICK_MS)
   presentingWatch = watch
+  if (firstFrameStandDownReason(snapshot) != null) {
+    // Standing down (a hold, a hidden dock) is neither a stall nor a
+    // recovery: the status and the last kind carry over, so the picture
+    // showing again never flaps the status or logs a recovery that did not
+    // happen, and a stall declared before it is still the state after it.
+    return
+  }
   const kindChanged = assessment.kind !== presentingWatchLastKind
   presentingWatchLastKind = assessment.kind
 
@@ -4444,6 +4460,13 @@ function previewWindowState(): PreviewWindowState {
     dockSlot: open && mode === 'docked' ? (previewDockSlot?.slot ?? null) : null,
     supervisor: previewSupervisor.snapshot()
   }
+}
+
+// Plan 213 D: why the docked surface is hidden on purpose right now, for the
+// first-frame and presenting watchdogs; null while it shows, and always for a
+// floating Preview, whose own window never hides the surface on purpose.
+function firstFrameDockHidden(): DockHiddenReason | null {
+  return currentPreviewWindowMode() === 'docked' ? dockVisibilityDecision().hiddenReason : null
 }
 
 function dockVisibilityDecision(): ReturnType<typeof decideDockVisibility> {
