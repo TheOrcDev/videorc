@@ -149,7 +149,7 @@ describe('GeneralSettings', () => {
     expect(requests).toEqual([{ returnTo: 'settings' }])
   })
 
-  it('does not promise a permissions step on Linux, where setup has none', async () => {
+  it('does not promise permission controls on Linux, where setup explains sharing', async () => {
     mocked.core = {
       ...mocked.core,
       runtimeInfo: { platform: 'linux', commentsWindowEnabled: true }

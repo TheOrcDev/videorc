@@ -124,7 +124,7 @@ async function observeCaller(t, script, scenario) {
       }
     )
     t.mock.method(childProcess, 'spawn', (command, args, options) => {
-      if (command === 'cargo') {
+      if (command === 'cargo' || command === 'cargo.exe') {
         captureEnvironment(options.env)
         trace.push({ owner: 'preparation', command, args })
         const build = new EventEmitter()
@@ -230,6 +230,7 @@ for (const script of scripts) {
       result.trace.map((row) => row.owner),
       ['preparation', 'app']
     )
+    assert.equal(result.trace[0].command, process.platform === 'win32' ? 'cargo.exe' : 'cargo')
     assert.deepEqual(result.trace[0].args, ['build', '-p', 'videorc-backend'])
     assert.equal(result.timers[0].delay, 20 * 60 * 1000)
     assert.equal(result.timers.find((timer) => timer.delay === 90_000).delay, 90_000)

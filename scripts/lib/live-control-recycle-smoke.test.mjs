@@ -165,16 +165,32 @@ test('RTMP readiness treats an empty lsof query as not ready and rejects probe e
   )
 })
 
-test('RTMP readiness waits for an owned listener without a fixed startup sleep', async () => {
+test('RTMP readiness waits for an owned listener without a fixed startup sleep', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 })
   let probes = 0
-  await waitForOwnedTcpListener({
+  const ready = waitForOwnedTcpListener({
     child: { pid: 421, exitCode: null },
     port: 19629,
     timeoutMs: 100,
     pollMs: 1,
     probe: () => ++probes === 2
   })
+  t.mock.timers.tick(1)
+  await ready
   assert.equal(probes, 2)
   assert.doesNotMatch(smoke, /await sleep\(750\)/)
   assert.match(smoke, /waitForOwnedTcpListener/)
+})
+
+test('RTMP readiness still refuses a listener absent at its deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 })
+  const ready = waitForOwnedTcpListener({
+    child: { pid: 421, exitCode: null },
+    port: 19629,
+    timeoutMs: 100,
+    probe: () => false
+  })
+  const rejected = assert.rejects(ready, /did not bind port 19629 within 100ms/)
+  t.mock.timers.tick(100)
+  await rejected
 })

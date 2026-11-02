@@ -1,8 +1,16 @@
 #!/usr/bin/env node
-// Plans 203 S7 and 207 S8. Real macOS dev app, isolated profile, CDP observations only.
+// Plans 203 S7, 207 S8 and 212. Real macOS/Linux dev app, isolated profile.
 // No permission buttons are pressed. Cold TCC prompts need the owner's S0 pass.
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { get } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -10,15 +18,20 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { ownedProcessLedgerPaths } from './lib/process-census.mjs'
+import { stopFirstRunApp } from './lib/first-run-smoke-stop.mjs'
+import { FIRST_RUN_SOURCE_TRACE_SCRIPT } from './lib/first-run-source-trace.mjs'
+import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import {
   evaluateFirstRunSmokeStep,
   FIRST_RUN_SMOKE_LIMITS,
   FIRST_RUN_SOURCE_START_PATTERNS,
+  firstRunPermissionsReady,
   firstRunSourceStartLines
 } from './lib/first-run-smoke-gate.mjs'
 
-if (process.platform !== 'darwin')
-  throw new Error('First-run app smoke requires macOS; Windows acceptance is owner-owed.')
+if (!['darwin', 'linux'].includes(process.platform))
+  throw new Error('First-run app smoke requires macOS or Linux; Windows acceptance is owner-owed.')
 if (!existsSync(join(repoRoot, 'target/debug/videorc-backend'))) {
   throw new Error('Build target/debug/videorc-backend before running this smoke.')
 }
@@ -29,7 +42,18 @@ delete process.env.ELECTRON_RUN_AS_NODE
 const outputRoot = resolve(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir())
 mkdirSync(outputRoot, { recursive: true })
 const output = mkdtempSync(join(outputRoot, 'videorc-first-run-'))
-const report = { limits: FIRST_RUN_SMOKE_LIMITS, output, steps: [] }
+const report = {
+  platform: process.platform,
+  appMode: 'vite-development',
+  screenshotSource: process.platform === 'linux' ? 'electron-content' : 'surface',
+  limits: FIRST_RUN_SMOKE_LIMITS,
+  output,
+  steps: [],
+  teardowns: [],
+  sourceRequests: [],
+  reloads: [],
+  rendererErrors: []
+}
 const save = () =>
   writeFileSync(join(output, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
 let cdp
@@ -116,9 +140,10 @@ async function connect(url) {
     call: (method, params = {}) =>
       new Promise((resolveCall, reject) => {
         const id = ++nextId
+        const timeoutError = new Error(`CDP ${method} timed out`)
         const timer = setTimeout(() => {
           pending.delete(id)
-          reject(new Error(`CDP ${method} timed out`))
+          reject(timeoutError)
         }, 10000)
         pending.set(id, { resolve: resolveCall, reject, timer })
         ws.send(JSON.stringify({ id, method, params }))
@@ -144,8 +169,12 @@ const instrument = `(() => {
   const evidence = window.__firstRunSmoke = {
     documentId: crypto.randomUUID(), mountedAt: null, movingAt: null, setupEver: false,
     workspaceBeforeSetup: false, whatsNewOverSetup: false, draws: [], pictureDraws: [], contexts: [], toasts: [], closedAt: null,
-    tones: [], flipMark: null
+    tones: [], flipMark: null, animationFrames: 0, windowVisible: null
   };
+  ${FIRST_RUN_SOURCE_TRACE_SCRIPT}
+  const countFrame = () => { evidence.animationFrames++; requestAnimationFrame(countFrame); };
+  requestAnimationFrame(countFrame);
+  window.videorc?.onWindowVisible?.(visible => { evidence.windowVisible = visible; });
   const draw = WebGL2RenderingContext.prototype.drawArrays;
   WebGL2RenderingContext.prototype.drawArrays = function(...args) {
     const backdrop = this.canvas.closest('[data-first-run-backdrop-canvas]');
@@ -191,6 +220,14 @@ const stateExpression = `(() => {
   const registryRaw = localStorage.getItem('videorc.backgroundAssets');
   const look = document.querySelector('[data-first-run-look-layout]');
   return {
+    documentVisibility: document.visibilityState, documentFocused: document.hasFocus(),
+    animationFrames: e?.animationFrames, windowVisible: e?.windowVisible,
+    animationTimelineMs: document.timeline.currentTime,
+    animations: document.getAnimations().slice(0, 8).map(animation => ({
+      state: animation.playState, currentTime: animation.currentTime, startTime: animation.startTime
+    })),
+    backdropDraws: e?.draws.length ?? 0,
+    backdropSize: (() => { const r = document.querySelector('[data-first-run-backdrop-canvas] canvas')?.getBoundingClientRect(); return r ? { width: r.width, height: r.height } : null })(),
     setup: setup?.dataset.firstRunSetup ?? null, mode: setup?.dataset.firstRunMode ?? null,
     cardStep: document.querySelector('[data-slot="first-run-card"]')?.dataset.firstRunStep ?? null,
     position: document.querySelector('[data-slot="first-run-card"]')?.dataset.firstRunStepPosition,
@@ -213,6 +250,9 @@ const stateExpression = `(() => {
     registryRaw, registry: registryRaw ? JSON.parse(registryRaw) : null,
     toasts: e?.toasts ?? [], closedAt: e?.closedAt,
     rows: Array.from(document.querySelectorAll('[data-slot="system-access-row"]')).map(row => row.dataset.state),
+    linuxAccess: !!document.querySelector('[data-first-run-linux-access]'),
+    linuxAccessTitle: document.querySelector('[data-first-run-linux-access] [data-slot="empty-title"]')?.textContent,
+    linuxAccessDescription: document.querySelector('[data-first-run-linux-access] [data-slot="empty-description"]')?.textContent,
     loading: !!document.querySelector('[data-first-run-rows="loading"]'),
     primaryCount: document.querySelectorAll('[data-first-run-primary]').length,
     primary: document.querySelector('[data-first-run-primary]')?.textContent.trim() ?? null,
@@ -237,7 +277,7 @@ const stateExpression = `(() => {
     retainedContextsLost: !!e?.contexts.length && e.contexts.every(gl => gl.isContextLost())
   };
 })()`
-const state = () => evaluate(stateExpression)
+const state = async () => ({ ...(await evaluate(stateExpression)), platform: process.platform })
 
 async function waitFor(label, predicate, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs
@@ -268,24 +308,50 @@ async function check(step, observation) {
 }
 
 async function screenshot(name) {
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' })
   const path = join(output, `${name}.png`)
+  if (process.platform === 'linux') {
+    // CDP's platform-view screenshot can hang on Wayland. Electron captures
+    // the real web contents without needing an X11 view or a portal grant.
+    const captured = await requestSmokeCommand(
+      launched.connections['preview-motion-ready'],
+      'capture-page',
+      { name },
+      { timeoutMs: 10000 }
+    )
+    if (!captured?.file || statSync(captured.file).size === 0)
+      throw new Error('Electron returned an empty first-run screenshot.')
+    copyFileSync(captured.file, path)
+    return path
+  }
+  const { data } = await cdp.call('Page.captureScreenshot', {
+    format: 'png',
+    fromSurface: true
+  })
   writeFileSync(path, Buffer.from(data, 'base64'))
   return path
 }
 
 async function reloadWith(keys) {
   const previousDocument = (await state()).documentId
+  const reload = { profile: profileName, previousDocument, requestedAt: Date.now() }
+  report.reloads.push(reload)
+  save()
   if (keys)
     await evaluate(
       `localStorage.clear(); for (const [key, value] of Object.entries(${JSON.stringify(keys)})) localStorage.setItem(key, value)`
     )
   await cdp.call('Page.reload', { ignoreCache: true })
   // Do not accidentally accept the previous document's state.
-  await waitFor(
+  const next = await waitFor(
     'new document instrument',
     (s) => s.documentId && s.documentId !== previousDocument && (s.setup === 'open' || s.sidebar)
   )
+  Object.assign(reload, {
+    nextDocument: next.documentId,
+    observedAt: Date.now(),
+    setup: next.setup
+  })
+  save()
 }
 
 async function click(selector) {
@@ -404,6 +470,7 @@ async function beginGuard(startMs = Date.now(), allowExistingSources = true) {
   const previewAtOpen = await previewSnapshot()
   guard = {
     startMs,
+    documentAtOpen: (await state()).documentId,
     previewAtOpen,
     allowExistingSources,
     previewIdleAtOpen: previewQuiet(previewAtOpen),
@@ -446,8 +513,23 @@ async function stopApp() {
   cdp = null
   browserCdp?.close()
   browserCdp = null
-  if (launched) await launched.stop()
+  const app = launched
   launched = null
+  if (app) {
+    const profile = join(output, profileName)
+    const teardown = await stopFirstRunApp(
+      app,
+      ownedProcessLedgerPaths({
+        appDataDir: join(profile, 'app-data'),
+        userDataDir: join(profile, 'user-data'),
+        workspaceRoot: repoRoot
+      })
+    )
+    report.teardowns.push({ profile: profileName, ...teardown })
+    save()
+    if (!teardown.pass)
+      throw new Error(`First-run teardown failed: ${teardown.failures.join('; ')}`)
+  }
 }
 
 async function startApp(name) {
@@ -460,6 +542,7 @@ async function startApp(name) {
   const startMs = Date.now()
   launched = await launchDevApp({
     timeoutMs: 180000,
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     env: {
       VIDEORC_SMOKE_OUTPUT_DIR: profile,
       VIDEORC_SMOKE_STATE_DIR: profile,
@@ -467,6 +550,7 @@ async function startApp(name) {
       VIDEORC_USER_DATA_DIR: join(profile, 'user-data'),
       VIDEORC_DEV_BACKEND_PROFILE: 'debug',
       VIDEORC_SMOKE_SKIP_FIRST_RUN: '0',
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_REMOTE_DEBUG_PORT: '0',
       RUST_LOG: 'videorc_backend=info'
     },
@@ -484,6 +568,15 @@ async function startApp(name) {
     }
   })
   if (!devtoolsUrl) throw new Error('Missing DevTools listening handshake')
+  // Backend READY can precede Vite transforming the Studio module on a cold
+  // launch. Wait for the real renderer within the original launch deadline,
+  // before attaching observations. The reload below still measures mount to
+  // first moving frame against the unchanged three-second budget.
+  await waitForRendererHook(
+    launched.connections['preview-motion-ready'],
+    '__videorcSmokeSetReplayBuffer',
+    { timeoutMs: Math.max(1, 180000 - (Date.now() - startMs)) }
+  )
   const { host } = new URL(devtoolsUrl)
   const targets = await fetchTargets(host)
   const target = targets.find(
@@ -494,6 +587,23 @@ async function startApp(name) {
   browserCdp = await connect(devtoolsUrl)
   backend = await connectBackend(launched.connections['backend-ready'], 10000)
   cdp.listeners.add((message) => {
+    if (message.method === 'Runtime.exceptionThrown') {
+      const details = message.params.exceptionDetails
+      report.rendererErrors.push({
+        profile: name,
+        text: details.exception?.description ?? details.text,
+        url: details.url,
+        line: details.lineNumber
+      })
+      save()
+    }
+    if (
+      message.method === 'Runtime.bindingCalled' &&
+      message.params.name === '__firstRunSourceRequest'
+    ) {
+      report.sourceRequests.push({ profile: name, ...JSON.parse(message.params.payload) })
+      save()
+    }
     if (
       message.method === 'Runtime.bindingCalled' &&
       message.params.name === '__firstRunSetupClosed' &&
@@ -504,14 +614,30 @@ async function startApp(name) {
   })
   await cdp.call('Runtime.enable')
   await cdp.call('Runtime.addBinding', { name: '__firstRunSetupClosed' })
+  await cdp.call('Runtime.addBinding', { name: '__firstRunSourceRequest' })
   await cdp.call('Page.enable')
+  // CDP activates a target but does not necessarily show its Electron window
+  // on Wayland. Exercise the foreground first-run UI through the owned window.
+  await requestSmokeCommand(
+    launched.connections['preview-motion-ready'],
+    'main-window-focus',
+    {},
+    { timeoutMs: 10000 }
+  )
   await cdp.call('Page.bringToFront')
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: instrument })
   await evaluate(instrument)
   await check(
     'fresh',
-    await waitFor('initial fresh setup', (s) => s.setup === 'open' && s.rows.length === 4)
+    await waitFor('initial fresh setup', (s) => s.setup === 'open' && firstRunPermissionsReady(s))
   )
+  report.windowState = await requestSmokeCommand(
+    launched.connections['preview-motion-ready'],
+    'main-window-state',
+    {},
+    { timeoutMs: 10000 }
+  )
+  save()
   await beginGuard(startMs, false)
   report.hostGrants = await evaluate('window.videorc.getMediaAccessStatus()')
 }
@@ -621,6 +747,9 @@ async function soundCheck() {
   }
   await check('sound', {
     ...(await state()),
+    systemAudioDeviceStatus: (await request(backend, 5000, 'devices.list')).devices.find(
+      (device) => device.kind === 'system-audio'
+    )?.status,
     microphoneGrant,
     gainBefore: s.config.audio.microphoneGainDb,
     gainKeyPressed
@@ -670,7 +799,10 @@ async function replay() {
     `(() => { const button = Array.from(document.querySelectorAll('button')).find(el => el.textContent.trim() === 'Run setup again…'); if (!button || button.disabled) throw new Error('Run setup again… unavailable'); button.click(); })()`
   )
   await check('replay-open', {
-    ...(await waitFor('replay permissions', (s) => s.mode === 'replay' && s.rows.length === 4)),
+    ...(await waitFor(
+      'replay permissions',
+      (s) => s.mode === 'replay' && firstRunPermissionsReady(s)
+    )),
     beforeRecordRaw: before.recordRaw
   })
   const visitedSteps = ['permissions']
@@ -705,7 +837,7 @@ try {
   // CDP attaches after the untouched first mount; reload to measure mount to
   // first frame on a shared renderer clock, as plan 203 did.
   await reloadWith({ 'videorc.theme': 'dark' })
-  await check('fresh', await waitFor('fresh rows', (s) => s.rows.length === 4))
+  await check('fresh', await waitFor('fresh rows', (s) => firstRunPermissionsReady(s)))
   await check(
     'moving',
     await waitFor('moving backdrop', (s) => ['moving', 'still'].includes(s.backdrop), 5000)
@@ -814,7 +946,13 @@ try {
   })
 
   await reloadWith({ 'videorc.whatsNewLastSeenVersion': '999.0.0' })
-  await check('existing-install', await state())
+  // An existing install shows the workspace before runtime info arrives.
+  // Finalization then persists its migration record; the sidebar alone is
+  // not that handshake. Still validate the record after the bounded wait.
+  await check(
+    'existing-install',
+    await waitFor('existing-install migration', (s) => s.recordRaw !== null)
+  )
   const resumeRecord = JSON.stringify({
     version: 1,
     status: 'in-progress',
@@ -823,7 +961,7 @@ try {
   })
   await beginGuard()
   await reloadWith({ 'videorc.firstRun': resumeRecord })
-  await check('resume', await waitFor('legacy resumed rows', (s) => s.rows.length === 4))
+  await check('resume', await waitFor('legacy resumed rows', (s) => firstRunPermissionsReady(s)))
   await waitFor('legacy resumed motion', (s) => s.backdrop === 'moving')
   await leave('[data-first-run-skip]')
   await check('finish', { ...(await state()), pressedPrimary: 'Skip setup' })
@@ -831,7 +969,7 @@ try {
   // record to test startup ordering instead of hiding setup by migration.
   await beginGuard()
   await reloadWith({ 'videorc.firstRun': resumeRecord, 'videorc.whatsNewLastSeenVersion': '0.0.1' })
-  await waitFor('old-version setup', (s) => s.rows.length === 4)
+  await waitFor('old-version setup', (s) => firstRunPermissionsReady(s))
   const whatsNewStart = Date.now()
   await delay(FIRST_RUN_SMOKE_LIMITS.whatsNewWatchMs + 100)
   await check('whats-new', {
@@ -844,7 +982,7 @@ try {
 
   await startApp('livestreams')
   await reloadWith({ 'videorc.theme': 'light' })
-  await waitFor('light permissions', (s) => s.rows.length === 4 && s.theme === 'light')
+  await waitFor('light permissions', (s) => firstRunPermissionsReady(s) && s.theme === 'light')
   // Plan 208 S5: opened in light, the first frame is already turned, never dark first.
   await check(
     'moving',
@@ -889,7 +1027,6 @@ try {
     beforeRegistryRaw: beforeSkip.registryRaw
   })
   report.pass = true
-  console.log('PASS first-run smoke: all steps passed')
 } catch (error) {
   report.pass = false
   report.error = error.stack ?? String(error)
@@ -904,7 +1041,15 @@ try {
   console.error(`FAIL first-run smoke: ${error.message}`)
   process.exitCode = 1
 } finally {
-  await stopApp()
+  try {
+    await stopApp()
+  } catch (error) {
+    report.pass = false
+    report.teardownError = error.stack ?? String(error)
+    console.error(`FAIL first-run smoke teardown: ${error.message}`)
+    process.exitCode = 1
+  }
   save()
+  if (report.pass) console.log('PASS first-run smoke: all steps passed')
   console.log(`Report: ${join(output, 'report.json')}`)
 }

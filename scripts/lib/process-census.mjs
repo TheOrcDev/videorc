@@ -501,12 +501,23 @@ export function parseWindowsProcessTable(stdout) {
  */
 export function classifyProcessInTable(row, rowsByPid) {
   const role = classifyProcess(row)
-  if (role !== 'electron-child' || !/--type=zygote(?:\s|$)/.test(row.args ?? '')) return role
+  // While exiting Linux replaces argv with "[electron]", then may append
+  // "<defunct>". That loses
+  // --type=zygote, but a known zygote parent still identifies the child. Keep
+  // the row in the census until it is reaped; it is not another app main.
+  const defunctElectron =
+    role === 'electron-main' &&
+    /^(?:<defun\S*\s+)?\[[^\]]+\](?:\s+<defunct>)?$/.test((row.args ?? '').trim())
+  if (
+    !defunctElectron &&
+    (role !== 'electron-child' || !/--type=zygote(?:\s|$)/.test(row.args ?? ''))
+  )
+    return role
   const isZygote = (candidate) => /--type=zygote(?:\s|$)/.test(candidate?.args ?? '')
   const parent = rowsByPid.get(row.ppid)
   if (!isZygote(parent)) return role
   if (/--no-zygote-sandbox/.test(parent.args ?? '')) return 'electron-gpu'
-  return isZygote(rowsByPid.get(parent.ppid)) ? 'electron-renderer' : role
+  return isZygote(rowsByPid.get(parent.ppid)) ? 'electron-renderer' : 'electron-child'
 }
 
 export function classifyProcess(row) {

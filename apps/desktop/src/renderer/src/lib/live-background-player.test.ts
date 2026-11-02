@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   BACKDROP_GUARD_WINDOW_MS,
@@ -20,6 +20,62 @@ import {
 } from './live-background-player'
 
 // Plan 203 S4: the Liquid Chrome backdrop behind first-run setup.
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+function playerFixture() {
+  const shared = (
+    globalThis as unknown as {
+      VideorcLiveBackground: {
+        create: (...args: unknown[]) => unknown
+        internalSize: (render: unknown, id: string, size: number[], level: string) => number[]
+      }
+    }
+  ).VideorcLiveBackground
+  const draw = vi.fn()
+  const dispose = vi.fn()
+  const create = vi.spyOn(shared, 'create').mockReturnValue({ draw, dispose })
+  const gl = { getExtension: () => null, getParameter: () => 'Intel' }
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+    gl as unknown as WebGL2RenderingContext
+  )
+  const frames = new Map<number, FrameRequestCallback>()
+  let nextFrame = 0
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frames.set(++nextFrame, callback)
+    return nextFrame
+  })
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
+  vi.stubGlobal('devicePixelRatio', 2)
+  vi.spyOn(performance, 'now').mockReturnValue(0)
+  const host = document.createElement('div')
+  const onFirstFrame = vi.fn()
+  const onStill = vi.fn()
+  const player = startBackdropPlayer({ host, look: 'polished', dim: 0, onFirstFrame, onStill })
+  const canvas = host.querySelector('canvas')!
+  const cssWidth = vi.spyOn(canvas, 'clientWidth', 'get').mockReturnValue(960)
+  vi.spyOn(canvas, 'clientHeight', 'get').mockReturnValue(821)
+  const render = create.mock.calls[0][1]
+  return {
+    canvas,
+    cssWidth,
+    draw,
+    dispose,
+    player,
+    onFirstFrame,
+    onStill,
+    shaderSize: (size: number[], level: string) =>
+      shared.internalSize(render, WELCOME_BACKDROP.id, size, level),
+    tick(now: number) {
+      const callbacks = [...frames.values()]
+      frames.clear()
+      for (const callback of callbacks) callback(now)
+    }
+  }
+}
 
 function feed(guard: BackdropGuard, intervalMs: number, fromMs: number, untilMs: number) {
   let next = guard
@@ -136,6 +192,64 @@ describe('the welcome backdrop', () => {
   it('keeps full size while frames keep their pace', () => {
     const guard = feed(createBackdropGuard(), 33.3, 0, BACKDROP_GUARD_WINDOW_MS * 3)
     expect(guard.level).toBe('full')
+  })
+
+  it('presents the existing shader resolution directly and halves it only once', () => {
+    const f = playerFixture()
+    try {
+      f.tick(0)
+      const full = f.shaderSize([1920, 1642], 'full')
+      expect(full).toEqual([1263, 1080])
+      expect([f.canvas.width, f.canvas.height]).toEqual(full)
+      expect(f.draw).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          width: full[0],
+          height: full[1],
+          level: 'full'
+        })
+      )
+      for (let now = 80; now <= 3360; now += 80) f.tick(now)
+      const half = f.shaderSize([1920, 1642], 'half')
+      expect(half).toEqual([631, 540])
+      expect([f.canvas.width, f.canvas.height]).toEqual(half)
+      const last = f.draw.mock.calls.at(-1)![0]
+      expect(f.shaderSize([last.width, last.height], last.level)).toEqual(half)
+      expect(f.onFirstFrame).toHaveBeenCalledOnce()
+      expect(f.onStill).not.toHaveBeenCalled()
+      // A small backing buffer must not reset the guard every frame.
+      for (let now = 3440; now <= 6800; now += 80) f.tick(now)
+      expect(f.onStill).toHaveBeenCalledExactlyOnceWith('gpu-budget', undefined)
+      expect(f.dispose).toHaveBeenCalledOnce()
+      expect(f.canvas.parentElement).toBeNull()
+    } finally {
+      f.player.dispose()
+    }
+  })
+
+  it('keeps the phase and half-size choice across resize and pause', () => {
+    const f = playerFixture()
+    try {
+      for (let now = 0; now <= 3360; now += 80) f.tick(now)
+      const phaseBefore = f.draw.mock.calls.at(-1)![0].phase
+      f.cssWidth.mockReturnValue(800)
+      f.tick(3440)
+      const resized = f.shaderSize([1600, 1642], 'half')
+      expect([f.canvas.width, f.canvas.height]).toEqual(resized)
+      expect(f.draw.mock.calls.at(-1)![0].phase).toBeGreaterThan(phaseBefore)
+      vi.mocked(performance.now).mockReturnValue(3440)
+      f.player.setRunning(false)
+      const count = f.draw.mock.calls.length
+      f.tick(20_000)
+      expect(f.draw).toHaveBeenCalledTimes(count)
+      vi.mocked(performance.now).mockReturnValue(20_000)
+      f.player.setRunning(true)
+      f.tick(20_000)
+      expect(f.draw.mock.calls.at(-1)![0].phase).toBeCloseTo(f.draw.mock.calls.at(-2)![0].phase)
+      expect([f.canvas.width, f.canvas.height]).toEqual(resized)
+      expect(f.onStill).not.toHaveBeenCalled()
+    } finally {
+      f.player.dispose()
+    }
   })
 
   it('drops to half, then to the poster, and never climbs back', () => {

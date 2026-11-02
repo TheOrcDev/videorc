@@ -45,6 +45,9 @@ import {
   formatSummaryTable,
   nextCycleDelayMs,
   readBudgetOverrides,
+  recordLatencyRendererReady,
+  recordLatencySceneReady,
+  recordLatencyTakeDurationMs,
   summarizeRecordCycles,
   timelinePhaseDeltas
 } from './lib/record-latency-gate.mjs'
@@ -242,7 +245,36 @@ async function waitForBackendState(ws, method, predicate, label) {
   fail(`timed out waiting for ${label}; last ${method}: ${JSON.stringify(last)}`)
 }
 
-async function verifyArtifact({ mp4Path, cycleIndex }) {
+async function waitForScreenOnlyRenderer(smoke) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const response = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: `
+          const hook = window.__videorcSmokeScenePresets;
+          const state = hook?.state();
+          return {
+            wsStatus: state?.diagnostics?.wsStatus,
+            layoutPreset: hook?.streamingState().captureConfig?.layout?.layoutPreset,
+            committedLayoutPreset: state?.diagnostics?.confirmedVisual?.layout?.layoutPreset,
+            visualTransactionPending: state?.diagnostics?.visualTransactionPending,
+            layoutSwitchPending: state?.pendingLayout
+          };
+        `
+      },
+      { timeoutMs: Math.max(1, deadline - Date.now()) }
+    )
+    last = response?.result
+    if (recordLatencyRendererReady(last)) return last
+    await sleep(100)
+  }
+  fail(`screen-only layout did not commit: ${JSON.stringify(last)}`)
+}
+
+async function verifyArtifact({ mp4Path, cycleIndex, expectedDurationMs }) {
   if (!mp4Path || !existsSync(mp4Path)) fail(`artifact missing for cycle ${cycleIndex}: ${mp4Path}`)
   const [startupReport, qualityReport] = await Promise.all([
     analyzeStartupResolution(mp4Path, {
@@ -257,7 +289,7 @@ async function verifyArtifact({ mp4Path, cycleIndex }) {
       ffprobePath,
       intendedFps,
       expectAudio: false,
-      gates: { requireMotion: false }
+      gates: { requireMotion: true }
     })
   ])
   const [startupPaths, qualityPaths] = await Promise.all([
@@ -281,8 +313,9 @@ async function verifyArtifact({ mp4Path, cycleIndex }) {
     )
   }
   const durationFailures = evaluateRecordingWallDuration({
-    expectedDurationMs: recordingMs,
-    actualDurationSeconds: durationSeconds
+    expectedDurationMs,
+    actualDurationSeconds: durationSeconds,
+    minRatio: 0.98
   })
   if (durationFailures.length > 0) {
     fail(`cycle ${cycleIndex} duration gate failed: ${durationFailures.join('; ')}`)
@@ -337,8 +370,12 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
   // Diagnostics publish is asynchronous; give the last stop snapshot a moment.
   await sleep(300)
   const stopTimeline = timelineSnapshotFor(recorder, 'recordingStopTimeline', sessionId)
-  const artifact = await verifyArtifact({ mp4Path: finalization.mp4Path, cycleIndex })
   const compositor = compositorPathForSession(recorder, sessionId)
+  const expectedDurationMs = recordLatencyTakeDurationMs({
+    recordingAtMs: recordingRecord.at,
+    stopClickAtMs: stopClickAt,
+    recordingMs
+  })
 
   const cycle = {
     index: cycleIndex,
@@ -355,7 +392,9 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
     mp4Path: finalization.mp4Path,
     compositorPath: compositor.path,
     compositorPathDetail: compositor.detail,
-    artifact,
+    expectedDurationMs,
+    artifact: null,
+    artifactStatus: 'pending',
     backend: {
       startTimeline,
       stopTimeline,
@@ -363,6 +402,27 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
       stopPhases: stopTimeline ? timelinePhaseDeltas(stopTimeline.marks) : null
     }
   }
+  // Preserve the measured phases even when the analyzer refuses this take.
+  // Only a completed analyzer run may mark the artifact passed.
+  const cyclePath = join(outputDirectory, `cycle-${cycleIndex}-timing.json`)
+  const saveCycle = () =>
+    writeFileSync(cyclePath, `${JSON.stringify(cycle, null, 2)}\n`, { mode: 0o600 })
+  saveCycle()
+  try {
+    cycle.artifact = await verifyArtifact({
+      mp4Path: finalization.mp4Path,
+      cycleIndex,
+      expectedDurationMs
+    })
+    cycle.artifactStatus = 'passed'
+  } catch (error) {
+    cycle.artifactStatus = 'failed'
+    cycle.artifactError = error instanceof Error ? error.message : String(error)
+    throw error
+  } finally {
+    saveCycle()
+  }
+  const artifact = cycle.artifact
   log(
     `cycle ${cycleIndex + 1}/${cycles} (${cold ? 'cold' : 'warm'}) ` +
       `start click→starting ${formatMs(cycle.clickToStartingMs)} click→recording ${formatMs(cycle.clickToRecordingMs)} · ` +
@@ -408,6 +468,7 @@ let stopApp = null
 let renderer = null
 let remote = null
 let recorder = null
+let smoke = null
 try {
   mkdirSync(outputDirectory, { recursive: true })
   const launch = await launchDevApp({
@@ -429,7 +490,7 @@ try {
   })
   stopApp = launch.stop
   renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
-  const smoke = launch.connections['preview-motion-ready']
+  smoke = launch.connections['preview-motion-ready']
   recorder = new BackendEventRecorder(renderer, { debug, timeoutMs })
 
   const health = await request(renderer, timeoutMs, 'health.ping', { ffmpegPath })
@@ -453,6 +514,31 @@ try {
     'synthetic compositor readiness'
   )
   log('synthetic source live; preview compositor rendering')
+
+  // The renderer can persist its initial working scene after the profile seed
+  // but before reload. Commit the screen-only fixture through the same layout
+  // action as the UI, then check the backend scene before arming Clips. Merely
+  // writing a layout to localStorage can leave a camera in the actual scene.
+  await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `
+        const scenes = window.__videorcSmokeScenePresets;
+        if (!scenes) throw new Error('Studio scene actions are not ready.');
+        scenes.layout({ layoutPreset: 'screen-only' });
+        return true;
+      `
+    },
+    { timeoutMs }
+  )
+  await waitForScreenOnlyRenderer(smoke)
+  const fixtureScene = await waitForBackendState(
+    renderer,
+    'scene.get',
+    recordLatencySceneReady,
+    'screen-only synthetic scene'
+  )
 
   const { discovery } = await enableRemoteControl(renderer, { timeoutMs })
   remote = await connectRemote(discovery.host, discovery.port, discovery.token, { timeoutMs })
@@ -544,6 +630,12 @@ try {
       replayBuffer
     },
     systemAudioEvidence: systemAudio ? systemAudioEvidence : undefined,
+    sceneFixture: {
+      layoutPreset: 'screen-only',
+      visibleSourceKinds: fixtureScene.sources
+        .filter((source) => source.visible)
+        .map((source) => source.kind)
+    },
     budgets,
     enforce,
     verdict,
@@ -579,6 +671,47 @@ try {
       : 'PASS (report-only; budgets NOT met, see above)'
   )
 } catch (error) {
+  // Keep the refusal state before disposing the isolated profile. Never dump
+  // the full Studio state: it includes destinations and resource capabilities.
+  try {
+    const response = smoke
+      ? await requestSmokeCommand(
+          smoke,
+          'eval-js',
+          {
+            code: `
+              const hook = window.__videorcSmokeScenePresets;
+              const diagnostics = hook?.state().diagnostics;
+              const state = hook?.streamingState();
+              return {
+                hookPresent: Boolean(hook),
+                wsStatus: diagnostics?.wsStatus,
+                replay: diagnostics?.replay,
+                hasScene: diagnostics?.hasScene,
+                visualTransactionPending: diagnostics?.visualTransactionPending,
+                recordingState: state?.recording?.state,
+                startBlockedReason: state?.startBlockedReason,
+                testPattern: state?.captureConfig?.sources?.testPattern,
+                layoutPreset: state?.captureConfig?.layout?.layoutPreset,
+                committedLayoutPreset: hook?.state().diagnostics?.confirmedVisual?.layout?.layoutPreset,
+                microphoneOff: state?.captureConfig?.sources?.microphoneOff,
+                replayConfig: state?.captureConfig?.replayBuffer
+              };
+            `
+          },
+          { timeoutMs: 5000 }
+        )
+      : null
+    const failurePath = join(outputDirectory, 'record-latency-failure.json')
+    writeFileSync(
+      failurePath,
+      `${JSON.stringify({ generatedAt: new Date().toISOString(), commit: gitHead(), renderer: response?.result ?? null }, null, 2)}\n`,
+      { mode: 0o600 }
+    )
+    log(`failure diagnostics written to ${failurePath}`)
+  } catch {
+    log('failure diagnostics unavailable')
+  }
   console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
   process.exitCode = 1
 } finally {

@@ -30,13 +30,14 @@ import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
   assessCameraPreview,
   assessLinuxDeviceList,
+  assessLinuxRecordingQuality,
   assessMicMeter,
   assessMicRecordingAudio,
   parseVolumedetect
 } from './lib/linux-av-device-gates.mjs'
 import { assessPortalRecording } from './lib/linux-portal-capture-gates.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
-import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import { analyzeRecording, DEFAULT_GATES, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -172,9 +173,13 @@ async function record(ws, smoke, label, { sources, layoutPreset, playTone = fals
     ffmpegPath,
     ffprobePath,
     intendedFps: video.fps,
-    expectAudio: true
+    expectAudio: true,
+    gates: {
+      minDurationSeconds: (recordingMs / 1000) * (1 - DEFAULT_GATES.frameCountTolerance)
+    }
   })
   writeReports(quality)
+  check(`${label} artifact quality`, assessLinuxRecordingQuality(quality))
   const levels = audioLevels(outputPath)
   const summary = {
     outputPath,
@@ -184,6 +189,8 @@ async function record(ws, smoke, label, { sources, layoutPreset, playTone = fals
     height: quality.metrics.height,
     durationSeconds: quality.metrics.durationSeconds,
     hasAudio: quality.metrics.hasAudio,
+    analyzerFailures: quality.verdict.failures,
+    analyzerWarnings: quality.verdict.warnings,
     ...levels,
     healthCodes: (health.events ?? []).map((event) => event.code)
   }

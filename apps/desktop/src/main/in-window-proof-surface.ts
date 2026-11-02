@@ -148,6 +148,7 @@ export interface InWindowProofSurfaceOptions {
 }
 
 export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHost {
+  readonly id: number
   private readonly view: WebContentsView
   private parent: BrowserWindow | null = null
   private screenBounds: Rect = { x: 0, y: 0, width: 1, height: 1 }
@@ -159,6 +160,9 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
   constructor(private readonly options: InWindowProofSurfaceOptions) {
     super()
     this.view = options.createView()
+    // A retired WebContentsView can release its webContents. Keep the host's
+    // identity available to async completions and diagnostics after close.
+    this.id = this.view.webContents.id
     this.view.setVisible(false)
     this.view.webContents.on('before-mouse-event', (event, mouse) => {
       this.forwardInput(event, mouse as ObservedInputEvent)
@@ -173,10 +177,6 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
       }
     })
     this.view.webContents.once('destroyed', () => this.destroy())
-  }
-
-  get id(): number {
-    return this.view.webContents.id
   }
 
   get webContents(): WebContents {

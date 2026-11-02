@@ -260,6 +260,23 @@ pub async fn list_linux_microphones(ffmpeg_path: &str) -> Vec<Device> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn capture_properties_override_conflicting_child_properties_without_changing_parent() {
+        let mut command = std::process::Command::new("ffmpeg");
+        command.env("PULSE_PROP", "node.dont-reconnect=false");
+        let parent = std::env::var_os("PULSE_PROP");
+        command.envs(pulse_pinned_source_env());
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == "PULSE_PROP")
+                .unwrap()
+                .1,
+            Some(std::ffi::OsStr::new(PULSE_PINNED_SOURCE_PROPS))
+        );
+        assert_eq!(std::env::var_os("PULSE_PROP"), parent);
+    }
+
     const OGRE_SOURCES: &str = "Auto-detected sources for pulse:\n  alsa_output.pci-0000_02_00.3.HiFi__Speaker__sink.monitor [Monitor of Apple Audio Device Internal Speakers] (none)\n* alsa_input.pci-0000_02_00.3.HiFi__Mic__source [Apple Audio Device Internal Microphone] (none)\n";
 
     #[test]

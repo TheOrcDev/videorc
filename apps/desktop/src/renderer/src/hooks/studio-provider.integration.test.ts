@@ -673,7 +673,10 @@ class StudioBackend {
           this.accountTransportFailuresRemaining -= 1
           throw new Error('Temporary account sign-in transport failure.')
         }
-        return signedInAccount
+        // A successful exchange persists before its reply. Subsequent account
+        // refreshes must read that committed snapshot, just like the backend.
+        this.accountSnapshot = signedInAccount
+        return this.accountSnapshot
       case 'account.sign_out':
         return { status: 'signed-out' }
       case 'overlays.layout.get':
@@ -2352,7 +2355,16 @@ describe('real StudioProvider lifecycle', () => {
   // own saves, landing where the Scene inspector's snaps would.
   it('moves Buddy and a banner from an agent with the editor snaps, and reads them back', async () => {
     const { backend, latest } = await mountBannerProvider([testBanner('sponsor', 0)])
-    await waitForObservation(() => latest().core.wsStatus === 'connected')
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'backend.ready', payload: null })
+      })
+    })
+    // The real backend sends intents only after this socket registers. A live
+    // socket alone does not mean the lazily loaded agent listener is ready.
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'agent.intent.listen')
+    )
     const pushIntent = async (intentId: string, tool: string, args: Record<string, unknown>) => {
       await act(async () => {
         backend.sockets[0]?.onmessage?.({
@@ -7872,6 +7884,142 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.captureConfig.sources.cameraOff).toBeUndefined()
   }, 15_000)
 
+  it('reconciles Clips with the committed layout after a delayed folder authorization', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    let releaseAuthorization!: (selection: ResourceSelection) => void
+    const folder: ResourceSelection = {
+      capabilityId: 'test-folder',
+      kind: 'output-directory',
+      displayName: 'Recordings'
+    }
+    const authorize = vi
+      .fn()
+      .mockResolvedValue(folder)
+      .mockImplementationOnce(
+        () =>
+          new Promise<ResourceSelection>((resolve) => {
+            releaseAuthorization = resolve
+          })
+      )
+    api.authorizeOutputDirectory = authorize
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.settings,
+      JSON.stringify({ outputDirectoryHandle: 'folder-handle' })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() => authorize.mock.calls.length === 1)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+    ).toHaveLength(0)
+
+    await act(async () => {
+      latest()!.core.applyLayoutPatch({ layoutPreset: 'screen-only' })
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' &&
+        latest()?.core.layoutSwitchPending == null
+    )
+    await act(async () => {
+      releaseAuthorization(folder)
+    })
+    await waitForObservation(() => latest()?.recording.recording.replayOnly === true)
+    const starts = backend.sentCommands.filter((command) => command.method === 'session.start')
+    expect(starts).toHaveLength(1)
+    expect(starts[0].params).toMatchObject({
+      layout: { layoutPreset: 'screen-only' },
+      output: {
+        recordEnabled: false,
+        streamEnabled: false,
+        outputDirectoryCapability: 'test-folder'
+      }
+    })
+    expect(authorize).toHaveBeenCalledTimes(2)
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
+  it('does not dispatch a delayed Clips start after a recording has taken over', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    let releaseAuthorization!: (selection: ResourceSelection) => void
+    const folder: ResourceSelection = {
+      capabilityId: 'test-folder',
+      kind: 'output-directory',
+      displayName: 'Recordings'
+    }
+    const authorize = vi
+      .fn()
+      .mockResolvedValue(folder)
+      .mockImplementationOnce(
+        () =>
+          new Promise<ResourceSelection>((resolve) => {
+            releaseAuthorization = resolve
+          })
+      )
+    api.authorizeOutputDirectory = authorize
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.settings,
+      JSON.stringify({ outputDirectoryHandle: 'folder-handle' })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() => authorize.mock.calls.length === 1)
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    await waitForObservation(
+      () =>
+        latest()?.recording.recording.state === 'recording' &&
+        !latest()?.recording.recording.replayOnly
+    )
+    await act(async () => {
+      releaseAuthorization(folder)
+    })
+    // Let the cancelled automatic start reconcile against the active session.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
+    const starts = backend.sentCommands.filter((command) => command.method === 'session.start')
+    expect(starts).toHaveLength(1)
+    expect(starts[0].params).toMatchObject({ output: { recordEnabled: true } })
+    expect(latest()?.recording.recording.replayOnly).not.toBe(true)
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
   it('keeps source pickers enabled on a buffer-only session and re-arms with the new microphone', async () => {
     const backend = new StudioBackend()
     backend.sourceCapabilities = [
@@ -8960,19 +9108,23 @@ describe('real StudioProvider lifecycle', () => {
   describe('events no core consumer reads keep the core value (plan 191)', () => {
     async function mountQuietProvider(setup?: (backend: StudioBackend) => void): Promise<{
       api: VideorcApi
+      backend: StudioBackend
       latest: () => StudioObservation
       shell: () => ReturnType<typeof useStudioShell> | undefined
       emit: (event: string, payload: unknown) => Promise<void>
+      emitMain: (event: string, payload: unknown) => Promise<void>
     }> {
       const backend = new StudioBackend()
       setup?.(backend)
       TestWebSocket.backend = backend
       vi.stubGlobal('WebSocket', TestWebSocket)
+      let emitMain!: (event: string, payload: unknown) => void
       const api = createVideorcApi({
         acknowledge: async () => true,
         pending: async () => [],
         acknowledgeProvider: async () => true,
-        pendingProvider: async () => []
+        pendingProvider: async () => [],
+        registerEmitter: (emit) => (emitMain = emit)
       })
       const testDom = installProviderTestEnvironment(api)
       restoreEnvironment = testDom.restore
@@ -9018,8 +9170,91 @@ describe('real StudioProvider lifecycle', () => {
           await Promise.resolve()
         })
       }
-      return { api, latest, shell: () => shell, emit }
+      return {
+        api,
+        backend,
+        latest,
+        shell: () => shell,
+        emit,
+        emitMain: async (event, payload) => {
+          await act(async () => emitMain(event, payload))
+        }
+      }
     }
+
+    it('ignores identical preview window IPC snapshots while publishing real lifecycle changes', async () => {
+      const { latest, emitMain } = await mountQuietProvider()
+      const core = latest().core
+      await emitMain('preview-window:state', structuredClone(core.previewWindow))
+      expect(latest().core).toBe(core)
+      const changed: PreviewWindowState = {
+        ...core.previewWindow,
+        supervisor: {
+          ...core.previewWindow.supervisor,
+          lifecycleState: 'failed',
+          lastError: 'The preview window could not open.',
+          updatedAt: '2026-10-30T12:00:01.000Z'
+        }
+      }
+      await emitMain('preview-window:state', changed)
+      expect(latest().core.previewWindow).toEqual(changed)
+      expect(latest().core).not.toBe(core)
+      const failedCore = latest().core
+      await emitMain('preview-window:state', structuredClone(changed))
+      expect(latest().core).toBe(failedCore)
+    })
+
+    it('keeps preview telemetry out of core while exporting the latest support diagnostics', async () => {
+      const { api, backend, latest, shell, emit } = await mountQuietProvider()
+      const core = latest().core
+      const shellValue = shell()
+      const status: PreviewSurfaceStatus = {
+        ...latest().diagnostics.previewSurfaceStatus,
+        state: 'stopped',
+        transport: 'unavailable',
+        framesRendered: 42,
+        updatedAt: '2026-10-30T12:00:01.000Z'
+      }
+      await emit('preview.surface.status', status)
+      await waitForObservation(
+        () => latest().diagnostics.previewSurfaceStatus.updatedAt === status.updatedAt
+      )
+      expect(latest().diagnostics.previewSurfaceStatus).toEqual(status)
+      expect(latest().core).toBe(core)
+      expect(shell()).toBe(shellValue)
+
+      // The export waits for main's fresh runtime snapshot. Telemetry received
+      // during that wait must still make it into the bundle, even when invoked
+      // through the stable action captured before the preview update.
+      const runtimeInfo = await api.getRuntimeInfo()
+      let releaseRuntime!: (value: typeof runtimeInfo) => void
+      api.getRuntimeInfo = vi.fn(
+        () => new Promise<typeof runtimeInfo>((resolve) => (releaseRuntime = resolve))
+      )
+      let exportTask!: Promise<void>
+      await act(async () => {
+        exportTask = core.exportSupportBundle()
+      })
+      expect(latest().core.supportBundleExportPending).toBe(true)
+      const failed: PreviewSurfaceStatus = {
+        ...status,
+        state: 'failed',
+        framesRendered: 43,
+        message: 'The preview stopped presenting.',
+        updatedAt: '2026-10-30T12:00:02.000Z'
+      }
+      await emit('preview.surface.status', failed)
+      expect(latest().diagnostics.previewSurfaceStatus).toEqual(failed)
+      await act(async () => {
+        releaseRuntime(runtimeInfo)
+        await exportTask
+      })
+      expect(
+        backend.commands.find((command) => command.method === 'diagnostics.supportBundle.export')
+          ?.params
+      ).toMatchObject({ rendererDiagnostics: { nativePreviewSurfaceStatus: failed } })
+      expect(latest().core.supportBundleExportPending).toBe(false)
+    })
 
     it('streams caption partials to captions readers without a new core or shell value', async () => {
       const { api, latest, shell, emit } = await mountQuietProvider()
@@ -11654,6 +11889,7 @@ describe('real StudioProvider lifecycle', () => {
   })
 
   it('boots, commits a layout, records, stops, and acknowledges a bound account callback', async () => {
+    vi.useFakeTimers()
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -11700,13 +11936,23 @@ describe('real StudioProvider lifecycle', () => {
       )
     })
 
-    await waitForObservation(
-      () =>
-        latest()?.core.wsStatus === 'connected' &&
-        latest()?.core.account?.status === 'signed-in' &&
-        acknowledgedCallbacks.includes(callbackEnvelope.id) &&
-        acknowledgedProviderCallbacks.includes(providerCallbackEnvelope.id)
-    )
+    const callbacksCommitted = (): boolean =>
+      latest()?.core.wsStatus === 'connected' &&
+      latest()?.core.account?.status === 'signed-in' &&
+      acknowledgedCallbacks.includes(callbackEnvelope.id) &&
+      acknowledgedProviderCallbacks.includes(providerCallbackEnvelope.id)
+    // Drive the transport, provider and acknowledgement retries without
+    // spending nearly the entire test deadline in real backoff timers.
+    for (let attempt = 0; attempt < 500 && !callbacksCommitted(); attempt += 1) {
+      await act(async () => {
+        await vi.dynamicImportSettled()
+        await vi.advanceTimersByTimeAsync(10)
+      })
+    }
+    expect(callbacksCommitted()).toBe(true)
+    vi.useRealTimers()
+    // The fake Electron window copied the timer functions at installation.
+    Object.assign(window, { setTimeout, clearTimeout, setInterval, clearInterval })
     expect(latest()?.core.deviceList.devices.map((device) => device.id)).toEqual([
       'screen:dxgi:0000000000000001:1',
       'camera:1',
@@ -11742,6 +11988,8 @@ describe('real StudioProvider lifecycle', () => {
       backend.commands.filter((command) => command.method === 'platformAccounts.oauth.complete')
     ).toHaveLength(4)
     expect(acknowledgedProviderCallbacks).toEqual([providerCallbackEnvelope.id])
+    expect(backend.accountSnapshot).toEqual(signedInAccount)
+    expect(latest()?.core.account).toEqual(backend.accountSnapshot)
 
     await act(async () => {
       latest()?.core.applyLayoutPatch({ layoutPreset: 'screen-only' })
@@ -15607,7 +15855,7 @@ describe('real StudioProvider lifecycle', () => {
     const flushAsyncWork = async (): Promise<void> => {
       for (let iteration = 0; iteration < 12; iteration += 1) {
         await act(async () => {
-          await Promise.resolve()
+          await vi.dynamicImportSettled()
           await vi.advanceTimersByTimeAsync(0)
           await Promise.resolve()
         })
@@ -16590,7 +16838,10 @@ function createVideorcApi(options: {
       getBundledBackgroundAssets: async () => [],
       getPendingAccountCallbacks: options.pending,
       acknowledgeAccountCallback: options.acknowledge,
-      ...(options.refreshAccount ? { refreshAccount: options.refreshAccount } : {}),
+      // Keep this capability absent when the fixture uses the backend fallback.
+      // The Proxy's generic no-op otherwise returns undefined for a method
+      // whose real contract always returns an account refresh outcome.
+      refreshAccount: options.refreshAccount,
       ...(options.signOutAccount ? { signOutAccount: options.signOutAccount } : {}),
       getPendingOAuthCallbacks: options.pendingProvider,
       acknowledgeOAuthCallback: options.acknowledgeProvider,

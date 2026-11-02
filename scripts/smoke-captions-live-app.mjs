@@ -616,6 +616,23 @@ async function ensureCaptionsOnBothOutputs(ws) {
 }
 
 async function seedRendererCaptionsProfile(smoke) {
+  const readyDeadline = Date.now() + timeoutMs
+  let rendererReady = false
+  while (Date.now() < readyDeadline) {
+    const state = await smokeCommand(smoke, 'eval-js', {
+      code: `return {
+        ready: document.readyState === 'complete' &&
+          typeof window.__videorcSmokeScenePresets?.configure === 'function' &&
+          typeof window.__videorcSmokeHydrateRecordingStatus === 'function'
+      }`
+    })
+    if (state?.result?.ready) {
+      rendererReady = true
+      break
+    }
+    await sleep(50)
+  }
+  if (!rendererReady) throw new Error('Renderer did not mount its caption smoke controls.')
   const seeded = await smokeCommand(smoke, 'eval-js', {
     code: `
       let current = {}
@@ -638,6 +655,11 @@ async function seedRendererCaptionsProfile(smoke) {
           textSize: 'l'
         }
       }
+      // Use the Studio's real setter. A raw storage write races the mounted
+      // provider persisting its previous config before the reload occurs.
+      window.__videorcSmokeScenePresets.configure(next)
+      // Pin the same value synchronously: configure commits React state later,
+      // while the reload helper captures storage now for its pagehide write.
       localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
       localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
       // The reload rides the seed's own eval: a second eval could find the
@@ -663,7 +685,16 @@ async function seedRendererCaptionsProfile(smoke) {
     throw new Error(`Could not seed renderer caption profile: ${JSON.stringify(seeded)}`)
   }
   await sleep(750)
+  await waitForSeededCaptionProfile(smoke)
+  // A fresh profile opens the Library. The session pill and live caption
+  // renderer belong to Studio, so mount that actual surface before starting.
+  await smokeCommand(smoke, 'open-tab', {
+    tab: 'studio',
+    waitFor: '[data-videorc-session-status]'
+  })
+}
 
+async function waitForSeededCaptionProfile(smoke) {
   let latest = null
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {

@@ -35,6 +35,12 @@ const STILL_REASONS = ['no-gpu', 'software-gpu', 'hardware-acceleration-off']
 // picture; under more contrast a brightness after it, so the card separates.
 const LIGHT_FILTER = { normal: 'invert(1)', moreContrast: 'invert(1) brightness(0.85)' }
 
+export function firstRunPermissionsReady(o) {
+  if (o.loading) return false
+  if (o.platform === 'linux') return o.linuxAccess === true && o.rows?.length === 0
+  return o.platform === 'darwin' && o.rows?.length === 4
+}
+
 export function evaluateFirstRunSmokeStep(step, observation = {}) {
   const failures = []
   const skipped = []
@@ -58,7 +64,16 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
   const setup = (mode) => {
     check(o.setup === 'open' && o.mode === mode, `expected open ${mode} setup`)
     check(o.cardStep === 'permissions', 'missing permissions card')
-    check(o.rows?.length === 4 && !o.loading, 'expected four resolved macOS permission rows')
+    check(firstRunPermissionsReady(o), 'missing platform permission rows or Linux sharing guidance')
+    if (o.platform === 'linux') {
+      check(
+        o.linuxAccessTitle === 'Screen sharing on Linux' &&
+          o.linuxAccessDescription?.includes('your desktop asks what to share') &&
+          o.linuxAccessDescription?.includes('Camera and microphone access'),
+        'missing Linux sharing and device access explanation'
+      )
+      check(o.primary === 'Continue', 'Linux guidance must allow Continue without claiming a grant')
+    }
     check(o.sidebar === false, 'workspace sidebar appeared during setup')
     check(o.primaryCount === 1, 'expected exactly one primary')
     check(['Continue', 'Skip for now'].includes(o.primary), 'unexpected primary label')
@@ -322,9 +337,14 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
       break
     }
     case 'sound':
+      check(o.cardStep === 'sound' && o.soundMicrophoneRow, 'missing Sound check rows')
       check(
-        o.cardStep === 'sound' && o.soundMicrophoneRow && o.soundSystemAudioRow,
-        'missing Sound check rows'
+        o.platform === 'linux'
+          ? ['available', 'permission-required', 'unavailable'].includes(
+              o.systemAudioDeviceStatus
+            ) && o.soundSystemAudioRow === (o.systemAudioDeviceStatus !== 'unavailable')
+          : o.soundSystemAudioRow === true,
+        'System audio row does not match the device capability'
       )
       if (o.soundBlocked) {
         check(

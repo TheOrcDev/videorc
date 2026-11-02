@@ -53,7 +53,9 @@ export type AppIcon = ComponentType<AppIconProps>
 
 // The compile-only check preserves the app prop contract. Direct re-exports
 // let each consumer own its glyph chunks; optional panels must not pull the
-// whole registry into the initial renderer asset graph.
+// whole registry into the initial renderer asset graph. Per-icon package
+// exports also keep Vite development reloads from evaluating every unused
+// glyph and weight in the package barrel while a performance check runs.
 type _AssertIconProps<T extends Record<string, AppIcon>> = T
 type _RegistryIconProps = _AssertIconProps<
   Pick<
@@ -151,149 +153,131 @@ type _RegistryIconProps = _AssertIconProps<
  * from the pre-audit set (see the audit table in the Nucleo plan). The Buddy
  * tab's slot is `BuddyIcon`, the Buddy emblem, below.
  */
-export {
-  VideoCamera as StudioIcon,
-  Monitor as SourcesIcon,
-  SquaresFour as SceneIcon,
-  ImageSquare as AssetsIcon,
-  Broadcast as LivestreamIcon,
-  ClosedCaptioning as CaptionsIcon,
-  Record as OutputIcon,
-  FilmReel as LibraryIcon,
-  GearSix as SettingsIcon,
-  Pulse as HealthIcon
-} from '@phosphor-icons/react'
+export { VideoCamera as StudioIcon } from '@phosphor-icons/react/dist/csr/VideoCamera'
+export { Monitor as SourcesIcon } from '@phosphor-icons/react/dist/csr/Monitor'
+export { SquaresFour as SceneIcon } from '@phosphor-icons/react/dist/csr/SquaresFour'
+export { ImageSquare as AssetsIcon } from '@phosphor-icons/react/dist/csr/ImageSquare'
+export { Broadcast as LivestreamIcon } from '@phosphor-icons/react/dist/csr/Broadcast'
+export { ClosedCaptioning as CaptionsIcon } from '@phosphor-icons/react/dist/csr/ClosedCaptioning'
+export { Record as OutputIcon } from '@phosphor-icons/react/dist/csr/Record'
+export { FilmReel as LibraryIcon } from '@phosphor-icons/react/dist/csr/FilmReel'
+export { GearSix as SettingsIcon } from '@phosphor-icons/react/dist/csr/GearSix'
+export { Pulse as HealthIcon } from '@phosphor-icons/react/dist/csr/Pulse'
 /**
  * Status and feedback. One glyph per meaning: a triangle warns, a circle
  * alerts, a crossed circle is an error. Never introduce a second variant of
  * an existing meaning — that is how the set grew to 100 icons.
  */
-export {
-  Warning as WarningIcon,
-  WarningCircle as AlertIcon,
-  XCircle as ErrorIcon,
-  CheckCircle as SuccessIcon,
-  Check as CheckIcon,
-  Info as InfoIcon,
-  CircleNotch as SpinnerIcon,
-  Heartbeat as HeartbeatIcon,
-  Gauge as GaugeIcon,
-  MinusCircle as DisabledIcon
-} from '@phosphor-icons/react'
+export { Warning as WarningIcon } from '@phosphor-icons/react/dist/csr/Warning'
+export { WarningCircle as AlertIcon } from '@phosphor-icons/react/dist/csr/WarningCircle'
+export { XCircle as ErrorIcon } from '@phosphor-icons/react/dist/csr/XCircle'
+export { CheckCircle as SuccessIcon } from '@phosphor-icons/react/dist/csr/CheckCircle'
+export { Check as CheckIcon } from '@phosphor-icons/react/dist/csr/Check'
+export { Info as InfoIcon } from '@phosphor-icons/react/dist/csr/Info'
+export { CircleNotch as SpinnerIcon } from '@phosphor-icons/react/dist/csr/CircleNotch'
+export { Heartbeat as HeartbeatIcon } from '@phosphor-icons/react/dist/csr/Heartbeat'
+export { Gauge as GaugeIcon } from '@phosphor-icons/react/dist/csr/Gauge'
+export { MinusCircle as DisabledIcon } from '@phosphor-icons/react/dist/csr/MinusCircle'
 /**
  * Chrome and controls.
  */
-export {
-  CaretDown as ChevronDownIcon,
-  CaretUpIcon as ChevronUpIcon,
-  CaretRight as ChevronRightIcon,
-  X as CloseIcon,
-  DotsThree as MoreIcon,
-  MagnifyingGlass as SearchIcon,
-  // Opens a small picture larger to look at it (the Buddy's bubble sample
-  // and its preview); never a zoom level control.
-  MagnifyingGlassPlus as ZoomInIcon,
-  SlidersHorizontal as AdjustIcon,
-  Layout as LayoutIcon
-} from '@phosphor-icons/react'
+export { CaretDown as ChevronDownIcon } from '@phosphor-icons/react/dist/csr/CaretDown'
+export { CaretUpIcon as ChevronUpIcon } from '@phosphor-icons/react/dist/csr/CaretUp'
+export { CaretRight as ChevronRightIcon } from '@phosphor-icons/react/dist/csr/CaretRight'
+export { X as CloseIcon } from '@phosphor-icons/react/dist/csr/X'
+export { DotsThree as MoreIcon } from '@phosphor-icons/react/dist/csr/DotsThree'
+export { MagnifyingGlass as SearchIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlass'
+// Opens a small picture larger to look at it (the Buddy's bubble sample
+// and its preview); never a zoom level control.
+export { MagnifyingGlassPlus as ZoomInIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlassPlus'
+export { SlidersHorizontal as AdjustIcon } from '@phosphor-icons/react/dist/csr/SlidersHorizontal'
+export { Layout as LayoutIcon } from '@phosphor-icons/react/dist/csr/Layout'
 /**
  * Arrows and movement.
  */
-export {
-  ArrowUp as ArrowUpIcon,
-  ArrowDown as ArrowDownIcon,
-  ArrowLeft as ArrowLeftIcon,
-  ArrowRight as ArrowRightIcon,
-  ArrowSquareOut as ExternalLinkIcon,
-  ArrowClockwise as RefreshIcon,
-  ArrowsClockwise as SyncIcon,
-  ArrowCounterClockwise as ResetIcon,
-  ArrowsDownUp as SortIcon
-} from '@phosphor-icons/react'
+export { ArrowUp as ArrowUpIcon } from '@phosphor-icons/react/dist/csr/ArrowUp'
+export { ArrowDown as ArrowDownIcon } from '@phosphor-icons/react/dist/csr/ArrowDown'
+export { ArrowLeft as ArrowLeftIcon } from '@phosphor-icons/react/dist/csr/ArrowLeft'
+export { ArrowRight as ArrowRightIcon } from '@phosphor-icons/react/dist/csr/ArrowRight'
+export { ArrowSquareOut as ExternalLinkIcon } from '@phosphor-icons/react/dist/csr/ArrowSquareOut'
+export { ArrowClockwise as RefreshIcon } from '@phosphor-icons/react/dist/csr/ArrowClockwise'
+export { ArrowsClockwise as SyncIcon } from '@phosphor-icons/react/dist/csr/ArrowsClockwise'
+export { ArrowCounterClockwise as ResetIcon } from '@phosphor-icons/react/dist/csr/ArrowCounterClockwise'
+export { ArrowsDownUp as SortIcon } from '@phosphor-icons/react/dist/csr/ArrowsDownUp'
 /**
  * Capture, media and playback.
  */
-export {
-  VideoCamera as CameraIcon,
-  Monitor as DisplayIcon,
-  Desktop as DesktopIcon,
-  DeviceMobile as MobileIcon,
-  Microphone as MicrophoneIcon,
-  SpeakerHigh as SpeakerOnIcon,
-  SpeakerSlash as SpeakerOffIcon,
-  Waveform as WaveformIcon,
-  WaveformSlash as WaveformMutedIcon,
-  Record as RecordIcon,
-  Stop as StopIcon,
-  Play as PlayIcon,
-  // The in-app player's pause (plan 119, S11); Stop is the capture action.
-  Pause as PauseIcon,
-  FileVideo as VideoFileIcon,
-  FilmSlate as ClapperboardIcon,
-  FrameCorners as FrameIcon,
-  Crosshair as CrosshairIcon,
-  // A marker: a point on a recording's timeline its owner wants to find
-  // again (CONTEXT.md). Never scissors, which mean a cut (plan 174 S3.12).
-  BookmarkSimple as MarkerIcon,
-  // Hide screen (plan 210): the screen is hidden from viewers. Never the
-  // Preview's eye, which opens a window.
-  EyeSlash as HiddenIcon
-} from '@phosphor-icons/react'
+export { VideoCamera as CameraIcon } from '@phosphor-icons/react/dist/csr/VideoCamera'
+export { Monitor as DisplayIcon } from '@phosphor-icons/react/dist/csr/Monitor'
+export { Desktop as DesktopIcon } from '@phosphor-icons/react/dist/csr/Desktop'
+export { DeviceMobile as MobileIcon } from '@phosphor-icons/react/dist/csr/DeviceMobile'
+export { Microphone as MicrophoneIcon } from '@phosphor-icons/react/dist/csr/Microphone'
+export { SpeakerHigh as SpeakerOnIcon } from '@phosphor-icons/react/dist/csr/SpeakerHigh'
+export { SpeakerSlash as SpeakerOffIcon } from '@phosphor-icons/react/dist/csr/SpeakerSlash'
+export { Waveform as WaveformIcon } from '@phosphor-icons/react/dist/csr/Waveform'
+export { WaveformSlash as WaveformMutedIcon } from '@phosphor-icons/react/dist/csr/WaveformSlash'
+export { Record as RecordIcon } from '@phosphor-icons/react/dist/csr/Record'
+export { Stop as StopIcon } from '@phosphor-icons/react/dist/csr/Stop'
+export { Play as PlayIcon } from '@phosphor-icons/react/dist/csr/Play'
+// The in-app player's pause (plan 119, S11); Stop is the capture action.
+export { Pause as PauseIcon } from '@phosphor-icons/react/dist/csr/Pause'
+export { FileVideo as VideoFileIcon } from '@phosphor-icons/react/dist/csr/FileVideo'
+export { FilmSlate as ClapperboardIcon } from '@phosphor-icons/react/dist/csr/FilmSlate'
+export { FrameCorners as FrameIcon } from '@phosphor-icons/react/dist/csr/FrameCorners'
+export { Crosshair as CrosshairIcon } from '@phosphor-icons/react/dist/csr/Crosshair'
+// A marker: a point on a recording's timeline its owner wants to find
+// again (CONTEXT.md). Never scissors, which mean a cut (plan 174 S3.12).
+export { BookmarkSimple as MarkerIcon } from '@phosphor-icons/react/dist/csr/BookmarkSimple'
+// Hide screen (plan 210): the screen is hidden from viewers. Never the
+// Preview's eye, which opens a window.
+export { EyeSlash as HiddenIcon } from '@phosphor-icons/react/dist/csr/EyeSlash'
 /**
  * Files, assets and editing.
  */
-export {
-  FolderOpen as FolderIcon,
-  DownloadSimple as DownloadIcon,
-  UploadSimple as UploadIcon,
-  FloppyDisk as SaveIcon,
-  Trash as DeleteIcon,
-  Copy as CopyIcon,
-  PencilSimple as EditIcon,
-  NotePencil as NoteIcon,
-  ImageSquare as ImageIcon,
-  ImageBroken as ImageBrokenIcon,
-  Eye as PreviewIcon
-} from '@phosphor-icons/react'
+export { FolderOpen as FolderIcon } from '@phosphor-icons/react/dist/csr/FolderOpen'
+export { DownloadSimple as DownloadIcon } from '@phosphor-icons/react/dist/csr/DownloadSimple'
+export { UploadSimple as UploadIcon } from '@phosphor-icons/react/dist/csr/UploadSimple'
+export { FloppyDisk as SaveIcon } from '@phosphor-icons/react/dist/csr/FloppyDisk'
+export { Trash as DeleteIcon } from '@phosphor-icons/react/dist/csr/Trash'
+export { Copy as CopyIcon } from '@phosphor-icons/react/dist/csr/Copy'
+export { PencilSimple as EditIcon } from '@phosphor-icons/react/dist/csr/PencilSimple'
+export { NotePencil as NoteIcon } from '@phosphor-icons/react/dist/csr/NotePencil'
+export { ImageSquare as ImageIcon } from '@phosphor-icons/react/dist/csr/ImageSquare'
+export { ImageBroken as ImageBrokenIcon } from '@phosphor-icons/react/dist/csr/ImageBroken'
+export { Eye as PreviewIcon } from '@phosphor-icons/react/dist/csr/Eye'
 /**
  * Account, access and links.
  */
-export {
-  LockKey as LockIcon,
-  SignIn as SignInIcon,
-  SignOut as SignOutIcon,
-  UserCircle as AccountIcon,
-  LinkSimple as LinkIcon
-} from '@phosphor-icons/react'
+export { LockKey as LockIcon } from '@phosphor-icons/react/dist/csr/LockKey'
+export { SignIn as SignInIcon } from '@phosphor-icons/react/dist/csr/SignIn'
+export { SignOut as SignOutIcon } from '@phosphor-icons/react/dist/csr/SignOut'
+export { UserCircle as AccountIcon } from '@phosphor-icons/react/dist/csr/UserCircle'
+export { LinkSimple as LinkIcon } from '@phosphor-icons/react/dist/csr/LinkSimple'
 /**
  * AI, tooling and appearance. Buddy (code name `cohost`) has its own mark,
  * the real Buddy artwork: `BuddyIcon` below at icon size, `BuddyEmblem` larger.
  */
-export {
-  Sparkle as SparkleIcon,
-  // Scissors means cutting only: Clean cut and clips (plan 174 S3.12, J1-22).
-  Scissors as ClipIcon,
-  Wrench as RepairIcon,
-  Bug as BugIcon,
-  TerminalWindow as TerminalIcon,
-  TextAa as TextIcon,
-  ChatCircle as ChatIcon,
-  PaperPlaneRight as SendIcon,
-  PushPin as PinIcon,
-  Sun as LightModeIcon,
-  Moon as DarkModeIcon
-} from '@phosphor-icons/react'
+export { Sparkle as SparkleIcon } from '@phosphor-icons/react/dist/csr/Sparkle'
+// Scissors means cutting only: Clean cut and clips (plan 174 S3.12, J1-22).
+export { Scissors as ClipIcon } from '@phosphor-icons/react/dist/csr/Scissors'
+export { Wrench as RepairIcon } from '@phosphor-icons/react/dist/csr/Wrench'
+export { Bug as BugIcon } from '@phosphor-icons/react/dist/csr/Bug'
+export { TerminalWindow as TerminalIcon } from '@phosphor-icons/react/dist/csr/TerminalWindow'
+export { TextAa as TextIcon } from '@phosphor-icons/react/dist/csr/TextAa'
+export { ChatCircle as ChatIcon } from '@phosphor-icons/react/dist/csr/ChatCircle'
+export { PaperPlaneRight as SendIcon } from '@phosphor-icons/react/dist/csr/PaperPlaneRight'
+export { PushPin as PinIcon } from '@phosphor-icons/react/dist/csr/PushPin'
+export { Sun as LightModeIcon } from '@phosphor-icons/react/dist/csr/Sun'
+export { Moon as DarkModeIcon } from '@phosphor-icons/react/dist/csr/Moon'
 /**
  * Platform brand marks. NOT part of the Nucleo migration: these are third-party
  * logos with their own trademark rules, and the design language keeps app/source
  * marks as the only full-colour icons on screen.
  */
-export {
-  TwitchLogo as TwitchIcon,
-  TiktokLogo as TiktokIcon,
-  InstagramLogo as InstagramIcon,
-  FacebookLogo as FacebookIcon
-} from '@phosphor-icons/react'
+export { TwitchLogo as TwitchIcon } from '@phosphor-icons/react/dist/csr/TwitchLogo'
+export { TiktokLogo as TiktokIcon } from '@phosphor-icons/react/dist/csr/TiktokLogo'
+export { InstagramLogo as InstagramIcon } from '@phosphor-icons/react/dist/csr/InstagramLogo'
+export { FacebookLogo as FacebookIcon } from '@phosphor-icons/react/dist/csr/FacebookLogo'
 
 export { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX }
 

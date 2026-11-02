@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { build } from 'vite'
+import { build, normalizePath, optimizeDeps, resolveConfig } from 'vite'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -27,6 +27,55 @@ import { X_MARK_PATH } from '../lib/x-mark'
 const SOURCE_SCAN_TIMEOUT = { timeout: 30_000 }
 
 describe('semantic icon registry', SOURCE_SCAN_TIMEOUT, () => {
+  it('prebundles only the selected glyphs during development', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'videorc-icon-dev-deps-'))
+    try {
+      const config = await resolveConfig(
+        {
+          configFile: false,
+          root: fileURLToPath(new URL('../../../../', import.meta.url)),
+          cacheDir,
+          logLevel: 'silent',
+          optimizeDeps: {
+            // Vite treats these as glob patterns, so Windows separators must
+            // be normalized before the dependency scan.
+            entries: [
+              normalizePath(fileURLToPath(new URL('./icons.tsx', import.meta.url))),
+              normalizePath(
+                fileURLToPath(new URL('./stream-manager/activity-icons.tsx', import.meta.url))
+              )
+            ]
+          }
+        },
+        'serve'
+      )
+      const metadata = await optimizeDeps(config, true)
+      const dependencies = Object.keys(metadata.optimized).filter((id) =>
+        id.startsWith('@phosphor-icons/react')
+      )
+      expect(dependencies).toContain('@phosphor-icons/react/dist/csr/VideoCamera')
+      expect(dependencies).toContain('@phosphor-icons/react/dist/csr/Coins')
+      expect(dependencies).not.toContain('@phosphor-icons/react')
+      // Production tree-shaking alone cannot prove this: the dev optimizer
+      // evaluates every weight of every glyph exported from a barrel import.
+      const maps = await Promise.all(
+        [...Object.values(metadata.optimized), ...Object.values(metadata.chunks)].map(
+          async ({ file }) =>
+            JSON.parse(await readFile(`${file}.map`, 'utf8')) as {
+              sources: string[]
+            }
+        )
+      )
+      const glyphs = new Set(
+        maps.flatMap(({ sources }) => sources.filter((id) => /\/defs\/[^/]+\.es\.js$/.test(id)))
+      )
+      expect(glyphs.size).toBeGreaterThan(0)
+      expect(glyphs.size).toBeLessThanOrEqual(100)
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
   it('keeps optional glyph modules outside the initial chunk through the actual registry', async () => {
     const root = await mkdtemp(join(tmpdir(), 'videorc-icon-chunks-'))
     try {

@@ -50,6 +50,19 @@ export type FirstRunLook = {
   liveBackgroundId: LiveBackgroundId | null
 }
 
+/** Read the latest Studio state before applying an individual setup choice. */
+export function firstRunLookFromState(
+  config: Pick<CaptureConfig, 'layout'>,
+  registry: Pick<BackgroundAssetRegistry, 'activeSlotId' | 'live'>
+): FirstRunLook {
+  return {
+    orientation: layoutPresetOrientation(config.layout.layoutPreset),
+    layoutPreset: config.layout.layoutPreset,
+    cameraShape: config.layout.cameraShape,
+    liveBackgroundId: registryLiveBackgroundId(registry)
+  }
+}
+
 export type FirstRunLookChoice = Pick<FirstRunLook, 'orientation' | 'layoutPreset' | 'cameraShape'>
 
 /**

@@ -139,15 +139,101 @@ async function bounded(promise, ms) {
 
 // Runner-owned loopback sockets work on Windows without inherited POSIX FDs.
 // Listening/connection callbacks are readiness; timers only pace media samples.
-export async function runOwnedPcmEof({
+export function runOwnedPcmEof(options) {
+  return runLiveInputEof({ ...options, audioSource: 'pcm' })
+}
+
+export function runIndependentToneEof(options) {
+  return runLiveInputEof({ ...options, audioSource: 'tone' })
+}
+
+export function independentToneEofVerdict(row) {
+  const failures = []
+  if (row.audioSource !== 'tone') failures.push('Independent tone evidence required')
+  if (
+    row.cancelled ||
+    row.error ||
+    row.videoProducerError ||
+    row.timeout ||
+    row.unsafeCleanup ||
+    row.exitCode !== 0 ||
+    !row.childReaped ||
+    !row.inputsClosed
+  )
+    failures.push('Owned tone probe did not finish and clean up normally')
+  if (
+    row.writtenVideoFrames !== 120 ||
+    row.fpsInputFrames !== 120 ||
+    !Number.isSafeInteger(row.encodedVideoFrames) ||
+    Math.abs(row.encodedVideoFrames - 120) > 2 ||
+    row.fpsOutputFrames !== row.encodedVideoFrames
+  )
+    failures.push('Live video frame accounting changed')
+  for (const [key, limit] of [
+    ['firstOutputMs', 1500],
+    ['stopMs', 1500],
+    ['startSkewMs', 100]
+  ]) {
+    if (!Number.isFinite(row[key]) || row[key] < 0 || row[key] > limit)
+      failures.push(`${key} missing or exceeds ${limit}ms`)
+  }
+  if (
+    !Number.isFinite(row.packetTail?.videoEndSeconds) ||
+    row.packetTail.videoEndSeconds < 3.9 ||
+    !Number.isFinite(row.packetTail?.tailMismatchMs) ||
+    row.packetTail.tailMismatchMs > 100 ||
+    !row.packetTail?.pass
+  )
+    failures.push(row.packetTail?.reason ?? 'Complete video and <=100ms packet tail required')
+  return { pass: failures.length === 0, failures }
+}
+
+export function independentToneEofAggregate(rows, expectedPasses) {
+  const candidates = rows.filter((row) => row.paceTone === true)
+  const failures = []
+  if (
+    candidates.length !== expectedPasses ||
+    candidates.some((row) => !independentToneEofVerdict(row).pass)
+  )
+    failures.push('Independent paced-tone evidence incomplete or failed')
+  const firstOutputP95Ms = percentileNearestRank(
+    candidates.map((row) => row.firstOutputMs).filter(Number.isFinite),
+    0.95
+  )
+  const stopP95Ms = percentileNearestRank(
+    candidates.map((row) => row.stopMs).filter(Number.isFinite),
+    0.95
+  )
+  if (
+    !Number.isFinite(firstOutputP95Ms) ||
+    firstOutputP95Ms > RECORD_LATENCY_BUDGETS.coldStartClickToRecordingMs
+  )
+    failures.push('Tone first-output p95 exceeds the unchanged startup budget')
+  if (!Number.isFinite(stopP95Ms) || stopP95Ms > RECORD_LATENCY_BUDGETS.stopClickToIdleP95Ms)
+    failures.push('Tone EOF-to-exit p95 exceeds the unchanged stop budget')
+  return {
+    pass: failures.length === 0,
+    failures,
+    firstOutputP95Ms,
+    stopP95Ms,
+    qualification:
+      'Independent FFmpeg tone component only; app and physical acceptance remain separate'
+  }
+}
+
+async function runLiveInputEof({
   ffmpeg,
   ffprobe,
   output,
   queuedAudioMs = 0,
   initialAudioDelayMs = 0,
-  keepAudioAlive = false
+  keepAudioAlive = false,
+  audioSource,
+  paceTone = true
 }) {
   const row = {
+    audioSource,
+    ...(audioSource === 'tone' ? { paceTone } : {}),
     queuedAudioMs,
     initialAudioDelayMs,
     keepAudioAlive,
@@ -158,7 +244,10 @@ export async function runOwnedPcmEof({
     audioEofMs: null,
     videoEofMs: null,
     childReaped: false,
-    inputProbe: 'Production raw-video and SessionPCM arguments; default format probing'
+    inputProbe:
+      audioSource === 'tone'
+        ? 'Production raw-video input with independent lavfi tone; default format probing'
+        : 'Production raw-video and SessionPCM arguments; default format probing'
   }
   const abort = new AbortController()
   const servers = [],
@@ -240,9 +329,33 @@ export async function runOwnedPcmEof({
     return `tcp://127.0.0.1:${server.address().port}`
   }
   try {
-    const video = await input('video'),
-      audio = await input('audio')
-    const media = join(output, `stop-order-alive${keepAudioAlive}-delay${initialAudioDelayMs}.flv`)
+    const video = await input('video')
+    const audioArgs =
+      audioSource === 'tone'
+        ? [
+            ...(paceTone ? ['-readrate', '1'] : []),
+            '-f',
+            'lavfi',
+            '-i',
+            'sine=frequency=880:sample_rate=48000'
+          ]
+        : [
+            '-f',
+            'f32le',
+            '-ar',
+            '48000',
+            '-ac',
+            '2',
+            '-thread_queue_size',
+            '1024',
+            '-i',
+            await input('audio')
+          ]
+    const name =
+      audioSource === 'tone'
+        ? `independent-tone-paced${paceTone}`
+        : `stop-order-alive${keepAudioAlive}-delay${initialAudioDelayMs}`
+    const media = join(output, `${name}.flv`)
     row.argv = [
       '-hide_banner',
       '-loglevel',
@@ -266,16 +379,7 @@ export async function runOwnedPcmEof({
       '30',
       '-i',
       video,
-      '-f',
-      'f32le',
-      '-ar',
-      '48000',
-      '-ac',
-      '2',
-      '-thread_queue_size',
-      '1024',
-      '-i',
-      audio,
+      ...audioArgs,
       '-vf',
       'setpts=PTS-STARTPTS,fps=30',
       '-c:v',
@@ -295,7 +399,9 @@ export async function runOwnedPcmEof({
       '-fps_mode',
       'vfr',
       '-af',
-      'aresample=async=1:first_pts=0,apad',
+      audioSource === 'tone'
+        ? 'aresample=async=1:first_pts=0'
+        : 'aresample=async=1:first_pts=0,apad',
       '-ar',
       '48000',
       '-ac',
@@ -415,10 +521,15 @@ export async function runOwnedPcmEof({
       row.unsafeCleanup = true
     }
     writeFileSync(
-      join(output, `stop-order-alive${keepAudioAlive}-delay${initialAudioDelayMs}.stderr.log`),
+      join(
+        output,
+        audioSource === 'tone'
+          ? `independent-tone-paced${paceTone}.stderr.log`
+          : `stop-order-alive${keepAudioAlive}-delay${initialAudioDelayMs}.stderr.log`
+      ),
       stderr
     )
   }
-  row.verdict = ownedPcmEofVerdict(row)
+  row.verdict = audioSource === 'tone' ? independentToneEofVerdict(row) : ownedPcmEofVerdict(row)
   return row
 }

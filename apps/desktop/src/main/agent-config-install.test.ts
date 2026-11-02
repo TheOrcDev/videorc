@@ -12,7 +12,7 @@ import {
   writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -331,7 +331,7 @@ describe('writeAgentConfig (plan 209 S22)', () => {
   })
 
   it.skipIf(process.platform === 'win32')(
-    "makes an unchanged file holding the token owner-only, and keeps Windows' modes alone",
+    'makes an unchanged file holding the token owner-only',
     async () => {
       const dir = await folder('.cursor')
       const file = join(dir, 'mcp.json')
@@ -340,16 +340,26 @@ describe('writeAgentConfig (plan 209 S22)', () => {
       const again = await writeAgentConfig(target('cursor', file), CONNECTION, HOST)
       expect(again).toEqual({ outcome: 'unchanged', file })
       expect((await stat(file)).mode & 0o777).toBe(0o600)
-
-      // Windows has no modes to set: nothing is chmodded there.
-      const chmodSpy = vi.fn(async () => undefined)
-      await chmod(file, 0o644)
-      await writeAgentConfig(target('cursor', file), CONNECTION, 'win32', {
-        fs: { ...nodeAgentConfigFs, chmod: chmodSpy }
-      })
-      expect(chmodSpy).not.toHaveBeenCalled()
     }
   )
+
+  it("keeps an unchanged Windows file's modes alone", async () => {
+    const file = 'C:\\Users\\Ana\\.cursor\\mcp.json'
+    const chmodSpy = vi.fn(async () => undefined)
+    const statSpy = vi.fn(async () => ({ isDirectory: () => true, mode: 0o644 }))
+    const write = await writeAgentConfig(target('cursor', file), CONNECTION, 'win32', {
+      fs: {
+        ...nodeAgentConfigFs,
+        stat: statSpy,
+        realpath: async () => file,
+        readFile: async () => JSON.stringify({ mcpServers: { videorc: ENTRY } }),
+        chmod: chmodSpy
+      }
+    })
+    expect(write).toEqual({ outcome: 'unchanged', file })
+    expect(statSpy.mock.calls).toEqual([['C:\\Users\\Ana\\.cursor'], [file]])
+    expect(chmodSpy).not.toHaveBeenCalled()
+  })
 
   it("keeps only Videorc's newest backups, owner-only, and never touches other files", async () => {
     const dir = await folder('.cursor')
@@ -454,7 +464,9 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     const file = join(dir, 'config.toml')
     await writeFile(file, '[mcp_servers]\nvideorc = { command = "x" }\n')
     const log = vi.fn()
-    const write = await writeAgentConfig(target('codex', file), CONNECTION, HOST, { log })
+    const write = await writeAgentConfig(target('codex', file), CONNECTION, HOST, {
+      log
+    })
     expect(write).toEqual({ outcome: 'refused', file, reason: 'unsafe-toml' })
     expect(log).toHaveBeenCalledOnce()
     expect(String(log.mock.calls[0][0])).not.toContain(TOKEN)
@@ -597,8 +609,8 @@ describe('Claude Code through the claude CLI (plan 209 S22)', () => {
 
 describe('addAgentToApp (plan 209 S22)', () => {
   it('writes the config for a config app, and reports a refusal as not added', async () => {
-    await folder('Library', 'Application Support', 'Claude')
-    const environment = { platform: 'darwin' as const, homeDir: root, pathVariable: '' }
+    const environment = { platform: process.platform, homeDir: root, pathVariable: '' }
+    await mkdir(dirname(agentConfigTarget('claude-desktop', environment).file), { recursive: true })
     const added = await addAgentToApp('claude-desktop', CONNECTION, environment)
     expect(added).toEqual({ added: true, message: 'Added. Restart Claude Desktop to see Videorc.' })
     const refused = await addAgentToApp('cursor', CONNECTION, environment)
@@ -607,8 +619,9 @@ describe('addAgentToApp (plan 209 S22)', () => {
   })
 
   it('refuses a bridge on a disk image or in a temporary copy, and writes nothing', async () => {
-    const dir = await folder('Library', 'Application Support', 'Claude')
-    const environment = { platform: 'darwin' as const, homeDir: root, pathVariable: '' }
+    const environment = { platform: process.platform, homeDir: root, pathVariable: '' }
+    const dir = dirname(agentConfigTarget('claude-desktop', environment).file)
+    await mkdir(dir, { recursive: true })
     const execFile = vi.fn<ExecFile>(async () => ({ stdout: '', stderr: '' }))
     for (const bridgePath of [
       '/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp',

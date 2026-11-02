@@ -24,10 +24,7 @@ import {
   waitForRemoteEvent as waitForRemoteEventClient
 } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
-import {
-  CAPTURE_CONFIG_STORAGE_KEY,
-  RELOAD_KEEPING_SEED_JS
-} from './lib/renderer-profile-seed.mjs'
+import { CAPTURE_CONFIG_STORAGE_KEY, RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -231,18 +228,26 @@ try {
   console.log('remote-control smoke: sceneApply ack + confirmed state OK')
 
   // 4b. clipMark (plan 068 D6; plan 181 R4) is on the allowlist and relays
-  // through the renderer. The ring runs by default (R2), so with nothing
-  // recording the press is admitted and saves a clip (the file is proven by
-  // pnpm smoke:replay-buffer); with the switch off the renderer refuses it
-  // with the reason, so the round trip proves admission + relay + ack both
-  // ways.
+  // through the renderer. Explicitly enable Clips using the Output switch's
+  // own path: automatic startup intentionally refuses software encoders such
+  // as OpenH264. This tests the remote command on either encoder, not whether
+  // the default is admitted. With the ring on, the press saves a clip (the
+  // file is proven by pnpm smoke:replay-buffer); with it off, the renderer
+  // refuses with the reason. Both round trips must acknowledge the ticket.
+  const enabled = await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    { code: 'return window.__videorcSmokeSetReplayBuffer?.(true) ?? null' },
+    { timeoutMs }
+  )
+  if (enabled?.result !== true) fail('the renderer has no clip buffer smoke hook')
   const ringOn = await waitForBackendState(
     renderer,
     'replay.status',
     (ring) => ring?.state === 'on',
-    'the default ring'
+    'the explicitly enabled ring'
   )
-  console.log(`remote-control smoke: ring on by default (${ringOn.seconds} s)`)
+  console.log(`remote-control smoke: ring on after explicit enable (${ringOn.seconds} s)`)
   const clipOnAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const clipOnTicket = await remoteRequest(remote, 'remote.intent', { kind: 'clipMark' })
   if (!clipOnTicket.payload?.accepted) fail('clipMark intent was not accepted')

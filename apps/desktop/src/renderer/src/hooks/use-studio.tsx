@@ -1468,7 +1468,7 @@ export type StudioContextValue = {
    * is held here and applied through one transaction when setup closes.
    */
   firstRunLookHold: FirstRunLook | null
-  applyFirstRunLook: (look: FirstRunLook) => void
+  applyFirstRunLook: (patch: Partial<FirstRunLook>) => void
   savedScenes: SavedScene[]
   activeSavedSceneId: string | null
   savedScenePendingId: string | null
@@ -3877,8 +3877,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
-  // Linux can't caption at all (no native microphone path): every session
-  // skips captions there, as if "Continue without captions" were chosen.
+  // Only an unsupported platform suppresses captions automatically. A Linux
+  // worker feeds the same post-controls bus; a direct-input fallback is refused
+  // by the backend instead of silently dropping requested captions.
   const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
   const suppressCaptionsForSession = suppressCaptionsChoice || captionsPlatformUnavailable !== null
   // "Go live without …" for this attempt only (plan 174 S3.4, B-8).
@@ -10946,19 +10947,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Studio with no undo history and no saved-scene origin (a built-in look).
   // The setup chunk has already loaded the look's helpers when this runs.
   const applyFirstRunLook = useCallback(
-    (look: FirstRunLook): void => {
-      if (firstRunLookWritesHeld(recordingRef.current)) {
-        firstRunLookHoldRef.current = look
-        setFirstRunLookHold(look)
-        return
-      }
-      // The session that held an earlier look has ended: this write wins.
-      if (firstRunLookHoldRef.current) {
-        firstRunLookHoldRef.current = null
-        setFirstRunLookHold(null)
-      }
+    (patch: Partial<FirstRunLook>): void => {
+      // Each control owns only its changed fields. Resolve against the latest
+      // refs after the lazy module loads, so a fast background/shape choice
+      // cannot restore the layout from an earlier render.
       void import('@/lib/first-run-look').then(
-        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+        ({ firstRunBackgroundChoice, firstRunLookPatch, firstRunLookFromState }) => {
+          const previous =
+            firstRunLookHoldRef.current ??
+            firstRunLookFromState(captureConfigRef.current, backgroundRegistryRef.current)
+          const look = { ...previous, ...patch }
+          if (
+            look.orientation === previous.orientation &&
+            look.layoutPreset === previous.layoutPreset &&
+            look.cameraShape === previous.cameraShape &&
+            look.liveBackgroundId === previous.liveBackgroundId
+          )
+            return
+          if (firstRunLookWritesHeld(recordingRef.current)) {
+            firstRunLookHoldRef.current = look
+            setFirstRunLookHold(look)
+            return
+          }
+          if (firstRunLookHoldRef.current) {
+            firstRunLookHoldRef.current = null
+            setFirstRunLookHold(null)
+          }
           const current = captureConfigRef.current
           if (current.layout.arrangementMode === 'freeform') {
             noteLayoutLeavingFreeform(current.layout)
@@ -10968,6 +10982,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           setWorkingOrigin('builtin')
           activeSavedSceneIdRef.current = null
           setActiveSavedSceneId(null)
+          captureConfigRef.current = next
           setCaptureConfig((latest) => firstRunLookPatch(latest, look))
           const registry = backgroundRegistryRef.current
           const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
@@ -10975,7 +10990,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
           workingBackgroundRef.current = background
           setWorkingBackground(background)
-          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+          if (nextRegistry !== registry) {
+            backgroundRegistryRef.current = nextRegistry
+            setBackgroundRegistry(nextRegistry)
+          }
         }
       )
     },
@@ -11705,7 +11723,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const timer = window.setInterval(() => {
       void reconcile()
     }, 4000)
-    const unsubscribe = window.videorc?.onPreviewWindowState?.((state) => setPreviewWindow(state))
+    const unsubscribe = window.videorc?.onPreviewWindowState?.((state) =>
+      setPreviewWindow((current) =>
+        JSON.stringify(current) === JSON.stringify(state) ? current : state
+      )
+    )
     return () => {
       cancelled = true
       window.clearInterval(timer)
@@ -12333,7 +12355,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         appVersion: freshRuntimeInfo?.version,
         rendererDiagnostics: {
           automaticSourceFallbacks: automaticSourceFallbacks.current,
-          nativePreviewSurfaceStatus: previewSurfaceStatus,
+          // Read at export time, including telemetry received while main was
+          // refreshing runtime info. Capturing the state here also made this
+          // core action invalidate every Assets control on each preview tick.
+          nativePreviewSurfaceStatus: previewSurfaceStatusRef.current,
           runtimeInfo: freshRuntimeInfo ?? undefined
         }
       }
@@ -12366,7 +12391,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  }, [client, reportError, runtimeInfo, supportBundleExportPending])
   // Plan 174 A-20: a toast whose raw details were withheld offers this export
   // (latest-value hand-off, like the ref mirrors above; idempotent per render).
   registerSupportBundleExport(() => void exportSupportBundle())
@@ -16765,24 +16790,90 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       previewCamera: previewCameraStatus,
       previewScreen: previewScreenStatus
     })
+  const replayStartContextRef = useRef({
+    captureConfig,
+    sceneWithBackground,
+    sceneEditMode,
+    recordBlockedReason,
+    replayGrantWait,
+    sourceDeviceSwitchPending
+  })
+  replayStartContextRef.current = {
+    captureConfig,
+    sceneWithBackground,
+    sceneEditMode,
+    recordBlockedReason,
+    replayGrantWait,
+    sourceDeviceSwitchPending
+  }
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
-    if (recordBlockedReason || replayGrantWait) {
+    const currentContext = replayStartContextRef.current
+    if (currentContext.recordBlockedReason || currentContext.replayGrantWait) {
       // Not yet: a source or a permission is missing. The switch stays on
       // and the ring starts once the reason clears (the effect below), so a
       // launch before Sources settle never turns clips off.
       return
     }
+    const selectionReady = (): boolean => {
+      const current = replayStartContextRef.current
+      return (
+        replayArmedRef.current &&
+        (recordingRef.current.state === 'idle' || recordingRef.current.state === 'failed') &&
+        (replayStateRef.current.state === 'off' || replayStateRef.current.state === 'error') &&
+        !replayReconcileHoldRef.current &&
+        !performanceCheckHoldRef.current &&
+        layoutIntentAwaitingProofRef.current === null &&
+        current.sourceDeviceSwitchPending === null &&
+        !current.recordBlockedReason &&
+        !current.replayGrantWait &&
+        current.captureConfig === captureConfigRef.current &&
+        sessionStartInFlightRef.current === null &&
+        !sessionStartLifecycleActiveRef.current &&
+        stopSessionInFlightPromiseRef.current === null
+      )
+    }
+    if (!selectionReady()) {
+      scheduleReplayReconcile()
+      return
+    }
     replayStartInFlightRef.current = true
+    let superseded = false
     try {
       const replay = await import('@/lib/replay-buffer')
+      if (!selectionReady()) {
+        superseded = true
+        return
+      }
+      // Read after the lazy import: a scheduled callback may belong to an
+      // older render. Keep one coherent scene/config until dispatch, then
+      // cancel if authorization lets a newer intent overtake it.
+      const context = replayStartContextRef.current
+      const config = captureConfigRef.current
+      const settings = settingsRef.current
+      const layoutIntent = layoutIntentIdRef.current
       const status = await replay.startBufferOnlySession({
         client,
-        captureConfig: captureConfigRef.current,
-        scene: sceneWithBackground,
-        sceneEditMode,
-        settings: settingsRef.current
+        captureConfig: config,
+        scene: context.sceneWithBackground,
+        sceneEditMode: context.sceneEditMode,
+        settings,
+        isCurrent: () => {
+          const current = replayStartContextRef.current
+          return (
+            selectionReady() &&
+            layoutIntentIdRef.current === layoutIntent &&
+            captureConfigRef.current === config &&
+            settingsRef.current === settings &&
+            current.sceneWithBackground === context.sceneWithBackground &&
+            current.sceneEditMode === context.sceneEditMode
+          )
+        }
       })
+      if (status === null) {
+        superseded = true
+        return
+      }
       replayFailedStartsRef.current = 0
       replayBlockedReasonRef.current = null
       setReplayBlockedReasonState(null)
@@ -16837,16 +16928,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     } finally {
       replayStartInFlightRef.current = false
+      if (superseded) scheduleReplayReconcile()
     }
-  }, [
-    applyRecordingStatus,
-    client,
-    recordBlockedReason,
-    replayGrantWait,
-    sceneEditMode,
-    sceneWithBackground,
-    scheduleReplayReconcile
-  ])
+  }, [applyRecordingStatus, client, scheduleReplayReconcile])
 
   const stopReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || !sessionIsReplayOnly(recordingRef.current)) return
@@ -18332,6 +18416,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         visual: workingVisual,
         diagnostics: {
           wsStatus,
+          replay: {
+            armed: replayArmedRef.current,
+            state: replayStateRef.current.state,
+            firstRunSetupOpen,
+            recordBlockedReason,
+            grantWait: replayGrantWait,
+            startInFlight: replayStartInFlightRef.current,
+            reconcileHeld: replayReconcileHoldRef.current,
+            performanceCheckHeld: performanceCheckHoldRef.current,
+            failedStarts: replayFailedStartsRef.current,
+            blocked: replayBlockedReasonRef.current !== null
+          },
           layoutIntentId: layoutIntentIdRef.current,
           layoutIntentAwaitingProof: layoutIntentAwaitingProofRef.current,
           confirmedSceneRevision: nativePreviewCommittedSceneRef.current?.sceneRevision ?? null,
@@ -18374,6 +18470,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       removeBackground: (id: string) =>
         setBackgroundRegistry((current) => removeSlotAsset(current, id)),
       layout: value.applyCameraPreset,
+      source: value.switchSourceDeviceLive,
       configure: (patch: Partial<CaptureConfig>) =>
         value.setCaptureConfig((current) => ({ ...current, ...patch })),
       start: value.startSession,

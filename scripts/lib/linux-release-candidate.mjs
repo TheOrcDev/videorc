@@ -1,19 +1,21 @@
+import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 import {
   assertIsolatedLinuxObjectKey,
-  assertLinuxAlphaReleaseManifest,
-  LINUX_ALPHA_UPDATE_FEED_NAME,
+  assertLinuxReleaseManifest,
+  parseLinuxReleaseId,
+  LINUX_UPDATE_FEED_NAME,
   sha256File,
   sha512File,
   updateFeedArtifactNameFromYml,
   updateFeedFileMetadataFromYml,
   updateFeedSha512FromYml,
   updateFeedVersionFromYml
-} from './linux-alpha-release.mjs'
+} from './linux-release.mjs'
 
-const CANDIDATE_ROOT = 'candidates/linux-alpha'
 const MAX_DOWNLOAD_BYTES = Object.freeze({
   appimage: 2 * 1024 * 1024 * 1024,
   'ffmpeg-license': 2 * 1024 * 1024,
@@ -41,10 +43,12 @@ export class LinuxReleaseCandidateError extends Error {
 }
 
 export function assertLinuxCandidateCoordinates({ releaseId, sourceCommit, appImageSha256 }) {
-  if (!/^\d+\.\d+\.\d+-alpha\.\d+$/.test(releaseId ?? '')) {
+  try {
+    parseLinuxReleaseId(releaseId)
+  } catch {
     throw new LinuxReleaseCandidateError(
       'invalid-release-id',
-      'Candidate releaseId must be a three-part numeric version followed by -alpha.N.'
+      'Candidate releaseId must be a three-part numeric version followed by -alpha.N or -beta.N.'
     )
   }
   if (!/^[a-f0-9]{40}$/.test(sourceCommit ?? '')) {
@@ -64,7 +68,7 @@ export function assertLinuxCandidateCoordinates({ releaseId, sourceCommit, appIm
 
 export function linuxCandidatePrefix({ releaseId, sourceCommit }) {
   assertLinuxCandidateCoordinates({ releaseId, sourceCommit })
-  return `${CANDIDATE_ROOT}/${releaseId}/${sourceCommit}`
+  return `candidates/linux-${parseLinuxReleaseId(releaseId).channel}/${releaseId}/${sourceCommit}`
 }
 
 export function linuxCandidateIdentity({ releaseId, sourceCommit, appImageSha256 }) {
@@ -92,7 +96,7 @@ export function classifyLinuxCandidateObjectHead({ artifact, response }) {
   }
   const contentLength = response.headers.get('content-length')
   const remoteSha256 = response.headers.get('x-amz-meta-sha256')?.trim().toLowerCase()
-  const sizeMismatch = contentLength !== null && Number(contentLength) !== artifact.sizeBytes
+  const sizeMismatch = contentLength !== String(artifact.sizeBytes)
   if (sizeMismatch || remoteSha256 !== artifact.sha256) {
     throw new LinuxReleaseCandidateError(
       'candidate-storage-collision',
@@ -104,11 +108,47 @@ export function classifyLinuxCandidateObjectHead({ artifact, response }) {
   return 'identical'
 }
 
+// Metadata alone is not evidence of stored bytes. Verify every new or reused
+// object by reading it back. The caller must bound the request AND body read
+// with an AbortSignal; memory stays bounded even for a multi-GB AppImage.
+export async function verifyLinuxCandidateObjectBody({ artifact, response }) {
+  if (
+    response.status !== 200 ||
+    !response.body ||
+    response.headers.get('content-length') !== String(artifact.sizeBytes) ||
+    ![null, 'identity'].includes(response.headers.get('content-encoding'))
+  ) {
+    await response.body?.cancel()
+    throw new LinuxReleaseCandidateError(
+      'candidate-storage-readback-failed',
+      `Candidate readback failed for ${artifact.objectKey}: HTTP ${response.status} or unexpected body headers.`
+    )
+  }
+  const hash = createHash('sha256')
+  let bytes = 0
+  for await (const chunk of response.body) {
+    bytes += chunk.byteLength
+    if (bytes > artifact.sizeBytes) {
+      throw new LinuxReleaseCandidateError(
+        'candidate-storage-readback-mismatch',
+        `Candidate readback exceeds the expected size: ${artifact.objectKey}.`
+      )
+    }
+    hash.update(chunk)
+  }
+  if (bytes !== artifact.sizeBytes || hash.digest('hex') !== artifact.sha256) {
+    throw new LinuxReleaseCandidateError(
+      'candidate-storage-readback-mismatch',
+      `Candidate stored bytes differ from the local artifact: ${artifact.objectKey}.`
+    )
+  }
+}
+
 export function assertPendingLinuxCandidateManifest(
   manifest,
   { releaseId, sourceCommit, appImageSha256 } = {}
 ) {
-  assertLinuxAlphaReleaseManifest(manifest)
+  assertLinuxReleaseManifest(manifest)
   assertLinuxCandidateCoordinates({
     releaseId: releaseId ?? manifest.releaseId,
     sourceCommit: sourceCommit ?? manifest.sourceCommit,
@@ -139,11 +179,7 @@ export function linuxCandidateObjectDescriptors(manifest) {
   const descriptors = [
     descriptor('appimage', manifest.filename, `${prefix}/${manifest.filename}`),
     descriptor('sha256', `${manifest.filename}.sha256`, `${prefix}/${manifest.filename}.sha256`),
-    descriptor(
-      'update-feed',
-      LINUX_ALPHA_UPDATE_FEED_NAME,
-      `${prefix}/${LINUX_ALPHA_UPDATE_FEED_NAME}`
-    ),
+    descriptor('update-feed', LINUX_UPDATE_FEED_NAME, `${prefix}/${LINUX_UPDATE_FEED_NAME}`),
     descriptor('manifest', 'release.json', `${prefix}/release.json`),
     descriptor('ffmpeg-license', 'FFMPEG-LICENSE.txt', `${prefix}/FFMPEG-LICENSE.txt`),
     descriptor('ffmpeg-source', 'FFMPEG-SOURCE.txt', `${prefix}/FFMPEG-SOURCE.txt`)
@@ -168,16 +204,25 @@ export async function buildLinuxCandidateStoragePlan({
   releaseDir
 }) {
   assertPendingLinuxCandidateManifest(manifest)
+  // The upload must carry the same identity we validate below. In particular,
+  // hashing a different release.json successfully cannot validate its claims.
+  const storedManifest = JSON.parse(await requiredText(manifestPath, 'candidate manifest'))
+  if (!isDeepStrictEqual(storedManifest, manifest)) {
+    throw new LinuxReleaseCandidateError(
+      'candidate-manifest-mismatch',
+      'Candidate release.json bytes describe a different manifest from the validated identity.'
+    )
+  }
   const feedYml = await requiredText(
-    join(releaseDir, LINUX_ALPHA_UPDATE_FEED_NAME),
-    LINUX_ALPHA_UPDATE_FEED_NAME
+    join(releaseDir, LINUX_UPDATE_FEED_NAME),
+    LINUX_UPDATE_FEED_NAME
   )
   assertFeedMatchesManifest({ feedYml, manifest })
 
   const paths = new Map([
     ['appimage', join(releaseDir, manifest.filename)],
     ['sha256', join(releaseDir, `${manifest.filename}.sha256`)],
-    ['update-feed', join(releaseDir, LINUX_ALPHA_UPDATE_FEED_NAME)],
+    ['update-feed', join(releaseDir, LINUX_UPDATE_FEED_NAME)],
     ['manifest', manifestPath],
     ['ffmpeg-license', ffmpegLicensePath],
     ['ffmpeg-source', ffmpegSourcePath]

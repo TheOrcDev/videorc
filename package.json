@@ -23,6 +23,7 @@
     "live:verdict": "node scripts/live-lab/verdict.mjs",
     "live:calibrate": "node scripts/live-lab/calibrate.mjs",
     "dev": "pnpm --filter @videorc/desktop dev",
+    "linux:with-render-node": "node scripts/with-linux-render-node.mjs",
     "dev:zerocopy": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_ZEROCOPY_SOURCES=1 -- pnpm --filter @videorc/desktop dev",
     "build": "pnpm --filter @videorc/desktop build",
     "typecheck": "pnpm --filter @videorc/desktop typecheck",
@@ -180,6 +181,8 @@
     "probe:ffmpeg-capture-clock": "node scripts/ffmpeg-capture-clock.mjs",
     "probe:caption-stt": "node scripts/probe-caption-stt-latency.mjs",
     "smoke:live-source-switch": "node scripts/smoke-live-source-switch-app.mjs",
+    "smoke:live-microphone:linux": "node scripts/smoke-live-source-switch-app.mjs --linux-pulse",
+    "probe:system-audio-routing:linux": "node scripts/probe-linux-system-audio-routing.mjs",
     "smoke:youtube-quota": "node scripts/smoke-youtube-quota-app.mjs",
     "cargo:slot": "node scripts/with-build-slot.mjs cargo",
     "smoke:captions-contract": "node scripts/with-build-slot.mjs cargo build -p videorc-backend && node scripts/smoke-captions-contract.mjs",
@@ -313,7 +316,11 @@
     "release:sync:controlled": "gh workflow run release-sync-origins.yml --ref main",
     "release:recover": "gh workflow run release-recover-publication.yml --ref main",
     "smoke:windows-mf-probe": "node scripts/smoke-windows-mf-probe.mjs",
-    "probe:windows-openh264": "node scripts/probe-windows-openh264-comparison.mjs"
+    "probe:windows-openh264": "node scripts/probe-windows-openh264-comparison.mjs",
+    "release:validate:linux-beta-acceptance": "node scripts/validate-linux-beta-acceptance.mjs",
+    "smoke:local-gates:linux": "node scripts/smoke-local-gates-linux.mjs",
+    "release:candidate:download:linux": "node scripts/download-linux-release-candidate.mjs",
+    "release:plan:linux-beta-promotion": "node scripts/plan-linux-beta-promotion.mjs"
   },
   "devDependencies": {
     "@electron/fuses": "1.8.0",

@@ -1,10 +1,10 @@
 import {
-  assertLinuxAlphaReleaseManifest,
+  assertLinuxReleaseManifest,
   updateFeedArtifactNameFromYml,
   updateFeedFileMetadataFromYml,
   updateFeedSha512FromYml,
   updateFeedVersionFromYml
-} from './linux-alpha-release.mjs'
+} from './linux-release.mjs'
 
 export class LinuxReleaseValidationError extends Error {
   constructor(code, message) {
@@ -12,6 +12,20 @@ export class LinuxReleaseValidationError extends Error {
     this.name = 'LinuxReleaseValidationError'
     this.code = code
   }
+}
+
+export function linuxReleaseBuildIdentityProblems(flags, manifest) {
+  const identity = flags?.linuxReleaseIdentity
+  // Existing Alpha artifacts predate the identity field. A Beta never may.
+  if (!identity && manifest.channel === 'alpha') return []
+  if (!identity) return ['Linux Beta AppImage is missing its immutable build identity.']
+  return ['platform', 'channel', 'releaseId', 'bundleVersion', 'sourceCommit']
+    .filter(
+      (field) =>
+        field !== 'sourceCommit' || identity.sourceCommit != null || manifest.channel === 'beta'
+    )
+    .filter((field) => identity[field] !== manifest[field])
+    .map((field) => `AppImage build identity ${field} differs from release.json.`)
 }
 
 export function validateLinuxReleaseFacts({
@@ -25,7 +39,7 @@ export function validateLinuxReleaseFacts({
   manifest,
   sha256FileText
 }) {
-  assertLinuxAlphaReleaseManifest(manifest)
+  assertLinuxReleaseManifest(manifest)
   const checks = []
   const requireCheck = (id, ok, message) => {
     if (!ok) {
@@ -95,8 +109,22 @@ export function validateLinuxReleaseFacts({
       ffmpegCapabilities?.problems ?? ['missing capability report']
     ).join('; ')}.`
   )
-  for (const [name, present] of Object.entries(files)) {
-    requireCheck(`file-${name}`, Boolean(present), `Missing required Linux release file: ${name}.`)
+  for (const name of [
+    'appImage',
+    'appArchive',
+    'backend',
+    'ffmpeg',
+    'ffprobe',
+    'ffmpegBuildConfig',
+    'ffmpegLicense',
+    'ffmpegSource',
+    'unpackedApp'
+  ]) {
+    requireCheck(
+      `file-${name}`,
+      files?.[name] === true,
+      `Missing required Linux release file: ${name}.`
+    )
   }
 
   return { checks, ok: true }

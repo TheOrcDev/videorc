@@ -10583,6 +10583,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_watchdog_cleanup_does_not_retain_caption_control_or_coordinator() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
         let root = std::env::temp_dir().join(format!(
             "videorc-caption-watchdog-io-{}",
             uuid::Uuid::new_v4().simple()
@@ -12053,6 +12054,7 @@ mod tests {
 
     #[tokio::test]
     async fn listen_block_ends_listening_only_and_never_a_presenting_caption_session() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
         let state = test_caption_app_state();
         let mut events = state.events.subscribe();
 

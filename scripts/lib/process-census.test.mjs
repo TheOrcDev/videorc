@@ -813,3 +813,46 @@ test('classifies a Linux dev Electron tree by ancestry (Linux plan 0020)', () =>
     ]
   )
 })
+
+test('retains defunct Linux Electron children in their zygote-derived role counts', () => {
+  const rows = [
+    { pid: 10, ppid: 1, command: 'electron', args: '/app/electron .', rssKb: 200 },
+    {
+      pid: 11,
+      ppid: 10,
+      command: 'electron',
+      args: '/app/electron --type=zygote --no-zygote-sandbox',
+      rssKb: 20
+    },
+    { pid: 12, ppid: 10, command: 'electron', args: '/app/electron --type=zygote', rssKb: 20 },
+    { pid: 13, ppid: 12, command: 'electron', args: '/app/electron --type=zygote', rssKb: 10 },
+    { pid: 15, ppid: 13, command: 'electron', args: '/app/electron --type=zygote', rssKb: 50 },
+    // Actual Linux ps shape after argv is discarded, before the zygote reaps.
+    { pid: 16, ppid: 13, command: 'electron', args: '<defun [electron] <defunct>', rssKb: 0 },
+    { pid: 17, ppid: 13, command: 'electron', args: '[electron]', rssKb: 0 },
+    { pid: 18, ppid: 11, command: 'electron', args: '<defun [electron] <defunct>', rssKb: 0 },
+    { pid: 19, ppid: 12, command: 'electron', args: '<defun [electron] <defunct>', rssKb: 0 }
+  ]
+  const byPid = new Map(rows.map((row) => [row.pid, row]))
+  const classified = rows.map((row) => ({ ...row, role: classifyProcessInTable(row, byPid) }))
+  const summary = summarizeRows(classified)
+  assert.equal(classified.length, rows.length)
+  assert.deepEqual(summary['electron-main'], { count: 1, rssKb: 200 })
+  assert.deepEqual(summary['electron-renderer'], { count: 3, rssKb: 50 })
+  assert.deepEqual(summary['electron-gpu'], { count: 1, rssKb: 0 })
+  assert.deepEqual(summary['electron-child'], { count: 4, rssKb: 50 })
+})
+
+test('does not hide defunct Electron mains or infer a missing zygote ancestry', () => {
+  const rows = [
+    { pid: 10, ppid: 1, command: 'electron', args: '<defun [electron] <defunct>', rssKb: 0 },
+    { pid: 11, ppid: 999, command: 'electron', args: '[electron]', rssKb: 0 },
+    { pid: 12, ppid: 10, command: 'electron', args: '/app/electron --type=zygote', rssKb: 20 },
+    { pid: 13, ppid: 12, command: 'electron', args: '/app/electron .', rssKb: 100 }
+  ]
+  const byPid = new Map(rows.map((row) => [row.pid, row]))
+  assert.deepEqual(
+    rows.map((row) => classifyProcessInTable(row, byPid)),
+    ['electron-main', 'electron-main', 'electron-child', 'electron-main']
+  )
+})

@@ -4,6 +4,17 @@
 export const LINUX_PULSE_MICROPHONE_PREFIX = 'microphone:linux-pulse:'
 export const LINUX_V4L2_CAMERA_PREFIX = 'camera:linux-v4l2:'
 
+/** An analyzer report is evidence only when its verdict is present and passes. */
+export function assessLinuxRecordingQuality(quality) {
+  const verdict = quality?.verdict
+  if (!Array.isArray(verdict?.failures)) {
+    return { ok: false, failures: ['recording analyzer omitted its verdict'] }
+  }
+  const failures = verdict.failures.map((failure) => `recording analyzer: ${failure}`)
+  if (verdict.pass !== true) failures.push('recording analyzer did not report PASS')
+  return { ok: failures.length === 0, failures }
+}
+
 /** Available devices of one kind whose id carries the Linux prefix. */
 export function linuxDevices(devices, kind) {
   const prefix = kind === 'microphone' ? LINUX_PULSE_MICROPHONE_PREFIX : LINUX_V4L2_CAMERA_PREFIX

@@ -195,7 +195,15 @@ type DrawOptions = {
   level: BackdropLevel
 }
 type Runner = { draw: (options: DrawOptions) => void; dispose: () => void }
-type RunnerGlobal = { create: (gl: WebGL2RenderingContext, render: unknown) => Runner }
+type RunnerGlobal = {
+  create: (gl: WebGL2RenderingContext, render: unknown) => Runner
+  internalSize: (
+    render: unknown,
+    id: string,
+    output: [number, number],
+    level: BackdropLevel
+  ) => [number, number]
+}
 type ClockSpec = { id: string; look: string; motion: string; rate: number; posterPhase: number }
 type Clock = { readonly id: string }
 type ClockGlobal = {
@@ -374,22 +382,32 @@ export function startBackdropPlayer({
     if (!backdropFrameDue(lastDrawMs, nowMs)) return
     const size = backdropCanvasSize(canvas.clientWidth, canvas.clientHeight, devicePixelRatio)
     if (!size) return
-    if (canvas.width !== size.width || canvas.height !== size.height) {
-      canvas.width = size.width
-      canvas.height = size.height
+    const level = guard.level === 'half' ? 'half' : 'full'
+    // Keep the shader's existing resolution, but let CSS scale its canvas.
+    // Otherwise the shared runner scales an intermediate texture into a
+    // full-size backing buffer even after the budget guard chooses half.
+    const [width, height] = globals.player.internalSize(
+      render(),
+      id,
+      [size.width, size.height],
+      level
+    )
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width
+      canvas.height = height
       guard = resetBackdropGuardWindow(guard)
       lastDrawMs = null
     }
-    const level = guard.level === 'half' ? 'half' : 'full'
     try {
       runner.draw({
         id,
         look,
         phase: globals.clock.phaseAt(clock, nowMs / 1000),
         dim,
-        width: size.width,
-        height: size.height,
-        level
+        width,
+        height,
+        // Half has already been applied to the backing size above.
+        level: 'full'
       })
     } catch (error) {
       still('shader-compile-failed', error instanceof Error ? error.message : String(error))

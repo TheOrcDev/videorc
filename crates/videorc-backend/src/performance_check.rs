@@ -291,7 +291,7 @@ async fn next_media_tick(
 ) -> Option<(Instant, u64)> {
     let previous = clock.media_micros();
     let deadline = Instant::now() + MEDIA_TICK_WAIT;
-    while Instant::now() < deadline && !state.performance_check.cancelled() {
+    while Instant::now() < deadline && !benchmark_cancelled(state) {
         tokio::time::sleep(MEDIA_TICK_POLL).await;
         let current = clock.media_micros();
         if current != previous {
@@ -432,6 +432,14 @@ pub struct PerformanceCheckRuntime {
 }
 
 impl PerformanceCheckRuntime {
+    #[cfg(test)]
+    pub(crate) fn running_for_test() -> Self {
+        Self {
+            running: AtomicBool::new(true),
+            ..Self::default()
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -443,10 +451,13 @@ impl PerformanceCheckRuntime {
     pub fn request_cancel(&self) {
         self.cancel.store(true, Ordering::Release);
     }
+}
 
-    fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Acquire)
-    }
+/// Process shutdown is permanent, whereas the per-run cancellation bit is
+/// reset when the ladder ends. Consult the latch at every cancellation edge
+/// so quitting during setup also interrupts warm-up, measurement and drain.
+fn benchmark_cancelled(state: &AppState) -> bool {
+    state.process_shutdown_requested() || state.performance_check.cancel.load(Ordering::Acquire)
 }
 
 struct RunningGuard<'a>(&'a PerformanceCheckRuntime);
@@ -672,8 +683,23 @@ pub async fn current_state(state: &AppState) -> PerformanceCheckState {
 /// Starts the check in the background; progress and the result arrive as
 /// `performance.check.progress` / `performance.check.completed` events.
 pub async fn start(state: AppState, params: PerformanceCheckRunParams) -> Result<()> {
+    if state.process_shutdown_requested() {
+        bail!("The studio is shutting down; cannot start a performance check");
+    }
     if state.recording.lock().await.is_some() {
         bail!("A capture session is running; the performance check needs an idle studio");
+    }
+    // Shutdown may have won while we waited for the capture slot. The spawned
+    // ladder checks again before touching the Preview, covering a shutdown
+    // request between this admission and the task's first poll.
+    if state.process_shutdown_requested() {
+        bail!("The studio is shutting down; cannot start a performance check");
+    }
+    // The monitor acquires this lease before removing the session from the
+    // recording slot. Do not overlap a user's finalization or hide its
+    // Stopping status behind the benchmark's private lifecycle.
+    if state.ffmpeg_work.snapshot().finalizing_active {
+        bail!("A capture session is finalizing; the performance check needs an idle studio");
     }
     if state
         .performance_check
@@ -725,6 +751,9 @@ async fn run_ladder_with(
     params: &PerformanceCheckRunParams,
     sample_pressure: impl Fn() -> Option<crate::host_pressure::HostPressureSample>,
 ) -> Result<PerformanceCheckResult> {
+    if benchmark_cancelled(state) {
+        bail!("cancelled");
+    }
     reject_host_pressure(state, sample_pressure())?;
     let hold = crate::compositor::PreviewHoldGuard::engage(state).await;
     let result = run_ladder_under_hold(state, params, sample_pressure).await;
@@ -802,7 +831,7 @@ async fn run_ladder_under_hold(
     // Plan 200 D4: the highest single-encode pixel rate this machine passed.
     let mut best_single_rate = None;
     for (index, video) in ladder.into_iter().enumerate() {
-        if state.performance_check.cancelled() {
+        if benchmark_cancelled(state) {
             discard_benchmark_sessions(state, &directory).await;
             bail!("cancelled");
         }
@@ -840,7 +869,7 @@ async fn run_ladder_under_hold(
         let (measurement, stats) = measure_rung(state, &video, &directory).await;
         let pressure_end = sample_pressure();
         discard_benchmark_sessions(state, &directory).await;
-        if state.performance_check.cancelled() {
+        if benchmark_cancelled(state) {
             // A rung cut short (and its encoder killed) is not a measurement;
             // logging it as "failed" would read as a verdict on this machine.
             bail!("cancelled");
@@ -1038,7 +1067,7 @@ async fn measure_rung(
         }
         Err(_) => {
             measurement.start_error = Some("start timed out".to_string());
-            let _ = crate::recording::stop_recording(state.clone()).await;
+            let _ = stop_rung_yielding_to_capture(state).await;
             return (measurement, None);
         }
     }
@@ -1055,7 +1084,7 @@ async fn measure_rung(
     // of each signal across the measured window.
     let measure_deadline = Instant::now() + RUNG_MEASURE;
     let mut stats = baseline.clone();
-    while Instant::now() < measure_deadline && !state.performance_check.cancelled() {
+    while Instant::now() < measure_deadline && !benchmark_cancelled(state) {
         sleep_unless_cancelled(
             state,
             SAMPLE_INTERVAL.min(measure_deadline - Instant::now()),
@@ -1138,16 +1167,16 @@ async fn measure_rung(
     (measurement, Some(stats))
 }
 
-/// Graceful stop, measured as drain time — unless the user's Record cancels
-/// the check meanwhile. Then the benchmark's FFmpeg is killed: its backlog is
-/// worthless, and on a below-realtime machine flushing it outlasted
+/// Graceful stop, measured as drain time — unless Record or process shutdown
+/// cancels the check meanwhile. Then the benchmark's FFmpeg is killed: its
+/// backlog is worthless, and on a below-realtime machine flushing it outlasted
 /// `YIELD_TO_CAPTURE_TIMEOUT`, so Record failed with "A capture session is
 /// active or finalizing" (UHD 620 field log: 13 s drain vs 8 s yield).
 ///
 /// The stop runs as its own task: it holds `state.recording` across awaits,
 /// and the kill needs that lock, so a stop that is only polled from this
 /// `select!` would deadlock against the kill branch.
-async fn stop_rung_yielding_to_capture(
+pub(crate) async fn stop_rung_yielding_to_capture(
     state: &AppState,
 ) -> Result<crate::protocol::RecordingStatus> {
     let stop_state = state.clone();
@@ -1161,12 +1190,12 @@ async fn stop_rung_yielding_to_capture(
                 });
             }
             () = tokio::time::sleep(CANCEL_POLL), if !killed => {
-                if state.performance_check.cancelled() {
+                if benchmark_cancelled(state) {
                     killed = true;
                     if crate::recording::kill_benchmark_ffmpeg(state).await {
                         state.emit_log(
                             "info",
-                            "Performance check cancelled for a recording; ended its benchmark encoder without flushing.",
+                            "Performance check cancelled; ended its benchmark encoder without flushing.",
                         );
                     }
                 }
@@ -1183,7 +1212,7 @@ fn stalled_frames(stats: &DiagnosticStats) -> u64 {
 
 async fn sleep_unless_cancelled(state: &AppState, duration: Duration) {
     let deadline = Instant::now() + duration;
-    while Instant::now() < deadline && !state.performance_check.cancelled() {
+    while Instant::now() < deadline && !benchmark_cancelled(state) {
         tokio::time::sleep(CANCEL_POLL.min(deadline - Instant::now())).await;
     }
 }
@@ -1205,6 +1234,91 @@ async fn discard_benchmark_sessions(state: &AppState, directory: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shutdown_test_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
+    fn shutdown_test_params() -> PerformanceCheckRunParams {
+        PerformanceCheckRunParams {
+            ceiling_width: 1920,
+            ceiling_height: 1080,
+            ceiling_fps: 30,
+            separate_source_recordings: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_benchmark_shutdown_refuses_admission_without_waiting_for_capture() {
+        let state = shutdown_test_state();
+        state.request_process_shutdown();
+        let recording = state.recording.lock().await;
+        let start = start(state.clone(), shutdown_test_params());
+        tokio::pin!(start);
+        let result = futures_util::poll!(&mut start);
+        drop(recording);
+        assert!(
+            matches!(result, std::task::Poll::Ready(Err(ref error)) if error.to_string().contains("shutting down")),
+            "shutdown must refuse immediately, before waiting on a draining capture"
+        );
+        assert!(!state.performance_check.is_running());
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_benchmark_shutdown_during_admission_does_not_spawn_a_ladder() {
+        let state = shutdown_test_state();
+        let recording = state.recording.lock().await;
+        let start = start(state.clone(), shutdown_test_params());
+        tokio::pin!(start);
+        assert!(futures_util::poll!(&mut start).is_pending());
+        state.request_process_shutdown();
+        drop(recording);
+        let error = start.await.expect_err("shutdown won admission");
+        assert!(error.to_string().contains("shutting down"));
+        assert!(!state.performance_check.is_running());
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_benchmark_shutdown_before_ladder_keeps_preview_and_previous_verdict() {
+        let state = shutdown_test_state();
+        let previous = sample_result(&capability_key(), false, Vec::new());
+        state
+            .database
+            .save_setting(RESULT_SETTING_KEY, &previous)
+            .unwrap();
+        let mut events = state.events.subscribe();
+        state.request_process_shutdown();
+        let error = run_ladder_with(&state, &shutdown_test_params(), || pressure(27.0))
+            .await
+            .expect_err("a shutdown ladder must not measure host pressure or hold preview");
+        assert_eq!(error.to_string(), "cancelled");
+        assert!(!crate::compositor::compositor_preview_hold_active(&state).await);
+        let after = current_state(&state).await;
+        assert_eq!(after.result.unwrap().checked_at, previous.checked_at);
+        assert!(after.last_run_not_recorded.is_none());
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(event.event, "performance.check.progress");
+            assert_ne!(event.event, "compositor.status");
+        }
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_benchmark_shutdown_interrupts_the_measurement_wait() {
+        let state = shutdown_test_state();
+        let measuring = sleep_unless_cancelled(&state, Duration::from_secs(60));
+        tokio::pin!(measuring);
+        assert!(futures_util::poll!(&mut measuring).is_pending());
+        state.request_process_shutdown();
+        tokio::time::timeout(Duration::from_secs(1), measuring)
+            .await
+            .expect("shutdown must end the measurement at its next cancellation boundary");
+    }
 
     fn pressure(load_average: f64) -> Option<crate::host_pressure::HostPressureSample> {
         Some(crate::host_pressure::HostPressureSample {

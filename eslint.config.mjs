@@ -3,7 +3,7 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
 
 const PHOSPHOR_RESTRICTION = {
-  name: '@phosphor-icons/react',
+  group: ['@phosphor-icons/react', '@phosphor-icons/react/*'],
   message:
     'Import icons from @/components/icons instead. Add a new semantic slot there only if no existing slot already means the same thing.'
 }
@@ -71,10 +71,7 @@ export default tseslint.config(
     ],
     rules: {
       // Flat config does not merge rule options: the Radix ban again.
-      'no-restricted-imports': [
-        'error',
-        { paths: [PHOSPHOR_RESTRICTION], patterns: [RADIX_RESTRICTION] }
-      ]
+      'no-restricted-imports': ['error', { patterns: [PHOSPHOR_RESTRICTION, RADIX_RESTRICTION] }]
     }
   }
 )

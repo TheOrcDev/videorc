@@ -18,7 +18,12 @@ import {
   measureOpenh264Comparison
 } from './lib/windows-openh264-comparison.mjs'
 
-import { runOwnedPcmEof, ownedPcmEofAggregate } from './lib/windows-owned-pcm-eof.mjs'
+import {
+  runOwnedPcmEof,
+  ownedPcmEofAggregate,
+  runIndependentToneEof,
+  independentToneEofAggregate
+} from './lib/windows-owned-pcm-eof.mjs'
 
 const argv = process.argv.slice(2).filter((arg) => arg !== '--')
 const options = {}
@@ -26,16 +31,31 @@ while (argv.length) {
   const name = argv.shift(),
     value = argv.shift()
   if (
-    !['--ffmpeg', '--ffprobe', '--output', '--eof-stability-passes'].includes(name) ||
+    ![
+      '--ffmpeg',
+      '--ffprobe',
+      '--output',
+      '--eof-stability-passes',
+      '--tone-eof-stability-passes'
+    ].includes(name) ||
     !value ||
     value.startsWith('--')
   )
-    throw new Error('Expected --ffmpeg, --ffprobe or --output followed by a value')
+    throw new Error(
+      'Expected a tool path, output path or EOF stability-pass option followed by a value'
+    )
   options[name] = value
 }
 const eofStabilityPasses = Number(options['--eof-stability-passes'] ?? '1')
 if (!Number.isInteger(eofStabilityPasses) || eofStabilityPasses < 1 || eofStabilityPasses > 25)
   throw new Error('EOF stability passes must be an integer from 1 through 25')
+const toneEofStabilityPasses = Number(options['--tone-eof-stability-passes'] ?? '0')
+if (
+  !Number.isInteger(toneEofStabilityPasses) ||
+  toneEofStabilityPasses < 0 ||
+  toneEofStabilityPasses > 25
+)
+  throw new Error('Tone EOF comparison passes must be an integer from 0 through 25')
 const ffmpeg = resolve(options['--ffmpeg'] ?? 'vendor/ffmpeg/windows-x64/bin/ffmpeg.exe')
 const ffprobe = resolve(options['--ffprobe'] ?? join(dirname(ffmpeg), 'ffprobe.exe'))
 if (!options['--output']) throw new Error('A new --output directory is required')
@@ -240,6 +260,35 @@ try {
     }
   }
   report.ownedPcmEofVerdict = ownedPcmEofAggregate(report.ownedPcmEof, eofStabilityPasses)
+  report.independentToneEof = []
+  // Opt-in causal experiment, not a shipping input policy. Retain the unpaced
+  // baseline and every paced attempt; a shorter tail alone is not a pass.
+  for (let pass = 0; toneEofStabilityPasses > 0 && pass <= toneEofStabilityPasses; pass++) {
+    const directory = join(output, `independent-tone-pass${pass}`)
+    mkdirSync(directory, { mode: 0o700 })
+    const row = { pass, paceTone: pass > 0, state: 'running' }
+    report.independentToneEof.push(row)
+    save()
+    Object.assign(
+      row,
+      await runIndependentToneEof({
+        ffmpeg,
+        ffprobe,
+        output: directory,
+        paceTone: pass > 0
+      }),
+      { state: 'complete' }
+    )
+    save()
+    if (row.unsafeCleanup || row.cancelled)
+      throw new Error(
+        'Independent tone probe cancelled or cleanup incomplete; refusing further processes'
+      )
+  }
+  report.independentToneEofVerdict =
+    toneEofStabilityPasses > 0
+      ? independentToneEofAggregate(report.independentToneEof, toneEofStabilityPasses)
+      : { pass: false, state: 'NOT_REQUESTED' }
   report.measurementComplete =
     report.cases.length === openh264ComparisonCases.length &&
     report.cases.every(
@@ -249,8 +298,16 @@ try {
     (row) =>
       row.childReaped && row.exitCode === 0 && Number.isFinite(row.packetTail?.tailMismatchMs)
   )
-  if (!report.measurementComplete || !report.ownedPcmEofVerdict.pass) {
-    report.error = 'Paired measurement or owned PCM EOF regression failed'
+  report.measurementComplete &&= report.independentToneEof.every(
+    (row) =>
+      row.childReaped && row.exitCode === 0 && Number.isFinite(row.packetTail?.tailMismatchMs)
+  )
+  if (
+    !report.measurementComplete ||
+    !report.ownedPcmEofVerdict.pass ||
+    (toneEofStabilityPasses > 0 && !report.independentToneEofVerdict.pass)
+  ) {
+    report.error = 'Paired measurement, owned PCM or independent tone EOF regression failed'
     process.exitCode = 1
   }
 } catch (error) {

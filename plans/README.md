@@ -40,6 +40,12 @@
     **Phase 1 BUILT** 2026-10-31 (D1 to D3 as recommended; Phase 2 not
     built). Owed: by-eye in both themes, packaged acceptance, Windows
     tester, and the owner's "Check this computer" on a quiet Mac.
+- 2026-10-29: [Plan 212](212-linux-beta-readiness.md), Linux Beta on Ubuntu
+  24.04 GNOME/Wayland and Omarchy/Hyprland, x64 AppImage. **IN PROGRESS**:
+  trustworthy gates, exact-artifact validation, channel identity and complete
+  acceptance ledger. Runtime gaps, protected promotion/web integration, both
+  physical acceptance passes, seven-day pilot and production receipts remain open.
+
 - 2026-10-28: [Plan 210](210-scenes-for-your-apps-and-hide-screen.md),
   Scenes for your apps, and Hide screen. Owner request: "our whole Scene tab
   needs to be much smarter", quoting a user who switches between T3 Code and

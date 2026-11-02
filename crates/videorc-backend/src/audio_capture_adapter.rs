@@ -93,6 +93,21 @@ const MAX_PCM_PACKET_FRAMES: usize = 48_000;
 /// 1 s float-stereo packet (384 KB) must fit when its metadata line is late.
 const RAW_PCM_QUEUE_CHUNKS: usize = 64;
 
+fn capture_output_channel(
+    protocol: CaptureProtocol,
+) -> (mpsc::SyncSender<AudioFrame>, mpsc::Receiver<AudioFrame>) {
+    // Pulse delivers 10 ms fragments. Four packets discarded still-fresh PCM
+    // during an 87 ms bus write stall, even though Linux's existing playout
+    // window is 150 ms. Hold one full window plus the packet at its boundary;
+    // this adds capacity, not a delay. The capture and bus age checks still
+    // reject stale audio. Other workers keep their existing packet budget.
+    let capacity = match protocol {
+        CaptureProtocol::Pulse => 16,
+        CaptureProtocol::AvFoundation | CaptureProtocol::DirectShow => 4,
+    };
+    mpsc::sync_channel(capacity)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PcmDescription {
     sequence: u64,
@@ -1411,7 +1426,7 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
     // session. 256 holds 2.5 s of 20 ms packets; the age check drops what
     // arrives stale.
     let (metadata_tx, metadata_rx) = mpsc::sync_channel::<String>(256);
-    let (pcm_tx, receiver) = mpsc::sync_channel::<AudioFrame>(4);
+    let (pcm_tx, receiver) = capture_output_channel(protocol);
     let read_stop = stop.clone();
     let read_failure = failure.clone();
     owner.threads.push(
@@ -1595,6 +1610,39 @@ fn observe_wall(
     }
 }
 
+/// Wait for the raw bytes belonging to one metadata record. Keep receipt and
+/// time injectable so protocol budgets can be tested without scheduler sleeps.
+/// `false` means capture was cancelled before the packet was complete.
+fn match_pcm_bytes(
+    queued: &mut VecDeque<u8>,
+    wanted: usize,
+    match_budget: Duration,
+    stop: &AtomicBool,
+    mut receive: impl FnMut(Duration) -> std::result::Result<Vec<u8>, mpsc::RecvTimeoutError>,
+    mut now: impl FnMut() -> Instant,
+) -> Result<bool> {
+    let deadline = now() + match_budget;
+    while queued.len() < wanted {
+        if stop.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if now() >= deadline {
+            bail!(
+                "Capture PCM did not match its timestamp metadata within {}ms",
+                match_budget.as_millis()
+            );
+        }
+        match receive(Duration::from_millis(5)) {
+            Ok(bytes) => queued.extend(bytes),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("Capture PCM ended in a partial timestamped packet")
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn assemble_pcm(
     protocol: CaptureProtocol,
     mut clock_pair: ClockPair,
@@ -1679,25 +1727,15 @@ fn assemble_pcm(
         // FFmpeg logs the record and writes its PCM from different threads, so
         // the PCM may trail it by as long as the packet may age (Pulse: the
         // worker stopped on a loaded Linux desktop at 100 ms, retest 153).
-        let match_budget = max_capture_age(protocol);
-        let deadline = Instant::now() + match_budget;
-        while queued.len() < wanted {
-            if stop.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                bail!(
-                    "Capture PCM did not match its timestamp metadata within {}ms",
-                    match_budget.as_millis()
-                );
-            }
-            match raw.recv_timeout(Duration::from_millis(5)) {
-                Ok(bytes) => queued.extend(bytes),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    bail!("Capture PCM ended in a partial timestamped packet")
-                }
-            }
+        if !match_pcm_bytes(
+            &mut queued,
+            wanted,
+            max_capture_age(protocol),
+            stop,
+            |wait| raw.recv_timeout(wait),
+            Instant::now,
+        )? {
+            return Ok(());
         }
         let bytes: Vec<_> = queued.drain(..wanted).collect();
         let samples: Vec<f32> = bytes
@@ -1752,6 +1790,72 @@ fn assemble_pcm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pulse_output_retains_a_playout_window_without_waiting_for_the_consumer() {
+        let (sender, receiver) = capture_output_channel(CaptureProtocol::Pulse);
+        let epoch = Instant::now();
+        let packet_duration = Duration::from_millis(10);
+        let packets = crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY.as_millis()
+            / packet_duration.as_millis();
+        // The bus is deliberately not drained until a whole playout window
+        // has arrived. This models a bounded consumer stall without sleeps or
+        // relying on the test runner's scheduler. The old four-packet queue
+        // loses packet 5 even though its capture time is inside that window.
+        for index in 0..packets as u64 {
+            sender
+                .try_send(AudioFrame {
+                    timestamp_micros: index * 10_000,
+                    captured_at: epoch + packet_duration * (index + 1) as u32,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    samples: vec![index as f32 / 100.0; 960],
+                })
+                .expect("fresh Pulse PCM must fit through the playout window");
+        }
+        for index in 0..packets as u64 {
+            let frame = receiver
+                .try_recv()
+                .expect("every captured packet is retained");
+            assert_eq!(frame.timestamp_micros, index * 10_000);
+            assert_eq!(frame.samples, vec![index as f32 / 100.0; 960]);
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn pulse_output_capacity_remains_bounded_and_preserves_refused_pcm() {
+        let (sender, receiver) = capture_output_channel(CaptureProtocol::Pulse);
+        let packet = AudioFrame {
+            timestamp_micros: 0,
+            captured_at: Instant::now(),
+            sample_rate: 48_000,
+            channels: 2,
+            samples: vec![0.25; 960],
+        };
+        // Do not permit a future capacity change to become an unbounded
+        // backlog. Refused packets remain available to the caller so its
+        // existing dropped-frame counter can account for every sample.
+        let maximum_packets = PULSE_MAX_CAPTURE_AGE.as_millis() / 10;
+        let mut accepted = 0;
+        loop {
+            match sender.try_send(packet.clone()) {
+                Ok(()) => {
+                    accepted += 1;
+                    assert!(accepted <= maximum_packets);
+                }
+                Err(mpsc::TrySendError::Full(refused)) => {
+                    assert_eq!(refused.samples, packet.samples);
+                    break;
+                }
+                Err(error) => panic!("unexpected queue failure: {error}"),
+            }
+        }
+        assert_eq!(receiver.try_iter().count(), accepted as usize);
+    }
 
     #[test]
     fn future_pcm_validation_uses_accepted_clock_uncertainty() {
@@ -2620,68 +2724,155 @@ mod tests {
 
     #[test]
     fn pulse_pcm_may_trail_its_record_within_the_pulse_age_budget() {
-        // The PCM arrives 130 ms after its record: past the 100 ms that
-        // stopped the Linux worker under load, inside Pulse's 250 ms budget.
+        // Exercise the production byte matcher with the actual protocol budgets.
+        // A real sleep also aged the capture timestamp and could correctly drop
+        // the packet on a loaded CI runner, obscuring this matching contract.
         let late = Duration::from_millis(130);
         let bytes: Vec<u8> = (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect();
-        let run = |protocol: CaptureProtocol, pair: ClockPair, records: Vec<String>| {
-            let (meta_tx, meta_rx) = mpsc::channel();
-            for record in records {
-                meta_tx.send(record).unwrap();
-            }
-            drop(meta_tx);
-            let (raw_tx, raw_rx) = mpsc::channel();
-            let bytes = bytes.clone();
-            let sender = thread::spawn(move || {
-                thread::sleep(late);
-                let _ = raw_tx.send(bytes);
-            });
-            let (out_tx, out_rx) = mpsc::sync_channel(4);
-            let stats = Arc::new(AudioCaptureStats::default());
-            let result = assemble_pcm(
-                protocol,
-                pair,
-                meta_rx,
-                raw_rx,
-                out_tx,
-                &AtomicBool::new(false),
-                &stats,
-            );
-            sender.join().unwrap();
-            (result, out_rx.try_iter().collect::<Vec<_>>())
-        };
-        let wall_us = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
-        let pts = i64::try_from(i128::from(wall_us - 10_000) * 48_000 / 1_000_000).unwrap();
-        let (result, frames) = run(
+        for protocol in [
             CaptureProtocol::Pulse,
-            ClockPair::sample().unwrap(),
-            vec![pcm(0, pts, 480)],
-        );
-        assert!(
-            result.as_ref().map_or_else(
-                |error| error.to_string().contains("stopped producing"),
-                |_| true
-            ),
-            "{result:?}"
-        );
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].samples, vec![0.25; 960]);
-        // macOS and Windows keep their 100 ms match budget.
-        let (result, frames) = run(
             CaptureProtocol::AvFoundation,
-            pair(Instant::now()),
-            vec![metadata(), pcm(0, 0, 480)],
+            CaptureProtocol::DirectShow,
+        ] {
+            let now = std::cell::Cell::new(Instant::now());
+            let arrival = now.get() + late;
+            let mut queued = VecDeque::new();
+            let result = match_pcm_bytes(
+                &mut queued,
+                bytes.len(),
+                max_capture_age(protocol),
+                &AtomicBool::new(false),
+                |wait| {
+                    now.set(now.get() + wait);
+                    if now.get() >= arrival {
+                        Ok(bytes.clone())
+                    } else {
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    }
+                },
+                || now.get(),
+            );
+            if protocol == CaptureProtocol::Pulse {
+                assert!(result.unwrap());
+                assert_eq!(queued, bytes);
+                assert_eq!(now.get(), arrival);
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("did not match its timestamp metadata within 100ms")
+                );
+                assert!(queued.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn pcm_match_still_expires_at_each_protocol_budget() {
+        for protocol in [
+            CaptureProtocol::Pulse,
+            CaptureProtocol::AvFoundation,
+            CaptureProtocol::DirectShow,
+        ] {
+            let start = Instant::now();
+            let now = std::cell::Cell::new(start);
+            let budget = max_capture_age(protocol);
+            let mut queued = VecDeque::from([1]);
+            let result = match_pcm_bytes(
+                &mut queued,
+                2,
+                budget,
+                &AtomicBool::new(false),
+                |wait| {
+                    now.set(now.get() + wait);
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                },
+                || now.get(),
+            );
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                format!(
+                    "Capture PCM did not match its timestamp metadata within {}ms",
+                    budget.as_millis()
+                )
+            );
+            assert_eq!(now.get() - start, budget);
+            assert_eq!(queued, [1]);
+        }
+    }
+
+    #[test]
+    fn pcm_match_cancellation_stops_receiving() {
+        let now = Instant::now();
+        let stop = AtomicBool::new(false);
+        let mut reads = 0;
+        let mut queued = VecDeque::new();
+        let matched = match_pcm_bytes(
+            &mut queued,
+            8,
+            PULSE_MAX_CAPTURE_AGE,
+            &stop,
+            |_| {
+                reads += 1;
+                stop.store(true, Ordering::Release);
+                Ok(vec![1, 2, 3, 4])
+            },
+            || now,
+        )
+        .unwrap();
+        assert!(!matched);
+        assert_eq!(reads, 1);
+        assert_eq!(queued, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn pcm_match_rejects_disconnected_partial_packets() {
+        let now = Instant::now();
+        let mut queued = VecDeque::from([1, 2]);
+        let result = match_pcm_bytes(
+            &mut queued,
+            8,
+            PULSE_MAX_CAPTURE_AGE,
+            &AtomicBool::new(false),
+            |_| Err(mpsc::RecvTimeoutError::Disconnected),
+            || now,
         );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Capture PCM ended in a partial timestamped packet"
+        );
+        assert_eq!(queued, [1, 2]);
+    }
+
+    #[test]
+    fn pcm_match_keeps_bytes_for_the_next_packet() {
+        let now = Instant::now();
+        let mut queued = VecDeque::from([1, 2]);
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("did not match its timestamp metadata within 100ms")
+            match_pcm_bytes(
+                &mut queued,
+                4,
+                PULSE_MAX_CAPTURE_AGE,
+                &AtomicBool::new(false),
+                |_| Ok(vec![3, 4, 5, 6]),
+                || now,
+            )
+            .unwrap()
         );
-        assert!(frames.is_empty());
+        assert_eq!(queued.drain(..4).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert!(
+            match_pcm_bytes(
+                &mut queued,
+                2,
+                PULSE_MAX_CAPTURE_AGE,
+                &AtomicBool::new(false),
+                |_| panic!("already buffered PCM must not wait for another read"),
+                || now,
+            )
+            .unwrap()
+        );
+        assert_eq!(queued, [5, 6]);
     }
 
     /// On-device check (release test 147, plan 0001): opens the real Pulse

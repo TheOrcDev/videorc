@@ -2,11 +2,22 @@ import { isWindowsPlatform } from '@/lib/platform'
 
 /**
  * The release track a build belongs to, shown next to the version in
- * Settings → About: macOS ships as a Beta, Windows and Linux as Alphas
- * (release test 146, plan 0006: Linux read "Beta"). An unpackaged build is a
- * development build whatever its package version says.
+ * Settings → About. Linux's channel is frozen at build time; old/default
+ * builds remain Alpha. An unpackaged build always says Development.
  */
-export function releaseTrackLabel(platform: string | undefined, isPackaged: boolean): string {
+declare const __VIDEORC_LINUX_RELEASE_CHANNEL__: 'alpha' | 'beta'
+
+const linuxBuildChannel =
+  typeof __VIDEORC_LINUX_RELEASE_CHANNEL__ === 'undefined'
+    ? 'alpha'
+    : __VIDEORC_LINUX_RELEASE_CHANNEL__
+
+export function releaseTrackLabel(
+  platform: string | undefined,
+  isPackaged: boolean,
+  linuxChannel: 'alpha' | 'beta' = linuxBuildChannel
+): string {
   if (!isPackaged) return 'Development'
-  return isWindowsPlatform(platform) || platform === 'linux' ? 'Alpha' : 'Beta'
+  if (platform === 'linux') return linuxChannel === 'beta' ? 'Beta' : 'Alpha'
+  return isWindowsPlatform(platform) ? 'Alpha' : 'Beta'
 }
