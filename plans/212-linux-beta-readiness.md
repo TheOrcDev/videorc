@@ -83,7 +83,7 @@ file size or successful build is not a pass.
 | Separate source recordings         | macOS-only                                                                                        | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
 | Preview                            | CPU/BMP proof presenter                                                                           | Native GPU rewrite is not required; real pixels, cadence/liveness, lifecycle and honest diagnostics are.    |
 | Soundboard                         | Normal Linux worker PCM bus supported; direct Pulse fallback cannot mix                           | Prove shared-bus mix and fallback warning.                                                                  |
-| First run                          | Linux sharing guidance enabled; reload passes; full smoke fails light-theme motion budget     | Packaged physical proof and real OAuth still required.                                                      |
+| First run                          | Linux sharing guidance enabled; intermittent reload and full motion failures remain     | Packaged physical proof and real OAuth still required.                                                      |
 | Notes protection                   | Capture exclusion unsupported                                                                     | Tell users Notes may be captured; prove behavior.                                                           |
 | Split profiles / dual orientation  | Restricted encoded paths                                                                          | Inventory actual combinations, implement/prove supported cases and explicit refusals; keep docs/UI aligned. |
 
@@ -2675,3 +2675,154 @@ unchanged. Rust formatting passes. A fresh native compilation, the same
 are running; none is yet claimed as passing after the correction. Fresh
 cross-platform CI is still required. No quality limit or test selection has
 been relaxed, and no Linux Beta candidate has been accepted or published.
+
+### Optimized runtime and setup canvas sizing, 2026-11-02
+
+The completed `d6318b4c` source verification passes 620 desktop files
+(6,811 tests passed, one skipped), all 3,051 Node tests with zero skips,
+typecheck, lint, formatting, the production build and tracked-text checks.
+The two caption fixture locks pass all 25 repeated concurrent-pair attempts
+and all 125 caption tests. The full backend target reports 4,195 passed,
+one failed and 19 ignored: the remaining failure is the GLES Beams golden
+comparison. Skips and ignored tests are not acceptance evidence.
+
+An optimized development backend is built from verified, unchanged native
+inputs in 733.71 seconds (optimization level 2, no debug symbols, debug
+assertions and overflow checks enabled). Its SHA-256 is
+`355f4a046c2952be77988761b854c81592a20372752f2d91fc301560af45c0a4`.
+Build provenance is external; an embedded source commit is not verified.
+This is a development executable, not a release candidate. The maintained
+preview lifecycle probe then passes all 100 cycles with normal app quit and
+an empty owned-process ledger. First-run light-theme motion still fails on
+that baseline after ten passing steps.
+
+Three 30-second controls on the baseline all reach the still-image fallback,
+including the run without capture. Screenshot overhead therefore does not
+explain the whole failure. The setup player now sizes its actual canvas to
+the shader resolution already selected by the shared renderer. CSS scales
+the canvas into its existing layout, removing the intermediate texture and
+full-size copy. At the observed 960 x 821 CSS box, the backing buffer becomes
+1,263 x 1,080 at full quality and 631 x 540 at half quality, instead of staying
+1,920 x 1,642. Shader resolution, phase, theme filters, reduced-motion
+behavior, frame cap and budget thresholds remain unchanged. Recording and
+production preview renderers are not changed by this optimization.
+
+The patch passes 82 focused tests across five files, typecheck, lint,
+formatting and the production build. Tests cover the real shared size policy,
+no double halving, resize/pause phase continuity and eventual budget fallback.
+Two completed 30-second controls remain moving: JPEG screencast records
+675 draws with a 45.9 ms median interval; the no-capture repeat records
+641 draws with a 47.5 ms median interval. Those are development observations,
+not first-run acceptance. The first no-capture attempt and the maintained
+first-run smoke both fail before setup mounts after reload (`new document instrument
+timed out`); neither measures motion. These failures remain open, and the
+repeat does not replace them. All runs finish owned cleanup without forced
+cleanup signals or leaked children. Ogre is on AC but still reports CPU
+frequencies near 800 MHz under load; stable performance acceptance remains
+required.
+
+At published head `d6318b4c`, Linux and JavaScript CI pass. macOS still fails
+two Metal golden tests (Beams and Ghost Fibers). The Windows installer recovery
+gate cannot establish the requested renderer crash: no crash event or main
+recovery log follows, so recovery is untested. Its five other scenarios pass.
+The separate Windows source and startup diagnostics jobs were still running
+when inspected; no passing result is inferred.
+
+Private receipts are under `~/.cache/videorc-linux-beta-evidence/`:
+`optimized-d6318-prpco5mo/`, `runtime-d6318-classification.json`,
+`first-run-capture-control-v2-classification.json`,
+`backdrop-canvas-source-validation.json`,
+`backdrop-canvas-candidate-classification.json`,
+`backdrop-canvas-no-capture-repeat-classification.json` and
+`ci-d6318-failure-classification.json`. No exact AppImage acceptance,
+endurance, pilot, update/rollback proof or public Beta publication is claimed.
+
+### Controlled recording-matrix input and timeout fixture, 2026-11-02
+
+The earlier synthetic matrix correctly recorded digital silence because it
+selected no microphone while requiring non-silent input. Its OpenH264
+artifact also failed the moving-content budgets; VAAPI passed its video
+checks but failed the audio gate. These failures remain retained.
+
+The Linux matrix now acquires the host smoke lock, starts owned 440/997 Hz
+Pulse null-sink fixtures, and only then launches the app so its initial device
+enumeration sees them. It waits for the scene and source-switch readiness, selects the 440 Hz
+microphone through the production source owner, requires unmuted unity gain,
+and passes the same identity into every session.
+Decoded artifact audio must contain the selected tone and exclude the independent 997 Hz input.
+Fixture lifetime extends through app teardown; defaults and speaker routing
+are unchanged. Other platforms do not start Pulse fixtures. An earlier
+attempt that created sources after launch failed during device selection
+on both encoders and produced no recording. Moving fixture creation before
+launch still failed selection in OpenH264; the display slept before VAAPI
+could start. A direct FFmpeg listing under approved render-node isolation
+includes both owned inputs, so absence from the Pulse server is not the cause.
+The harness now awaits the source-switch action used by the picker instead
+of writing raw source configuration, which bypasses the Clips source owner.
+All failed attempts remain recorded; their owned fixture modules and sources
+were removed.
+
+All 40 focused matrix, Pulse fixture and process-group tests pass, including
+executing the renderer command and proving it waits for source confirmation
+before updating audio without overwriting the confirmed source. The first final full Node run
+reports 3,058 passed, one failed, zero skipped: an existing process-group
+test's one-second timeout expired before its grandchild reported readiness.
+That test now waits for an explicit ready line from a real grandchild, then
+advances a controlled clock. It observes the leader's exit before advancing
+the escalation deadline, still requiring both owned processes to be gone.
+No production timeout or cleanup code changes. All 25 repetitions of the
+five-test process-group suite pass.
+
+After the source-owner correction, typecheck, lint, formatting and the
+production build pass. All 220 Studio/backdrop tests pass, and the final
+full Node suite passes all 3,061 tests with zero skips. The earlier full
+3,059-test pass covers the timeout correction before the source-owner change.
+All source checks finish with owned cleanup complete, no forced cleanup
+signals and no leaked descendants.
+
+Both encoders now select the owned microphone and produce analyzed 1080p30
+recordings. The first 440/880 Hz pair fails on audio discontinuities and
+unexpected 880 Hz energy; OpenH264 also fails moving-content limits. Because
+880 Hz is a harmonic of 440 Hz, the final fixture uses an independent 997 Hz
+second tone. The shared fixture helper retains 880 Hz by default for existing
+callers. Thresholds stay at selected tone >= -30 dBFS and unselected band
+< -50 dBFS. The error reports unexpected energy, not a proven routing leak.
+All 42 focused tests and all 3,063 final Node tests pass, with zero skips.
+
+The final independent-tone artifacts still fail:
+
+- OpenH264: a corroborated freeze of 867 ms, 21 repeated frames, five mid-take
+  digital-zero runs (longest 904.3 ms), and 997 Hz energy at -47.4 dBFS. Its
+  selected 440 Hz tone is -18 dBFS; A/V stop tail is 6.7 ms. Artifact SHA-256:
+  `c030ac877ad07b1d324d104452f400a08e629f74ede572c5d50d8c1bd98bb323`.
+- Intel VAAPI: the existing video, duration, gap and tail checks pass in this
+  run, but 997 Hz energy at -43.8 dBFS fails the added input-isolation check.
+  The selected tone is -18 dBFS and the stop tail is 13 ms. Artifact SHA-256:
+  `7d5f34045f68b53f28ae3dcfece313c40f91552dbf410a25cc48969805bbea9d`.
+
+No passing matrix is claimed. Concurrent compilation in another worktree
+and CPU frequencies near 800 MHz remain in the host receipts. A source-side
+control is still needed to distinguish fixture/audio discontinuities,
+processing or codec energy from cross-input routing. Stable-host performance,
+all shipping profiles, the hard-content pass and fresh repetitions remain
+open. No quality limit is relaxed.
+
+All four completed recording runs remove their owned Pulse modules/sources
+and finish process cleanup without forced cleanup signals or leaks. The
+final wrapper observes and preserves the existing stay-awake setting; it does
+not change desktop configuration. The initial display-asleep refusal and the
+later pre-recording selection failures also remain retained. The final source
+and runtime receipts pin all modified source files and the unchanged native
+backend executable; this remains development evidence, not AppImage proof.
+
+Private receipts include `matrix-owned-discovery-source-validation.json`
+(the retained failed run), `matrix-ready-source-validation.json`,
+`matrix-source-owner-source-validation.json`, `matrix-pulse-listing.json`,
+`matrix-controlled-tone-discovery-failure.json` and
+`matrix-ready-runtime-classification.json`,
+`matrix-source-owner-runtime-classification.json`,
+`matrix-independent-tone-source-validation.json` and
+`matrix-independent-tone-runtime-classification.json`, under
+`~/.cache/videorc-linux-beta-evidence/`. These are development checks; no
+physical microphone, portal, full-profile matrix or exact AppImage acceptance
+is established. All Beta release gates above still apply.

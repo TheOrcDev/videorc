@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { startLinuxPulseFixtures } from './linux-pulse-fixture.mjs'
 
-function harness({ failLoad = null, failTone = null, failUnload = null } = {}) {
+function harness({ failLoad = null, failTone = null, failUnload = null, otherFrequency } = {}) {
   const actions = []
   let loads = 0
   const command = async (args) => {
@@ -31,12 +31,38 @@ function harness({ failLoad = null, failTone = null, failUnload = null } = {}) {
         ffmpegPath: '/fixture/ffmpeg',
         prefix: 'videorc_beta_test',
         command,
-        tone
+        tone,
+        otherFrequency
       })
   }
 }
 
 describe('owned Linux Pulse fixtures', () => {
+  it('supports an independent second tone and preserves its identity on reconnect', async () => {
+    const fixture = harness({ otherFrequency: 997 })
+    const started = await fixture.start()
+    const source = started.sources[1]
+    assert.equal(source.frequency, 997)
+    assert.equal(source.source, 'videorc_beta_test_997_source')
+    assert.ok(
+      fixture.actions.some(
+        ([kind, sink, hz]) => kind === 'tone' && sink.endsWith('_997') && hz === 997
+      )
+    )
+    await source.disconnect()
+    await source.reconnect()
+    assert.ok(fixture.actions.at(-1).includes('source_name=videorc_beta_test_997_source'))
+    await started.stop()
+  })
+
+  it('rejects invalid or indistinguishable frequencies before creating a module', async () => {
+    for (const otherFrequency of [440, 0, 99, 10_001, 997.5, '997', NaN]) {
+      const fixture = harness({ otherFrequency })
+      await assert.rejects(fixture.start(), /distinct frequency/)
+      assert.deepEqual(fixture.actions, [])
+    }
+  })
+
   it('creates distinct microphone IDs and plays each tone only into its null sink', async () => {
     const fixture = harness()
     const started = await fixture.start()

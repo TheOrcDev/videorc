@@ -18428,6 +18428,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       removeBackground: (id: string) =>
         setBackgroundRegistry((current) => removeSlotAsset(current, id)),
       layout: value.applyCameraPreset,
+      source: value.switchSourceDeviceLive,
       configure: (patch: Partial<CaptureConfig>) =>
         value.setCaptureConfig((current) => ({ ...current, ...patch })),
       start: value.startSession,

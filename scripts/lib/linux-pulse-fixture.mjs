@@ -13,9 +13,18 @@ export async function startLinuxPulseFixtures({
   ffmpegPath,
   command = pulse,
   tone = startTone,
+  otherFrequency = 880,
   prefix = `videorc_beta_${randomUUID().replaceAll('-', '')}`
 }) {
   if (!/^videorc_beta_[a-z0-9_]+$/.test(prefix)) throw new Error('Invalid fixture prefix.')
+  if (
+    !Number.isInteger(otherFrequency) ||
+    otherFrequency < 100 ||
+    otherFrequency > 10_000 ||
+    otherFrequency === 440
+  ) {
+    throw new Error('The other fixture tone must be a distinct frequency between 100 and 10000 Hz.')
+  }
   const modules = []
   const players = []
   const sources = []
@@ -48,7 +57,7 @@ export async function startLinuxPulseFixtures({
     return id
   }
   try {
-    for (const frequency of [440, 880]) {
+    for (const frequency of [440, otherFrequency]) {
       const sink = `${prefix}_${frequency}`
       const source = `${sink}_source`
       await load('module-null-sink', `sink_name=${sink}`, 'rate=48000', 'channels=2')

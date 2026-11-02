@@ -1,4 +1,51 @@
 import { DEFAULT_GATES } from './recording-analyzer.mjs'
+import { startLinuxPulseFixtures } from './linux-pulse-fixture.mjs'
+import { acquireHostSmokeLock } from './host-lock.mjs'
+import { bandMaxDbfs, reportDbfs, toneEnvelope } from './system-audio-gates.mjs'
+
+// Linux always opens the shared PCM bus, even with no selected microphone.
+// That is correctly silent; it cannot supply this matrix's non-silent input.
+// Keep owned tones alive through app teardown and never change system defaults.
+export async function withRecordingMatrixAudio({
+  platform,
+  ffmpegPath,
+  run,
+  startFixtures = startLinuxPulseFixtures,
+  acquireLock = acquireHostSmokeLock
+}) {
+  if (platform !== 'linux') return run(undefined)
+  // The process keeps this lock across app relaunches. Create devices before
+  // the app's initial enumeration, while still excluding other app smokes.
+  await acquireLock()
+  // Keep the unselected tone away from the selected tone's harmonics.
+  const fixtures = await startFixtures({ ffmpegPath, otherFrequency: 997 })
+  try {
+    const source = fixtures.sources.find((source) => source.frequency === 440)
+    if (!source?.deviceId?.startsWith('microphone:linux-pulse:')) {
+      throw new Error('Recording matrix needs its owned 440 Hz Pulse microphone.')
+    }
+    return await run(source.deviceId)
+  } finally {
+    await fixtures.stop()
+  }
+}
+
+export function assessRecordingMatrixTone(samples) {
+  // Identify the sustained source, away from the encoder's start/stop edges.
+  // The artifact analyzer still enforces gaps, take coverage and stop tails.
+  const interior = { from: 0.5, to: samples.length / 48_000 - 0.5 }
+  const selectedDbfs = bandMaxDbfs(toneEnvelope(samples, { frequency: 440 }), interior)
+  const otherDbfs = bandMaxDbfs(toneEnvelope(samples, { frequency: 997 }), interior)
+  const failures = []
+  if (!(selectedDbfs >= -30)) failures.push('owned 440 Hz microphone tone is missing or too quiet')
+  if (!(otherDbfs < -50))
+    failures.push('unexpected 997 Hz energy exceeds the unselected-input limit')
+  return {
+    selectedDbfs: reportDbfs(selectedDbfs),
+    otherDbfs: reportDbfs(otherDbfs),
+    failures
+  }
+}
 
 export function recordingMatrixGates(recordingMs) {
   return {
@@ -15,7 +62,7 @@ export function recordingMatrixGates(recordingMs) {
   }
 }
 
-function rendererReady(state) {
+function rendererReady(state, microphoneId) {
   return Boolean(
     state?.wsStatus === 'connected' &&
     state.testPattern === true &&
@@ -24,7 +71,11 @@ function rendererReady(state) {
     state.layoutPreset === 'screen-only' &&
     state.committedLayoutPreset === 'screen-only' &&
     state.visualTransactionPending === false &&
-    state.layoutSwitchPending === null
+    state.layoutSwitchPending === null &&
+    (!microphoneId ||
+      (state.microphoneId === microphoneId &&
+        state.microphoneMuted === false &&
+        state.microphoneGainDb === 0))
   )
 }
 
@@ -38,6 +89,7 @@ export async function prepareRecordingMatrixFixture({
   command,
   request,
   timeoutMs,
+  microphoneId,
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onProgress = () => {}
@@ -80,6 +132,7 @@ export async function prepareRecordingMatrixFixture({
     },
     'apply screen-only layout'
   )
+  let microphoneSelected = !microphoneId
   phase = 'confirm renderer and backend scene'
   onProgress({ phase, elapsedMs: now() - startedAt })
   while (now() < deadline) {
@@ -97,10 +150,14 @@ export async function prepareRecordingMatrixFixture({
             testPattern: config?.sources?.testPattern,
             screenId: config?.sources?.screenId ?? null,
             windowId: config?.sources?.windowId ?? null,
+            microphoneId: config?.sources?.microphoneId ?? null,
+            microphoneMuted: config?.audio?.microphoneMuted,
+            microphoneGainDb: config?.audio?.microphoneGainDb,
             layoutPreset: config?.layout?.layoutPreset,
             committedLayoutPreset: state?.diagnostics?.confirmedVisual?.layout?.layoutPreset,
             visualTransactionPending: state?.diagnostics?.visualTransactionPending,
-            layoutSwitchPending: state?.pendingLayout
+            layoutSwitchPending: state?.pendingLayout,
+            microphoneSwitchReason: state?.diagnostics?.sourceSwitchReasons?.microphone
           };
         `
         },
@@ -113,7 +170,35 @@ export async function prepareRecordingMatrixFixture({
       throw failure(error)
     }
     last = response?.result
-    if (rendererReady(last)) {
+    if (!microphoneSelected && rendererReady(last) && last.microphoneSwitchReason === null) {
+      await action(
+        'eval-js',
+        {
+          code: `
+            const scenes = window.__videorcSmokeScenePresets;
+            if (!scenes) throw new Error('Studio scene actions are not ready.');
+            const config = scenes.streamingState().captureConfig;
+            // Use the picker's owner: a raw config write can be overwritten by
+            // confirmation of the microphone already owned by the Clips ring.
+            await scenes.source('microphone', {
+              ...config.sources,
+              microphoneId: ${JSON.stringify(microphoneId)},
+              microphoneName: undefined,
+              microphoneOff: undefined
+            });
+            scenes.configure({
+              audio: { ...config.audio, microphoneMuted: false, microphoneGainDb: 0 }
+            });
+            return true;
+          `
+        },
+        'select owned microphone'
+      )
+      microphoneSelected = true
+      phase = 'confirm renderer and backend scene'
+      continue
+    }
+    if (microphoneSelected && rendererReady(last, microphoneId)) {
       let scene
       try {
         scene = await request('scene.get', remaining())
@@ -123,7 +208,11 @@ export async function prepareRecordingMatrixFixture({
       const visible = scene?.sources?.filter((source) => source?.visible === true)
       visibleSourceKinds = visible?.map((source) => source.kind) ?? null
       if (visible?.length === 1 && visible[0].kind === 'test-pattern') {
-        return { layoutPreset: 'screen-only', visibleSourceKinds: ['test-pattern'] }
+        return {
+          layoutPreset: 'screen-only',
+          visibleSourceKinds: ['test-pattern'],
+          ...(microphoneId ? { microphoneId } : {})
+        }
       }
     }
     await sleep(Math.min(100, Math.max(0, deadline - now())))

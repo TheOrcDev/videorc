@@ -18,6 +18,8 @@
 //   VIDEORC_MATRIX_ONLY=1080p60,4K30   run a subset by label
 //   VIDEORC_MATRIX_RECORDING_MS=6000   per-combo capture length
 //   VIDEORC_SMOKE_OUTPUT_DIR=...       artifact + report directory
+// Linux supplies owned Pulse tones through null sinks; no speaker playback
+// or default-device changes. Physical microphone acceptance is a separate gate.
 
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
@@ -30,9 +32,12 @@ import { linuxHostPerformanceSnapshot } from './lib/linux-host-performance.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import {
+  assessRecordingMatrixTone,
   prepareRecordingMatrixFixture,
-  recordingMatrixGates
+  recordingMatrixGates,
+  withRecordingMatrixAudio
 } from './lib/recording-matrix-fixture.mjs'
+import { decodeMonoF32 } from './lib/system-audio-gates.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { selectRecordingMatrixProfiles } from './lib/recording-matrix-profiles.mjs'
@@ -83,9 +88,9 @@ const EXPECTED_RESULT_LABELS = [
 
 const MATRIX_GATES = Object.freeze(recordingMatrixGates(recordingMs))
 
-function sessionParams({ outputDirectoryCapability, combo, streamTarget = null }) {
+function sessionParams({ outputDirectoryCapability, combo, streamTarget = null, microphoneId }) {
   return {
-    sources: { testPattern: true },
+    sources: { testPattern: true, ...(microphoneId ? { microphoneId } : {}) },
     layout: {
       layoutPreset: combo.width >= combo.height ? 'screen-camera' : 'vertical-camera-top',
       cameraTransformMode: 'preset',
@@ -190,6 +195,7 @@ async function recordComboWithArtifactGates({
   ws,
   smoke,
   combo,
+  microphoneId,
   streamTarget = null,
   assertPreviewLiveness = false,
   stress = false,
@@ -209,7 +215,7 @@ async function recordComboWithArtifactGates({
     ws,
     timeoutMs,
     'session.start',
-    sessionParams({ outputDirectoryCapability: capabilityId, combo, streamTarget })
+    sessionParams({ outputDirectoryCapability: capabilityId, combo, streamTarget, microphoneId })
   )
   if (started.state !== 'recording') {
     throw new Error(`session.start state ${started.state}: ${started.message ?? ''}`)
@@ -343,6 +349,10 @@ async function recordComboWithArtifactGates({
   writeReports(quality)
 
   const failures = [...quality.verdict.failures]
+  const microphoneTone = microphoneId
+    ? assessRecordingMatrixTone(await decodeMonoF32(outputPath, { ffmpegPath }))
+    : null
+  if (microphoneTone) failures.push(...microphoneTone.failures)
   if (livenessFailure) {
     failures.push(livenessFailure)
   }
@@ -379,6 +389,7 @@ async function recordComboWithArtifactGates({
     failures,
     warnings: quality.verdict.warnings,
     metrics: quality.metrics,
+    ...(microphoneId ? { microphoneId, microphoneTone } : {}),
     bridgeDiagnostics,
     transientFifoPauseFiredCount,
     transientFifoCleanFfmpegExitCount,
@@ -391,19 +402,29 @@ async function recordComboWithArtifactGates({
   }
 }
 
-async function runPass({
+async function runPass(options) {
+  return withRecordingMatrixAudio({
+    platform: process.platform,
+    ffmpegPath,
+    run: (microphoneId) => runPassWithAudio({ ...options, microphoneId })
+  })
+}
+
+async function runPassWithAudio({
   passLabel,
   combos,
   extraEnv = {},
   assertPreviewLiveness = false,
   requireTransientFifoPressure = false,
   streamTarget = null,
-  requireSharedRecordStream = false
+  requireSharedRecordStream = false,
+  microphoneId
 }) {
   const passResults = []
   let transientFifoPauseFiredCount = 0
   let stopApp = async () => {}
   let listener = null
+  if (microphoneId) console.log(`Recording matrix owned microphone: ${microphoneId}`)
   try {
     if (requireSharedRecordStream && (!streamTarget || combos.length !== 1)) {
       throw new Error('shared record+stream pressure pass requires one combo and one RTMP target')
@@ -435,6 +456,7 @@ async function runPass({
         requestSmokeCommand(smoke, name, params, { timeoutMs: waitMs }),
       request: (method, waitMs) => request(ws, waitMs, method),
       timeoutMs,
+      microphoneId,
       onProgress: (step) => console.log(`[matrix:fixture] ${JSON.stringify(step)}`)
     })
     console.log(`Recording matrix synthetic fixture committed: ${JSON.stringify(fixture)}`)
@@ -464,6 +486,7 @@ async function runPass({
           ws,
           smoke,
           combo,
+          microphoneId,
           streamTarget,
           assertPreviewLiveness,
           stress: combo.stress ?? false,
@@ -515,13 +538,13 @@ async function runPass({
         }
       }
     }
+    return passResults
   } finally {
     if (listener) {
       await stopLocalRtmpListener(listener.proc)
     }
     await stopApp()
   }
-  return passResults
 }
 
 async function waitForEncoderBridgeLifecycleLogs(ws, sessionId) {
