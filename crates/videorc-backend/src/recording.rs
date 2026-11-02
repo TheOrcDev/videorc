@@ -38662,10 +38662,24 @@ mod tests {
         }
     }
 
+    /// Runs the look filter in a real FFmpeg; it skips with a line where
+    /// FFmpeg is not on PATH (the Rust CI jobs).
     #[test]
     fn camera_look_ffmpeg_eq_agrees_with_float_law() {
         use std::io::Write;
         use std::process::{Command, Stdio};
+        let ffmpeg_runs = Command::new(crate::ffmpeg::default_ffmpeg_path())
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !ffmpeg_runs {
+            eprintln!(
+                "camera_look_ffmpeg_eq_agrees_with_float_law: skipped, ffmpeg is not on PATH"
+            );
+            return;
+        }
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
                 .unwrap();
