@@ -15,7 +15,16 @@ import { RetroQuickSettings } from './retro-lcd-studio'
 // hidden, and a refused hide's reason. It is there with or without a screen.
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  // The Chat row under Captions (plan 213 B1), idle.
+  useStudioChat: () => ({
+    liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
+    chatNewCount: 0
+  }),
+  useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
+  useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
+}))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn(), openStudioPanel: vi.fn(), setActive: vi.fn() }),
   WorkspaceNavContext: { Provider: () => null }

@@ -99,7 +99,9 @@ describe('Settings layout', () => {
       pageSource.indexOf('function ConfigGrid'),
       pageSource.indexOf('const CONFIG_GRID_PAIR')
     )
-    expect(configGrid).toContain("'grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r'")
+    expect(configGrid).toContain(
+      "'grid @min-[940px]/page:grid-cols-2 @min-[940px]/page:[&>*:nth-child(odd)]:border-r'"
+    )
     expect(configGrid).not.toMatch(/\bgap-\d/)
   })
 
@@ -179,7 +181,7 @@ describe('Settings layout', () => {
   })
 
   it('pairs multi-section tabs side by side and stacks single-section tabs', () => {
-    // At `lg` the pair fills the visible height with one stretched row, so the
+    // In two columns the pair fills the visible height with one stretched row, so the
     // column hairline runs the full height; stacked, rows keep content height.
     // One pair class for every two-section tab (plan 174 S1.6a, I-33).
     expect(shellSource).toContain('CONFIG_GRID_PAIR')
@@ -202,8 +204,11 @@ describe('Settings layout', () => {
     // Plan 174 S1.6b (A-14): the page says it owns its scroll on its root
     // (PageTabs), so the shell keeps no list of such pages. #956 keys the
     // body by the active page so each page opens at its own scroll top; that
-    // key is allowed, but no scroll prop or other per-page list is.
-    expect(appShellSource).toMatch(/<PaneBody(\s+key=\{active\})?>/)
+    // key is allowed, and so is the page container (plan 213 C3), but no
+    // scroll prop or other per-page list is.
+    expect(appShellSource).toMatch(
+      /<PaneBody(\s+className=\{PAGE_CONTAINER\})?(\s+key=\{active\})?>/
+    )
     expect(appShellSource).not.toMatch(/<PaneBody scroll=/)
     expect(shellSource).toContain('<PageTabs')
     expect(pageTabsSource).toContain('{...PANE_OWNS_SCROLL}')

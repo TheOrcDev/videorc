@@ -230,7 +230,14 @@ function DockedPreviewFrame({
   const hidden = dockHiddenDisplay(previewWindow.dockHiddenReason)
   const status =
     hidden ??
-    previewSupervisorDisplay(true, supervisor, previewSurfaceStatus, undefined, permissionAccess)
+    previewSupervisorDisplay(
+      true,
+      supervisor,
+      previewSurfaceStatus,
+      undefined,
+      permissionAccess,
+      platform
+    )
   const permissionPane = previewPermissionPane(supervisor)
   const footprintRatio = previewFootprintRatio(aspect)
   const slotRatio = previewSlotRatio(aspect)
@@ -539,6 +546,15 @@ export function previewSupervisorDisplay(
         tone: 'normal'
       }
     case 'surface-fallback':
+      // Linux has no native surface, so its CPU path is the preview, not a
+      // fallback (previewFallbackLabel). A broken surface arrives as 'failed'.
+      if (platform === 'linux') {
+        return {
+          title: 'Preview is open in its own window',
+          detail: 'Drag, resize or close it anytime.',
+          tone: 'normal'
+        }
+      }
       // AGENTS.md: a fallback is never silent. The reason stays on the card.
       return {
         title: PREVIEW_FALLBACK_LABEL,

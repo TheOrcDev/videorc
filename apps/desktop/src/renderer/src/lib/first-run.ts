@@ -284,6 +284,21 @@ export interface FirstRunLeave {
   openTab?: WorkspaceTab
 }
 
+/**
+ * The line under "Run setup again…": it names permissions only where setup
+ * has that step, so Linux, which skips it, is not promised one.
+ */
+export function firstRunReplayDescription(platform: string | undefined): string {
+  const [first] = firstRunStepsFor({
+    goal: null,
+    platform,
+    mode: { kind: 'replay', returnTo: 'settings' }
+  })
+  return first === 'permissions'
+    ? 'Go through the welcome steps again, starting with permissions.'
+    : 'Go through the welcome steps again.'
+}
+
 /** Why "Run setup again…" is off (plan 203 D5): setup holds capture back. */
 export const FIRST_RUN_REPLAY_LOCKED_REASON = 'Finish your recording or livestream first.'
 

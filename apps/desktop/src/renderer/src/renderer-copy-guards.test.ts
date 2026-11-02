@@ -239,6 +239,8 @@ const CAPITALIZED_NAMES = new Set([
   'Still',
   'Auto',
   'Check',
+  // Plan 213 J1: "Use Sign in" names the connection choice, "Sign in".
+  'Sign',
   'YouTube',
   'Twitch',
   'Kick',

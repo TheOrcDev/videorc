@@ -59,6 +59,7 @@ import {
 } from '@/lib/studio-session-view'
 import { connectionBlockedReason } from '@/lib/state-labels'
 import { cn } from '@/lib/utils'
+import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /**
  * The session transport (plan 050 S12): status, clock, and Record / Go Live… /
@@ -577,8 +578,13 @@ export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook })
  * surfaces cannot disagree. Dot + label only: this panel is a fact list, not a
  * working surface, so the typing shimmer stays where the work is read. What
  * viewers report through Buddy ("Chat says: no audio · 3 viewers") shows here
- * too (plan 174 S3.2, F-7): a problem the streamer cannot see is news.
+ * too (plan 174 S3.2, F-7): a problem the streamer cannot see is news. A click
+ * opens the Stream Manager, where Buddy works, and its hint and name say so
+ * (plan 213 B2): the Chat row is chat's door, this one is Buddy's.
  */
+/** Where the Buddy row goes (plan 213 B2): its last hint line and the end of its name. */
+export const COHOST_ROW_OPENS = `Open ${WINDOW_NAMES.streamManager}`
+
 export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): ReactElement {
   const { cohostState } = useStudioChat()
   const { openCommentsWindow } = useStudioShell()
@@ -592,25 +598,29 @@ export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): R
   const view = cohostPresenceView(cohostState, nowMs)
   const alerts = activeCohostAlerts(cohostState, nowMs)
   const alertLabels = alerts.map((alert) => cohostAlertLabel(alert))
-  const hintLines = [...alertLabels, ...view.tooltipLines]
+  const hintLines = [...alertLabels, ...view.tooltipLines, COHOST_ROW_OPENS]
 
   return (
     <FactRow
       look={look}
       icon={BuddyIcon}
       label="Buddy"
-      hint={hintLines.length > 0 ? <NavigableRowHintLines lines={hintLines} /> : undefined}
+      hint={<NavigableRowHintLines lines={hintLines} />}
       value={
-        alertLabels.length > 0 ? (
-          <span data-testid="session-buddy-alert">
-            <StatusDot className={dotClassName(look)} label={alertLabels[0]} tone="warn" />
-          </span>
-        ) : (
-          <span className="flex min-w-0 items-center gap-1.5">
-            <CohostPresenceDot view={view} />
-            <span className="truncate">{view.label}</span>
-          </span>
-        )
+        <>
+          {alertLabels.length > 0 ? (
+            <span data-testid="session-buddy-alert">
+              <StatusDot className={dotClassName(look)} label={alertLabels[0]} tone="warn" />
+            </span>
+          ) : (
+            <span className="flex min-w-0 items-center gap-1.5">
+              <CohostPresenceDot view={view} />
+              <span className="truncate">{view.label}</span>
+            </span>
+          )}
+          {/* The row's name says where it goes, not only its tooltip. */}
+          <span className="sr-only">{`. ${COHOST_ROW_OPENS}`}</span>
+        </>
       }
       onNavigate={() => void openCommentsWindow()}
     />

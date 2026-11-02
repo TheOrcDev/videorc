@@ -45,6 +45,24 @@ describe('Stream Manager status bar', () => {
     // One chat vocabulary (plan 174 H-13): never "off" or "receive-only".
     expect(providerCapabilityLabel(provider({ state: 'unsupported' }))).toBe('unavailable')
     expect(providerCapabilityLabel(provider({ write: 'unavailable' }))).toBe('read-only')
+    // Plan 213 J1: a stream key's chat needs Sign in, the choice's own name,
+    // with the reason in the hover text.
+    const streamKeyX = provider({
+      id: 'x:x',
+      platform: 'x',
+      targetId: 'x',
+      state: 'unsupported',
+      read: 'needs-sign-in',
+      write: 'unavailable',
+      message:
+        'X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to.'
+    })
+    expect(providerCapabilityLabel(streamKeyX)).toBe('needs Sign in')
+    expect(providerCapabilityTitle(streamKeyX, null).split('\n')).toEqual([
+      'X chat: needs Sign in',
+      streamKeyX.message
+    ])
+    expect(providerProblem(streamKeyX)).toBe('')
     // The words still live in the hover text.
     expect(providerCapabilityTitle(provider(), null).split('\n')[0]).toBe(
       'Twitch chat: reads and sends'

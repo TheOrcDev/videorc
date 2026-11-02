@@ -8,7 +8,8 @@
   - C: pages that fit a small window or display.
   - D: Stick to app draws inside the main window, and a floating Preview
     stops fighting a tiling window manager.
-  - E: a missing screen or camera never rewrites your choice.
+  - E: a missing screen or camera never rewrites your choice (implemented;
+    draft PR, physical camera/display checks owed).
   - F: real display names, hot-plug, and resolution changes.
   - G: screen crop and Fill.
   - H: Continuity Camera disconnects and returns cleanly.

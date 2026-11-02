@@ -64,6 +64,39 @@ describe('SourceItem (plan 173)', () => {
     expect(render()).not.toContain('data-testid="source-item-more"')
   })
 
+  // Plan 213 A3: only the 24 px chevron opened More. Its button now stretches
+  // over the header row; the control sits above it, the tag and chip under.
+  it('opens More from the whole header row, with the control kept clickable', () => {
+    const markup = render({
+      tag: createElement('span', { 'data-test-tag': '' }, 'Sync +150 ms'),
+      status: { label: 'Muted', tone: 'neutral' },
+      control: createElement('button', { 'data-test-control': '' }),
+      more: createElement('div', null, 'rare')
+    })
+    const rowClass = markup.match(/data-slot="list-row" class="([^"]*)"/)?.[1]?.split(' ')
+    expect(rowClass).toEqual(expect.arrayContaining(['relative', 'hover:bg-accent']))
+    const triggerClass = markup
+      .match(/<button[^>]*aria-label="More Microphone settings"[^>]*class="([^"]*)"/)?.[1]
+      ?.split(' ')
+    expect(triggerClass).toEqual(
+      expect.arrayContaining(['static', 'after:absolute', 'after:inset-0'])
+    )
+    expect(markup).toMatch(
+      /<span class="relative [^"]*" data-slot="source-item-control"><button data-test-control=""/
+    )
+    // Decorations are never positioned: a click on them opens More.
+    expect(markup).not.toMatch(/class="relative[^"]*"[^>]*>(<[^>]*>)*Sync \+150 ms/)
+    expect(markup).not.toMatch(/class="relative[^"]*" data-slot="source-status"/)
+  })
+
+  it('stays a plain row without More: no hover, nothing stretched', () => {
+    const markup = render({ control: createElement('button', { 'data-test-control': '' }) })
+    const rowClass = markup.match(/data-slot="list-row" class="([^"]*)"/)?.[1]?.split(' ')
+    expect(rowClass).not.toContain('relative')
+    expect(rowClass).not.toContain('hover:bg-accent')
+    expect(markup).not.toContain('after:inset-0')
+  })
+
   it('renders More when opened, linked to its chevron', () => {
     const open = render({
       defaultMoreOpen: true,

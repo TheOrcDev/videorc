@@ -868,7 +868,13 @@ themes.
 - B: not started.
 - C: not started.
 - D: not started.
-- E: not started.
+- E: implemented in three slices (draft PR, plan 213 E). Wanted camera,
+  screen and window choices survive substitutes in settings and saved scenes.
+  AVFoundation notifications and CoreGraphics reconfiguration feed a 500 ms
+  trailing debounce and the existing `devices.changed` DeviceList event. Idle
+  discovery restores the choice; active sessions offer "Use it". Camera starts
+  wait for discovery and do not repeat a failed start on unrelated changes.
+  Physical camera/display reconnect acceptance is still owed.
 - F: not started.
 - G: not started.
 - H: not started.

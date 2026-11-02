@@ -75,8 +75,10 @@ describe('Electron IPC contract', () => {
     // 153: plan 209 S22 adds agents:add-to-app ("Add to …" in Connect).
     // 155: plan 210 S9 adds foreground window watch and self bundle ids.
     // 156: plan 210 S5 adds app icons for New scene… (S4 fills main's side).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(156)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(156)
+    // 157: plan 213 J1 adds comments-window:open-destination ("Use Sign in"
+    // opens the destination in the main window).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(157)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(157)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -428,6 +430,33 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeResult('comments-window:reconnect-scopes', true)).toBe(true)
     expect(() =>
       validateElectronInvokeResult('comments-window:reconnect-scopes', 'opened')
+    ).toThrow()
+  })
+
+  it('lets the Stream Manager name one destination to open, nothing else (plan 213 J1)', () => {
+    const command = { requestId: 'open-1', targetId: 'x-manual' }
+    expect(validateElectronInvokeArgs('comments-window:open-destination', [command])).toEqual([
+      command
+    ])
+    for (const forged of [
+      { requestId: 'r', targetId: '' },
+      { requestId: 'r', targetId: 'x'.repeat(129) },
+      { requestId: '', targetId: 'x-manual' },
+      { targetId: 'x-manual' },
+      { requestId: 'r', targetId: 'x-manual', authMode: 'oauth' },
+      'x-manual',
+      null
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:open-destination', [forged])
+      ).toThrow()
+    }
+    expect(validateElectronInvokeResult('comments-window:open-destination', true)).toBe(true)
+    expect(validateElectronEventPayload('livestream:open-destination', { targetId: 'x' })).toEqual({
+      targetId: 'x'
+    })
+    expect(() =>
+      validateElectronEventPayload('livestream:open-destination', { targetId: 'x', view: 'setup' })
     ).toThrow()
   })
 

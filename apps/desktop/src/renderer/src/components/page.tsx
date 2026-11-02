@@ -10,12 +10,15 @@ import { cn } from '@/lib/utils'
  *   Stage        the Studio: the preview pane leads. Bespoke.
  *   Bench        Scene: a flush stage pane beside the inspector. Bespoke.
  *   Config grid  Sources, Livestream, Output, Settings: flush sections in
- *                <ConfigGrid>, one column, two at `lg`, split by hairlines.
+ *                <ConfigGrid>, one column, two from 940 px of page, split
+ *                by hairlines.
  *   Gallery      Assets, Screens: picture cards in <Gallery>.
  *   Browse       Library: a flush list or table in the pane body.
  *   Inspect      Health: dense sections of metric rows. Bespoke.
  *
- * `lg` is the one layout breakpoint. Inner form sub-grids use `sm` and `md`.
+ * Page layouts follow the page's own width, never the window's: the shell's
+ * pane body is `@container/page`, and 940 px of it is the one layout
+ * breakpoint. Inner form sub-grids use `sm` and `md`.
  */
 
 interface PageHeaderProps {
@@ -54,7 +57,8 @@ function PageHeader({
 }
 
 /**
- * The config grid: flush sections in one column, two at `lg`, with a hairline
+ * The config grid: flush sections in one column, two from 940 px of page (the
+ * `@container/page` around it, never the viewport), with a hairline
  * between the columns. Grid rows stretch, which is harmless because sections
  * are flush: a short section simply leaves pane background below it.
  */
@@ -67,7 +71,10 @@ function ConfigGrid({
 }): ReactElement {
   return (
     <div
-      className={cn('grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r', className)}
+      className={cn(
+        'grid @min-[940px]/page:grid-cols-2 @min-[940px]/page:[&>*:nth-child(odd)]:border-r',
+        className
+      )}
       data-slot="config-grid"
     >
       {children}
@@ -76,11 +83,12 @@ function ConfigGrid({
 }
 
 /**
- * A config grid of exactly two sections that fills the visible height at
- * `lg`, so the column hairline runs the full height however short the tab
+ * A config grid of exactly two sections that fills the visible height in two
+ * columns, so the column hairline runs the full height however short the tab
  * is. Stacked, the rows keep their content height.
  */
-const CONFIG_GRID_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
+const CONFIG_GRID_PAIR =
+  'flex-1 content-start @min-[940px]/page:content-stretch @min-[940px]/page:[&>*]:border-b-0'
 
 /** The gallery's tracks: 180 px cards, 10 rem when dense, five a row at most. */
 function galleryColumns(dense: boolean, rowsOfFive: boolean): string {

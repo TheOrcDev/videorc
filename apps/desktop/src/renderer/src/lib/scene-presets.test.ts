@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { defaultCaptureConfig, reconcileSourceSelection } from './capture'
 import {
+  visualSources,
+  usingVisualSources,
   hydrateSceneLibrary,
   hydrateWorkingScene,
   normalizeSavedBackground,
@@ -593,4 +595,44 @@ describe('saved scenes keep the microphone and system audio (owner, 2026-10-27)'
     expect(sceneMicrophone(audio({ microphoneId: 'mic:gone' }), microphones)).toBeNull()
     expect(sceneMicrophone(audio({}), microphones)).toBeNull()
   })
+})
+
+it('saves the wanted sources in a scene, never the substitutes', () => {
+  expect(
+    visualSources({
+      cameraId: 'stand-in',
+      cameraName: 'Built-in',
+      wantedCameraId: 'iphone',
+      wantedCameraName: 'iPhone',
+      screenId: 'substitute',
+      wantedWindowId: 'keynote',
+      wantedWindowName: 'Keynote'
+    })
+  ).toMatchObject({
+    cameraId: 'iphone',
+    cameraName: 'iPhone',
+    screenId: undefined,
+    windowId: 'keynote'
+  })
+})
+
+it('keeps built-in layouts available with a substitute without saving it', () => {
+  const devices = [
+    {
+      id: 'screen:screencapturekit:1',
+      name: 'Display',
+      kind: 'screen' as const,
+      status: 'available' as const
+    },
+    { id: 'builtin', name: 'Built-in', kind: 'camera' as const, status: 'available' as const }
+  ]
+  const sources = reconcileSourceSelection(
+    { screenId: devices[0].id, cameraId: 'iphone', cameraName: 'iPhone' },
+    devices
+  )
+  const layout = { ...defaultCaptureConfig.layout, layoutPreset: 'camera-only' as const }
+  expect(
+    sceneSourceGaps({ layout, sources: usingVisualSources(sources), background: null }, devices)
+  ).toEqual([])
+  expect(visualSources(sources).cameraId).toBe('iphone')
 })

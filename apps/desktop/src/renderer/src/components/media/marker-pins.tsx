@@ -85,8 +85,13 @@ export function MarkerPins({
   )
 }
 
-/** The 24 px hit area, centred on the pin's time. */
-const PIN_CLASS = 'pointer-events-auto absolute top-1/2 -translate-x-1/2 -translate-y-1/2'
+/**
+ * The 24 px hit area, centred on the pin's time. Pins closer than that merge,
+ * so two can touch: no compact-button spill (plan 213 A4), or one would take
+ * its neighbour's clicks.
+ */
+const PIN_CLASS =
+  'pointer-events-auto absolute top-1/2 -translate-x-1/2 -translate-y-1/2 before:hidden'
 
 /** The 2 px tick a pin draws; a chooser's is twice as wide. */
 function PinTick({ several = false }: { several?: boolean }): ReactElement {

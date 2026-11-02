@@ -1136,6 +1136,51 @@
   .typing-dot-fast {
     animation-duration: 0.75s;
   }
+
+  /* The compact controls take a click across at least 28 × 28 px through an
+     invisible spill, so nothing you can see grows (plan 213 A4). The
+     primitives are synced from @videorc, so this keys on what they already
+     write: Button and ToggleGroupItem carry data-variant and data-size, which
+     survive a Tooltip or menu trigger taking their data-slot. A link sits in
+     running text and keeps its own box. In this layer a call site's own
+     position wins; one whose spill would reach a neighbour opts out with
+     before:hidden. */
+  :is(button, a)[data-variant]:is([data-size='xs'], [data-size='icon-xs']):not(
+      [data-variant='link']
+    ) {
+    position: relative;
+    &::before {
+      content: '';
+      position: absolute;
+      /* Each side spills half of what the box lacks of 28 px, never less than
+         nothing: an icon-xs button 2 px all round, an xs one 2 px above and
+         below. */
+      inset: min(0px, calc((100% - 28px) / 2));
+    }
+  }
+
+  /* A button in an input group sits against its field: it spills only up
+     and down, to the group's own 28 px edge, never into the field. */
+  [data-slot='input-group-addon']
+    :is(button, a)[data-variant]:is([data-size='xs'], [data-size='icon-xs'])::before {
+    inset-inline: 0;
+  }
+
+  /* The status bar's actions sit side by side with no gap, so they spill
+     only up and down: to the main bar's full 26 px, and to 28 px in the
+     Stream Manager's 32 px bar. */
+  :is([data-slot='status-bar-hint'], [data-slot='status-bar-action']) {
+    position: relative;
+    &::before {
+      content: '';
+      position: absolute;
+      inset: -3px 0;
+    }
+  }
+  [data-slot='stream-manager-actions']
+    :is([data-slot='status-bar-hint'], [data-slot='status-bar-action'])::before {
+    inset-block: -4px;
+  }
 }
 
 @keyframes typing-dot-shimmer {

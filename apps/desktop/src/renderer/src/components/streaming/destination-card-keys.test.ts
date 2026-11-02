@@ -127,6 +127,46 @@ describe('destination row anatomy', () => {
     expect(markup).not.toContain('Quality override')
   })
 
+  // Plan 213 A1: a click near the switch toggled it, and the chevron did
+  // nothing. Only the switch sits above the row's stretched button now.
+  it('opens from anywhere but the switch: the chevron and the gap fall through to the row', () => {
+    const markup = renderToStaticMarkup(
+      createElement(DestinationCard, props({ target: target('twitch'), expanded: false }) as never)
+    )
+    const controls = markup.match(/<span class="([^"]*)" data-slot="destination-controls"/)?.[1]
+    expect(controls).toBeDefined()
+    expect(controls?.split(' ')).not.toContain('relative')
+    expect(controls?.split(' ')).toContain('gap-3')
+    const switchClass = markup.match(/<span[^>]*data-slot="switch"[^>]*class="([^"]*)"/)?.[1]
+    // The spill toward the chevron is trimmed; a disabled switch takes no click.
+    expect(switchClass?.split(' ')).toEqual(
+      expect.arrayContaining(['relative', 'after:-right-1', 'data-disabled:pointer-events-none'])
+    )
+    expect(markup).toMatch(
+      /<svg[^>]*aria-hidden="true"[^>]*class="[^"]*pointer-events-none[^"]*"[^>]*data-testid="destination-chevron"/
+    )
+  })
+
+  it('says why the switch is locked when the row opens', () => {
+    const reason = 'You can stream to 3 destinations at once.'
+    const markup = renderToStaticMarkup(
+      createElement(
+        DestinationCard,
+        props({
+          target: target('twitch', { enabled: false }),
+          enableGate: { allowed: false, featureId: 'livestreaming', reason }
+        }) as never
+      )
+    )
+    expect(markup).toMatch(/role="switch"[^>]*aria-disabled="true"[^>]*aria-label="Enable Twitch"/)
+    expect(markup).toContain(`data-slot="destination-lock-reason">${reason}<`)
+    expect(
+      renderToStaticMarkup(
+        createElement(DestinationCard, props({ target: target('twitch') }) as never)
+      )
+    ).not.toContain('destination-lock-reason')
+  })
+
   it('tags a horizontal row with its own quality too, and none without one', () => {
     expect(destinationQualityTag({ outputPreset: 'stream-safe-1080p30' })).toBe('1080p · 30 fps')
     expect(destinationQualityTag({})).toBeNull()

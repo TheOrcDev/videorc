@@ -163,10 +163,12 @@ type ChatProviderInput = Pick<LiveChatProviderState, 'state' | 'read' | 'write' 
  * One platform's chat in a word or two, in the Stream Manager's status bar
  * and its destination badges (H-13): the connection first, then what chat
  * can't do. "Read-only" (never "receive-only"), "Reconnect to send", "Off"
- * when chat is turned off and "Unavailable" when the platform has none for
- * this stream (never "Idle").
+ * when chat is turned off, "Needs Sign in" when a stream key can't bring chat
+ * (plan 213 J1) and "Unavailable" when the platform has none for this stream
+ * (never "Idle").
  */
 export function chatStateLabel(provider: ChatProviderInput): string {
+  if (provider.read === 'needs-sign-in') return 'Needs Sign in'
   switch (provider.state) {
     case 'failed':
       return 'Failed'

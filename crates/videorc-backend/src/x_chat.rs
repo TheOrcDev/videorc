@@ -185,7 +185,7 @@ pub fn x_chat_message(has_x_account: bool) -> &'static str {
     if has_x_account {
         "X live chat can be read and sent for native X broadcasts."
     } else {
-        "Connect or configure X native live before using X chat."
+        crate::live_chat::X_SIGN_IN_FOR_CHAT
     }
 }
 

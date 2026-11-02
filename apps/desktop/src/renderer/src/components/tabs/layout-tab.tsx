@@ -92,6 +92,7 @@ import {
   overlaySnapRect
 } from '@/lib/overlay-layout'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
+import { PAGE_LEAD_COLUMN, SCENE_GRID } from '@/lib/page-layout'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
 
@@ -581,8 +582,8 @@ export function LayoutTab(): ReactElement {
     <div className="flex flex-col">
       {/* Plan 210 D6: the scene list leads the page. */}
       <SceneList />
-      <div className="grid lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
-        <div className="flex min-w-0 flex-col lg:border-r">
+      <div className={SCENE_GRID}>
+        <div className={PAGE_LEAD_COLUMN}>
           <PanelSection
             action={
               // The canvas is fixed at session start, so the orientation is

@@ -5713,7 +5713,9 @@ mod linux {
     use crate::linux_portal_capture::{
         PortalCaptureState, RestoreTokenStore, parse_portal_source_id, portal_environment_available,
     };
-    use crate::linux_portal_session::{PortalStart, portal_runtime, start_portal_session};
+    use crate::linux_portal_session::{
+        PortalStart, portal_runtime, restore_token_refused, start_portal_session,
+    };
 
     pub fn run_native_screen_preview(
         config: NativeScreenPreviewConfig,
@@ -5767,12 +5769,7 @@ mod linux {
         ));
         // A refused token (revoked elsewhere, another session) shows the
         // picker once instead of failing forever.
-        if saved_token.is_some()
-            && matches!(
-                outcome,
-                PortalStart::Denied(PortalCaptureState::MissingSource { .. })
-            )
-        {
+        if saved_token.is_some() && restore_token_refused(&outcome) {
             let _ = store.forget(&config.source_id);
             let _ = startup_tx.send(NativeScreenStartup::AwaitingConsent);
             outcome = runtime.block_on(start_portal_session(
@@ -5792,7 +5789,7 @@ mod linux {
                 ));
                 return;
             }
-            PortalStart::Denied(state) => {
+            PortalStart::Denied(state) | PortalStart::Unavailable(state) => {
                 let message = state.message();
                 tracing::warn!(%message, "portal screen capture: not shared");
                 let _ = startup_tx.send(match state.lifecycle_status() {

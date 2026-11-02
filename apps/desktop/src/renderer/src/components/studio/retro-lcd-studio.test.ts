@@ -16,7 +16,16 @@ import { SystemAudioIdleLine, type SystemAudioRowProps } from './audio-section'
 import { RetroAudioSectionView, RetroQuickSettings, RetroTakeoverSection } from './retro-lcd-studio'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  // The Chat row under Captions (plan 213 B1), idle.
+  useStudioChat: () => ({
+    liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
+    chatNewCount: 0
+  }),
+  useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
+  useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
+}))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn(), openStudioPanel: vi.fn(), setActive: vi.fn() }),
   WorkspaceNavContext: { Provider: () => null }
@@ -292,6 +301,9 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     // Captions: under no heading, a door to its page (B-13, B-15).
     expect(captions).not.toContain('<h2')
     expect(captions).toMatch(/data-slot="lcd-panel-nav-row"[^>]*>[\s\S]*?>Captions</)
+    // Chat's door shares the Captions screen, right under it (plan 213 B1).
+    expect(captions).toMatch(/>Captions<[\s\S]*data-slot="lcd-panel-nav-row"[^>]*>[\s\S]*?>Chat</)
+    expect(captions).toContain('Stream Manager · <span')
   })
 
   it('switches takeovers from rows that say On or Off, and says what a click does', () => {

@@ -21,6 +21,8 @@ import {
   nativePreviewProofWatchdogEnabled,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
+  proofSourceLiveReason,
+  proofSourceStalledReason,
   proofWatchdogRendererReadAllowed,
   WatchdogTickOwnership,
   type FirstFrameSnapshot,
@@ -320,6 +322,22 @@ describe('proofPresentationFallbackReason', () => {
         pendingElapsedMs: 200
       })
     ).toBe(
+      'Windows preview source frames have not advanced for 1501ms; keeping the last good frame while polling retries.'
+    )
+  })
+})
+
+describe('proof source frame status copy', () => {
+  it('names Linux on Linux, where the Preview window shows it', () => {
+    expect(proofSourceLiveReason('linux')).toBe('Linux preview pixels are live.')
+    expect(proofSourceStalledReason('linux', 1_513)).toBe(
+      'Linux preview source frames have not advanced for 1513ms; keeping the last good frame while polling retries.'
+    )
+  })
+
+  it('keeps the Windows copy on Windows', () => {
+    expect(proofSourceLiveReason('win32')).toBe('Windows preview pixels are live.')
+    expect(proofSourceStalledReason('win32', 1_501)).toBe(
       'Windows preview source frames have not advanced for 1501ms; keeping the last good frame while polling retries.'
     )
   })

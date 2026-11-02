@@ -112,6 +112,8 @@ export async function reconcileWorkingSceneSources(
           cameraId: reconciled.cameraId,
           cameraName: reconciled.cameraName,
           cameraOff: reconciled.cameraOff,
+          wantedCameraId: reconciled.wantedCameraId,
+          wantedCameraName: reconciled.wantedCameraName,
           microphoneId: reconciled.microphoneId,
           microphoneName: reconciled.microphoneName,
           microphoneOff: reconciled.microphoneOff

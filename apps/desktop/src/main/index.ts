@@ -497,6 +497,8 @@ import {
   previewHoldHandback,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
+  proofSourceLiveReason,
+  proofSourceStalledReason,
   proofWatchdogRendererReadAllowed,
   WatchdogTickOwnership,
   type FirstFrameLedger,
@@ -7749,13 +7751,13 @@ async function presentNativePreviewSurfaceCompositor(
   })
   if (proofSourceAssessment === 'met') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'met') {
-      setFirstFrameStatus('met', 'Windows preview pixels are live.')
+      setFirstFrameStatus('met', proofSourceLiveReason(process.platform))
       updatePreviewWindowWaitDetail(null)
       logBackend('info', '[proof-preview] source frame delivery is live')
     }
   } else if (proofSourceAssessment === 'stalled') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
-      const reason = `Windows preview source frames have not advanced for ${Math.round(sourceFrameAgeMs ?? 0)}ms; keeping the last good frame while polling retries.`
+      const reason = proofSourceStalledReason(process.platform, sourceFrameAgeMs ?? 0)
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
@@ -16660,6 +16662,30 @@ app.whenReady().then(async () => {
         throw new Error('Opening a Buddy tab requires its id.')
       }
       sendBuddyNavigation({ openCreator: false, tab })
+      return true
+    }
+  )
+  // Plan 213 J1: "Use Sign in" on a stream-key X destination's chat row opens
+  // that destination in Livestream → Setup. Main shows the window; the shell
+  // opens the card, and drops an id that is not a saved destination.
+  secureIpcHandle(
+    'comments-window:open-destination',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can open a destination.')
+      }
+      commentsCommandRequestId(value)
+      const targetId = (value as { targetId?: unknown }).targetId
+      if (typeof targetId !== 'string' || !targetId.trim()) {
+        throw new Error('Opening a destination requires its id.')
+      }
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        return false
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'livestream:open-destination', { targetId })
       return true
     }
   )

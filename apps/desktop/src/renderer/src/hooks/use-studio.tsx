@@ -1,3 +1,9 @@
+import {
+  cameraIsAvailable,
+  cameraPreviewStartAllowed,
+  returningSourceChoices,
+  sourceReturnAction
+} from '@/lib/source-return'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 import {
@@ -51,6 +57,7 @@ import {
   WORKING_SCENE_KEY,
   normalizeSceneVisual,
   visualSources,
+  usingVisualSources,
   snapshotBackground,
   resolveSavedBackground,
   sameSceneAudio,
@@ -179,6 +186,7 @@ import {
   auxiliaryStreamOutputVideoSettings,
   bridgeStreamingToLegacy,
   buildCameraSources,
+  buildCaptureSources,
   areEnabledStreamTargetsStartReady,
   coerceVideoToOrientation,
   defaultSettings,
@@ -613,6 +621,7 @@ import {
 } from '@/lib/background-assets'
 import type { LiveBackgroundId } from '../../../shared/live-background-ids'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
+import { useChatNewCount } from '@/hooks/use-chat-new-count'
 import { findDevice, isActiveRecordingState, mergeStreamHealth, plural } from '@/lib/format'
 import { REMOTE_SOUND_STALE_MESSAGE, createRemoteIntentQueue } from '@/lib/remote-intent-queue'
 import {
@@ -739,6 +748,9 @@ const BUDDY_LIBRARY_FOCUS_SYNC_MS = 60_000
 // keeps the post-capture replay from racing Main into a second deferral.
 const ACCOUNT_REFRESH_IDLE_REPLAY_DELAY_MS = 1_000
 const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
+// The engine dropped this window's socket but may still be running: how long
+// to wait before each quiet check that it still answers.
+const ENGINE_RECONNECT_DELAY_MS = 2_000
 /// Scene-motion duration: content motion on-air sits just above the UI's
 /// 100-150ms tier; >=500ms reads as a broadcast wipe.
 const SCENE_TRANSITION_MS = 320
@@ -1790,6 +1802,8 @@ interface StudioDiagnosticsContextValue {
 
 interface StudioChatContextValue {
   liveChatSnapshot: LiveChatSnapshot
+  /** Chat messages since the Stream Manager last showed (plan 213 B1): the Studio's Chat row. */
+  chatNewCount: number
   /** Latest `cohost.state`; null until the engine reports for the first time. */
   cohostState: CohostState | null
 }
@@ -7196,6 +7210,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     const nextClient = new BackendClient(connection)
     const platformBootstrapClient = new BackendClient(connection)
+    let engineReconnectTimer: number | null = null
+    // The engine closes a socket whose replies sat unread too long (a renderer
+    // stalled by a busy machine) and keeps running. Main only pushes a
+    // connection when the engine (re)starts, so nothing else would bring this
+    // window back. While Main still reports this engine, ping it quietly on a
+    // fresh socket; once it answers, a fresh connection object re-runs this
+    // effect as a restart would. An engine stopping for a restart fails the
+    // ping, and its successor arrives through onBackendConnection.
+    const reconnectAfterEngineDrop = (): void => {
+      if (disposed || engineReconnectTimer !== null) return
+      engineReconnectTimer = window.setTimeout(() => {
+        engineReconnectTimer = null
+        void (async () => {
+          const current = await window.videorc.getBackendConnection()
+          if (
+            disposed ||
+            !current ||
+            current.host !== connection.host ||
+            current.port !== connection.port ||
+            current.token !== connection.token
+          ) {
+            return
+          }
+          const probe = new BackendClient(current)
+          try {
+            await probe.connect()
+            await probe.request<BackendHealth>('health.ping')
+          } finally {
+            probe.close()
+          }
+          if (!disposed) setConnection({ ...current })
+        })().catch(() => reconnectAfterEngineDrop())
+      }, ENGINE_RECONNECT_DELAY_MS)
+    }
     const bootstrapRequest = <TPayload,>(method: string, params?: unknown): Promise<TPayload> =>
       nextClient.request<TPayload>(method, params, { signal: bootstrapAbort.signal })
     const bootstrapGuard = new StudioBootstrapGuard()
@@ -8425,6 +8473,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('connection.closed', () => {
         soundboard.disconnect(nextClient)
         setWsStatus('closed')
+        reconnectAfterEngineDrop()
       })
     ]
 
@@ -8870,6 +8919,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (liveChatRecoveryRetryTimer !== null) {
         window.clearTimeout(liveChatRecoveryRetryTimer)
         liveChatRecoveryRetryTimer = null
+      }
+      if (engineReconnectTimer !== null) {
+        window.clearTimeout(engineReconnectTimer)
+        engineReconnectTimer = null
       }
       platformBootstrapClient.close()
       nativePreviewCompositorPendingRef.current = null
@@ -10009,7 +10062,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             options?.sourcesOverride ??
             reconcileSourceSelectionForLayoutTransaction(
               requestedConfig.sources,
-              deviceListRef.current.devices
+              deviceListRef.current.devices,
+              // Plan 213 D6: a stand-in never gives way mid-session without a
+              // click, not even on a scene switch.
+              { holdStandIns: sessionOwnsTransport(recordingRef.current) }
             )
           const requestedBackground =
             options && 'backgroundOverride' in options
@@ -10023,7 +10079,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             ? (savedSceneApplyChunk ?? (await loadSavedSceneApply())).runSavedScenePreflight({
                 visual: {
                   layout,
-                  sources: { ...visualSources(requestedSources), app: undefined },
+                  sources: { ...usingVisualSources(requestedSources), app: undefined },
                   background: snapshotBackground(requestedBackground)
                 },
                 sceneApp: options.sceneApp,
@@ -10389,7 +10445,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const issues = sceneSourceProblems(
           {
             layout: { ...current.layout, layoutPreset: nextPreset, arrangementMode: 'preset' },
-            sources: visualSources(current.sources),
+            sources: usingVisualSources(current.sources),
             background: null
           },
           deviceListRef.current.devices
@@ -11015,18 +11071,43 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Plan 080 S4: the backend confirms only the device; the Off intent
         // is renderer state, so it must be recorded here to outlive the
         // session's end (reconcile would otherwise fill in the first camera).
+        // Plan 213 E1: a pick ends the wish a stand-in was holding, the same way.
         setCaptureConfig((current) =>
-          current.sources.cameraOff === sources.cameraOff
+          current.sources.cameraOff === sources.cameraOff &&
+          current.sources.wantedCameraId === sources.wantedCameraId &&
+          current.sources.wantedCameraName === sources.wantedCameraName
             ? current
-            : { ...current, sources: { ...current.sources, cameraOff: sources.cameraOff } }
+            : {
+                ...current,
+                sources: {
+                  ...current.sources,
+                  cameraOff: sources.cameraOff,
+                  wantedCameraId: sources.wantedCameraId,
+                  wantedCameraName: sources.wantedCameraName
+                }
+              }
         )
       }
       if (sourceKind === 'capture') {
         // Plan 0002 (release test 146): the same for a screen set to None.
         setCaptureConfig((current) =>
-          current.sources.captureOff === sources.captureOff
+          current.sources.captureOff === sources.captureOff &&
+          current.sources.wantedScreenId === sources.wantedScreenId &&
+          current.sources.wantedScreenName === sources.wantedScreenName &&
+          current.sources.wantedWindowId === sources.wantedWindowId &&
+          current.sources.wantedWindowName === sources.wantedWindowName
             ? current
-            : { ...current, sources: { ...current.sources, captureOff: sources.captureOff } }
+            : {
+                ...current,
+                sources: {
+                  ...current.sources,
+                  captureOff: sources.captureOff,
+                  wantedScreenId: sources.wantedScreenId,
+                  wantedScreenName: sources.wantedScreenName,
+                  wantedWindowId: sources.wantedWindowId,
+                  wantedWindowName: sources.wantedWindowName
+                }
+              }
         )
       }
       if (sourceKind === 'microphone') {
@@ -11061,6 +11142,72 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       persistWorkingVisual
     ]
   )
+
+  const announcedSourceReturnsRef = useRef(new Set<string>())
+  useEffect(() => {
+    const sources = captureConfigRef.current.sources
+    // A missing camera may be retried only after discovery finds it again.
+    if (!cameraIsAvailable(sources.cameraId, deviceList.devices)) {
+      nativePreviewCameraKeyRef.current = null
+    }
+    const returns =
+      sourceStatusKnown &&
+      !startRequestPending &&
+      !stopRequestPending &&
+      isActiveRecordingState(recording.state)
+        ? returningSourceChoices(sources, deviceList.devices)
+        : []
+    const keys = new Set(returns.map(({ kind, device }) => `${kind}:${device.id}`))
+    for (const old of announcedSourceReturnsRef.current) {
+      if (!keys.has(old)) toast.dismiss(`source-return:${old}`)
+    }
+    for (const { kind, device } of returns) {
+      const key = `${kind}:${device.id}`
+      if (announcedSourceReturnsRef.current.has(key)) continue
+      const applyDevice = () => {
+        const current = captureConfigRef.current.sources
+        if (
+          !returningSourceChoices(current, deviceListRef.current.devices).some(
+            (choice) => choice.kind === kind && choice.device.id === device.id
+          )
+        )
+          return
+        const next =
+          kind === 'camera'
+            ? buildCameraSources(current, deviceListRef.current.devices, device.id)
+            : buildCaptureSources(current, deviceListRef.current.devices, device.id)
+        void switchSourceDeviceLive(kind, next).catch((error) => toastUserError(error))
+      }
+      const action = sourceReturnAction(
+        { state: recording.state, replayOnly: recording.replayOnly },
+        Boolean(sourceSwitchReason(kind))
+      )
+      if (action === 'wait') {
+        keys.delete(key)
+        continue
+      }
+      if (action === 'restore') {
+        applyDevice()
+        continue
+      }
+      toast(`${device.name} is back`, {
+        id: `source-return:${key}`,
+        duration: Infinity,
+        action: { label: 'Use it', onClick: applyDevice }
+      })
+    }
+    announcedSourceReturnsRef.current = keys
+  }, [
+    captureConfig.sources,
+    deviceList,
+    recording.state,
+    recording.replayOnly,
+    sourceStatusKnown,
+    startRequestPending,
+    stopRequestPending,
+    sourceSwitchReason,
+    switchSourceDeviceLive
+  ])
 
   const ensureNativePreviewCamera = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
@@ -11106,20 +11253,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     const current = previewCameraStatusRef.current
     if (
-      nativePreviewCameraKeyRef.current === key &&
-      current.cameraId === cameraId &&
-      (current.state === 'starting' || current.state === 'live')
-    ) {
+      !cameraPreviewStartAllowed(
+        cameraId,
+        deviceListRef.current.devices,
+        key,
+        nativePreviewCameraKeyRef.current,
+        current.state
+      )
+    )
       return current
-    }
 
     const status = await client.request<PreviewCameraStatus>('preview.camera.start', {
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       video: captureConfig.video
     })
-    nativePreviewCameraKeyRef.current =
-      status.state === 'failed' || status.state === 'device-missing' ? null : key
+    nativePreviewCameraKeyRef.current = key
     applyPreviewCameraStatus(status)
     if (status.state === 'permission-needed') {
       const permissionReport = window.videorc?.reportPreviewPermissionRequired?.(
@@ -13902,7 +14051,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       const config = captureConfigForIntent(captureConfig, intent)
       const turnedOff = sceneSourcesTurnedOff(
-        { layout: config.layout, sources: visualSources(config.sources), background: null },
+        { layout: config.layout, sources: usingVisualSources(config.sources), background: null },
         deviceList.devices
       )
       // Plan 210 D1: a scene made for an app whose window isn't there holds
@@ -17925,7 +18074,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sceneSourceProblems(
               {
                 layout: { ...current.layout, layoutPreset: id, arrangementMode: 'preset' },
-                sources: visualSources(current.sources),
+                sources: usingVisualSources(current.sources),
                 background: null
               },
               deviceListRef.current.devices
@@ -18093,9 +18242,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamHealth
     ]
   )
+  const chatNewCount = useChatNewCount(
+    liveChatSnapshot,
+    commentsWindow.open && commentsWindow.visible
+  )
   const chatValue = useMemo<StudioChatContextValue>(
-    () => ({ cohostState, liveChatSnapshot }),
-    [cohostState, liveChatSnapshot]
+    () => ({ chatNewCount, cohostState, liveChatSnapshot }),
+    [chatNewCount, cohostState, liveChatSnapshot]
   )
   const audioValue = useMemo<StudioAudioContextValue>(
     () => ({ audioMeter, audioMeterLoading, meterLevel }),

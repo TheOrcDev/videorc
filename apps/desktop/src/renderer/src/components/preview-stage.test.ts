@@ -198,4 +198,30 @@ describe('preview copy (plan 174 S2.3a, B-23)', () => {
       tone: 'warn'
     })
   })
+
+  it('reads the Linux CPU preview as open, not as a slower fallback', () => {
+    // On Linux the main process always reports the proof surface as
+    // 'surface-fallback'; it is the only preview Linux has.
+    const linuxPreview = {
+      ...supervisor('ok', 'surface-fallback'),
+      fallbackReason: 'Preview is displaying compositor output.'
+    }
+    const linux = previewSupervisorDisplay(true, linuxPreview, undefined, undefined, null, 'linux')
+    expect(linux).toMatchObject({
+      title: 'Preview is open in its own window',
+      detail: 'Drag, resize or close it anytime.',
+      tone: 'normal'
+    })
+    expect(`${linux.title} ${linux.detail}`).not.toMatch(/slower|compositor|surface|proof/i)
+
+    for (const platform of ['darwin', 'win32']) {
+      expect(
+        previewSupervisorDisplay(true, linuxPreview, undefined, undefined, null, platform)
+      ).toMatchObject({
+        title: PREVIEW_FALLBACK_LABEL,
+        detail: 'Preview is displaying compositor output.',
+        tone: 'warn'
+      })
+    }
+  })
 })

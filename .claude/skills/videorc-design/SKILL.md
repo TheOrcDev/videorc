@@ -430,7 +430,22 @@ Everything except ⌘K uses the desktop scale.
   Sources (plan 173) is the reference for rows that carry controls: one
   `SourceItem` per source (`components/sources/source-item.tsx`), a header
   row (icon, title, one status chip, one quick control, More), a body
-  indented to the title, and the rare settings folded into More.
+  indented to the title, and the rare settings folded into More. The whole
+  header row opens More (plan 213 A3): the chevron's button stretches over
+  it, and only the quick control sits above.
+  - **What a stretched row lets through** (plan 213 A2). The row is
+    `relative`. Only its real controls (a switch, a button, a menu) are
+    positioned, each on its own (the Switch already is; wrap a Button in a
+    `relative` span), so they sit above the row's button. Trailing
+    decorations (tags, chips, status icons, a shortcut, the chevron) are
+    never positioned, and never inside a positioned wrapper with a control,
+    so a click on them acts as the row. A chevron that only pictures the
+    row's state is `aria-hidden` and `pointer-events-none`.
+  - **Hit areas.** A control's invisible hit area never reaches over a
+    neighbour's: trim the spill on the side that faces one (the destination
+    row's Switch spills 4 px toward its chevron, not 12). A disabled control
+    in a stretched row takes no click (`data-disabled:pointer-events-none`),
+    so the row opens and says why.
 - **Overflow menus.** Low-frequency per-item actions go in one `KebabMenu`
   (⋯): items grouped with a hairline between groups, destructive items last,
   each item's keys right-aligned, a spinner while an item's work runs.
@@ -456,6 +471,13 @@ Everything except ⌘K uses the desktop scale.
     transcript and marker rows); a card's actions (`MediaCard`, the Buddy and
     Stream Manager cards); the Stream Manager's panes and status bar; a
     small inline action under a field (Reset, Calibrate).
+  - A compact control still takes a click across 28 × 28 px (plan 213 A4):
+    `xs` and `icon-xs` buttons, `xs` toggle group items and the status
+    bar's actions spill an invisible hit area (`styles.css`), so nothing
+    you can see grows. The status bar's spill only goes up and down, and an
+    input group's button stays out of its field. A call site whose spill
+    would reach a neighbour passes `before:hidden` (marker pins, View in
+    Discord).
   - A page's or a dialog's own actions stay 28 px, and so does a control
     beside a 28 px control in the same row.
   - There is no `sm` or `icon-sm`: both were 28 px under another name.

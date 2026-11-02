@@ -132,7 +132,7 @@ export function BuddyPetSettings({
         onWear={wear}
       />
       {/* One hairline under both columns, as the column pair ends level. */}
-      <ConfigGrid className="border-b border-border lg:[&>*]:border-b-0">
+      <ConfigGrid className="border-b border-border @min-[940px]/page:[&>*]:border-b-0">
         <BuddyReactionsSection
           persona={persona}
           reactions={activeReactions}

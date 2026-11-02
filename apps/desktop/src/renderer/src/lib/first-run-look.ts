@@ -27,7 +27,7 @@ import {
 } from './capture'
 import { recalledLayoutFraming, rememberLayoutFraming } from './layout-framing-memory'
 import { layoutPresetLabel } from './layout-labels'
-import { sceneSourceGaps, visualSources, type SceneSourceGap } from './scene-presets'
+import { sceneSourceGaps, usingVisualSources, type SceneSourceGap } from './scene-presets'
 
 // Plan 207 S4: the "Your look" step of first-run setup writes the same state
 // the Studio's own controls write, without a layout transaction. A
@@ -236,7 +236,7 @@ function gapReason(
 export function firstRunLayoutOptions(input: FirstRunLayoutOptionsInput): FirstRunLayoutOptions {
   const presets: readonly LayoutPreset[] =
     input.orientation === 'vertical' ? VERTICAL_LAYOUT_PRESETS : HORIZONTAL_LAYOUT_PRESETS
-  const sources = visualSources(input.sources)
+  const sources = usingVisualSources(input.sources)
   const options = presets.map((preset): FirstRunLayoutOption => {
     const gaps = sceneSourceGaps(
       {

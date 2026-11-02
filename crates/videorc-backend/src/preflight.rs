@@ -319,16 +319,17 @@ fn destination_chat_preflight(
         crate::live_chat::chat_capability(target.platform, account_for_target(target, accounts));
     if target.platform == StreamPlatform::X {
         let account = account_for_target(target, accounts);
-        let account_connected =
-            account.is_some_and(|account| account.status == PlatformAccountStatus::Connected);
         let (native_available, capability_message) = match x_live::x_native_live_capability(account)
         {
-            Ok(capability) => (capability.native_available, capability.message),
+            Ok(capability) => (
+                capability.native_available,
+                x_live_chat_message(&capability.state, capability.message),
+            ),
             Err(error) => (false, error.to_string()),
         };
         return x_destination_chat_preflight(
             target.auth_mode,
-            account_connected,
+            account.map(|account| account.status),
             native_available,
             capability_message,
         );
@@ -368,38 +369,59 @@ fn destination_chat_preflight(
     (capability.read, capability.write, message)
 }
 
+/// What the Go Live check says while X Live isn't ready: Authorize X Live in
+/// the Stream Manager's words (plan 213 J3), any other cause in its own.
+fn x_live_chat_message(state: &x_live::XNativeLiveCapabilityState, message: String) -> String {
+    if *state == x_live::XNativeLiveCapabilityState::NeedsAuthorization {
+        crate::live_chat::X_AUTHORIZE_LIVE_FOR_CHAT.to_string()
+    } else {
+        message
+    }
+}
+
 /// X chat rides the native broadcast: the X sign-in plus Authorize X Live read
 /// it and send to it (`POST /2/broadcasts/:id/chat`, #229), the same as
 /// `live_chat::chat_capability`. Ready X chat is no limit, so it raises no
 /// Chat limits warning; YouTube's chat also attaches once its broadcast
 /// exists and reads as ready here too. A stream key has no broadcast, so it
-/// can neither read nor send.
+/// can neither read nor send: chat needs Sign in, in the Stream Manager's
+/// words (plan 213 J1). Authorize X Live comes up only once Sign in is done
+/// (J3).
 fn x_destination_chat_preflight(
     auth_mode: StreamAuthMode,
-    account_connected: bool,
+    account_status: Option<PlatformAccountStatus>,
     native_available: bool,
     capability_message: String,
 ) -> (CommentsReadState, CommentsWriteState, String) {
     if auth_mode != StreamAuthMode::Oauth {
         return (
-            CommentsReadState::Unavailable,
+            CommentsReadState::NeedsSignIn,
             CommentsWriteState::Unavailable,
-            "With a stream key, Videorc can't read or send X chat. Choose Sign in to use it."
-                .to_string(),
+            crate::live_chat::X_STREAM_KEY_CHAT_NEEDS_SIGN_IN.to_string(),
         );
+    }
+    match account_status {
+        None => {
+            return (
+                CommentsReadState::Unavailable,
+                CommentsWriteState::Unavailable,
+                crate::live_chat::X_SIGN_IN_FOR_CHAT.to_string(),
+            );
+        }
+        Some(status) if status != PlatformAccountStatus::Connected => {
+            return (
+                CommentsReadState::Unavailable,
+                CommentsWriteState::Unavailable,
+                "Reconnect X to read and send chat.".to_string(),
+            );
+        }
+        Some(_) => {}
     }
     if !native_available {
         return (
             CommentsReadState::Unavailable,
             CommentsWriteState::Unavailable,
             capability_message,
-        );
-    }
-    if !account_connected {
-        return (
-            CommentsReadState::Unavailable,
-            CommentsWriteState::Unavailable,
-            "Reconnect X to read and send chat.".to_string(),
         );
     }
     (
@@ -686,9 +708,10 @@ mod tests {
     fn x_chat_reads_and_sends_once_x_live_is_ready_and_raises_no_chat_limit() {
         // X chat send landed in #229; the old "receive-only" preflight raised a
         // Chat limits warning on every healthy X Go Live.
+        let connected = Some(PlatformAccountStatus::Connected);
         let ready = x_destination_chat_preflight(
             StreamAuthMode::Oauth,
-            true,
+            connected,
             true,
             "X Livestream API credentials are configured.".to_string(),
         );
@@ -696,20 +719,31 @@ mod tests {
         assert_eq!(ready.1, CommentsWriteState::Ready);
         assert_eq!(ready.2, "X chat is ready to read and send.");
 
-        let not_authorized = x_destination_chat_preflight(
-            StreamAuthMode::Oauth,
-            true,
-            false,
+        // Plan 213 J3: the Go Live check names Authorize X Live in the Stream
+        // Manager's words; any other cause keeps its own.
+        let authorize = x_live_chat_message(
+            &x_live::XNativeLiveCapabilityState::NeedsAuthorization,
             "Authorize X Live to let Videorc create stream sources and broadcasts on your X account."
                 .to_string(),
         );
+        assert_eq!(authorize, crate::live_chat::X_AUTHORIZE_LIVE_FOR_CHAT);
+        assert_eq!(
+            x_live_chat_message(
+                &x_live::XNativeLiveCapabilityState::AccountMismatch,
+                "Connected X account does not match the account that authorized X Live."
+                    .to_string(),
+            ),
+            "Connected X account does not match the account that authorized X Live."
+        );
+        let not_authorized =
+            x_destination_chat_preflight(StreamAuthMode::Oauth, connected, false, authorize);
         assert_eq!(not_authorized.0, CommentsReadState::Unavailable);
         assert_eq!(not_authorized.1, CommentsWriteState::Unavailable);
-        assert!(not_authorized.2.starts_with("Authorize X Live"));
+        assert_eq!(not_authorized.2, "Authorize X Live to read and send chat.");
 
         let disconnected = x_destination_chat_preflight(
             StreamAuthMode::Oauth,
-            false,
+            Some(PlatformAccountStatus::NeedsReconnect),
             true,
             "X Livestream API credentials are configured.".to_string(),
         );
@@ -717,17 +751,34 @@ mod tests {
         assert_eq!(disconnected.1, CommentsWriteState::Unavailable);
         assert_eq!(disconnected.2, "Reconnect X to read and send chat.");
 
+        // Plan 213 J3: Authorize X Live comes up only once Sign in is done.
+        let signed_out = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            None,
+            false,
+            crate::live_chat::X_AUTHORIZE_LIVE_FOR_CHAT.to_string(),
+        );
+        assert_eq!(signed_out.0, CommentsReadState::Unavailable);
+        assert_eq!(signed_out.2, "Sign in to X to read and send chat.");
+        assert!(!signed_out.2.contains("Authorize"));
+
+        // Plan 213 J1: a stream key says what brings chat, in the Stream
+        // Manager's words.
         let stream_key = x_destination_chat_preflight(
             StreamAuthMode::ManualRtmp,
-            true,
+            connected,
             true,
             "ignored".to_string(),
         );
-        assert_eq!(stream_key.0, CommentsReadState::Unavailable);
+        assert_eq!(stream_key.0, CommentsReadState::NeedsSignIn);
         assert_eq!(stream_key.1, CommentsWriteState::Unavailable);
-        assert!(stream_key.2.contains("stream key"));
+        assert_eq!(
+            stream_key.2,
+            "X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to."
+        );
+        assert!(!stream_key.2.contains("Authorize"));
 
-        for (_, _, message) in [ready, not_authorized, disconnected, stream_key] {
+        for (_, _, message) in [ready, not_authorized, disconnected, signed_out, stream_key] {
             assert!(!message.contains("receive-only"), "{message}");
             assert!(!message.contains("Manual RTMP"), "{message}");
         }

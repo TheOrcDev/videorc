@@ -52,6 +52,8 @@ export const AUXILIARY_API_KEYS = {
     'reconnectScopesFromCommentsWindow',
     // The behaviour chips open Buddy → Chat in the main window (plan 174 S3.14a).
     'openBuddyTabFromCommentsWindow',
+    // "Use Sign in" opens the destination in the main window (plan 213 J1).
+    'openDestinationFromCommentsWindow',
     // Remove from chat and Buddy's removal cards (plan 140, S6): relayed.
     'moderateFromCommentsWindow',
     'getCommentsWindowState',
