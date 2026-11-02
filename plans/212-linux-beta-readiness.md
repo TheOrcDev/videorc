@@ -2625,3 +2625,53 @@ compilation, with all owned descendants reaped and no test credit. The retained
 run uses normal stack limits and the approved Intel render node. Hosted CI must
 also verify the new profile before this correction can be accepted. Runtime,
 cross-platform failures and the remaining Beta acceptance gates stay open.
+
+### Setup and source-return main merge, 2026-11-02
+
+Integrated main `2e554968bde096dfc9cdf673cbd550fd53940bf9`. The first-run
+conflict preserves Linux sharing guidance in the initial step while Settings
+keeps the general welcome-step description, without promising permission
+controls. Main's source-return fences, distinct screen/window names, Studio
+Chat row and Linux preview status copy are retained. Rust sources, Cargo
+manifest and lockfile are unchanged by this merge.
+
+The preceding test-profile run on `79181eb6` now completes local compilation
+in 1,412.684 seconds. The backend target executes in 303.85 seconds: 4,194
+pass, two fail and 19 are ignored. The failures are the established GLES
+Beams comparison (mean 20.405, maximum 193) and the caption intent matrix's
+`TAP_ACTIVE` assertion. Cargo stops after that failed target; separate runs
+of the retained binaries subsequently pass all 24 MCP tests, the wire-header
+test and the example test. The zero-test native helper target also completes.
+Ignored tests and the separate passing targets do not turn the full run green.
+
+The caption assertion passes alone and in the 125-test caption module, but
+running the intent-matrix and terminal-listen tests together reproduces it
+in five of 25 attempts. The terminal-listen test clears the process-global
+audio tap without acquiring the lifecycle test mutex used by its neighbor.
+This is retained failure evidence, not a successful retry of the full suite.
+
+Private source checks, retained-binary identities, logs, concurrency attempts
+and owned cleanup receipts are in
+`~/.cache/videorc-linux-beta-evidence/merge-main2e554-tepfhgqd/`; the compile
+and full backend results remain in `test-profile-symbol-free-_ckyqr51/`.
+The full-run supervisor reaps one already terminated orphan and sends no
+cleanup signals; the remaining-target supervisor reports no orphan cleanup.
+No exact AppImage or runtime acceptance is established by this merge. The
+shader failures, Windows streaming diagnostics, current runtime gates,
+physical acceptance, endurance, pilot and protected publication remain open.
+
+On merge `00f9e200`, all 722 focused desktop tests across 26 files pass.
+Typecheck, lint and formatting pass, and all 3,051 Node tests pass with zero
+skips. The full desktop suite and production build remain pending at this
+commit. Its JavaScript inputs stay fixed while the native fixture correction
+is verified separately; the source collector records that boundary before
+resuming the build.
+
+The two caption tests that tear down the shared tap now acquire the existing
+`caption_lifecycle_test_lock`: the terminal-listen test and the blocked-watchdog
+cleanup test. Their assertions and all production caption behavior remain
+unchanged. Rust formatting passes. A fresh native compilation, the same
+25-attempt concurrent pair, the caption module and the full backend target
+are running; none is yet claimed as passing after the correction. Fresh
+cross-platform CI is still required. No quality limit or test selection has
+been relaxed, and no Linux Beta candidate has been accepted or published.
