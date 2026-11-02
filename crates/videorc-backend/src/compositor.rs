@@ -18937,7 +18937,13 @@ mod tests {
     async fn a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths() {
         let state = test_state();
         start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
-        eprintln!("TEMP-DIAG benchmark arm: preview run started");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "TEMP-DIAG benchmark arm: preview run started"
+            );
+        }
         // The user's scene: one plain test pattern (the only source a test
         // can draw), committed the way the idle Preview commits it.
         let (user_scene, user_sources) = test_pattern_scene(64, 36);
@@ -18954,7 +18960,13 @@ mod tests {
         )
         .await;
         let before = wait_for_frame_at_revision(&state, Some(10)).await;
-        eprintln!("TEMP-DIAG benchmark arm: user frame at 10");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "TEMP-DIAG benchmark arm: user frame at 10"
+            );
+        }
         let user_status = compositor_status(&state).await;
         assert_eq!(user_status.scene_revision, Some(10));
         assert_eq!(
@@ -18999,7 +19011,10 @@ mod tests {
         )
         .await
         .expect("arms in place");
-        eprintln!("TEMP-DIAG benchmark arm: armed");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: armed");
+        }
         assert!(
             commit_benchmark_scene(
                 &state,
@@ -19011,7 +19026,13 @@ mod tests {
             .await
         );
         let benchmark_frame = wait_for_frame_dimensions(&state, 128, 72, before.sequence).await;
-        eprintln!("TEMP-DIAG benchmark arm: benchmark frame");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "TEMP-DIAG benchmark arm: benchmark frame"
+            );
+        }
         assert_eq!(
             benchmark_frame.scene_revision,
             Some(11),
@@ -19060,7 +19081,10 @@ mod tests {
         // The release takes the benchmark scene with it; the next frame is
         // the user's scene at its own revision (no surface: the run stops).
         release_compositor_capture_lease(&state, "benchmark").await;
-        eprintln!("TEMP-DIAG benchmark arm: released");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: released");
+        }
         {
             let compositor = state.compositor.lock().await;
             assert!(compositor.benchmark_scene.is_none());
@@ -19071,7 +19095,13 @@ mod tests {
             );
         }
 
-        eprintln!("TEMP-DIAG benchmark arm: before fresh run");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "TEMP-DIAG benchmark arm: before fresh run"
+            );
+        }
         // Fresh run: the benchmark starts its own run.
         start_synthetic_compositor(
             state.clone(),
@@ -19093,7 +19123,10 @@ mod tests {
             .await
         );
         let fresh_frame = wait_for_frame_dimensions(&state, 128, 72, 0).await;
-        eprintln!("TEMP-DIAG benchmark arm: fresh frame");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: fresh frame");
+        }
         assert_eq!(fresh_frame.scene_revision, Some(12));
         {
             let compositor = state.compositor.lock().await;
@@ -19115,7 +19148,10 @@ mod tests {
             );
         }
         stop_compositor(&state).await;
-        eprintln!("TEMP-DIAG benchmark arm: stopped");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: stopped");
+        }
         assert!(state.compositor.lock().await.benchmark_scene.is_none());
     }
 
