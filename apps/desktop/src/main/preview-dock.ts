@@ -32,6 +32,64 @@ export function parsePreviewWindowMode(raw: unknown): PreviewWindowMode {
 }
 
 /**
+ * The mode a launch starts in (plan 213 D5). A saved choice wins. With none
+ * saved, a new install starts stuck to the app: one window, as in OBS, and
+ * nothing a tiling window manager can move on its own. Smoke and probe runs
+ * (`scripted`: nothing is restored or saved) start floating, the state every
+ * probe assumes before it sets the mode it tests.
+ */
+export function initialPreviewWindowMode(
+  savedMode: unknown,
+  options: { scripted: boolean }
+): PreviewWindowMode {
+  if (savedMode === 'docked' || savedMode === 'floating') {
+    return savedMode
+  }
+  return options.scripted ? 'floating' : 'docked'
+}
+
+/**
+ * What a floating Preview does with a size it did not choose (plan 213 D4): a
+ * tiling window manager's tile, or a programmatic setBounds. On macOS AppKit
+ * already keeps the user's own drags on the output aspect, so the window
+ * keeps the size and draws the video aspect-fit inside, with bars; setting
+ * the size back would start a fight with the manager (AeroSpace re-tiles, we
+ * conform, it re-tiles). Elsewhere the backstop conforms the window.
+ */
+export type PreviewWindowExternalResizePolicy = 'fit-inside' | 'conform-window'
+
+export function previewWindowExternalResizePolicy(
+  platform: NodeJS.Platform
+): PreviewWindowExternalResizePolicy {
+  return platform === 'darwin' ? 'fit-inside' : 'conform-window'
+}
+
+/**
+ * The largest rect of `ratio` (width / height) inside `region`, centred and
+ * rounded to whole points: the video region of a floating Preview whose
+ * window is not on the output aspect.
+ */
+export function aspectFitRect(region: Rect, ratio: number): Rect {
+  const safeRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 16 / 9
+  const regionWidth = Math.max(1, region.width)
+  const regionHeight = Math.max(1, region.height)
+  let width = regionWidth
+  let height = Math.round(width / safeRatio)
+  if (height > regionHeight) {
+    height = regionHeight
+    width = Math.round(height * safeRatio)
+  }
+  width = Math.max(1, Math.min(regionWidth, width))
+  height = Math.max(1, Math.min(regionHeight, height))
+  return {
+    x: Math.round(region.x + (regionWidth - width) / 2),
+    y: Math.round(region.y + (regionHeight - height) / 2),
+    width,
+    height
+  }
+}
+
+/**
  * What the Preview window remembers as it closes: its frame, and that the
  * streamer closed it. Quitting closes every window without anyone choosing
  * to, so a quit keeps `open` as it was and the next launch restores a Preview
@@ -114,6 +172,10 @@ export interface DockVisibilityInput {
   mainWindowVisible: boolean
   mainWindowMinimized: boolean
   mainWindowFullScreen: boolean
+  // The surface is drawn inside the main window's own view (the macOS
+  // in-process layer, the Linux in-window proof surface), not in a child
+  // window: fullscreen keeps it, since it is part of the window now.
+  surfaceInsideMainWindow?: boolean
   overlayOpen: boolean
 }
 
@@ -127,7 +189,7 @@ export interface DockVisibilityDecision {
 // Order matters: window-level conditions outrank slot-level ones so the reason
 // shown matches what the user actually did last.
 export function decideDockVisibility(input: DockVisibilityInput): DockVisibilityDecision {
-  if (input.mainWindowFullScreen) {
+  if (input.mainWindowFullScreen && !input.surfaceInsideMainWindow) {
     return { visible: false, hiddenReason: 'main-window-fullscreen' }
   }
   if (!input.mainWindowVisible || input.mainWindowMinimized) {

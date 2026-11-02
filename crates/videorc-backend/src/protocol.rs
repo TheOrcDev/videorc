@@ -3528,6 +3528,16 @@ pub struct PreviewSurfaceBounds {
     // past it; absent/0 = square (floating window, legacy callers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corner_radius: Option<f64>,
+    // Where the in-process CAMetalLayer sits inside its host window (plan 213
+    // D2): the surface's top-left origin in the host's content coordinates and
+    // the host content's height, in points. Mirrors
+    // apps/desktop/src/shared/backend.ts; absent = legacy callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_height: Option<f64>,
 }
 
 /// Validated opaque HWND identity used only by Electron main and the backend

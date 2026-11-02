@@ -197,9 +197,11 @@ function previewSlotRatio(aspect: { width: number; height: number }): string {
   return aspect.width > 0 && aspect.height > 0 ? `${aspect.width} / ${aspect.height}` : '16 / 9'
 }
 
-// Docked ("stick") mode: the native preview surface floats glued over the slot
-// below, so this frame is what shows through when the surface is hidden — it
-// must always state WHY (dockHiddenReason / supervisor copy), never sit blank.
+// Docked ("stick") mode: the native preview surface sits over the slot below
+// (on macOS a CAMetalLayer inside this very window, plan 213 D3; elsewhere a
+// child window glued to the slot), so this frame is what shows through when
+// the surface is hidden — it must always state WHY (dockHiddenReason /
+// supervisor copy), never sit blank.
 function DockedPreviewFrame({
   previewWindow,
   previewSurfaceStatus,
@@ -236,9 +238,10 @@ function DockedPreviewFrame({
   const slotRatio = previewSlotRatio(aspect)
 
   return (
-    // No border here. The native surface is a separate window glued over the
-    // slot; it clips itself to the panel radius, so the strip below rounds to
-    // the same radius. A square strip leaves a corner wedge behind the video.
+    // No border here. The native surface (a layer in this window on macOS, a
+    // window glued over the slot elsewhere) clips itself to the panel radius,
+    // so the strip below rounds to the same radius. A square strip leaves a
+    // corner wedge behind the video.
     <div
       className={cn('flex w-full flex-col overflow-hidden', className)}
       data-videorc-preview-card

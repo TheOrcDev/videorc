@@ -1898,7 +1898,10 @@ const rendererSafePreviewBoundsSchema = objectSchema(
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     elevated: optionalSchema(booleanSchema),
-    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -1930,7 +1933,10 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
     elevated: optionalSchema(booleanSchema),
-    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -2028,6 +2034,7 @@ const previewSurfaceStatusFieldsSchema = objectSchema(
         'backend-d3d11-presenter'
       ])
     ),
+    nativePreviewHostWindow: optionalSchema(enumSchema(['main', 'preview'])),
     bounds: optionalSchema(rendererSafePreviewBoundsSchema),
     windowsD3d11Presenter: optionalSchema(windowsD3d11PresenterDiagnosticsSchema),
     updatedAt: timestamp

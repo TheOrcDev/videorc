@@ -62,6 +62,23 @@ export function normalizePreviewSurfaceBounds(bounds: PreviewSurfaceBounds): Pre
   } else {
     delete normalized.cornerRadius
   }
+  // In-window placement (plan 213 D2) must survive normalization too: without
+  // its host origin the in-process layer falls back to its host's origin and
+  // draws over the drag strip, or at the wrong place in the main window.
+  for (const field of ['hostX', 'hostY'] as const) {
+    const value = bounds[field]
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      normalized[field] = value
+    } else {
+      delete normalized[field]
+    }
+  }
+  const hostHeight = optionalPositiveNumber(bounds.hostHeight)
+  if (hostHeight === undefined) {
+    delete normalized.hostHeight
+  } else {
+    normalized.hostHeight = hostHeight
+  }
   // Renderer-supplied bounds are never an HWND authority. The object spread
   // above intentionally preserves unknown future geometry, so privileged
   // fields must be deleted explicitly rather than relying on TypeScript.
@@ -149,7 +166,10 @@ export function previewSurfaceBoundsChanged(
     Math.abs((previous.clipHeight ?? previous.height) - (next.clipHeight ?? next.height)) >= 1 ||
     (previous.visible ?? true) !== (next.visible ?? true) ||
     previous.orderAboveWindowId !== next.orderAboveWindowId ||
-    previous.elevated !== next.elevated
+    previous.elevated !== next.elevated ||
+    Math.abs((previous.hostX ?? 0) - (next.hostX ?? 0)) >= 1 ||
+    Math.abs((previous.hostY ?? 0) - (next.hostY ?? 0)) >= 1 ||
+    Math.abs((previous.hostHeight ?? 0) - (next.hostHeight ?? 0)) >= 1
   )
 }
 
@@ -171,7 +191,12 @@ export function previewSurfaceDrawableBoundsChanged(
     Math.abs(previous.scaleFactor - next.scaleFactor) >= 0.01 ||
     (previous.visible ?? true) !== (next.visible ?? true) ||
     // A radius change must reach the layer even when nothing else moved.
-    Math.abs((previous.cornerRadius ?? 0) - (next.cornerRadius ?? 0)) >= 0.5
+    Math.abs((previous.cornerRadius ?? 0) - (next.cornerRadius ?? 0)) >= 0.5 ||
+    // The in-window origin and the host's height place the layer's frame
+    // (plan 213 D2); screen coordinates never do.
+    Math.abs((previous.hostX ?? 0) - (next.hostX ?? 0)) >= 1 ||
+    Math.abs((previous.hostY ?? 0) - (next.hostY ?? 0)) >= 1 ||
+    Math.abs((previous.hostHeight ?? 0) - (next.hostHeight ?? 0)) >= 1
   )
 }
 

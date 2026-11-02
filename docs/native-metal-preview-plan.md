@@ -369,6 +369,62 @@ fails a "native" claim — by design.
   example CVMetalTextureCache/native source import), not simply extending the startup
   barrier timeout.
 
+## Where the preview layer lives (plan 213, workstream D)
+
+The production macOS preview is one in-process `CAMetalLayer`
+(`crates/videorc-native-preview-addon`), added as a sublayer of an Electron
+window's own content view. Which window hosts it follows the Preview's mode,
+and main names the host in `PreviewSurfaceStatus.nativePreviewHostWindow`, so
+a change of host is never silent.
+
+- **Pop out (floating):** the Preview window's content view, below the drag
+  strip. On a size the window did not choose (a tiling window manager's tile,
+  a programmatic resize) the video is the largest output-aspect rect inside,
+  centred, with bars. AppKit keeps the user's own drags on the output aspect;
+  setting a tiler's size back started a fight (AeroSpace re-tiles, we conform,
+  it re-tiles), so macOS keeps the size (`previewWindowExternalResizePolicy`)
+  and Windows keeps the `setContentSize` backstop.
+- **Stick to app (docked):** the main window's content view, at the Studio
+  preview card or the Scene canvas, at the slot rect the renderer reports in
+  window content coordinates. The Preview `BrowserWindow` stays hidden and
+  only owns the lifecycle. One window, as in OBS: nothing a window manager can
+  move on its own. The old host, a child window, was tiled, displaced and
+  parked by AeroSpace separately from the main window. Fullscreen keeps the
+  preview, since it is part of the window; the overlay-open and scrolled-away
+  hides stay, because dialogs and popovers paint under the layer.
+- **Helper-process or external driver (diagnostic fallback only):** the child
+  Preview window, ordered above by screen coordinates and
+  `orderAboveWindowId`. A separate process cannot be a subview of the main
+  window.
+
+The frame reaches the addon as `NativePreviewLayerFrame`, a top-left origin
+in the host's content coordinates (points), carried by
+`PreviewSurfaceBounds.hostX`, `hostY` and `hostHeight` through every mirror of
+the bounds. The addon converts it to the host layer's own space with
+`layer_frame_in_host` (flipped or not) and sets the frame again when the host's
+height changes, because an AppKit layer measures a sublayer's origin from the
+bottom edge. `cornerRadius` masks the layer to the slot's rounded panel. A
+window drag changes only `screenX`/`screenY`, which never touch the layer.
+
+New installs start stuck to the app (`initialPreviewWindowMode`); a saved mode
+wins. Smoke and probe runs start floating, the state every probe assumes.
+
+### Tiling window managers (AeroSpace)
+
+Stick to app needs no rule: the Preview is inside the main window. For Pop out,
+tell AeroSpace to float the Preview window instead of tiling it; without the
+rule the tile's size is kept and the video is drawn letterboxed inside it:
+
+```toml
+[[on-window-detected]]
+if.app-id = 'dev.theorcdev.videorc'
+if.window-title-regex-substring = 'Preview'
+run = 'layout floating'
+```
+
+`pnpm probe:preview-window` covers the window-manager cases
+(`wm-displaces-child`, `wm-parks-main`, `wm-resizes-floating`).
+
 ## What remains (on-device only)
 
 1. **Electron native view (Phase 2).** Embed the `CAMetalLayer` (driven by

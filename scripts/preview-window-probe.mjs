@@ -15,6 +15,12 @@
 //      a stage source reaches the SVG hit layer under the surface and never
 //      focuses the preview window — at the DOM level (CDP) and, when the host
 //      lets this process post HID events, at the OS level (CGEvent).
+//   7. Window managers (plan 213 D1): a docked preview is one window with the
+//      app — drawn inside the main window's own view, or hidden with a stated
+//      reason — when the Preview window is moved on its own (wm-displaces-child)
+//      and when the main window is parked past the display corner and brought
+//      back (wm-parks-main). A floating preview keeps a non-16:9 size a window
+//      manager gives it and draws the video aspect-fit inside (wm-resizes-floating).
 //
 // Placement oracles: the `preview-window-state` smoke command (preview window +
 // Electron proof surface geometry) and CGWindowList floating-level geometry for
@@ -387,6 +393,8 @@ async function main() {
   await smokeCommand('main-window-set-bounds', { x: 200, y: 180 })
   await waitForDockedSurfaceAtSlot('dock-storm: surface settles after rapid main-window changes')
 
+  await runWindowManagerDockedScenarios()
+
   // Overlay occlusion: the docked surface yields while an in-app overlay is up.
   // (Injected via the same IPC path the renderer's overlay watcher uses; the
   // watcher only re-sends on change, so the injection is not raced.)
@@ -603,10 +611,12 @@ async function main() {
   )
   assertPreviewWindowShadow(undocked, true, 'undock: the floating window gets its shadow back')
 
+  await runWindowManagerFloatingScenario()
+
   console.log('\n=== Preview window probe summary ===')
   if (failures.length === 0) {
     console.log(
-      'PASS — open, move, resize, toggle-close, toggle-reopen, dock-follow, dock-occlusion, scene-slot dock, pass-through, and undock keep the surface aligned.'
+      'PASS — open, move, resize, toggle-close, toggle-reopen, dock-follow, window-manager docked cases, dock-occlusion, scene-slot dock, pass-through, undock, and the window-manager floating resize keep the surface aligned.'
     )
     return 0
   }
@@ -1280,6 +1290,224 @@ function movedAtLeast(before, after, minimum) {
     after &&
     (Math.abs(after.x - before.x) >= minimum || Math.abs(after.y - before.y) >= minimum)
   )
+}
+
+/**
+ * Plan 213 D1: a tiling window manager (AeroSpace) moves every window of an
+ * app on its own, and parks a hidden workspace's windows past the display's
+ * corner. A docked preview that is a second window gets displaced by both. The
+ * contract is one window: the surface is drawn inside the main window at the
+ * slot, or hidden with a stated reason. Runs while docked in the Studio slot.
+ */
+async function runWindowManagerDockedScenarios() {
+  if (!expectInProcessNative) {
+    assertProbe(
+      true,
+      'wm-docked: skipped — the helper-window fallback is a separate window by design',
+      ''
+    )
+    return
+  }
+  // The window manager moves the Preview window by itself (what AeroSpace
+  // does to every window of the app, through the accessibility API).
+  const slot = await dockSlotRect(STUDIO_SLOT)
+  const main = await smokeCommand('main-window-state')
+  await smokeCommand('preview-window-set-bounds', {
+    x: Math.round(main.contentBounds.x + slot.x + 320),
+    y: Math.round(main.contentBounds.y + slot.y + 180),
+    focus: false
+  })
+  await waitForDockedSurfaceInsideMainWindow(
+    'wm-displaces-child: the Preview window moved on its own leaves the surface in the slot (or hidden)'
+  )
+
+  // The window manager parks the main window so almost all of it is past the
+  // display's bottom-right corner, then brings it back.
+  const display =
+    main.displays.find(
+      (candidate) =>
+        main.bounds.x >= candidate.bounds.x &&
+        main.bounds.x < candidate.bounds.x + candidate.bounds.width &&
+        main.bounds.y >= candidate.bounds.y &&
+        main.bounds.y < candidate.bounds.y + candidate.bounds.height
+    ) ?? main.displays[0]
+  const parked = await smokeCommand('main-window-set-bounds', {
+    x: display.bounds.x + display.bounds.width - 48,
+    y: display.bounds.y + display.bounds.height - 48,
+    focus: false
+  })
+  console.log(`wm-parks-main: main window parked at ${JSON.stringify(parked.bounds)}`)
+  await waitForDockedSurfaceInsideMainWindow(
+    'wm-parks-main: parked past the display corner, the surface stays in the slot (or hidden)'
+  )
+  await smokeCommand('main-window-set-bounds', { x: 200, y: 180, focus: false })
+  await waitForDockedSurfaceInsideMainWindow(
+    'wm-parks-main-return: back on screen, the surface is in the slot (or hidden)'
+  )
+  await waitForDockedSurfaceAtSlot('wm-parks-main-return: surface at the Studio slot again')
+}
+
+/**
+ * Plan 213 D1: a window manager resizes a floating Preview to its tile, which
+ * is never 16:9. The window must keep that size (no setContentSize fight) and
+ * draw the video aspect-fit inside it. Runs while floating.
+ */
+async function runWindowManagerFloatingScenario() {
+  await smokeCommand('preview-window-set-bounds', {
+    x: 240,
+    y: 160,
+    width: 720,
+    height: 300,
+    focus: false
+  })
+  const samples = []
+  const until = Date.now() + 2000
+  while (Date.now() < until) {
+    const sample = await smokeCommand('preview-window-state')
+    samples.push(
+      sample.bounds ? { width: sample.bounds.width, height: sample.bounds.height } : null
+    )
+    await sleep(200)
+  }
+  assertProbe(
+    samples.length > 0 &&
+      samples.every(
+        (sample) =>
+          sample && Math.abs(sample.width - 720) <= 2 && Math.abs(sample.height - 300) <= 2
+      ),
+    'wm-resizes-floating: the window keeps a non-16:9 size for 2 s',
+    JSON.stringify(samples)
+  )
+  const state = await smokeCommand('preview-window-state')
+  const video = state.contentBounds
+  const frame = state.bounds
+  const inside =
+    video &&
+    frame &&
+    video.x >= frame.x - 1 &&
+    video.y >= frame.y - 1 &&
+    video.x + video.width <= frame.x + frame.width + 1 &&
+    video.y + video.height <= frame.y + frame.height + 1
+  const ratio = video ? video.width / Math.max(1, video.height) : 0
+  // The tile is wider than 16:9, so a fitted video has side bars of equal
+  // width; a window conformed back to 16:9 fills the width instead. (The drag
+  // strip always leaves the video shorter than the window, so height alone
+  // would prove nothing.)
+  const leftBar = video && frame ? video.x - frame.x : 0
+  const rightBar = video && frame ? frame.x + frame.width - (video.x + video.width) : 0
+  const pillarboxed = leftBar >= 4 && Math.abs(leftBar - rightBar) <= 2
+  assertProbe(
+    Boolean(inside && pillarboxed) && Math.abs(ratio - 16 / 9) <= (16 / 9) * 0.02,
+    'wm-resizes-floating: the video is drawn aspect-fit inside the window, with bars',
+    JSON.stringify({ frame, video, ratio, leftBar, rightBar })
+  )
+  const hosted = state.surfaceStatus?.bounds
+  // hostX/hostY are measured from the host window's CONTENT origin.
+  const content = state.windowContentBounds ?? frame
+  assertProbe(
+    Boolean(hosted && video && frame) &&
+      state.surfaceStatus.nativePreviewHostWindow === 'preview' &&
+      Math.abs(hosted.hostX - (video.x - content.x)) <= 2 &&
+      Math.abs(hosted.hostY - (video.y - content.y)) <= 2 &&
+      Math.abs(hosted.width - video.width) <= 2 &&
+      Math.abs(hosted.height - video.height) <= 2,
+    'wm-resizes-floating: the layer is placed at the fitted rect inside the Preview window',
+    JSON.stringify({
+      hosted,
+      video,
+      frame,
+      content,
+      host: state.surfaceStatus?.nativePreviewHostWindow
+    })
+  )
+}
+
+/**
+ * The one-window oracle for a docked preview, polled until it holds: the
+ * surface is hosted by the main window's own view (status names the host, the
+ * layer's in-window origin equals the DOM slot rect, the Preview window is not
+ * shown, and CGWindowList sees no second on-screen window of the app), or the
+ * surface is hidden with a stated reason.
+ */
+async function waitForDockedSurfaceInsideMainWindow(label, options = {}) {
+  const { selector = STUDIO_SLOT, tolerance = 6, timeoutMs: timeoutMsLocal = 10000 } = options
+  const deadline = Date.now() + timeoutMsLocal
+  let detail = null
+  do {
+    const slot = await dockSlotRect(selector)
+    const main = await smokeCommand('main-window-state')
+    const state = await smokeCommand('preview-window-state')
+    const status = state.surfaceStatus ?? {}
+    const hosted = status.bounds
+    const expected = main.contentBounds
+      ? {
+          x: main.contentBounds.x + slot.x,
+          y: main.contentBounds.y + slot.y,
+          width: slot.width,
+          height: slot.height
+        }
+      : null
+    const near = (a, b) =>
+      typeof a === 'number' && typeof b === 'number' && Math.abs(a - b) <= tolerance
+    const layerInSlot =
+      Boolean(hosted && expected) &&
+      near(hosted.hostX, slot.x) &&
+      near(hosted.hostY, slot.y) &&
+      near(hosted.width, slot.width) &&
+      near(hosted.height, slot.height) &&
+      near(hosted.screenX, expected.x) &&
+      near(hosted.screenY, expected.y)
+    const others = appWindowsOnScreen(main.bounds).filter(
+      (w) => !(near(w.x, main.bounds.x) && near(w.y, main.bounds.y))
+    )
+    const hiddenWithReason = state.visible === false && typeof state.dockHiddenReason === 'string'
+    const insideMainWindow =
+      state.open &&
+      status.nativePreviewHostKind === 'in-process' &&
+      status.transport === 'native-surface' &&
+      status.nativePreviewHostWindow === 'main' &&
+      state.previewWindowShown === false &&
+      others.length === 0 &&
+      (hiddenWithReason || (state.visible === true && layerInSlot))
+    detail = {
+      expected,
+      slot,
+      hosted,
+      host: status.nativePreviewHostWindow,
+      previewWindowShown: state.previewWindowShown,
+      visible: state.visible,
+      dockHiddenReason: state.dockHiddenReason,
+      otherAppWindows: others
+    }
+    if (insideMainWindow) {
+      assertProbe(true, label, '')
+      return
+    }
+    await sleep(250)
+  } while (Date.now() < deadline)
+  assertProbe(false, label, JSON.stringify(detail))
+}
+
+/**
+ * On-screen windows (CGWindowList) of the app that owns the main window:
+ * the main window itself and anything else the app shows. A docked preview
+ * that is its own window appears here; one drawn inside the main window
+ * never does. Tooltips and other 1 px helpers are ignored.
+ */
+function appWindowsOnScreen(mainBounds) {
+  const windows = windowList()
+  const main = windows.find(
+    (w) =>
+      w.layer === 0 &&
+      Math.abs(w.x - mainBounds.x) <= 6 &&
+      Math.abs(w.y - mainBounds.y) <= 6 &&
+      Math.abs(w.width - mainBounds.width) <= 6 &&
+      Math.abs(w.height - mainBounds.height) <= 6
+  )
+  if (!main) {
+    return [{ missing: 'main window not found on screen', mainBounds }]
+  }
+  return windows.filter((w) => w.pid === main.pid && w.width >= 24 && w.height >= 24)
 }
 
 /** A dock slot's live rect (window-relative CSS px) straight from the DOM. */
