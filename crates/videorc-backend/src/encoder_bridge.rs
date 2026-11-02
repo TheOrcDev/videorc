@@ -189,7 +189,9 @@ const fn windows_d3d11_primary_sequence_is_newer(
 }
 const FIFO_WRITE_PROGRESS_YIELD_BUDGET: u32 = 64;
 const FIFO_WRITE_STALL_BACKOFF: Duration = Duration::from_micros(250);
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const VIDEOTOOLBOX_OUTPUT_DRAIN_MAX_FRAMES_PER_TICK: usize = 8;
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const VIDEOTOOLBOX_PROBE_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEOTOOLBOX_PROBE";
 
 type CompositorFrameHandle = FrameHandle<CompositorPixelFormat, CompositorFrameExportHandle>;
@@ -2066,6 +2068,7 @@ pub(crate) fn test_source_iso_trace_ms(at: Instant) -> f64 {
 /// A compositor frame fed into the encoder FIFO on one tick.
 #[derive(Clone)]
 struct FedCompositorFrame {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     iso_lease: Option<Arc<SourceIsoLeasedFrame>>,
     /// Retains the compositor's immutable allocation through FIFO delivery. Raw
     /// output writes these bytes directly instead of copying them into a second
@@ -2400,6 +2403,7 @@ impl EncoderBridgeDrainState {
         downstream_closed
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn pending_timeout_is_terminal(
         &self,
         pending_video_toolbox_frames: u64,
@@ -2430,6 +2434,7 @@ impl EncoderBridgeDrainState {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_video_toolbox_loop_error(
         &mut self,
         terminal_failure: &Arc<StdMutex<Option<String>>>,
@@ -3763,13 +3768,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut metal_target_copied_frames = 0_u64;
     let mut metal_target_handle_frames = 0_u64;
     let mut zero_copy_frames = 0_u64;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut video_toolbox_probe_frames = 0_u64;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut video_toolbox_probe_bytes = 0_u64;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut video_toolbox_probe_errors = 0_u64;
     let mut video_toolbox_output_frames = 0_u64;
     let mut video_toolbox_output_bytes = 0_u64;
     let mut max_video_toolbox_output_encode_ms: Option<u64> = None;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut pending_video_toolbox_output_frames = 0_u64;
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut pending_video_toolbox_fifo_frames = 0_u64;
     let mut pending_raw_fifo_frames = 0_u64;
     let mut pending_raw_fifo_started_at = VecDeque::<Instant>::new();
@@ -3856,6 +3866,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut video_toolbox_fifo_write_times_ms = Vec::with_capacity(128);
     let mut raw_video_fifo_write_times_ms = Vec::with_capacity(128);
     let mut video_toolbox_fifo_enqueue_times_ms = Vec::with_capacity(128);
+    #[cfg_attr(target_os = "windows", allow(unused_mut))]
     let mut max_video_toolbox_fifo_enqueue_ms: Option<f64> = None;
     let mut writer_loop_times_ms = Vec::with_capacity(128);
     let mut writer_sleep_times_ms = Vec::with_capacity(128);
@@ -6727,6 +6738,7 @@ enum BoundedWriterJoinOutcome {
     Detached,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn bounded_writer_join<T>(join: std::thread::JoinHandle<T>) -> BoundedWriterJoinOutcome {
     const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
     bounded_writer_join_until(join, Instant::now() + WRITER_CLOSE_JOIN_GRACE)
@@ -7840,10 +7852,12 @@ fn oldest_pending_video_toolbox_frame_age(
         .map(|started_at| started_at.elapsed())
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn encoder_bridge_video_toolbox_probe_enabled() -> bool {
     parse_video_toolbox_probe_enabled(std::env::var(VIDEOTOOLBOX_PROBE_ENV).ok().as_deref())
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn parse_video_toolbox_probe_enabled(value: Option<&str>) -> bool {
     let Some(value) = value else {
         return false;

@@ -260,6 +260,7 @@ fn unsupported_device_list() -> DeviceList {
     DeviceList { devices, warnings }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
     devices
         .into_iter()
@@ -284,6 +285,7 @@ fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_screen_devices(
     av_devices: &[AvFoundationDevice],
     screen_capture_permission_required: bool,
@@ -318,6 +320,7 @@ fn avfoundation_screen_devices(
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn missing_avfoundation_screen_device() -> Device {
     Device {
         app: None,
@@ -335,6 +338,7 @@ fn missing_avfoundation_screen_device() -> Device {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_probe_failed_screen_device() -> Device {
     Device {
         app: None,
@@ -947,6 +951,7 @@ fn db_to_level(db: f64) -> f64 {
 // available doubled every microphone in the picker and made a broken
 // "Fallback - X" row the fresh-profile default, so they are listed only when
 // no native CoreAudio input can be selected at all.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_microphone_picker_devices(
     av_devices: &[AvFoundationDevice],
     native_microphone_available: bool,
@@ -961,6 +966,7 @@ fn avfoundation_microphone_picker_devices(
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
     // The capture worker and meter only open stable UID identities. An
     // index-only row (FFmpeg without the Videorc AVF identity patch) can never

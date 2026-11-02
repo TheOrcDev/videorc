@@ -9,6 +9,7 @@ const SCREEN_CAPTUREKIT_PREFIX: &str = "screen:screencapturekit:";
 const WINDOW_CAPTUREKIT_PREFIX: &str = "window:screencapturekit:";
 const WINDOWS_DXGI_SCREEN_PREFIX: &str = "screen:dxgi:";
 const WINDOWS_GDIGRAB_DESKTOP_ID: &str = "screen:gdigrab:desktop";
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Whether native capture callbacks provide a continuous cadence signal that
@@ -435,6 +436,7 @@ fn windows_gdigrab_desktop_device() -> Device {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn permission_or_unavailable(error: &str) -> DeviceStatus {
     let normalized = error.to_lowercase();
     if normalized.contains("permission")
@@ -448,6 +450,7 @@ fn permission_or_unavailable(error: &str) -> DeviceStatus {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn should_include_window_metadata(
     is_on_screen: bool,
     layer: isize,
@@ -468,6 +471,7 @@ fn should_include_window_metadata(
             || app_name.is_some_and(|value| !value.is_empty()))
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) fn is_foreign_session_window_app(app_name: Option<&str>) -> bool {
     app_name.is_some_and(|value| value.eq_ignore_ascii_case("loginwindow"))
 }

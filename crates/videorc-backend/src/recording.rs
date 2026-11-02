@@ -58,6 +58,7 @@ use crate::encoder_bridge::DirectD3D11CameraOverlay;
 #[cfg(any(target_os = "windows", test))]
 use crate::encoder_bridge::encoder_bridge_lifecycle_snapshot;
 #[cfg(target_os = "windows")]
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
 use crate::encoder_bridge::gate_encoder_bridge_lifecycle_persistence;
 use crate::encoder_bridge::{
     EncoderBridgeDiagnosticsContext, EncoderBridgeLifecycleSnapshot, EncoderBridgeOutputProfile,
@@ -2287,6 +2288,7 @@ pub struct ActiveRecording {
     /// Capture lease over the preview compositor run when the session armed
     /// it in place (instant-record P4.1). Released after bridge teardown so
     /// the preview returns to its own dimensions and fps.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     compositor_capture_lease: Option<CompositorCaptureLeaseGuard>,
     /// The compositor run this session started itself (the restart path:
     /// Linux, and macOS sessions that can't arm in place). Stopped by exact
@@ -2330,6 +2332,7 @@ impl CompositorCaptureLeaseGuard {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     async fn release(mut self) {
         self.released = true;
         let _ = release_compositor_capture_lease(&self.state, &self.session_id).await;
@@ -15200,7 +15203,7 @@ fn ffmpeg_h264_platform_for_target(
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 static WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<
         std::collections::HashMap<
@@ -15213,7 +15216,7 @@ static WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE: std::sync::OnceLock<
 /// Cached hardware verdict for one capability key, if any. Failures are
 /// cached exactly like successes: a rejected probe must not re-run FFmpeg on
 /// every session start with the same binary + profile.
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 fn windows_media_foundation_cached_outcome(
     key: &WindowsMediaFoundationProbeKey,
 ) -> Option<WindowsMediaFoundationProbeOutcome> {
@@ -15224,7 +15227,7 @@ fn windows_media_foundation_cached_outcome(
         .and_then(|cache| cache.get(key).cloned())
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 fn windows_media_foundation_store_outcome(
     key: WindowsMediaFoundationProbeKey,
     outcome: WindowsMediaFoundationProbeOutcome,
@@ -15256,7 +15259,7 @@ struct WindowsMediaFoundationProbeKey {
 /// One cached hardware-capability verdict for a probe key. `reason` carries
 /// the EXACT failure evidence (exit status + stderr tail) so every session
 /// that falls back logs why, not just that it did.
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowsMediaFoundationProbeOutcome {
     accepted: bool,
@@ -15431,7 +15434,7 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".to_string(),
