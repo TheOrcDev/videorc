@@ -960,6 +960,15 @@ Those were reviewed after merge, and the follow-ups are listed.
     FFmpeg within 8/255.
   - As built: CPU 1/255, Metal 0/255 and FFmpeg 2/255, the last with a
     float-LUT `eq`.
+  - **Found (0.18.0):** `eq` is GPL-only and every shipped FFmpeg is an
+    LGPL build, so a legacy-path take (4K60, or above 1080p60 while
+    streaming) with a non-neutral look failed to start with
+    `No such filter: 'eq'`; the Homebrew GPL ffmpeg hid it from the parity
+    test. Fixed by [#1047](https://github.com/TheOrcDev/videorc/pull/1047):
+    the same law through `lutyuv` on full-range BT.709 YUV (2/255 on the
+    fixture against the bundled 8.1.1), the chain's filters in every bundle
+    policy, and the parity test pinned to the bundled FFmpeg as a
+    `smoke:recording-studio` step.
 - **J** ([#1002](https://github.com/TheOrcDev/videorc/pull/1002)): a
   stream-key X destination's chat row is a neutral "Needs Sign in" state.
   - It reads "X chat needs Sign in…" with a Use Sign in button.
