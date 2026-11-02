@@ -34,7 +34,7 @@
       "elevated": false,
       "hostX": 20.5,
       "hostY": 12.25,
-      "hostHeight": 900
+      "hostHeight": 900.0
     },
     "normalized": {
       "screenX": 120.5,
@@ -52,7 +52,7 @@
       "elevated": false,
       "hostX": 20.5,
       "hostY": 12.25,
-      "hostHeight": 900
+      "hostHeight": 900.0
     },
     "legacyWire": {
       "screenX": 0.0,
