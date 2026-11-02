@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { evaluateRnnoiseArtifact, measureFloatPcmWindow } from './lib/rnnoise-artifact-gate.mjs'
+import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -170,7 +171,7 @@ async function seedRenderer(smoke, mode, selectedMicrophoneId) {
       sources: { testPattern: true, microphoneId: ${JSON.stringify(selectedMicrophoneId)} }
     }))
     localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
-    setTimeout(() => location.reload(), 100)
+    ${reloadKeepingSeedJs({ delayMs: 100 })}
     return true
   `
   })

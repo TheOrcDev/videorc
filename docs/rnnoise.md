@@ -8,10 +8,10 @@ other microphone processing or the system-audio mix.
 The control changes during capture without restarting the microphone. Off and
 On share the same source timeline and use a short transition. Mute remains
 a separate downstream control and silences the audio sent to the recording,
-stream, captions and Orcle. System audio is not processed by noise reduction.
+stream, captions and Buddy. System audio is not processed by noise reduction.
 
 An idle microphone meter shows the input level with gain applied. During a
-supported session the mic meter, captions and Orcle receive the processed
+supported session the mic meter, captions and Buddy receive the processed
 microphone contribution used in the recording. Noise reduction targets background
 noise in speech. It does not provide acoustic echo cancellation or a configurable
 strength parameter.
