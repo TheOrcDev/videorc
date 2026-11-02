@@ -186,6 +186,23 @@ describe('Linux FFmpeg capability policy', () => {
     assert.deepEqual(unlisted.problems, ['ffmpeg -filters output was not provided'])
   })
 
+  it('reads filter names, never a description that mentions one', () => {
+    // FFmpeg's own `scale2ref` line carries a bare "format" word.
+    const describedOnly = assessLinuxFfmpegCapabilities({
+      versionOutput,
+      encodersOutput,
+      filtersOutput: filtersOutput
+        .split('\n')
+        .filter((line) => !/ format /.test(line))
+        .concat(
+          ' ... scale2ref        VV->VV     Scale the input video size and/or convert the image format to the given reference.'
+        )
+        .join('\n'),
+      ...ring
+    })
+    assert.deepEqual(describedOnly.problems, ['missing filter format'])
+  })
+
   it('fails closed without the replay ring components or their listings (plan 181)', () => {
     const withoutRing = assessLinuxFfmpegCapabilities({
       versionOutput,

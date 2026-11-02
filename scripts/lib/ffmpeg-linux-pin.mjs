@@ -83,8 +83,10 @@ export const REQUIRED_LINUX_FFMPEG_DEMUXERS = ['concat', 'mpegts']
 export const REQUIRED_LINUX_FFMPEG_BITSTREAM_FILTERS = ['aac_adtstoasc']
 
 function listedNames(output) {
-  // `-muxers` / `-demuxers` print one component per line, flags first; a
-  // comma-joined alias list (`stream_segment,ssegment`) is one component.
+  // `-filters` / `-muxers` / `-demuxers` print one component per line, flags
+  // first; a comma-joined alias list (`stream_segment,ssegment`) is one
+  // component. Descriptions are ignored, so `scale2ref`'s "convert the image
+  // format" never passes for `format`.
   return String(output ?? '')
     .split(/\r?\n/)
     .flatMap((line) => line.trim().split(/\s+/).slice(0, 2))
@@ -121,7 +123,7 @@ export function assessLinuxFfmpegCapabilities({
   if (typeof filtersOutput !== 'string') {
     problems.push('ffmpeg -filters output was not provided')
   } else {
-    const filters = filtersOutput.split(/\s+/)
+    const filters = listedNames(filtersOutput)
     for (const filter of REQUIRED_LINUX_FFMPEG_FILTERS) {
       if (!filters.includes(filter)) problems.push(`missing filter ${filter}`)
     }

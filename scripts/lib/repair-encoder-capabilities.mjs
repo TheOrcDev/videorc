@@ -76,6 +76,15 @@ function hasWord(output, word) {
   return new RegExp(`(^|[^A-Za-z0-9_])${word}([^A-Za-z0-9_]|$)`, 'm').test(output)
 }
 
+/** The filter names a `-filters` listing carries: flags first, then the
+ * name. Descriptions are ignored, so `scale`'s "convert the image format."
+ * never passes for `format`. */
+function listedFilterNames(output) {
+  return String(output ?? '')
+    .split(/\r?\n/)
+    .flatMap((line) => line.trim().split(/\s+/).slice(0, 2))
+}
+
 /**
  * Assesses `ffmpeg -protocols` / `ffmpeg -encoders` output against the macOS
  * bundle's required capability set (streaming TLS + repair/record encoders).
@@ -97,8 +106,9 @@ export function assessMacosFfmpegCapabilities({
       missing.push(`encoder:${encoder}`)
     }
   }
+  const filters = listedFilterNames(filtersOutput)
   for (const filter of REQUIRED_MACOS_FFMPEG_FILTERS) {
-    if (!hasWord(filtersOutput, filter)) {
+    if (!filters.includes(filter)) {
       missing.push(`filter:${filter}`)
     }
   }

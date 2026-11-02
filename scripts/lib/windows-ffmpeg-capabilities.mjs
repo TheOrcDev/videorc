@@ -50,10 +50,11 @@ function hasWord(output, word) {
   return new RegExp(`(^|[^A-Za-z0-9_])${word}([^A-Za-z0-9_]|$)`, 'm').test(output)
 }
 
-/** The component names a `-muxers` / `-demuxers` / `-bsfs` listing carries:
- * flags first, then the name (a comma-joined alias list is one component).
- * Descriptions are ignored, so "streaming segment muxer" never passes for
- * `segment`. */
+/** The component names a `-filters` / `-muxers` / `-demuxers` / `-bsfs`
+ * listing carries: flags first, then the name (a comma-joined alias list is
+ * one component). Descriptions are ignored, so "streaming segment muxer"
+ * never passes for `segment`, nor `scale`'s "convert the image format." for
+ * `format`. */
 function listedComponentNames(output) {
   return String(output ?? '')
     .split(/\r?\n/)
@@ -87,8 +88,9 @@ export function assessWindowsFfmpegCapabilities({
       missing.push(`encoder:${encoder}`)
     }
   }
+  const filters = listedComponentNames(filtersOutput)
   for (const filter of REQUIRED_WINDOWS_FFMPEG_FILTERS) {
-    if (!hasWord(filtersOutput, filter)) {
+    if (!filters.includes(filter)) {
       missing.push(`filter:${filter}`)
     }
   }
