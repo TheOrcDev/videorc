@@ -57,9 +57,12 @@ original [port license](../licenses/rnnoise-rs/LICENSE.txt),
 ## Audio timing and controls
 
 The processor consumes 480 mono samples at 48 kHz. Its measured delay is 960
-samples, or 20 ms. The session bus prepares future input using its existing
-playout buffer and assigns the result to its original source position. It does
-not add a hidden user sync offset or move system audio independently.
+samples, or 20 ms. The session bus prepares future input from its playout
+buffer and assigns the result to its original source position. Sessions that
+use the 50 ms deadline get 20 ms more, so the microphone keeps the same budget
+for late audio when noise reduction is on. This changes when the bus writes,
+not what it writes. It does not add a user sync offset or move system audio
+independently.
 
 Each input block snapshots mic gain and advances the recurrent processor once.
 Partial output writes reuse the prepared samples. Gain edits affect subsequent

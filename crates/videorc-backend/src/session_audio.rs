@@ -28,6 +28,16 @@ pub const PLAYOUT_DELAY: Duration = Duration::from_millis(50);
 /// buffers arrive 22-52 ms after their last sample (S0), so 50 ms would place
 /// about 31% of them behind the cursor.
 pub const SYSTEM_AUDIO_PLAYOUT_DELAY: Duration = Duration::from_millis(150);
+/// Noise reduction reads this far past the chunk it renders. A session whose
+/// deadline is [`PLAYOUT_DELAY`] adds it, so turning noise reduction on keeps
+/// the same late-arrival budget for the microphone.
+pub const MICROPHONE_DENOISE_PLAYOUT_HEADROOM: Duration = Duration::from_micros(
+    crate::microphone_denoise::DELAY_SAMPLES as u64 * 1_000_000 / NATIVE_AUDIO_SAMPLE_RATE as u64,
+);
+const _: () = assert!(
+    SYSTEM_AUDIO_PLAYOUT_DELAY.as_micros()
+        >= PLAYOUT_DELAY.as_micros() + MICROPHONE_DENOISE_PLAYOUT_HEADROOM.as_micros()
+);
 /// The enable/disable envelope for a mixed source and the microphone handoff
 /// ramp: 5 ms at 48 kHz.
 const RAMP_FRAMES: u16 = 240;

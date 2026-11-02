@@ -22722,11 +22722,13 @@ fn session_audio_options(
 /// 37 s of mic lost in a 12-minute 1080p take, 2 s in a 10-minute 720p one).
 /// The delay changes when bytes are written, never which bytes
 /// (`playout_delay_150ms_writes_the_same_bytes_as_50ms`).
+/// Elsewhere the deadline also covers the noise reduction lookahead.
 fn default_session_playout_delay() -> std::time::Duration {
     if cfg!(target_os = "linux") {
         crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
     } else {
         crate::session_audio::PLAYOUT_DELAY
+            + crate::session_audio::MICROPHONE_DENOISE_PLAYOUT_HEADROOM
     }
 }
 
@@ -47476,8 +47478,9 @@ mod tests {
             assert_eq!(capable.system_delay_frames, 0);
             assert_eq!(capable.system_gain_db, -9.0);
 
-            // Elsewhere the bus keeps its pre-mixer defaults, except Linux's
-            // longer deadline for the Pulse worker (retest 150).
+            // Elsewhere the bus keeps its pre-mixer defaults, except a longer
+            // deadline: Linux for the Pulse worker (retest 150), others for the
+            // noise reduction lookahead, which can turn on mid-session.
             let elsewhere = session_audio_options(&audio, false);
             assert_eq!(
                 crate::session_audio::SessionAudioOptions {
@@ -47493,6 +47496,7 @@ mod tests {
                     crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
                 } else {
                     crate::session_audio::PLAYOUT_DELAY
+                        + crate::session_audio::MICROPHONE_DENOISE_PLAYOUT_HEADROOM
                 }
             );
 
