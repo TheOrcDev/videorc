@@ -804,6 +804,7 @@ describe(
     let midfreeze
     let silence
     let zerohole
+    let leadInZerohole
     let screenonly
 
     before(async () => {
@@ -812,6 +813,7 @@ describe(
       midfreeze = join(dir, 'midfreeze.mp4')
       silence = join(dir, 'silence.mp4')
       zerohole = join(dir, 'zerohole.mp4')
+      leadInZerohole = join(dir, 'lead-in-zerohole.mp4')
       screenonly = join(dir, 'screenonly.mp4')
 
       await generate([
@@ -900,6 +902,30 @@ describe(
         'aac',
         zerohole
       ])
+      // A non-silent tone with a dropout crossing the 500 ms lead-in must
+      // still fail the matrix's digital-zero gate (#947).
+      await generate([
+        '-f',
+        'lavfi',
+        '-i',
+        'testsrc2=size=320x240:rate=30',
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=880:sample_rate=48000',
+        '-t',
+        '3',
+        '-af',
+        "volume=enable='between(t,0.2,0.8)':volume=0",
+        '-fps_mode',
+        'cfr',
+        ...videoCodecArgs,
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        leadInZerohole
+      ])
       await generate([
         '-f',
         'lavfi',
@@ -920,8 +946,13 @@ describe(
       if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true })
     })
 
-    it('PASSES a clean CFR recording', async () => {
-      const report = await analyzeRecording(clean, { ffmpegPath, ffprobePath, intendedFps: 30 })
+    it('PASSES a clean CFR tone recording with the digital-zero gate armed', async () => {
+      const report = await analyzeRecording(clean, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        gates: { requireNoDigitalZeroRuns: true }
+      })
       assert.equal(
         report.verdict.pass,
         true,
@@ -959,6 +990,19 @@ describe(
       })
       assert.equal(strict.verdict.pass, false)
       assert.ok(strict.verdict.failures.some((f) => /digital-zero run/.test(f)))
+    })
+
+    it('FAILS a tone dropout that begins inside the lead-in and continues into the take', async () => {
+      const report = await analyzeRecording(leadInZerohole, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        gates: { requireNoDigitalZeroRuns: true }
+      })
+      assert.equal(report.verdict.pass, false)
+      assert.equal(report.metrics.digitalZeroRunCount, 1)
+      assert.equal(report.metrics.firstDigitalZeroSeconds, 0.5)
+      assert.ok(report.verdict.failures.some((f) => /digital-zero run/.test(f)))
     })
 
     it('FAILS a recording with a mid-stream freeze (freeze + repeated-frame gates)', async () => {

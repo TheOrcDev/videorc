@@ -2998,3 +2998,77 @@ and `merge-main-a2b-native` reports, their cleanup receipts, and
 `merge-main-a2b-desktop-restored.json` in the existing evidence root. AppImage,
 physical Ubuntu/Hyprland, endurance, seven-day pilot, update/rollback and
 publication gates remain open. No Beta candidate is accepted or published.
+
+### Bundled camera-look compatibility and fresh recording evidence, 2026-11-02
+
+The published UI registry now matches all 79 files from 76 items after the
+normal protected merge of videorc-ui PR #1. The earlier failed registry
+receipt remains preserved. The optimized development build for `1cf872a8`
+completed with unchanged native inputs and normal owned cleanup; its SHA-256
+is `796da9782dbb2e8d4b708934796b70c0807f9813fd31cdba116be126b1dfd573`.
+
+Fresh 1080p30 recordings through that exact development build execute on Ogre
+with both VAAPI and OpenH264, but both fail. VAAPI has a 200 ms corroborated
+freeze, a three-frame repeat burst, and a 58.5 ms digital-zero run. OpenH264
+has a 967 ms freeze, a fourteen-frame repeat burst, and up to 1005.4 ms of
+digital zeros. Both fail the unselected-frequency energy gate. Independent
+raw/AAC Pulse captures were ready before the scene and routing was recorded.
+In the VAAPI recording window with one-second padding, both controls remain
+continuous with no above-limit 997 Hz windows while the app has a gap and
+transient energy. OpenH264 controls contain shorter raw-source glitches.
+This narrows the investigation; it does not prove cross-source leakage or
+waive the failed tone gate. Source/app time alignment uses wall timestamps,
+not a shared sample-clock anchor. All owned test audio modules are removed;
+no supervisor cleanup signals or leaked descendants remain.
+
+AC and the display are on, but Ogre still reports its lid closed and clocks
+near 800 MHz. The cause is unproven. These are development diagnostics, not
+performance or physical AppImage acceptance. The owner's stay-awake setting
+was preserved.
+
+Current-head Linux, macOS and Windows source CI exposed a new upstream
+camera-look fixture requiring FFmpeg without provisioning it. Pointing the
+fixture at the pinned LGPL Linux bundle exposed a second, product failure:
+that bundle has no GPL-only `eq` filter. The camera graph now expresses the
+compositor's BT.709 luma formula with LGPL `geq` in planar RGB, clips only at
+the end, and preserves keyed alpha. Tests retain the shared palette, add all
+eight slider-extreme combinations and alpha 0/63/127/255, and enforce 2/255
+precision instead of the former 8/255 YUV round-trip allowance. Every
+platform's package capability check now requires `geq`; missing-filter tests
+exercise each required filter.
+
+Main was subsequently integrated through `d9e43aef` (smoke-only changes).
+Darwin zombie-group cleanup and the analyzer's lead-in dropout regression
+are retained. The matrix conflict preserves the Beta motion/gap budgets and
+Linux's owned Pulse input; upstream's debug FFmpeg tone applies only to the
+other platforms' no-microphone sessions.
+
+Six local workflow changes provision/select FFmpeg for CI and release source
+tests and preserve Linux gate failures across shell retry handling. Fourteen
+executed shell cases verify ordinary failure propagation, success, and
+bounded 137/143 retries. They remain outside the pushed PR until a credential
+with `workflow` access is available; the secure credential request timed out
+without input. The earlier stash remains untouched, including its rejected
+compositor experiment. No acceptance threshold or test is skipped to make CI
+pass.
+
+Validation on the merged working source: all 3,069 Node tests pass with zero
+skips, including 102 focused merge tests. The backend camera filter passes
+220 tests; the two actual FFmpeg regressions also pass with system tools
+removed from PATH and the pinned LGPL executable selected explicitly. The
+full backend suite reports 4,235 passed, one failed and 19 ignored in 668.37
+seconds; only the unchanged GLES Beams comparison fails (mean 20.405,
+maximum 193). The additional bridge and wire targets pass 24 and one tests.
+Clippy passes with the four existing Linux platform allowances; Rust and
+changed-script formatting pass. All captured input hashes remain unchanged.
+Both owned supervisors finish without cleanup signals or leaked descendants.
+These results do not turn the failed shader or recording gates into passes.
+
+Private receipts are under `ffmpeg-parity-ci/`,
+`merge-main-a2b-runtime-classification.json`, and
+`merge-main-a2b-audio-comparison.json` in the existing evidence root. The
+camera-look change still needs packaged camera/recording-studio validation
+on the supported platforms; macOS device smokes cannot run on Ogre. Shader,
+audio/motion, latency, exact AppImage Ubuntu/Hyprland acceptance, endurance,
+pilot, updates/rollback and protected public delivery remain open. No Beta
+version is selected, accepted or published.

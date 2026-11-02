@@ -23485,11 +23485,21 @@ fn camera_look_filter(layout: &LayoutSettings) -> String {
     if look.is_neutral() {
         return String::new();
     }
-    // Zero gamma weight preserves unit gamma while selecting eq's float LUT.
-    // Its integer shortcut quantizes negative brightness too coarsely.
+    // `eq` is GPL-only and absent from our LGPL bundles. Apply the same
+    // BT.709 luma law as the compositor directly in planar RGB instead;
+    // clamp only the final result and preserve the chroma key's alpha.
+    let luma = "(0.2126*r(X,Y)+0.7152*g(X,Y)+0.0722*b(X,Y))";
+    let channel = |name| {
+        format!(
+            "clip({}*{name}(X,Y)+({}-{})*{luma}+255*({}-({}-1)/2),0,255)",
+            look.saturation, look.contrast, look.saturation, look.brightness, look.contrast
+        )
+    };
     format!(
-        "format=rgba,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva444p,eq=brightness={}:contrast={}:saturation={}:gamma=1.000001:gamma_r=1.000001:gamma_b=1.000001:gamma_weight=0,scale=in_range=full:out_range=full:in_color_matrix=bt709,format=rgba,",
-        look.brightness, look.contrast, look.saturation
+        "format=gbrap,geq=r='{}':g='{}':b='{}':a='alpha(X,Y)',format=rgba,",
+        channel("r"),
+        channel("g"),
+        channel("b")
     )
 }
 
@@ -39109,28 +39119,58 @@ mod tests {
             params.layout.layout_preset = preset.clone();
             let filter = video_filter(Some(1), &params, false);
             assert!(
-                filter.contains("eq=brightness=0.05:contrast=1.1:saturation=0.8"),
+                filter.contains(&camera_look_filter(&params.layout)),
                 "{preset:?}: camera grade missing from {filter}"
             );
         }
     }
 
     #[test]
-    fn camera_look_ffmpeg_eq_agrees_with_float_law() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
+    fn camera_look_ffmpeg_agrees_with_float_law() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
                 .unwrap();
         let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
         let look: crate::protocol::CameraLook =
             serde_json::from_value(fixture["look"].clone()).unwrap();
+        assert_ffmpeg_camera_look(&palette, look);
+    }
+
+    #[test]
+    fn camera_look_ffmpeg_clamps_only_after_grading_and_preserves_key_alpha() {
+        let palette = [
+            [0, 0, 0],
+            [255, 255, 255],
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [1, 254, 127],
+        ];
+        for brightness in [-0.25, 0.25] {
+            for contrast in [0.5, 1.5] {
+                for saturation in [0.0, 2.0] {
+                    assert_ffmpeg_camera_look(
+                        &palette,
+                        crate::protocol::CameraLook {
+                            brightness,
+                            contrast,
+                            saturation,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_ffmpeg_camera_look(palette: &[[u8; 3]], look: crate::protocol::CameraLook) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
         let width = palette.len() * 4;
         let mut frame = Vec::new();
-        for _ in 0..4 {
-            for rgb in &palette {
+        for alpha in [0, 63, 127, 255] {
+            for rgb in palette {
                 for _ in 0..4 {
-                    frame.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 127]);
+                    frame.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
                 }
             }
         }
@@ -39178,7 +39218,7 @@ mod tests {
         for (index, pixel) in frame.chunks_exact(4).enumerate() {
             assert_eq!(
                 output.stdout[index * 4 + 3],
-                127,
+                pixel[3],
                 "look must preserve key alpha"
             );
             let rgb = [pixel[0], pixel[1], pixel[2]].map(|v| f64::from(v) / 255.0);
@@ -39188,20 +39228,19 @@ mod tests {
                     + look.brightness
                     + (look.contrast - 1.0) * (y - 0.5)
                     + look.saturation * (value - y))
+                    .clamp(0.0, 1.0)
                     * 255.0)
                     .round() as u8;
-                assert!(
-                    (1..255).contains(&expected),
-                    "fixture must stay away from clipping"
-                );
                 maximum = maximum.max(expected.abs_diff(output.stdout[index * 4 + channel]));
             }
         }
-        // Orchestrator call, plan 213 I, 2026-11-01: legacy eq gets 8/255.
-        // The measured swscale RGB -> YUV -> RGB identity baseline is 2/255;
-        // eq adds about 4/255. CPU/Metal keep the strict 2/255 bound.
-        assert!(maximum <= 8, "FFmpeg eq vs float law: {maximum}/255");
-        eprintln!("camera look FFmpeg eq vs float law: {maximum}/255 (limit 8)");
+        // RGB evaluation avoids the old eq path's RGB/YUV round-trip loss.
+        // Keep the same 2/255 precision bound as the CPU/Metal paths.
+        assert!(
+            maximum <= 2,
+            "FFmpeg camera look vs float law: {maximum}/255"
+        );
+        eprintln!("camera look FFmpeg vs float law: {maximum}/255 (limit 2)");
     }
 
     /// The FFmpeg-leg twin of scene_geometry's realistic-palette pin: under
@@ -39290,7 +39329,7 @@ mod tests {
         let key_at = layer.find("chromakey=").expect("scene layer keys");
         let scale_at = layer.find("scale=").expect("scene layer scales");
         assert!(key_at < scale_at, "key must run before scaling: {layer}");
-        let look_at = layer.find("eq=").expect("camera look");
+        let look_at = layer.find("geq=r=").expect("camera look");
         assert!(
             key_at < look_at && look_at < layer.rfind("scale=").unwrap(),
             "key, look, then frame scale: {layer}"
@@ -39304,7 +39343,7 @@ mod tests {
         let key_at = chain.find("chromakey=").expect("camera chain keys");
         let scale_at = chain.find("scale=").expect("camera chain scales");
         assert!(key_at < scale_at, "key must run before scaling: {chain}");
-        let look_at = chain.find("eq=").expect("camera look");
+        let look_at = chain.find("geq=r=").expect("camera look");
         assert!(
             key_at < look_at && look_at < chain.rfind("scale=").unwrap(),
             "key, look, then frame scale: {chain}"
@@ -39322,7 +39361,7 @@ mod tests {
             180,
             &params,
         );
-        assert!(!screen.contains("eq="), "the screen must stay ungraded");
+        assert!(!screen.contains("geq=r="), "the screen must stay ungraded");
     }
 
     #[test]

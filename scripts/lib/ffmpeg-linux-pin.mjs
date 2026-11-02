@@ -15,9 +15,9 @@ export const REQUIRED_LINUX_FFMPEG_CONFIGURATION = [
 
 export const REQUIRED_LINUX_H264_ENCODERS = ['h264_vaapi', 'libopenh264']
 
-/** The filters Clean cut renders with (plan 119 S13), plus `hwupload` for the
- * VAAPI arm. Required from `ffmpeg -filters`; a missing listing fails closed. */
-export const REQUIRED_LINUX_FFMPEG_FILTERS = [...CLEAN_CUT_FFMPEG_FILTERS, 'hwupload']
+/** Clean cut's filters, `hwupload` for VAAPI, and `geq` for camera look/masks.
+ * Required from `ffmpeg -filters`; a missing listing fails closed. */
+export const REQUIRED_LINUX_FFMPEG_FILTERS = [...CLEAN_CUT_FFMPEG_FILTERS, 'hwupload', 'geq']
 
 export function lastDayOfMonth(year, month) {
   return new Date(Date.UTC(year, month, 0)).getUTCDate()

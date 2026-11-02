@@ -84,6 +84,7 @@ describe('Linux FFmpeg capability policy', () => {
     ' ... setpts           V->V       Set PTS for the output video frame.',
     ' ... asetpts          A->A       Set PTS for the output audio frame.',
     ' ... format           V->V       Convert the input video to one of the specified pixel formats.',
+    ' TS. geq              V->V       Apply generic equation to each pixel.',
     ' ... hwupload         V->V       Upload a normal frame to a hardware frame'
   ].join('\n')
   const muxersOutput = [
@@ -125,7 +126,8 @@ describe('Linux FFmpeg capability policy', () => {
       'setpts',
       'asetpts',
       'format',
-      'hwupload'
+      'hwupload',
+      'geq'
     ])
   })
 
@@ -150,16 +152,18 @@ describe('Linux FFmpeg capability policy', () => {
   })
 
   it('fails closed on a missing filter or a missing -filters listing (plan 119 S13)', () => {
-    const withoutUpload = assessLinuxFfmpegCapabilities({
-      versionOutput,
-      encodersOutput,
-      filtersOutput: filtersOutput
-        .split('\n')
-        .filter((line) => !/ hwupload /.test(line))
-        .join('\n'),
-      ...ring
-    })
-    assert.deepEqual(withoutUpload.problems, ['missing filter hwupload'])
+    for (const name of REQUIRED_LINUX_FFMPEG_FILTERS) {
+      const missingFilter = assessLinuxFfmpegCapabilities({
+        versionOutput,
+        encodersOutput,
+        filtersOutput: filtersOutput
+          .split('\n')
+          .filter((line) => !line.split(/\s+/).includes(name))
+          .join('\n'),
+        ...ring
+      })
+      assert.deepEqual(missingFilter.problems, [`missing filter ${name}`])
+    }
     const unlisted = assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, ...ring })
     assert.deepEqual(unlisted.problems, ['ffmpeg -filters output was not provided'])
   })

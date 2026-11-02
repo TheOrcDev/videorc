@@ -24,7 +24,7 @@ export const REQUIRED_WINDOWS_FFMPEG_PROTOCOLS = ['rtmp', 'rtmps', 'tls']
 export const REQUIRED_WINDOWS_FFMPEG_ENCODERS = ['h264_mf', 'aac', 'pcm_s16le']
 /** `afftdn` for Noise Cleanup plus the trim/concat set Clean cut renders with
  * (plan 119 S13). */
-export const REQUIRED_WINDOWS_FFMPEG_FILTERS = ['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS]
+export const REQUIRED_WINDOWS_FFMPEG_FILTERS = ['afftdn', 'geq', ...CLEAN_CUT_FFMPEG_FILTERS]
 
 /** Encoders the app uses when present and lives without when absent: Intel
  * Quick Sync for the Windows raw path (plan 090 C). Reported, never required,

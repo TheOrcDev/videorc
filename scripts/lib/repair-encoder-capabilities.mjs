@@ -33,7 +33,7 @@ export const REQUIRED_MACOS_FFMPEG_ENCODERS = ['h264_videotoolbox', 'aac', 'pcm_
 /** Filters required by Premium local creative transforms: `afftdn` for Noise
  * Cleanup (built into the LGPL FFmpeg bundle, no separately licensed model)
  * and the trim/concat set Clean cut renders with (plan 119 S13). */
-export const REQUIRED_MACOS_FFMPEG_FILTERS = ['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS]
+export const REQUIRED_MACOS_FFMPEG_FILTERS = ['afftdn', 'geq', ...CLEAN_CUT_FFMPEG_FILTERS]
 
 /** Protocols every shipped macOS ffmpeg must expose. rtmps implies a TLS
  * backend was linked (static OpenSSL since 0.9.23); tls is listed separately

@@ -434,6 +434,9 @@ async function runPassWithAudio({
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
         VIDEORC_SMOKE_STATE_DIR: outputDirectory,
         VIDEORC_USER_DATA_DIR: userDataDir,
+        // Linux proves the owned Pulse microphone path; other hosts use the
+        // debug FFmpeg tone for their no-microphone matrix sessions.
+        ...(process.platform === 'linux' ? {} : { VIDEORC_INCIDENT_FFMPEG_TONE: '1' }),
         ...extraEnv
       },
       timeoutMs,
