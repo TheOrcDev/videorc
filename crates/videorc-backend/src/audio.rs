@@ -1462,6 +1462,7 @@ fn unavailable_microphone(id: &str, name: &str, detail: &str) -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: id.to_string(),
         name: name.to_string(),
         kind: DeviceKind::Microphone,
@@ -1736,6 +1737,7 @@ mod windows_native {
         Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: windows_dshow_microphone_device_id(&capture_name),
             name: friendly_name.clone(),
             kind: DeviceKind::Microphone,
@@ -1805,6 +1807,7 @@ fn list_platform_microphones() -> Result<Vec<Device>> {
         devices.push(Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: format!("microphone:coreaudio:{device_id}"),
             name,
             kind: DeviceKind::Microphone,

@@ -240,6 +240,7 @@ pub fn portal_capture_devices(environment: Result<(), String>) -> Vec<Device> {
         Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: PORTAL_MONITOR_SOURCE_ID.to_string(),
             name: "Screen (portal)".to_string(),
             kind: DeviceKind::Screen,
@@ -251,6 +252,7 @@ pub fn portal_capture_devices(environment: Result<(), String>) -> Vec<Device> {
         Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: PORTAL_WINDOW_SOURCE_ID.to_string(),
             name: "Window (portal)".to_string(),
             kind: DeviceKind::Window,

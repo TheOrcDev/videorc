@@ -35,6 +35,7 @@ mod captions;
 mod capture_health;
 mod capture_input;
 mod capture_interruption;
+mod capture_log;
 mod capture_recovery;
 mod clean_cut;
 mod clip_marks;
@@ -258,6 +259,8 @@ use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
 const ENTITLEMENT_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -474,6 +477,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
         // and the next log line would kill an otherwise healthy backend
         // mid-recording. Logging must never be load-bearing.
         .with_writer(|| FailSilentStderr)
+        .finish()
+        // The support bundle's capture lines (plan 213 F3).
+        .with(capture_log::layer())
         .init();
     // Must run before any capture/encoder/audio thread joins the MTA: keeps
     // COM from unloading GraphicsCapture.dll (and the rest of the WinRT
@@ -14437,6 +14443,15 @@ async fn export_support_bundle_for_state(
         database_path: state.database.path().clone(),
         health: backend_health(state, ffmpeg_path).await,
         devices: devices::list_devices(ffmpeg_path).await,
+        displays: support_bundle::SupportBundleDisplays {
+            displays: tokio::task::spawn_blocking(screen_capture::display_facts)
+                .await
+                .unwrap_or_default(),
+            captured: support_bundle::SupportBundleCapturedDisplay::from_status(
+                &preview_screen::preview_screen_status(state).await,
+            ),
+            capture_log: capture_log::global().lines(),
+        },
         last_audio_meter: state.last_audio_meter.lock().await.clone(),
         entitlements: entitlements::current_entitlements(),
         recording: current_recording_status(state).await,

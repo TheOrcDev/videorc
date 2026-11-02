@@ -433,6 +433,46 @@ describe('live source selection authority', () => {
     ).toBeUndefined()
   })
 
+  it("keeps a display's UUID with its id, and a wish its old id now names another display (plan 213 F1)", () => {
+    const lg = {
+      id: 'screen:screencapturekit:5',
+      name: 'LG ULTRAWIDE · 3440 × 1440',
+      displayUuid: 'E2D7A1C4-0B6F-4E3A-9C1D-5F8A2B7C9D10',
+      kind: 'screen' as const,
+      status: 'available' as const
+    }
+    const dell = {
+      ...lg,
+      name: 'DELL U2720Q · 3840 × 2160',
+      displayUuid: '0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0'
+    }
+    const merged = confirmedSourceSelection(
+      { screenId: 'screen:screencapturekit:1', screenUuid: 'OLD' },
+      snapshot({ confirmed: { screenId: lg.id } }),
+      [lg]
+    )
+    expect(merged).toMatchObject({
+      screenId: lg.id,
+      screenName: lg.name,
+      screenUuid: lg.displayUuid
+    })
+
+    // The LG is gone and the DELL has its old id: confirming the DELL meets no wish.
+    const wish = {
+      screenId: dell.id,
+      wantedScreenId: lg.id,
+      wantedScreenName: lg.name,
+      wantedScreenUuid: lg.displayUuid
+    }
+    expect(
+      confirmedSourceSelection(wish, snapshot({ confirmed: { screenId: dell.id } }), [dell])
+    ).toMatchObject({ screenUuid: dell.displayUuid, wantedScreenUuid: lg.displayUuid })
+    expect(
+      confirmedSourceSelection(wish, snapshot({ confirmed: { screenId: lg.id } }), [lg])
+        .wantedScreenId
+    ).toBeUndefined()
+  })
+
   it('keeps a live microphone None through confirmation (plan 0027)', () => {
     const off = confirmedSourceSelection(
       { cameraId: 'cam-a', microphoneOff: true },

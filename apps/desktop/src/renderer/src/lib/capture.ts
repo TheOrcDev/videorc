@@ -2562,13 +2562,24 @@ export function preparedXCompletionTargets(streaming: StreamingSettings): Stream
   )
 }
 
-function findRememberedSource(
+export function findRememberedSource(
   sourceId: string | undefined,
   sourceName: string | undefined,
-  devices: Device[]
+  devices: readonly Device[],
+  displayUuid?: string
 ): Device | undefined {
+  // Plan 213 F1: a display's UUID outlives the id macOS gives it, so it
+  // decides first; a match under another id is the same display. A display
+  // with another UUID is another display, whatever its id or name.
+  const display = displayUuid
+    ? devices.find((device) => device.displayUuid === displayUuid)
+    : undefined
+  if (display) {
+    return display
+  }
+  const candidates = displayUuid ? devices.filter((device) => !device.displayUuid) : devices
   if (sourceId) {
-    const exact = devices.find((device) => device.id === sourceId)
+    const exact = candidates.find((device) => device.id === sourceId)
     if (exact) {
       return exact
     }
@@ -2579,7 +2590,7 @@ function findRememberedSource(
     return undefined
   }
 
-  return devices.find((device) => device.name.trim() === normalizedName)
+  return candidates.find((device) => device.name.trim() === normalizedName)
 }
 
 function sourceIdentityFor(device: Device | undefined): { id?: string; name?: string } {
@@ -2763,6 +2774,7 @@ export function buildCaptureSources(
     ...next,
     screenId: selected?.kind === 'screen' ? captureId : undefined,
     screenName: selected?.kind === 'screen' ? selected.name : undefined,
+    screenUuid: selected?.kind === 'screen' ? selected.displayUuid : undefined,
     windowId: selected?.kind === 'window' ? captureId : undefined,
     windowName: selected?.kind === 'window' ? selected.name : undefined,
     // Plan 0002 (release test 146): None is a choice that must outlive
@@ -2771,6 +2783,7 @@ export function buildCaptureSources(
     // Plan 213 E1: a new pick replaces the one a stand-in was holding for.
     wantedScreenId: undefined,
     wantedScreenName: undefined,
+    wantedScreenUuid: undefined,
     wantedWindowId: undefined,
     wantedWindowName: undefined,
     testPattern: false
@@ -2807,12 +2820,14 @@ const SOURCE_KIND_FIELDS = {
   capture: [
     'screenId',
     'screenName',
+    'screenUuid',
     'windowId',
     'windowName',
     'captureOff',
     'testPattern',
     'wantedScreenId',
     'wantedScreenName',
+    'wantedScreenUuid',
     'wantedWindowId',
     'wantedWindowName'
   ],
@@ -2909,6 +2924,7 @@ export function reconcileSourceSelection(
   if (nextSources.testPattern) {
     nextSources.screenId = undefined
     nextSources.screenName = undefined
+    nextSources.screenUuid = undefined
     nextSources.windowId = undefined
     nextSources.windowName = undefined
   } else if (nextSources.captureOff === true && !nextSources.screenId && !nextSources.windowId) {
@@ -2916,6 +2932,7 @@ export function reconcileSourceSelection(
     // to the first screen here re-selected it on every scene click and device
     // refresh, and on Linux that opened the compositor's share dialog.
     nextSources.screenName = undefined
+    nextSources.screenUuid = undefined
     nextSources.windowName = undefined
   } else {
     // Plan 213 E1: the pick is what the user chose, which a stand-in may be
@@ -2932,20 +2949,26 @@ export function reconcileSourceSelection(
       findRememberedSource(
         pick.id,
         pick.name,
-        selectableCaptureDevices.filter((device) => device.kind === pick.kind)
+        selectableCaptureDevices.filter((device) => device.kind === pick.kind),
+        pick.displayUuid
       )
     const holdingCapture = options.holdStandIns && pick.standIn
     const selectedCapture = holdingCapture
       ? selectableCaptureDevices.find((device) => device.id === usingId)
       : (rememberedCapture ?? defaultCaptureDevice)
     const standIn = holdingCapture || (!rememberedCapture && Boolean(pick.id || pick.name))
+    // Plan 213 F1: a display found by its UUID under a new id takes that id,
+    // silently; it is the same display.
     nextSources.screenId = selectedCapture?.kind === 'screen' ? selectedCapture.id : undefined
     nextSources.screenName = selectedCapture?.kind === 'screen' ? selectedCapture.name : undefined
+    nextSources.screenUuid =
+      selectedCapture?.kind === 'screen' ? selectedCapture.displayUuid : undefined
     nextSources.windowId = selectedCapture?.kind === 'window' ? selectedCapture.id : undefined
     nextSources.windowName = selectedCapture?.kind === 'window' ? selectedCapture.name : undefined
     nextSources.captureOff = undefined
     nextSources.wantedScreenId = standIn && pick.kind === 'screen' ? pick.id : undefined
     nextSources.wantedScreenName = standIn && pick.kind === 'screen' ? pick.name : undefined
+    nextSources.wantedScreenUuid = standIn && pick.kind === 'screen' ? pick.displayUuid : undefined
     nextSources.wantedWindowId = standIn && pick.kind === 'window' ? pick.id : undefined
     nextSources.wantedWindowName = standIn && pick.kind === 'window' ? pick.name : undefined
   }
@@ -3023,6 +3046,8 @@ type WantedSource = {
   kind: 'screen' | 'window' | 'camera'
   id?: string
   name?: string
+  /** A display pick's UUID (plan 213 F1). */
+  displayUuid?: string
   /** A stand-in is in use (or nothing is) for this pick. */
   standIn: boolean
 }
@@ -3042,12 +3067,21 @@ function wantedCapture(sources: SourceSelection): WantedSource {
       kind: 'screen',
       id: sources.wantedScreenId,
       name: sources.wantedScreenName,
+      displayUuid: sources.wantedScreenUuid,
       standIn: true
     }
   }
-  return sources.windowId
-    ? { kind: 'window', id: sources.windowId, name: sources.windowName, standIn: false }
-    : { kind: 'screen', id: sources.screenId, name: sources.screenName, standIn: false }
+  if (sources.windowId) {
+    return { kind: 'window', id: sources.windowId, name: sources.windowName, standIn: false }
+  }
+  return {
+    kind: 'screen',
+    id: sources.screenId,
+    name: sources.screenName,
+    // A UUID left over without its display's id or name is no pick.
+    displayUuid: sources.screenId || sources.screenName ? sources.screenUuid : undefined,
+    standIn: false
+  }
 }
 
 function wantedCamera(sources: SourceSelection): WantedSource {
@@ -3065,6 +3099,7 @@ export function wantedSourceSelection(sources: SourceSelection): SourceSelection
   const {
     wantedScreenId: _screenId,
     wantedScreenName: _screenName,
+    wantedScreenUuid: _screenUuid,
     wantedWindowId: _windowId,
     wantedWindowName: _windowName,
     wantedCameraId: _cameraId,
@@ -3075,6 +3110,7 @@ export function wantedSourceSelection(sources: SourceSelection): SourceSelection
   if (capture.standIn) {
     next.screenId = capture.kind === 'screen' ? capture.id : undefined
     next.screenName = capture.kind === 'screen' ? capture.name : undefined
+    next.screenUuid = capture.kind === 'screen' ? capture.displayUuid : undefined
     next.windowId = capture.kind === 'window' ? capture.id : undefined
     next.windowName = capture.kind === 'window' ? capture.name : undefined
   }
@@ -3109,7 +3145,8 @@ export function sourceStandIn(
     findRememberedSource(
       pick.id,
       pick.name,
-      devices.filter((device) => device.kind === pick.kind && device.status === 'available')
+      devices.filter((device) => device.kind === pick.kind && device.status === 'available'),
+      pick.displayUuid
     )
   )
   return { kind: pick.kind, wantedName: pick.name, usingName, available }
@@ -3119,15 +3156,23 @@ export function sourceSelectionChangeEvents(
   previous: SourceSelection,
   next: SourceSelection
 ): AutomaticSourceFallbackEvent[] {
+  // Plan 213 F1: the same display under a new id is no change to report.
+  const sameDisplay =
+    !previous.windowId &&
+    !next.windowId &&
+    Boolean(previous.screenUuid) &&
+    previous.screenUuid === next.screenUuid
   const events = [
-    sourceChangeEvent(
-      'capture',
-      previous.windowId ?? previous.screenId,
-      previous.windowName ?? previous.screenName,
-      next.windowId ?? next.screenId,
-      next.windowName ?? next.screenName,
-      previous.wantedWindowId ?? previous.wantedScreenId
-    ),
+    sameDisplay
+      ? undefined
+      : sourceChangeEvent(
+          'capture',
+          previous.windowId ?? previous.screenId,
+          previous.windowName ?? previous.screenName,
+          next.windowId ?? next.screenId,
+          next.windowName ?? next.screenName,
+          previous.wantedWindowId ?? previous.wantedScreenId
+        ),
     sourceChangeEvent(
       'camera',
       previous.cameraId,
@@ -3159,7 +3204,9 @@ function sourceChangeEvent(
   if (!previousId && !previousName) {
     return undefined
   }
-  if (previousId === nextId && previousName === nextName) {
+  // The same device under a new name (a window's title, a display's size,
+  // plan 213 F1) is no fallback.
+  if (previousId === nextId && (previousId || previousName === nextName)) {
     return undefined
   }
 

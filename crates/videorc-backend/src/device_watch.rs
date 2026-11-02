@@ -34,6 +34,8 @@ pub async fn run(mut changes: watch::Receiver<u64>, state: crate::state::AppStat
             .unwrap_or_else(|p| p.into_inner())
             .observe_devices(&devices.devices);
         state.emit_event("devices.changed", &devices);
+        // Plan 213 F2: a captured display's new resolution or scale.
+        crate::preview_screen::follow_display_size(&state, &devices.devices).await;
     }
 }
 

@@ -7,10 +7,11 @@ use serde_json::Value;
 
 use crate::protocol::{
     AiArtifactKind, AiArtifactStatus, AudioMeterSampleSnapshot, BackendHealth, BackendLogEvent,
-    DeviceList, DiagnosticStats, EntitlementsSnapshot, HealthEvent, RecordingStatus,
-    SessionLogEntry, SessionSummary,
+    DeviceList, DiagnosticStats, EntitlementsSnapshot, HealthEvent, PreviewScreenSourceKind,
+    PreviewScreenState, PreviewScreenStatus, RecordingStatus, SessionLogEntry, SessionSummary,
 };
 use crate::repair::GateStatus;
+use crate::screen_capture::DisplayFacts;
 
 // v2 (plan 024 S2): app.version + health.version now carry the DESKTOP app
 // version (threaded from Electron `app.getVersion()`), not the backend crate
@@ -51,6 +52,7 @@ pub struct SupportBundleExportInput {
     pub database_path: PathBuf,
     pub health: BackendHealth,
     pub devices: DeviceList,
+    pub displays: SupportBundleDisplays,
     pub last_audio_meter: Option<AudioMeterSampleSnapshot>,
     pub entitlements: EntitlementsSnapshot,
     pub recording: RecordingStatus,
@@ -64,6 +66,64 @@ pub struct SupportBundleExportInput {
     pub metrics_journal: Option<Vec<Value>>,
 }
 
+/// The Displays section (plan 213 F3): what macOS says of each display, the
+/// one the screen preview captures and at what size, and the last screen and
+/// camera capture log lines (never the whole log).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleDisplays {
+    pub displays: Vec<DisplayFacts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured: Option<SupportBundleCapturedDisplay>,
+    pub capture_log: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleCapturedDisplay {
+    pub source_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<u32>,
+    pub state: PreviewScreenState,
+    /// The display's own pixel size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_height: Option<u32>,
+    /// The size the capture asks for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_height: Option<u32>,
+    /// The size its frames arrive at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_height: Option<u32>,
+}
+
+impl SupportBundleCapturedDisplay {
+    /// The display the screen preview captures; `None` while it captures a
+    /// window or nothing.
+    pub fn from_status(status: &PreviewScreenStatus) -> Option<Self> {
+        if status.source_kind != Some(PreviewScreenSourceKind::Screen) {
+            return None;
+        }
+        let source_id = status.source_id.clone()?;
+        Some(Self {
+            display_id: crate::screen_capture::parse_screencapturekit_display_id(&source_id),
+            source_id,
+            state: status.state.clone(),
+            native_width: status.native_width,
+            native_height: status.native_height,
+            requested_width: status.requested_width,
+            requested_height: status.requested_height,
+            actual_width: status.actual_width,
+            actual_height: status.actual_height,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SupportBundle {
@@ -72,6 +132,7 @@ pub struct SupportBundle {
     pub app: SupportBundleApp,
     pub health: Value,
     pub devices: DeviceList,
+    pub displays: Value,
     pub last_audio_meter: Option<AudioMeterSampleSnapshot>,
     pub entitlements: Value,
     pub recording: Value,
@@ -214,6 +275,7 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
     let mut recording = serde_json::to_value(input.recording)?;
     let mut diagnostics = serde_json::to_value(input.diagnostics)?;
     let mut renderer_diagnostics = input.renderer_diagnostics;
+    let mut displays = serde_json::to_value(input.displays)?;
     let mut logs = serde_json::to_value(input.logs)?;
     let mut windows_mf_probe = match crate::windows_mf_probe::load_report(&input.database_path) {
         Ok(report) => report.map(serde_json::to_value).transpose()?,
@@ -232,6 +294,7 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
     if let Some(value) = renderer_diagnostics.as_mut() {
         redact_value(value, &mut redaction_summary);
     }
+    redact_value(&mut displays, &mut redaction_summary);
     redact_value(&mut logs, &mut redaction_summary);
     let mut metrics_journal = input.metrics_journal.map(Value::Array);
     if let Some(lines) = metrics_journal.as_mut() {
@@ -256,6 +319,7 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
         },
         health,
         devices: input.devices,
+        displays,
         last_audio_meter: input.last_audio_meter,
         entitlements,
         recording,
@@ -464,6 +528,7 @@ fn included_sections() -> Vec<String> {
         "app",
         "health",
         "devices",
+        "displays",
         "lastAudioMeter",
         "entitlements",
         "recording",
@@ -841,6 +906,7 @@ mod tests {
                 devices: vec![],
                 warnings: vec![],
             },
+            displays: SupportBundleDisplays::default(),
             last_audio_meter: Some(AudioMeterSampleSnapshot {
                 microphone_id: Some("microphone:coreaudio:42".to_string()),
                 result: crate::protocol::AudioMeterResult {
@@ -936,6 +1002,176 @@ mod tests {
         assert_eq!(on["metricsJournal"][0]["sessionId"], json!("session-1"));
     }
 
+    fn screen_status(source_kind: &str, source_id: &str) -> PreviewScreenStatus {
+        serde_json::from_value(json!({
+            "state": "live",
+            "sourceId": source_id,
+            "sourceKind": source_kind,
+            "targetFps": 30,
+            "nativeWidth": 3440,
+            "nativeHeight": 1440,
+            "requestedWidth": 1920,
+            "requestedHeight": 804,
+            "actualWidth": 1920,
+            "actualHeight": 804,
+            "framesCaptured": 120,
+            "droppedFrames": 0,
+            "includeCursor": true,
+            "excludeCurrentProcessWindows": true,
+            "updatedAt": "2026-11-01T10:00:00Z",
+            "message": "Keynote — Secret Plans"
+        }))
+        .unwrap()
+    }
+
+    fn two_displays() -> Vec<DisplayFacts> {
+        vec![
+            DisplayFacts {
+                id: 1,
+                uuid: Some("37D8832A-2D66-02CA-B9F7-8F30A301B230".to_string()),
+                name: Some("Built-in Retina Display".to_string()),
+                frame: crate::screen_capture::DisplayFrame {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1512.0,
+                    height: 982.0,
+                },
+                pixel_width: 3024,
+                pixel_height: 1964,
+                scale: 2.0,
+                main: true,
+                mirrors: None,
+            },
+            DisplayFacts {
+                id: 2,
+                uuid: Some("9A1B0C3D-0000-4000-8000-00000000F213".to_string()),
+                name: Some("LG ULTRAWIDE".to_string()),
+                frame: crate::screen_capture::DisplayFrame {
+                    x: 1512.0,
+                    y: 0.0,
+                    width: 3440.0,
+                    height: 1440.0,
+                },
+                pixel_width: 3440,
+                pixel_height: 1440,
+                scale: 1.0,
+                main: false,
+                mirrors: Some(1),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_displays_section_names_each_display_and_the_captured_one_plan_213_f3() {
+        let mut input = minimal_input(None);
+        input.displays = SupportBundleDisplays {
+            displays: two_displays(),
+            captured: SupportBundleCapturedDisplay::from_status(&screen_status(
+                "screen",
+                "screen:screencapturekit:2",
+            )),
+            capture_log: vec![
+                "2026-11-01T10:00:00.000Z INFO videorc_backend::preview_screen: [videorc-capture-sizing] resize=true".to_string(),
+                "2026-11-01T10:00:01.000Z WARN videorc_backend::preview_screen: relay stream_key=live_abc123".to_string(),
+            ],
+        };
+
+        let bundle = serde_json::to_value(build_support_bundle(input).unwrap()).unwrap();
+
+        assert_eq!(
+            bundle["displays"],
+            json!({
+                "displays": [
+                    {
+                        "id": 1,
+                        "uuid": "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+                        "name": "Built-in Retina Display",
+                        "frame": { "x": 0.0, "y": 0.0, "width": 1512.0, "height": 982.0 },
+                        "pixelWidth": 3024,
+                        "pixelHeight": 1964,
+                        "scale": 2.0,
+                        "main": true
+                    },
+                    {
+                        "id": 2,
+                        "uuid": "9A1B0C3D-0000-4000-8000-00000000F213",
+                        "name": "LG ULTRAWIDE",
+                        "frame": { "x": 1512.0, "y": 0.0, "width": 3440.0, "height": 1440.0 },
+                        "pixelWidth": 3440,
+                        "pixelHeight": 1440,
+                        "scale": 1.0,
+                        "main": false,
+                        "mirrors": 1
+                    }
+                ],
+                "captured": {
+                    "sourceId": "screen:screencapturekit:2",
+                    "displayId": 2,
+                    "state": "live",
+                    "nativeWidth": 3440,
+                    "nativeHeight": 1440,
+                    "requestedWidth": 1920,
+                    "requestedHeight": 804,
+                    "actualWidth": 1920,
+                    "actualHeight": 804
+                },
+                "captureLog": [
+                    "2026-11-01T10:00:00.000Z INFO videorc_backend::preview_screen: [videorc-capture-sizing] resize=true",
+                    "2026-11-01T10:00:01.000Z WARN videorc_backend::preview_screen: relay <redacted:secret>"
+                ]
+            })
+        );
+        assert!(included_sections().contains(&"displays".to_string()));
+    }
+
+    #[test]
+    fn a_captured_window_is_no_captured_display_plan_213_f3() {
+        let window = screen_status("window", "window:screencapturekit:77");
+        assert_eq!(SupportBundleCapturedDisplay::from_status(&window), None);
+        let mut idle = screen_status("screen", "screen:screencapturekit:2");
+        idle.source_id = None;
+        assert_eq!(SupportBundleCapturedDisplay::from_status(&idle), None);
+    }
+
+    #[test]
+    fn the_displays_section_adds_no_window_title_plan_213_f3() {
+        let title = "Secret Plans";
+        let mut input = minimal_input(None);
+        input.devices.devices = vec![crate::protocol::Device {
+            app: None,
+            window_title: Some(title.to_string()),
+            display_uuid: None,
+            id: "window:screencapturekit:77".to_string(),
+            name: format!("Keynote — {title}"),
+            kind: crate::protocol::DeviceKind::Window,
+            status: crate::protocol::DeviceStatus::Available,
+            detail: None,
+            width: None,
+            height: None,
+        }];
+        let empty = serde_json::to_string(&build_support_bundle(input.clone()).unwrap()).unwrap();
+        assert!(empty.contains(title));
+        input.displays = SupportBundleDisplays {
+            displays: two_displays(),
+            // The window's status message carries its title; the section
+            // keeps sizes only.
+            captured: SupportBundleCapturedDisplay::from_status(&screen_status(
+                "screen",
+                "screen:screencapturekit:2",
+            )),
+            capture_log: vec![
+                "2026-11-01T10:00:00.000Z INFO videorc_backend::preview_screen: [capture-generation] source=screen source_id=window:screencapturekit:77".to_string(),
+            ],
+        };
+
+        let bundle = build_support_bundle(input).unwrap();
+        let displays = serde_json::to_string(&bundle.displays).unwrap();
+        let full = serde_json::to_string(&bundle).unwrap();
+
+        assert!(!displays.contains(title), "{displays}");
+        assert_eq!(full.matches(title).count(), empty.matches(title).count());
+    }
+
     fn minimal_input(app_version: Option<String>) -> SupportBundleExportInput {
         SupportBundleExportInput {
             output_directory: None,
@@ -959,6 +1195,7 @@ mod tests {
                 devices: vec![],
                 warnings: vec![],
             },
+            displays: SupportBundleDisplays::default(),
             last_audio_meter: None,
             entitlements: current_entitlements(),
             recording: idle_status(),

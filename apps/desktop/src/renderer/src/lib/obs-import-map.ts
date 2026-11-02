@@ -274,6 +274,7 @@ export function mapObsSetup(
       if (firstScreen) {
         result.sources.screenId = firstScreen.id
         result.sources.screenName = firstScreen.name
+        result.sources.screenUuid = firstScreen.displayUuid
         report.push({
           verdict: 'approximated',
           subject: source.name,

@@ -8,6 +8,7 @@ import type {
 } from './backend'
 import {
   defaultCaptureConfig,
+  findRememberedSource,
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
   normalizeLayoutSettings,
@@ -29,6 +30,7 @@ export type VisualSources = Pick<
   | 'captureOff'
   | 'screenId'
   | 'screenName'
+  | 'screenUuid'
   | 'windowId'
   | 'windowName'
   | 'testPattern'
@@ -105,6 +107,14 @@ export function usingVisualSources(sources: VisualSources): VisualSources {
     captureOff: sources.captureOff === true && !sources.screenId && !sources.windowId,
     screenId: sources.screenId,
     screenName: sources.screenName,
+    // Plan 213 F1: a malformed UUID is dropped, never the scene; one left
+    // over without its display is no pick.
+    screenUuid:
+      typeof sources.screenUuid === 'string' &&
+      sources.screenUuid &&
+      (sources.screenId || sources.screenName)
+        ? sources.screenUuid
+        : undefined,
     windowId: sources.windowId,
     windowName: sources.windowName,
     ...(app ? { app } : {}),
@@ -378,7 +388,77 @@ export function hydrateWorkingScene(raw: unknown): WorkingScene | null {
   }
 }
 export function sameSceneVisual(a: SceneVisual, b: SceneVisual): boolean {
-  return JSON.stringify(normalizeSceneVisual(a)) === JSON.stringify(normalizeSceneVisual(b))
+  const left = normalizeSceneVisual(a)
+  const right = normalizeSceneVisual(b)
+  // Plan 213 F1: a display's name (its size included) and UUID describe the
+  // display a scene names; the same UUID is the same display under any id,
+  // and another UUID is another display under the same one.
+  const [leftUuid, rightUuid] = [left.sources.screenUuid, right.sources.screenUuid]
+  if (leftUuid && rightUuid && leftUuid !== rightUuid) return false
+  const sameDisplay = Boolean(leftUuid) && leftUuid === rightUuid
+  const comparable = ({ sources, ...visual }: SceneVisual) => {
+    if (!sources.screenId) return { ...visual, sources }
+    const { screenName: _name, screenUuid: _uuid, screenId, ...rest } = sources
+    return { ...visual, sources: { ...rest, screenId: sameDisplay ? undefined : screenId } }
+  }
+  return JSON.stringify(comparable(left)) === JSON.stringify(comparable(right))
+}
+
+/**
+ * The display a scene shows, listed now (plan 213 F1): by its UUID first, as
+ * macOS can give a reconnected display a new id, then by id, then by name.
+ */
+export function sceneDisplay(
+  sources: VisualSources,
+  devices: readonly Device[]
+): Device | undefined {
+  if (sources.windowId || sources.app) return undefined
+  return findRememberedSource(
+    sources.screenId,
+    sources.screenName,
+    devices.filter((device) => device.kind === 'screen' && device.status === 'available'),
+    sources.screenUuid
+  )
+}
+
+/** The scene's sources with its display as listed now, when that is another id. */
+export function withSceneDisplay(visual: SceneVisual, devices: readonly Device[]): SceneVisual {
+  const display = sceneDisplay(visual.sources, devices)
+  if (!display || display.id === visual.sources.screenId) return visual
+  return {
+    ...visual,
+    sources: {
+      ...visual.sources,
+      screenId: display.id,
+      screenName: display.name,
+      screenUuid: display.displayUuid
+    }
+  }
+}
+
+/**
+ * What a saved scene keeps of its display once it is found (plan 213 F1): the
+ * id, name and UUID it is listed under now, when it is the same display (its
+ * UUID, or its id when the scene kept no UUID). `null` when nothing changed
+ * or the display was found only by id or name against the scene's UUID.
+ */
+export function sceneDisplayRefresh(
+  sources: VisualSources,
+  devices: readonly Device[]
+): Pick<VisualSources, 'screenId' | 'screenName' | 'screenUuid'> | null {
+  const display = sceneDisplay(sources, devices)
+  if (!display) return null
+  const same = sources.screenUuid
+    ? display.displayUuid === sources.screenUuid
+    : display.id === sources.screenId
+  if (
+    !same ||
+    (display.id === sources.screenId &&
+      display.name === sources.screenName &&
+      display.displayUuid === sources.screenUuid)
+  )
+    return null
+  return { screenId: display.id, screenName: display.name, screenUuid: display.displayUuid }
 }
 /** A source a scene needs that isn't usable now: turned off, or chosen but gone. */
 export type SceneSourceGap = {
@@ -421,7 +501,11 @@ export function sceneSourceGaps(visual: SceneVisual, devices: readonly Device[])
     (!visual.sources.testPattern || baseId)
   ) {
     // App identities require resolution, not a stale-window-id refusal.
-    if (!visual.sources.app) check(baseId, visual.sources.windowId ? 'window' : 'screen', 'screen')
+    if (visual.sources.app) return gaps
+    if (visual.sources.windowId) check(baseId, 'window', 'screen')
+    // Plan 213 F1: found by its UUID first; its old id on another display is not it.
+    else if (!sceneDisplay(visual.sources, devices))
+      gaps.push({ source: 'screen', state: baseId ? 'unavailable' : 'off' })
   }
   return gaps
 }

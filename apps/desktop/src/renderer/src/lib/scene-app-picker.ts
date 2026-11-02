@@ -222,7 +222,7 @@ export function captureChoices(devices: readonly Device[]): Device[] {
 
 /** A scene for one display (or the portal's source), named after it, with no audio. */
 export function newCaptureScene(
-  device: Pick<Device, 'id' | 'name' | 'kind'>,
+  device: Pick<Device, 'id' | 'name' | 'kind' | 'displayUuid'>,
   look: SceneVisual,
   existing: readonly SavedScene[],
   options: { id: string; now: string }
@@ -240,6 +240,7 @@ export function newCaptureScene(
         ...base.sources,
         screenId: window ? undefined : device.id,
         screenName: window ? undefined : device.name,
+        screenUuid: window ? undefined : device.displayUuid,
         windowId: window ? device.id : undefined,
         windowName: window ? device.name : undefined,
         captureOff: false,
