@@ -2826,3 +2826,20 @@ Private receipts include `matrix-owned-discovery-source-validation.json`
 `~/.cache/videorc-linux-beta-evidence/`. These are development checks; no
 physical microphone, portal, full-profile matrix or exact AppImage acceptance
 is established. All Beta release gates above still apply.
+
+### Pulse source controls and bounded producer queue, 2026-11-02
+
+The delayed `runtime-d6318` dispatcher receipt is the already-handled display-asleep refusal before app launch. No duplicate run was started. Main's Studio socket-reconnection fix (`ab1ebd14`, PR #1021) was merged without conflicts as `8fccdc65`; runtime evidence before that merge remains tied to `76a0ec08`.
+
+A direct twelve-second Pulse source control captures both owned 440/997 Hz inputs as raw PCM and AAC. Each intended tone is near -18 dBFS; the other band stays below -95 dBFS, with no long zero runs. Under a simultaneous app run, raw controls have short off-target transients before AAC encoding. Artifact probes also show neighboring 700/900/1100/1300 Hz energy near discontinuities. This does not establish a sustained cross-input routing leak. Each control is a separate Pulse reader, so the fixture writer, server and individual reader overruns are not yet distinguished. The initial simultaneous controls lacked pinned source properties; their teardown tails cannot prove routing isolation. The next controls pin the source and stop after the artifact verdict, before fixture teardown.
+
+Both pre-fix app recordings fail. VAAPI reports four digital-zero runs (longest 22.2 ms) and unexpected 997 Hz energy. Its audio bus reports 3,840 frames lost to a full producer queue, an 87 ms maximum write stall and 90 ms maximum lateness. OpenH264 reports a 533 ms corroborated freeze, 15 repeated frames, two digital-zero runs (longest 221.3 ms), unexpected 997 Hz energy and 960 producer-queue-full frames. Exact artifacts:
+
+- VAAPI: `7c613028b1917338cb2dff3b1fbe0d6b27b237e9f4820f8f3b19840bbc6b2ccc`.
+- OpenH264: `42c59bad9eef20fa1d1c7a0b036ca1024fb5627f3939f36ae745decb0a8a403b`.
+
+The Linux capture output queue held only four requested 10 ms packets, less than the existing 150 ms bus playout window. The correction holds sixteen packets, one window plus its boundary packet, without adding a wait or changing capture freshness, playout or artifact limits. Other capture protocols retain their existing capacity. A deterministic regression sends the full window before draining the production channel factory, checks the exact retained PCM/timestamps, and separately verifies bounded overflow with the refused samples preserved. Extracted source tests fail the old capacity and pass the correction; full-crate validation and runtime results must be recorded below before acceptance is inferred.
+
+Private evidence: `pulse-source-control-sVrmDG/report.json`, `pulse-app-control-classification.json`, `pulse-transient-analysis.json`, `pulse-queue-regression-jdmci96c/report.json`, and the source/native queue-capacity receipts under `~/.cache/videorc-linux-beta-evidence/`. Ogre remains powered but near 800 MHz while another worktree compiles. This is development diagnosis, not stable-host performance or exact AppImage acceptance. All physical desktop, endurance, pilot, update/rollback and publication gates remain open.
+
+At this draft-PR update, Rust formatting and the extracted before/after queue regression pass. Typecheck, lint and formatting pass after the main merge. The full desktop suite has reported four five-second timeouts and is still running; no passing full-suite result is claimed. Native adapter tests are still compiling, with Clippy and the optimized backend build following in the same owned queue. Fresh full backend and recording comparison results remain pending. The earlier source/native results above are historical evidence, not proof for this correction. No timing threshold is raised and no timeout is classified as harmless before follow-up.

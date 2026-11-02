@@ -93,6 +93,21 @@ const MAX_PCM_PACKET_FRAMES: usize = 48_000;
 /// 1 s float-stereo packet (384 KB) must fit when its metadata line is late.
 const RAW_PCM_QUEUE_CHUNKS: usize = 64;
 
+fn capture_output_channel(
+    protocol: CaptureProtocol,
+) -> (mpsc::SyncSender<AudioFrame>, mpsc::Receiver<AudioFrame>) {
+    // Pulse delivers 10 ms fragments. Four packets discarded still-fresh PCM
+    // during an 87 ms bus write stall, even though Linux's existing playout
+    // window is 150 ms. Hold one full window plus the packet at its boundary;
+    // this adds capacity, not a delay. The capture and bus age checks still
+    // reject stale audio. Other workers keep their existing packet budget.
+    let capacity = match protocol {
+        CaptureProtocol::Pulse => 16,
+        CaptureProtocol::AvFoundation | CaptureProtocol::DirectShow => 4,
+    };
+    mpsc::sync_channel(capacity)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PcmDescription {
     sequence: u64,
@@ -1411,7 +1426,7 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
     // session. 256 holds 2.5 s of 20 ms packets; the age check drops what
     // arrives stale.
     let (metadata_tx, metadata_rx) = mpsc::sync_channel::<String>(256);
-    let (pcm_tx, receiver) = mpsc::sync_channel::<AudioFrame>(4);
+    let (pcm_tx, receiver) = capture_output_channel(protocol);
     let read_stop = stop.clone();
     let read_failure = failure.clone();
     owner.threads.push(
@@ -1775,6 +1790,72 @@ fn assemble_pcm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pulse_output_retains_a_playout_window_without_waiting_for_the_consumer() {
+        let (sender, receiver) = capture_output_channel(CaptureProtocol::Pulse);
+        let epoch = Instant::now();
+        let packet_duration = Duration::from_millis(10);
+        let packets = crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY.as_millis()
+            / packet_duration.as_millis();
+        // The bus is deliberately not drained until a whole playout window
+        // has arrived. This models a bounded consumer stall without sleeps or
+        // relying on the test runner's scheduler. The old four-packet queue
+        // loses packet 5 even though its capture time is inside that window.
+        for index in 0..packets as u64 {
+            sender
+                .try_send(AudioFrame {
+                    timestamp_micros: index * 10_000,
+                    captured_at: epoch + packet_duration * (index + 1) as u32,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    samples: vec![index as f32 / 100.0; 960],
+                })
+                .expect("fresh Pulse PCM must fit through the playout window");
+        }
+        for index in 0..packets as u64 {
+            let frame = receiver
+                .try_recv()
+                .expect("every captured packet is retained");
+            assert_eq!(frame.timestamp_micros, index * 10_000);
+            assert_eq!(frame.samples, vec![index as f32 / 100.0; 960]);
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn pulse_output_capacity_remains_bounded_and_preserves_refused_pcm() {
+        let (sender, receiver) = capture_output_channel(CaptureProtocol::Pulse);
+        let packet = AudioFrame {
+            timestamp_micros: 0,
+            captured_at: Instant::now(),
+            sample_rate: 48_000,
+            channels: 2,
+            samples: vec![0.25; 960],
+        };
+        // Do not permit a future capacity change to become an unbounded
+        // backlog. Refused packets remain available to the caller so its
+        // existing dropped-frame counter can account for every sample.
+        let maximum_packets = PULSE_MAX_CAPTURE_AGE.as_millis() / 10;
+        let mut accepted = 0;
+        loop {
+            match sender.try_send(packet.clone()) {
+                Ok(()) => {
+                    accepted += 1;
+                    assert!(accepted <= maximum_packets);
+                }
+                Err(mpsc::TrySendError::Full(refused)) => {
+                    assert_eq!(refused.samples, packet.samples);
+                    break;
+                }
+                Err(error) => panic!("unexpected queue failure: {error}"),
+            }
+        }
+        assert_eq!(receiver.try_iter().count(), accepted as usize);
+    }
 
     #[test]
     fn future_pcm_validation_uses_accepted_clock_uncertainty() {
