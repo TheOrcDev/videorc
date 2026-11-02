@@ -5385,6 +5385,8 @@ async fn start_session_with_timeline(
                 {
                     Some(DirectD3D11CameraOverlay {
                         source,
+                        compositor: state.compositor.clone(),
+                        camera_look: params.layout.camera_look,
                         destination,
                         crop,
                         contain: matches!(
@@ -23157,6 +23159,19 @@ fn camera_circle_mask_applies(layout: &LayoutSettings) -> bool {
     matches!(camera_mask(layout), SceneMask::Circle)
 }
 
+fn camera_look_filter(layout: &LayoutSettings) -> String {
+    let look = layout.camera_look;
+    if look.is_neutral() {
+        return String::new();
+    }
+    // Zero gamma weight preserves unit gamma while selecting eq's float LUT.
+    // Its integer shortcut quantizes negative brightness too coarsely.
+    format!(
+        "format=rgba,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva444p,eq=brightness={}:contrast={}:saturation={}:gamma=1.000001:gamma_r=1.000001:gamma_b=1.000001:gamma_weight=0,scale=in_range=full:out_range=full:in_color_matrix=bt709,format=rgba,",
+        look.brightness, look.contrast, look.saturation
+    )
+}
+
 fn scene_source_layer_filter(
     input_index: usize,
     layer_label: &str,
@@ -23178,6 +23193,11 @@ fn scene_source_layer_filter(
     } else {
         String::new()
     };
+    let look = if matches!(kind, SceneSourceKind::Camera) {
+        camera_look_filter(&params.layout)
+    } else {
+        String::new()
+    };
     let crop = normalized_crop_filter(transform);
     let fit = scene_source_fit_filter(kind, width, height, params);
     let shape = if matches!(kind, SceneSourceKind::Camera) {
@@ -23192,7 +23212,7 @@ fn scene_source_layer_filter(
         String::new()
     };
     format!(
-        "[{input_index}:v]setpts=PTS-STARTPTS,{mirror}{chroma}{crop}{fit}{shape}[{layer_label}]"
+        "[{input_index}:v]setpts=PTS-STARTPTS,{mirror}{chroma}{look}{crop}{fit}{shape}[{layer_label}]"
     )
 }
 
@@ -23436,7 +23456,8 @@ fn camera_only_video_filter(params: &StartSessionParams, preview: bool) -> Strin
     // fit/fill/zoom/pan treatment as the overlay box so preview and output match.
     let frame = camera_frame_filter(video.width, video.height, &params.layout);
     let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
-    format!("{prefix}{frame},fps={}{final_scale}[v]", video.fps)
+    let look = camera_look_filter(&params.layout);
+    format!("{prefix}{look}{frame},fps={}{final_scale}[v]", video.fps)
 }
 
 fn side_by_side_video_filter(
@@ -23463,8 +23484,9 @@ fn side_by_side_video_filter(
                 ""
             };
             let frame = camera_frame_filter(camera_width, height, &params.layout);
+            let look = camera_look_filter(&params.layout);
             format!(
-                "[{index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[sbs_camera]"
+                "[{index}:v]setpts=PTS-STARTPTS,{mirror}{look}{frame},fps={fps},format=yuv420p[sbs_camera]"
             )
         }
         None => {
@@ -23579,8 +23601,9 @@ fn vertical_video_filter(
     let mut band_layout = params.layout.clone();
     band_layout.camera_fit = CameraFit::Fill;
     let frame = camera_frame_filter(width, camera_height, &band_layout);
+    let look = camera_look_filter(&params.layout);
     let camera = format!(
-        "[{camera_index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[vt_camera]"
+        "[{camera_index}:v]setpts=PTS-STARTPTS,{mirror}{look}{frame},fps={fps},format=yuv420p[vt_camera]"
     );
     let stack_order = if bands.camera_on_top {
         "[vt_camera][vt_screen]"
@@ -23644,10 +23667,11 @@ fn camera_chain_filter(camera_input_index: usize, params: &StartSessionParams) -
     // Key at native camera resolution (before the frame scale/crop), same
     // ordering as scene_source_layer_filter.
     let chroma = camera_chroma_key_filter(&params.layout);
+    let look = camera_look_filter(&params.layout);
     let prefix = if params.layout.camera_mirror {
-        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,hflip,{chroma}")
+        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,hflip,{chroma}{look}")
     } else {
-        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,{chroma}")
+        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,{chroma}{look}")
     };
     let frame = camera_frame_filter(width, height, &params.layout);
 
@@ -30945,6 +30969,7 @@ mod tests {
                 arrangement_mode: crate::protocol::ArrangementMode::Preset,
                 source_transform_overrides: std::collections::BTreeMap::new(),
                 source_visibility: Default::default(),
+                camera_look: Default::default(),
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -38450,6 +38475,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn camera_look_reaches_every_legacy_camera_graph() {
+        let mut params = base_params(true, false);
+        params.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05,
+            contrast: 1.1,
+            saturation: 0.8,
+        };
+        for preset in [
+            LayoutPreset::ScreenCamera,
+            LayoutPreset::CameraOnly,
+            LayoutPreset::SideBySide,
+            LayoutPreset::VerticalScreenCamera,
+            LayoutPreset::VerticalCameraOnly,
+            LayoutPreset::VerticalCameraTop,
+            LayoutPreset::VerticalCameraBottom,
+            LayoutPreset::VerticalSplit,
+        ] {
+            params.layout.layout_preset = preset.clone();
+            let filter = video_filter(Some(1), &params, false);
+            assert!(
+                filter.contains("eq=brightness=0.05:contrast=1.1:saturation=0.8"),
+                "{preset:?}: camera grade missing from {filter}"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_look_ffmpeg_eq_agrees_with_float_law() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
+                .unwrap();
+        let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
+        let look: crate::protocol::CameraLook =
+            serde_json::from_value(fixture["look"].clone()).unwrap();
+        let width = palette.len() * 4;
+        let mut frame = Vec::new();
+        for _ in 0..4 {
+            for rgb in &palette {
+                for _ in 0..4 {
+                    frame.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 127]);
+                }
+            }
+        }
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_look = look;
+        let filter = camera_look_filter(&layout)
+            .trim_end_matches(',')
+            .to_string();
+        let mut child = Command::new(crate::ffmpeg::default_ffmpeg_path())
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "-s",
+                &format!("{width}x4"),
+                "-i",
+                "pipe:0",
+                "-vf",
+                &filter,
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "pipe:1",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("FFmpeg parity fixture requires FFmpeg");
+        child.stdin.take().unwrap().write_all(&frame).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), frame.len());
+        let mut maximum = 0;
+        for (index, pixel) in frame.chunks_exact(4).enumerate() {
+            assert_eq!(
+                output.stdout[index * 4 + 3],
+                127,
+                "look must preserve key alpha"
+            );
+            let rgb = [pixel[0], pixel[1], pixel[2]].map(|v| f64::from(v) / 255.0);
+            let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+            for (channel, value) in rgb.into_iter().enumerate() {
+                let expected = ((y
+                    + look.brightness
+                    + (look.contrast - 1.0) * (y - 0.5)
+                    + look.saturation * (value - y))
+                    * 255.0)
+                    .round() as u8;
+                assert!(
+                    (1..255).contains(&expected),
+                    "fixture must stay away from clipping"
+                );
+                maximum = maximum.max(expected.abs_diff(output.stdout[index * 4 + channel]));
+            }
+        }
+        // Orchestrator call, plan 213 I, 2026-11-01: legacy eq gets 8/255.
+        // The measured swscale RGB -> YUV -> RGB identity baseline is 2/255;
+        // eq adds about 4/255. CPU/Metal keep the strict 2/255 bound.
+        assert!(maximum <= 8, "FFmpeg eq vs float law: {maximum}/255");
+        eprintln!("camera look FFmpeg eq vs float law: {maximum}/255 (limit 8)");
+    }
+
     /// The FFmpeg-leg twin of scene_geometry's realistic-palette pin: under
     /// chromakey's absolute-CbCr-distance model, the DEFAULT mapping must key
     /// every real screen tone and keep the subject. (Pure synthetic green
@@ -38505,6 +38646,12 @@ mod tests {
     fn camera_layer_filters_key_before_scaling_on_both_ffmpeg_paths() {
         let mut params = base_params(true, false);
         params.layout.camera_chroma_key_enabled = true;
+        params.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05,
+            contrast: 1.1,
+            saturation: 0.8,
+        };
+        assert!(camera_look_filter(&crate::protocol::default_layout_settings()).is_empty());
         params.layout.camera_shape = CameraShape::Circle;
         params.layout.layout_preset = LayoutPreset::ScreenCamera;
         let transform = SceneTransform {
@@ -38530,6 +38677,11 @@ mod tests {
         let key_at = layer.find("chromakey=").expect("scene layer keys");
         let scale_at = layer.find("scale=").expect("scene layer scales");
         assert!(key_at < scale_at, "key must run before scaling: {layer}");
+        let look_at = layer.find("eq=").expect("camera look");
+        assert!(
+            key_at < look_at && look_at < layer.rfind("scale=").unwrap(),
+            "key, look, then frame scale: {layer}"
+        );
         assert!(
             layer.contains("alpha(X,Y)"),
             "shape mask preserves key alpha: {layer}"
@@ -38539,10 +38691,25 @@ mod tests {
         let key_at = chain.find("chromakey=").expect("camera chain keys");
         let scale_at = chain.find("scale=").expect("camera chain scales");
         assert!(key_at < scale_at, "key must run before scaling: {chain}");
+        let look_at = chain.find("eq=").expect("camera look");
+        assert!(
+            key_at < look_at && look_at < chain.rfind("scale=").unwrap(),
+            "key, look, then frame scale: {chain}"
+        );
         assert!(
             chain.contains("alpha(X,Y)"),
             "circle geq preserves key alpha: {chain}"
         );
+        let screen = scene_source_layer_filter(
+            0,
+            "screen",
+            &SceneSourceKind::Screen,
+            &transform,
+            320,
+            180,
+            &params,
+        );
+        assert!(!screen.contains("eq="), "the screen must stay ungraded");
     }
 
     #[test]

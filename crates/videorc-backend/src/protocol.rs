@@ -450,9 +450,35 @@ impl Default for SourceVisibility {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLook {
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
+}
+
+impl Default for CameraLook {
+    fn default() -> Self {
+        Self {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        }
+    }
+}
+
+impl CameraLook {
+    pub fn is_neutral(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutSettings {
+    #[serde(default, skip_serializing_if = "CameraLook::is_neutral")]
+    pub camera_look: CameraLook,
     #[serde(default = "default_layout_preset")]
     pub layout_preset: LayoutPreset,
     #[serde(default = "default_camera_transform_mode")]
@@ -1128,6 +1154,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         camera_shape: CameraShape::Rectangle,
         camera_corner_radius_pct: default_camera_corner_radius_pct(),
         camera_aspect: default_camera_aspect(),
+        camera_look: Default::default(),
         camera_chroma_key_enabled: false,
         camera_chroma_key_color: default_camera_chroma_key_color(),
         camera_chroma_key_similarity_pct: default_camera_chroma_key_similarity_pct(),
@@ -7370,6 +7397,7 @@ mod tests {
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
+            camera_look: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,
@@ -7607,6 +7635,23 @@ mod tests {
 
     #[test]
     fn shared_high_risk_contract_fixture_matches_layout_and_scene_defaults() {
+        let look_wire = shared_high_risk_contract_fixture_value("/cameraLook");
+        let look: CameraLook = serde_json::from_value(look_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(look).unwrap(), look_wire);
+        let mut graded = default_layout_settings();
+        graded.camera_look = look;
+        let wire = serde_json::to_value(&graded).unwrap();
+        assert_eq!(wire["cameraLook"], look_wire);
+        assert_eq!(
+            serde_json::from_value::<LayoutSettings>(wire).unwrap(),
+            graded
+        );
+        assert!(
+            serde_json::to_value(default_layout_settings())
+                .unwrap()
+                .get("cameraLook")
+                .is_none()
+        );
         let legacy_layout = shared_high_risk_contract_fixture_value("/layout/legacyWire");
         assert!(legacy_layout.get("sourceVisibility").is_none());
         let expected_layout = shared_high_risk_contract_fixture_value("/layout/normalized");

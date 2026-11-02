@@ -683,7 +683,15 @@ export interface SourceVisibility {
   capture: boolean
 }
 
+export interface CameraLook {
+  brightness: number
+  contrast: number
+  saturation: number
+}
+
 export interface LayoutSettings {
+  /** Per-camera setting injected at the output boundary; omitted when neutral. */
+  cameraLook?: CameraLook
   layoutPreset: LayoutPreset
   cameraTransformMode: CameraTransformMode
   cameraTransform: CameraTransform | null

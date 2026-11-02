@@ -4,6 +4,7 @@ import {
   returningSourceChoices,
   sourceReturnAction
 } from '@/lib/source-return'
+import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 import {
@@ -1454,6 +1455,7 @@ export type StudioContextValue = {
   setCaptureConfig: Dispatch<SetStateAction<CaptureConfig>>
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
+  applyCameraLook: (look: NonNullable<LayoutSettings['cameraLook']>) => void
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   /** `keepScene`: the Scene page's Layout edits the saved scene on stream (plan 210 D3). */
@@ -2924,7 +2926,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const workingAppRef = useRef<SceneApp | undefined>(
     hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.visual.sources.app
   )
-  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
+  const [settings, setSettings] = useState<SettingsState>(() =>
+    loadJson(STORAGE_KEYS.settings, defaultSettings)
+  )
+  const [storedCaptureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
     const config = loadCaptureConfig()
     const working = hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))
     return working
@@ -2939,6 +2944,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       : config
   })
+  const captureConfig = useMemo(
+    () => ({
+      ...storedCaptureConfig,
+      layout: cameraLookLayout(
+        storedCaptureConfig.layout,
+        storedCaptureConfig.sources.cameraId,
+        settings.cameraLooks
+      )
+    }),
+    [storedCaptureConfig, settings.cameraLooks]
+  )
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
     if (!sessionId) {
@@ -4162,9 +4178,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, wsStatus])
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
-  const [settings, setSettings] = useState<SettingsState>(() =>
-    loadJson(STORAGE_KEYS.settings, defaultSettings)
-  )
+
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   // Stable handle for callbacks that only need to READ the config (labels,
@@ -9939,6 +9953,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       layout: LayoutSettings,
       options?: {
         pendingIndicator?: boolean
+        cameraLookOnly?: boolean
         videoOverride?: VideoSettings
         captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
         sceneApp?: SceneApp
@@ -10025,6 +10040,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               // click, not even on a scene switch.
               { holdStandIns: sessionOwnsTransport(recordingRef.current) }
             )
+          layout = cameraLookLayout(
+            layout,
+            requestedSources.cameraId,
+            settingsRef.current.cameraLooks
+          )
           const requestedBackground =
             options && 'backgroundOverride' in options
               ? (options.backgroundOverride ?? undefined)
@@ -10070,7 +10090,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 : current
             )
           }
-          const method = sessionActive ? 'scene.layout.apply_live' : 'scene.layout.apply_preview'
+          const method =
+            sessionActive || options?.cameraLookOnly
+              ? 'scene.layout.apply_live'
+              : 'scene.layout.apply_preview'
           const requestedTransaction = {
             intentId,
             sources: requestedSources,
@@ -10084,7 +10107,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             // Scene motion (opt-in): the committed layout glides into place
             // (320ms ease) in preview, stream, and recording alike. Absent =
             // instant cut.
-            ...(settingsRef.current.animateSceneChanges === true
+            ...(settingsRef.current.animateSceneChanges === true && !options?.cameraLookOnly
               ? { transitionMs: SCENE_TRANSITION_MS }
               : {})
           }
@@ -10326,6 +10349,33 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
     [requestLayoutTransaction]
   )
+
+  const cameraLookThrottleRef = useRef<ReturnType<typeof createCameraLookThrottle> | null>(null)
+  useEffect(() => () => cameraLookThrottleRef.current?.dispose(), [])
+  const applyCameraLook = useCallback((value: NonNullable<LayoutSettings['cameraLook']>): void => {
+    const cameraId = captureConfigRef.current.sources.cameraId
+    if (!cameraId) return
+    const cameraLooks = { ...settingsRef.current.cameraLooks }
+    const look = normalizeCameraLook(value)
+    if (look) cameraLooks[cameraId] = look
+    else delete cameraLooks[cameraId]
+    settingsRef.current = { ...settingsRef.current, cameraLooks }
+    // The live transaction updates the existing source. Suppress the idle
+    // reload so dragging never tears down and reopens the camera.
+    skipNextConfigSceneReloadRef.current = true
+    captureConfigRef.current = {
+      ...captureConfigRef.current,
+      layout: cameraLookLayout(captureConfigRef.current.layout, cameraId, cameraLooks)
+    }
+    setSettings((current) => ({ ...current, cameraLooks }))
+    cameraLookThrottleRef.current ??= createCameraLookThrottle(() => {
+      void requestLayoutTransactionRef.current(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        cameraLookOnly: true
+      })
+    })
+    cameraLookThrottleRef.current.schedule()
+  }, [])
 
   // Single-level undo of the last committed layout change (plan 174 S3.9,
   // D15): the remembered layout goes back through the same transaction, with
@@ -18477,6 +18527,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCaptureConfig,
       patchLayout,
       applyLayoutPatch,
+      applyCameraLook,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
@@ -18723,6 +18774,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCaptureConfig,
       patchLayout,
       applyLayoutPatch,
+      applyCameraLook,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
