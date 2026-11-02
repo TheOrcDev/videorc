@@ -429,6 +429,7 @@ export function nativePreviewDriverFailureFallbackStatus(
     sourcePixelsPresent: false,
     nativePreviewHostKind: 'proof-surface',
     nativePreviewHostAttached: false,
+    nativePreviewHostWindow: undefined,
     windowsD3d11Presenter: undefined,
     firstFrameContract: 'fallback',
     firstFrameReason: input.reason,

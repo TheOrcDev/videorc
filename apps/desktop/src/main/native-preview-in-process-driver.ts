@@ -1,5 +1,6 @@
 import type {
   NativePreviewHostCommand,
+  NativePreviewHostWindow,
   PreviewSurfaceBounds,
   PreviewSurfaceStatus
 } from '../shared/backend'
@@ -28,15 +29,26 @@ export interface NativePreviewInProcessMetrics {
   contentsScale?: number
 }
 
+/**
+ * The layer's frame inside its host window's view (plan 213 D2): a top-left
+ * origin in the host's content coordinates, in points, plus the drawable's
+ * scale, visibility and corner radius. Mirrors the addon's
+ * NativePreviewLayerFrame; the addon converts it to the host layer's own
+ * space, flipped or not.
+ */
+export interface NativePreviewLayerFrame {
+  x: number
+  y: number
+  width: number
+  height: number
+  scaleFactor: number
+  visible: boolean
+  cornerRadius: number
+}
+
 export interface NativePreviewInProcessBinding {
-  attach(
-    nativeWindowHandle: Buffer,
-    width: number,
-    height: number,
-    scaleFactor: number,
-    visible: boolean
-  ): void
-  update(width: number, height: number, scaleFactor: number, visible: boolean): void
+  attach(nativeWindowHandle: Buffer, frame: NativePreviewLayerFrame): void
+  update(frame: NativePreviewLayerFrame): void
   present(
     iosurfaceId: number,
     width: number,
@@ -51,6 +63,9 @@ export interface NativePreviewInProcessBinding {
 export interface NativePreviewInProcessDriverOptions {
   binding: NativePreviewInProcessBinding
   getNativeWindowHandle: () => Buffer | null
+  /** Which app window the handle belongs to (plan 213 D3); the status names
+   * it. Absent = the Preview window, the only host before plan 213. */
+  getNativeHostWindow?: () => NativePreviewHostWindow | null
   nowMs?: () => number
   percentileCacheTtlMs?: number
 }
@@ -66,10 +81,13 @@ type NativePreviewInProcessModule = {
 
 type Attachment = {
   handle: Buffer
-  width: number
-  height: number
-  scaleFactor: number
-  visible: boolean
+  hostWindow: NativePreviewHostWindow
+  frame: NativePreviewLayerFrame
+  // The host content's height the frame was placed against. An AppKit layer
+  // measures its origin from the host's bottom edge, so a taller host must
+  // have the frame set again even when the slot stayed put; the addon
+  // re-reads the real height, this only decides when to call it.
+  hostHeight: number
 }
 
 export function createNativePreviewInProcessDriver(
@@ -106,10 +124,8 @@ export function createNativePreviewInProcessDriver(
     }
     const next: Attachment = {
       handle,
-      width: Math.max(1, Math.round(bounds.width)),
-      height: Math.max(1, Math.round(bounds.height)),
-      scaleFactor: Math.max(1, bounds.scaleFactor),
-      visible: bounds.visible !== false
+      hostWindow: options.getNativeHostWindow?.() ?? 'preview',
+      ...layerPlacementFromBounds(bounds)
     }
     lastBounds = bounds
     if (!attachment || !attachment.handle.equals(next.handle)) {
@@ -117,7 +133,7 @@ export function createNativePreviewInProcessDriver(
       if (attachment) {
         options.binding.destroy()
       }
-      options.binding.attach(next.handle, next.width, next.height, next.scaleFactor, next.visible)
+      options.binding.attach(next.handle, next.frame)
       recordSample(placementRoundTripSamplesMs, performance.now() - startedAt)
       placementsApplied += 1
       attachment = next
@@ -131,7 +147,7 @@ export function createNativePreviewInProcessDriver(
     }
     if (surfaceAttachmentChanged(attachment, next)) {
       const startedAt = performance.now()
-      options.binding.update(next.width, next.height, next.scaleFactor, next.visible)
+      options.binding.update(next.frame)
       recordSample(placementRoundTripSamplesMs, performance.now() - startedAt)
       placementsApplied += 1
       attachment = next
@@ -168,14 +184,8 @@ export function createNativePreviewInProcessDriver(
       request: NativePreviewRealSurfacePresentRequest
     ): Promise<PreviewSurfaceStatus | null> {
       if (request.bounds) {
-        const requestedAttachment = attachment
-          ? {
-              handle: attachment.handle,
-              width: Math.max(1, Math.round(request.bounds.width)),
-              height: Math.max(1, Math.round(request.bounds.height)),
-              scaleFactor: Math.max(1, request.bounds.scaleFactor),
-              visible: request.bounds.visible !== false
-            }
+        const requestedAttachment: Attachment | null = attachment
+          ? { ...attachment, ...layerPlacementFromBounds(request.bounds) }
           : null
         if (
           !attachment ||
@@ -184,7 +194,7 @@ export function createNativePreviewInProcessDriver(
         ) {
           applyBounds(request.bounds)
         } else {
-          // Position and stacking move atomically with the BrowserWindow because
+          // Position and stacking move atomically with the host window because
           // the CAMetalLayer is its child. Still adopt the newest diagnostic
           // bounds so this present cannot overwrite main's fast-move state.
           lastBounds = request.bounds
@@ -193,12 +203,12 @@ export function createNativePreviewInProcessDriver(
       if (!attachment) {
         return null
       }
-      if (!attachment.visible) {
+      if (!attachment.frame.visible) {
         return lastPresentedStatus
           ? {
               ...lastPresentedStatus,
-              width: attachment.width,
-              height: attachment.height,
+              width: attachment.frame.width,
+              height: attachment.frame.height,
               framePollingSuppressed: request.suppressFramePolling,
               bounds: lastBounds
             }
@@ -214,8 +224,8 @@ export function createNativePreviewInProcessDriver(
         return lastPresentedStatus
           ? {
               ...lastPresentedStatus,
-              width: attachment.width,
-              height: attachment.height,
+              width: attachment.frame.width,
+              height: attachment.frame.height,
               framePollingSuppressed: request.suppressFramePolling,
               bounds: lastBounds
             }
@@ -269,8 +279,8 @@ export function createNativePreviewInProcessDriver(
         transport: 'native-surface',
         backing: 'cametal-layer',
         targetFps: 60,
-        width: attachment.width,
-        height: attachment.height,
+        width: attachment.frame.width,
+        height: attachment.frame.height,
         framesRendered: request.handoff.frameId,
         presentedFrameId: request.handoff.frameId,
         compositorFrameLag: 0,
@@ -287,6 +297,7 @@ export function createNativePreviewInProcessDriver(
         pendingHostCommandCount: 0,
         nativePreviewHostKind: 'in-process',
         nativePreviewHostAttached: true,
+        nativePreviewHostWindow: attachment.hostWindow,
         nativePreviewPlacementEventsReceived: placementEventsReceived,
         nativePreviewPlacementsApplied: placementsApplied,
         nativePreviewPlacementsCoalesced: placementsCoalesced,
@@ -330,7 +341,9 @@ export function createNativePreviewInProcessDriver(
         },
         bounds: lastBounds,
         updatedAt: new Date().toISOString(),
-        message: 'In-process CAMetalLayer preview is presenting compositor output.'
+        message: `In-process CAMetalLayer preview is presenting compositor output in the ${
+          attachment.hostWindow === 'main' ? 'main window' : 'Preview window'
+        }.`
       }
       lastPresentedRunId = request.handoff.runId
       lastPresentedFrameId = request.handoff.frameId
@@ -372,8 +385,8 @@ export function nativePreviewInProcessBindingFromModule(
     return null
   }
   return {
-    attach: (...args) => candidate.attachNativePreview(...args),
-    update: (...args) => candidate.updateNativePreview(...args),
+    attach: (handle, frame) => candidate.attachNativePreview(handle, frame),
+    update: (frame) => candidate.updateNativePreview(frame),
     present: (...args) => candidate.presentNativePreview(...args),
     destroy: () => candidate.destroyNativePreview(),
     attached: () => candidate.nativePreviewAttached(),
@@ -430,11 +443,42 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+// What the layer needs from the bounds: its frame inside the host (never the
+// screen rect, which moves with the window) and the host height it was
+// placed against.
+function layerPlacementFromBounds(bounds: PreviewSurfaceBounds): {
+  frame: NativePreviewLayerFrame
+  hostHeight: number
+} {
+  return {
+    frame: {
+      x: Math.round(finiteOr(bounds.hostX, 0)),
+      y: Math.round(finiteOr(bounds.hostY, 0)),
+      width: Math.max(1, Math.round(bounds.width)),
+      height: Math.max(1, Math.round(bounds.height)),
+      scaleFactor: Math.max(1, bounds.scaleFactor),
+      visible: bounds.visible !== false,
+      cornerRadius: Math.max(0, finiteOr(bounds.cornerRadius, 0))
+    },
+    hostHeight: Math.max(0, Math.round(finiteOr(bounds.hostHeight, 0)))
+  }
+}
+
+function finiteOr(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
 function surfaceAttachmentChanged(current: Attachment, next: Attachment): boolean {
+  const a = current.frame
+  const b = next.frame
   return (
-    current.width !== next.width ||
-    current.height !== next.height ||
-    current.scaleFactor !== next.scaleFactor ||
-    current.visible !== next.visible
+    a.x !== b.x ||
+    a.y !== b.y ||
+    a.width !== b.width ||
+    a.height !== b.height ||
+    a.scaleFactor !== b.scaleFactor ||
+    a.visible !== b.visible ||
+    a.cornerRadius !== b.cornerRadius ||
+    current.hostHeight !== next.hostHeight
   )
 }

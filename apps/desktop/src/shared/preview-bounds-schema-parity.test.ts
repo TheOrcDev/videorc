@@ -28,7 +28,10 @@ const MAXIMAL_BOUNDS = {
   visible: true,
   orderAboveWindowId: 42,
   elevated: false,
-  cornerRadius: 18
+  cornerRadius: 18,
+  hostX: 240,
+  hostY: 96,
+  hostHeight: 780
 }
 
 const SURFACE_STATUS = {

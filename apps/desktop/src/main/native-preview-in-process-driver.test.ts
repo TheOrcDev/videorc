@@ -140,9 +140,122 @@ describe('native preview in-process driver', () => {
     expect(calls).toEqual([
       {
         method: 'attach',
-        args: [nativeWindowHandle, 960, 540, 2, true]
+        args: [
+          nativeWindowHandle,
+          { x: 0, y: 0, width: 960, height: 540, scaleFactor: 2, visible: true, cornerRadius: 0 }
+        ]
       }
     ])
+  })
+
+  it('places the layer from its in-window origin and re-places it when the host grows', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = []
+    const binding: NativePreviewInProcessBinding = {
+      attach: (...args) => {
+        calls.push({ method: 'attach', args })
+      },
+      update: (...args) => {
+        calls.push({ method: 'update', args })
+      },
+      present: () => ({ presented: true }),
+      destroy: () => undefined,
+      attached: () => true,
+      metrics: () => emptyMetrics()
+    }
+    const handle = Buffer.from('0100000000000000', 'hex')
+    const driver = createNativePreviewInProcessDriver({
+      binding,
+      getNativeWindowHandle: () => handle
+    })
+    // The Studio slot of a 780 pt tall main window, rounded to the panel.
+    const slot = bounds({
+      screenX: 320,
+      screenY: 276,
+      width: 800,
+      height: 450,
+      hostX: 240.4,
+      hostY: 96.2,
+      hostHeight: 780,
+      cornerRadius: 12
+    })
+    const frame = {
+      x: 240,
+      y: 96,
+      width: 800,
+      height: 450,
+      scaleFactor: 2,
+      visible: true,
+      cornerRadius: 12
+    }
+
+    await driver.applyHostCommands([{ kind: 'create', bounds: slot }])
+    // A window drag moves the screen rect only: the layer is its host's child.
+    await driver.applyHostCommands([
+      { kind: 'update-bounds', bounds: { ...slot, screenX: 520, screenY: 476 } }
+    ])
+    // A taller window keeps the slot where it is, but an AppKit layer measures
+    // its origin from the bottom, so the frame is set again.
+    await driver.applyHostCommands([
+      { kind: 'update-bounds', bounds: { ...slot, hostHeight: 900 } }
+    ])
+    // The slot itself moving inside the window places the layer again.
+    await driver.applyHostCommands([
+      { kind: 'update-bounds', bounds: { ...slot, hostHeight: 900, hostY: 140 } }
+    ])
+
+    expect(calls).toEqual([
+      { method: 'attach', args: [handle, frame] },
+      { method: 'update', args: [frame] },
+      { method: 'update', args: [{ ...frame, y: 140 }] }
+    ])
+  })
+
+  it('re-attaches to a new host window and names the host in its status', async () => {
+    const calls: string[] = []
+    const binding: NativePreviewInProcessBinding = {
+      attach: () => calls.push('attach'),
+      update: () => calls.push('update'),
+      present: () => ({ presented: true }),
+      destroy: () => calls.push('destroy'),
+      attached: () => true,
+      metrics: () => emptyMetrics()
+    }
+    const previewHandle = Buffer.from('0100000000000000', 'hex')
+    const mainHandle = Buffer.from('0200000000000000', 'hex')
+    let host: 'preview' | 'main' = 'preview'
+    const driver = createNativePreviewInProcessDriver({
+      binding,
+      getNativeWindowHandle: () => (host === 'main' ? mainHandle : previewHandle),
+      getNativeHostWindow: () => host
+    })
+    const present = (frameId: number) =>
+      driver.presentCompositorHandoff({
+        handoff: { iosurfaceId: 9, width: 1920, height: 1080, frameId, runId: 'run-a' },
+        bounds: bounds(),
+        scene: null,
+        suppressFramePolling: false
+      })
+
+    await driver.applyHostCommands([{ kind: 'create', bounds: bounds() }])
+    await expect(present(1)).resolves.toMatchObject({
+      transport: 'native-surface',
+      backing: 'cametal-layer',
+      nativePreviewHostKind: 'in-process',
+      nativePreviewHostWindow: 'preview',
+      message: expect.stringContaining('in the Preview window')
+    })
+
+    // Stick to app (plan 213 D3): the same layer moves into the main window.
+    host = 'main'
+    await driver.applyHostCommands([{ kind: 'update-bounds', bounds: bounds() }])
+    await expect(present(2)).resolves.toMatchObject({
+      transport: 'native-surface',
+      backing: 'cametal-layer',
+      nativePreviewHostKind: 'in-process',
+      nativePreviewHostWindow: 'main',
+      message: expect.stringContaining('in the main window')
+    })
+    expect(calls).toEqual(['attach', 'destroy', 'attach'])
   })
 
   it('adopts fast-move bounds from the next present without updating the child layer', async () => {
