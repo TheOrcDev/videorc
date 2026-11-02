@@ -840,7 +840,10 @@ const previewBoundsSchema = objectSchema(
     cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(nonNegativeSafeIntegerSchema),
-    elevated: optionalSchema(booleanSchema)
+    elevated: optionalSchema(booleanSchema),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -886,6 +889,21 @@ const cameraTransformSchema = objectSchema(
   { allowUnknown: false }
 )
 
+// A freeform box; the screen's crop rides along when it has one (plan 213 G2).
+const sourceTransformOverrideSchema = objectSchema(
+  {
+    x: numberSchema(),
+    y: numberSchema(),
+    width: numberSchema(),
+    height: numberSchema(),
+    cropLeft: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropTop: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropRight: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    cropBottom: optionalSchema(numberSchema({ min: 0, max: 1 }))
+  },
+  { allowUnknown: false }
+)
+
 const layoutSettingsSchema = objectSchema(
   {
     layoutPreset: enumSchema(LAYOUT_PRESET_VALUES),
@@ -896,6 +914,16 @@ const layoutSettingsSchema = objectSchema(
     cameraShape: enumSchema(['rectangle', 'rounded', 'circle']),
     cameraCornerRadiusPct: numberSchema(),
     cameraAspect: enumSchema(['source', 'square', 'portrait']),
+    cameraLook: optionalSchema(
+      objectSchema(
+        {
+          brightness: numberSchema({ min: -0.25, max: 0.25 }),
+          contrast: numberSchema({ min: 0.5, max: 1.5 }),
+          saturation: numberSchema({ min: 0, max: 2 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraChromaKeyEnabled: booleanSchema,
     cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
     cameraChromaKeySimilarityPct: numberSchema(),
@@ -910,6 +938,7 @@ const layoutSettingsSchema = objectSchema(
     sideBySideSplit: enumSchema(['50-50', '60-40', '70-30']),
     sideBySideCameraSide: enumSchema(['left', 'right']),
     verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit'])),
+    horizontalScreenFraming: optionalSchema(enumSchema(['fit', 'fill'])),
     arrangementMode: optionalSchema(enumSchema(['preset', 'freeform'])),
     sourceVisibility: optionalSchema(
       objectSchema(
@@ -917,7 +946,9 @@ const layoutSettingsSchema = objectSchema(
         { allowUnknown: false }
       )
     ),
-    sourceTransformOverrides: optionalSchema(recordSchema(cameraTransformSchema, { maxKeys: 16 }))
+    sourceTransformOverrides: optionalSchema(
+      recordSchema(sourceTransformOverrideSchema, { maxKeys: 16 })
+    )
   },
   { allowUnknown: false }
 )
@@ -1097,6 +1128,7 @@ const previewSurfaceStatusFieldsSchema = objectSchema(
         'backend-d3d11-presenter'
       ])
     ),
+    nativePreviewHostWindow: optionalSchema(enumSchema(['main', 'preview'])),
     bounds: optionalSchema(previewBoundsSchema),
     updatedAt: stringSchema({ minLength: 1, maxLength: 128 })
   },

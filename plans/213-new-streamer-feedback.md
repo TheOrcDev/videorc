@@ -16,7 +16,12 @@
 
 ## Status
 
-- **Status:** EXECUTING 2026-11-01. Owner answers, 2026-11-01: "I
+- **Status:** BUILT 2026-11-02, with every workstream (A to J) on main as
+  of `d74018b0`. See "As built". Still open:
+  [videorc-ui#1](https://github.com/TheOrcDev/videorc-ui/pull/1), the
+  synced `page.tsx` half of C. Owner acceptance (by eye, AeroSpace, a
+  virtual display, an iPhone, real X) is owed.
+- **Was:** EXECUTING 2026-11-01. Owner answers, 2026-11-01: "I
   wouldn't change the window size … just go with the recommended … open
   multiple PRs. Execute the entire plan." So D2 is **no change** (the
   main window keeps 1180×780, minimum 960×660, and is not clamped; slice
@@ -864,19 +869,144 @@ themes.
 
 ## As built
 
-- A: not started.
-- B: not started.
-- C: not started.
-- D: not started.
-- E: implemented in three slices (draft PR, plan 213 E). Wanted camera,
-  screen and window choices survive substitutes in settings and saved scenes.
-  AVFoundation notifications and CoreGraphics reconfiguration feed a 500 ms
-  trailing debounce and the existing `devices.changed` DeviceList event. Idle
-  discovery restores the choice; active sessions offer "Use it". Camera starts
-  wait for discovery and do not repeat a failed start on unrelated changes.
-  Physical camera/display reconnect acceptance is still owed.
-- F: not started.
-- G: not started.
-- H: not started.
-- I: not started.
-- J: not started.
+Built 2026-11-01 to 11-02 by one agent per workstream, each PR reviewed by
+the orchestrator. The owner merged as PRs appeared, some before review.
+Those were reviewed after merge, and the follow-ups are listed.
+
+- **A** ([#1001](https://github.com/TheOrcDev/videorc/pull/1001)): the
+  destination row opens from its chevron and the gap.
+  - Only the Switch is positioned. Its spill toward the chevron is 4 px and
+    the gap 12 px. A disabled Switch lets the click open the row, which
+    says why it's locked.
+  - A source's whole header row opens More.
+  - The 28 px hit area for `xs`/`icon-xs` buttons and status-bar actions is
+    one rule in `styles.css`. The primitives are synced from `@videorc` and
+    `ui:check` fails on local edits. Marker pins and View in Discord opt
+    out.
+  - Owed to videorc-ui: the `ListRowButton` doc comment, and the hit-area
+    rule if wanted there.
+- **B** ([#1010](https://github.com/TheOrcDev/videorc/pull/1010)): a Chat
+  row under Captions.
+  - It reads "Stream Manager · ⇧⌘J" when idle and "{n} new" while live.
+    The count lives in the provider's chat context, so there are no extra
+    renders.
+  - The live Session row labelled Buddy now says it opens the Stream
+    Manager.
+  - The agent's account hit a rate limit. The orchestrator finished its
+    gates and PR; an earlier copy, #1004, was closed.
+- **C** ([#1003](https://github.com/TheOrcDev/videorc/pull/1003)): pages
+  switch columns on their own width.
+  - The shell's PaneBody is `@container/page`, and pages split at 940 px,
+    with literal class strings in `lib/page-layout.ts`.
+  - The base sweep found 6 breaks in 138 shots; the after sweep found 0.
+    `scripts/capture-ui-pages.mjs --sweep` keeps the sweep.
+  - The synced `page.tsx` change is upstream as
+    [videorc-ui#1](https://github.com/TheOrcDev/videorc-ui/pull/1). Merge
+    and sync it, or `ui:check` reports drift. C2 was dropped (D2).
+- **D** ([#1018](https://github.com/TheOrcDev/videorc/pull/1018)): on
+  macOS, a stuck Preview is the in-process CAMetalLayer inside the main
+  window's own view.
+  - The Preview BrowserWindow stays hidden, and status names the host.
+  - A floating Preview keeps a tiler's size on macOS and draws the video
+    aspect-fit inside; Windows keeps its backstop.
+  - New installs start stuck.
+  - Fixed in review: an existing install with Preview prefs but no saved
+    mode stays floating. The mode is only written on a toggle, so without
+    the fix the update would have docked it.
+  - The `wm-*` probe cases were red on `d3bac98c` and are green here.
+- **E** ([#1000](https://github.com/TheOrcDev/videorc/pull/1000), follow-up
+  [#1011](https://github.com/TheOrcDev/videorc/pull/1011)): the wanted
+  camera, screen and window survive stand-ins in settings and saved scenes.
+  - AVFoundation and CoreGraphics changes reach `device_watch.rs`, which
+    debounces them to 500 ms and sends `devices.changed`.
+  - Idle restores the choice; a session offers "Use it".
+  - #1000 merged before its smokes ran. #1011 keeps window and display
+    names apart, adds a `block2` lockfile edge, and waits for a scene
+    change before restoring.
+- **F** ([#1019](https://github.com/TheOrcDev/videorc/pull/1019)): displays
+  carry their macOS name, size and an optional UUID.
+  - Saved choices and scenes resolve by UUID, then id, then name.
+  - A captured display's resolution change is applied in place, holding
+    the last frame.
+  - The support bundle has a Displays section and a capture-log ring with
+    no window titles.
+- **G** ([#1029](https://github.com/TheOrcDev/videorc/pull/1029)): the
+  screen can be cropped by number or by ⌥-dragging an edge.
+  - Screen + camera and Screen only get Fill/Fit (Fit is the default).
+  - With a background on, its Visibility shows as "Screen size" beside the
+    screen.
+  - The crop draws on CPU, Metal, the aux leg and FFmpeg legacy, and the
+    Screen ISO file stays whole.
+  - Owed: on Windows, the Preview only approximates a typed crop when the
+    box keeps another shape.
+- **H** ([#1015](https://github.com/TheOrcDev/videorc/pull/1015)): cameras
+  come from a DiscoverySession that includes Continuity Camera, with
+  `NSCameraUseContinuityCameraDeviceType` set.
+  - A running camera's disconnect is reported at once, the last frame is
+    kept, and the same uniqueID reconnects without spending the restart
+    budget.
+  - New profiles prefer `systemPreferredCamera`.
+  - The support bundle lists the last 20 connect and disconnect edges.
+  - **H4 deferred:** FFmpeg's probe has no uniqueID, so the legacy index is
+    still matched by name. A double open is now shown in the Session
+    section.
+- **I** ([#1017](https://github.com/TheOrcDev/videorc/pull/1017)): one look
+  per camera (brightness, contrast, saturation), stored by camera id and
+  sent as `cameraLook` (omitted when neutral).
+  - It is graded on CPU, Metal, D3D11, every FFmpeg camera graph, the aux
+    leg and the Camera ISO file.
+  - The FFmpeg `eq` probe was 6/255 off, so the STOP condition fired. The
+    orchestrator ruled 2026-11-01: CPU and Metal stay within 2/255, legacy
+    FFmpeg within 8/255.
+  - As built: CPU 1/255, Metal 0/255 and FFmpeg 2/255, the last with a
+    float-LUT `eq`.
+- **J** ([#1002](https://github.com/TheOrcDev/videorc/pull/1002)): a
+  stream-key X destination's chat row is a neutral "Needs Sign in" state.
+  - It reads "X chat needs Sign in…" with a Use Sign in button.
+  - X setup reads "Sign in · Chat works" and "Stream key · No chat".
+  - The new IPC channel is limited to the Chat window, with a closed
+    schema.
+- **Found along the way:**
+  - [#1007](https://github.com/TheOrcDev/videorc/pull/1007): the phone
+    remote page's Record LED matches the desktop again. #988 broke
+    `served_page_palette` on main.
+  - The local-only `studio-provider.integration` agent test was fixed in F.
+- **Combined verification, 2026-11-02:** run on `ce80b647` + G (#1029) +
+  [#1030](https://github.com/TheOrcDev/videorc/pull/1030), which equals
+  `d74018b0`.
+  - **Pass:**
+    - The full desktop suite: 621 files, 6,852 tests.
+    - `test:scripts`: 2,846 tests.
+    - `smoke:studio-chat`.
+  - **`smoke:recording-studio`, every stage up to the separate-source
+    runtime:** unit tests, backend layout/scene/recording/audio tests,
+    scene-switch pixels, `smoke:smart-scenes` (switch budget met),
+    separate-source fixture, soundboard fixture.
+  - **The 24 later stages that pass:**
+    - all-layout recording (`smoke:dev`), record-latency gate, app-quit,
+      output-stall, screens, banners, captions contract and live,
+      noise cleanup, live layout switch, comment highlight, Buddy pet,
+      Comments relay, system audio, Notes invisibility;
+    - the real-launch first frame, preview pump, click/focus, the
+      lifecycle and window probes, surface reattach, overlay
+      presentation, and the performance check staying invisible;
+    - the real ScreenCaptureKit recording.
+  - **Found:** #1017 left `camera-look.ts` out of the smoke compile list,
+    so `test:scripts` and the bundle failed at stage 1. Fixed by #1030.
+  - **Red, not from this plan:**
+    - The separate-source runtime at 3840×2160@30, the known 4K overload
+      red by design (owner's call). Its 1080p60 cases pass.
+    - `smoke:live-background`, its p95 budget versus idle GPU clocks
+      (owner's call).
+  - **Blocked by the host:** the dev app gets no camera on this Mac, so
+    four smokes stop at their first "select camera" step:
+    `freeform-editor`, `layout-source-loop`, `preview-scene-commit` and
+    `preview-interaction-stress`. They hit the same block before H.
+- **Owed by the owner:**
+  - AeroSpace by eye (D).
+  - A BetterDisplay virtual display turned on after launch, resized and
+    relaunched (E, F).
+  - An iPhone locked and unlocked while idle, recording and live (H).
+  - Every UI change by eye in light and dark (A, B, C, G, I, J).
+  - A real X Sign in check (J).
+  - Windows CI and D3D11 (G, I).

@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
+import type { Device } from './backend'
 import { defaultCaptureConfig, reconcileSourceSelection } from './capture'
 import {
   visualSources,
   usingVisualSources,
+  sceneDisplay,
+  sceneDisplayRefresh,
+  withSceneDisplay,
+  type SceneVisual,
+  type VisualSources,
   hydrateSceneLibrary,
   hydrateWorkingScene,
   normalizeSavedBackground,
@@ -635,4 +641,104 @@ it('keeps built-in layouts available with a substitute without saving it', () =>
     sceneSourceGaps({ layout, sources: usingVisualSources(sources), background: null }, devices)
   ).toEqual([])
   expect(visualSources(sources).cameraId).toBe('iphone')
+})
+
+describe('a saved scene finds its display by UUID first (plan 213 F1)', () => {
+  const lg: Device = {
+    id: 'screen:screencapturekit:5',
+    name: 'LG ULTRAWIDE · 3440 × 1440',
+    displayUuid: 'E2D7A1C4-0B6F-4E3A-9C1D-5F8A2B7C9D10',
+    kind: 'screen',
+    status: 'available'
+  }
+  const lgBack: Device = { ...lg, id: 'screen:screencapturekit:9' }
+  const dellOnLgId: Device = {
+    id: lg.id,
+    name: 'DELL U2720Q · 3840 × 2160',
+    displayUuid: '0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0',
+    kind: 'screen',
+    status: 'available'
+  }
+  const layout = { ...defaultCaptureConfig.layout, layoutPreset: 'screen-only' as const }
+  const scene = (sources: VisualSources): SceneVisual =>
+    normalizeSceneVisual({ layout, sources, background: null })
+  const lgScene = scene({ screenId: lg.id, screenName: lg.name, screenUuid: lg.displayUuid })
+
+  it('resolves by UUID, then id, then name, never to a display with another UUID', () => {
+    expect(sceneDisplay(lgScene.sources, [dellOnLgId, lgBack])).toBe(lgBack)
+    expect(sceneDisplay(lgScene.sources, [dellOnLgId])).toBeUndefined()
+    expect(sceneSourceGaps(lgScene, [dellOnLgId, lgBack])).toEqual([])
+    expect(sceneSourceGaps(lgScene, [dellOnLgId])).toEqual([
+      { source: 'screen', state: 'unavailable' }
+    ])
+
+    const legacy = scene({ screenId: lg.id, screenName: 'Display 2' })
+    expect(sceneDisplay(legacy.sources, [lg])).toBe(lg)
+    const byName = scene({ screenId: 'screen:screencapturekit:3', screenName: lg.name })
+    expect(sceneDisplay(byName.sources, [lgBack])).toBe(lgBack)
+  })
+
+  it('applies under the new id, and the saved scene is rewritten only for the same display', () => {
+    expect(withSceneDisplay(lgScene, [lgBack]).sources).toMatchObject({
+      screenId: lgBack.id,
+      screenName: lg.name,
+      screenUuid: lg.displayUuid
+    })
+    expect(withSceneDisplay(lgScene, [lg])).toBe(lgScene)
+
+    expect(sceneDisplayRefresh(lgScene.sources, [lgBack])).toEqual({
+      screenId: lgBack.id,
+      screenName: lg.name,
+      screenUuid: lg.displayUuid
+    })
+    expect(sceneDisplayRefresh(lgScene.sources, [lg])).toBeNull()
+    // A scene saved before UUIDs learns its display's UUID and name by id.
+    expect(
+      sceneDisplayRefresh(scene({ screenId: lg.id, screenName: 'Display 2' }).sources, [lg])
+    ).toEqual({ screenId: lg.id, screenName: lg.name, screenUuid: lg.displayUuid })
+    // Found by name alone is not proof enough to rewrite it.
+    expect(
+      sceneDisplayRefresh(
+        scene({ screenId: 'screen:screencapturekit:3', screenName: lg.name }).sources,
+        [lgBack]
+      )
+    ).toBeNull()
+  })
+
+  it("a display's name, size or new id under the same UUID is not a modified scene", () => {
+    const legacy = scene({ screenId: lg.id, screenName: 'Display 2' })
+    expect(sameSceneVisual(legacy, lgScene)).toBe(true)
+    expect(
+      sameSceneVisual(
+        lgScene,
+        scene({ ...lgScene.sources, screenName: 'LG ULTRAWIDE · 2560 × 1080' })
+      )
+    ).toBe(true)
+    expect(sameSceneVisual(lgScene, scene({ ...lgScene.sources, screenId: lgBack.id }))).toBe(true)
+    expect(
+      sameSceneVisual(
+        lgScene,
+        scene({
+          screenId: dellOnLgId.id,
+          screenName: dellOnLgId.name,
+          screenUuid: dellOnLgId.displayUuid
+        })
+      )
+    ).toBe(false)
+    expect(
+      sameSceneVisual(
+        lgScene,
+        scene({ screenId: 'screen:screencapturekit:2', screenName: lg.name })
+      )
+    ).toBe(false)
+  })
+
+  it('keeps a UUID only with its display, and drops a malformed one without the scene', () => {
+    expect(lgScene.sources.screenUuid).toBe(lg.displayUuid)
+    expect(scene({ screenUuid: lg.displayUuid }).sources.screenUuid).toBeUndefined()
+    expect(scene({ screenId: lg.id, screenUuid: 42 as unknown as string }).sources).toMatchObject({
+      screenId: lg.id,
+      screenUuid: undefined
+    })
+  })
 })

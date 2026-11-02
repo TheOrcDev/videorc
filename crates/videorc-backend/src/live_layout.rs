@@ -2283,6 +2283,7 @@ fn screen_readiness_detail(
 
 fn camera_state_label(state: &PreviewCameraState) -> &'static str {
     match state {
+        PreviewCameraState::Disconnected => "disconnected",
         PreviewCameraState::DeviceMissing => "device-missing",
         PreviewCameraState::PermissionNeeded => "permission-needed",
         PreviewCameraState::Starting => "starting",
@@ -3976,9 +3977,11 @@ mod tests {
             side_by_side_split: SideBySideSplit::SeventyThirty,
             side_by_side_camera_side: SideBySideCameraSide::Right,
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+            horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
+            camera_look: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

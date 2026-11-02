@@ -349,10 +349,17 @@ jobs:
           if ($executables.Count -lt 4) {
             throw "Expected at least four packaged executables, found $($executables.Count)."
           }
+          # WerFault.exe loads the WER crash-dump helper into its own process
+          # when the backend crashes, so it is signed too. It is the one DLL
+          # Videorc builds; Electron's own DLLs stay outside this pass.
+          # Get-Item throws if packaging dropped it.
+          $werHelper = Get-Item -LiteralPath (Join-Path $unpackedRoot 'resources\videorc_wer_helper.dll')
+          $signedFiles = @($executables) + @($werHelper)
           $signingParams = @{
             Endpoint = $env:VIDEORC_WINDOWS_SIGNING_ENDPOINT
             CodeSigningAccountName = $env:VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME
             CertificateProfileName = $env:VIDEORC_WINDOWS_CERTIFICATE_PROFILE_NAME
+            Files = $werHelper.FullName
             FilesFolder = $unpackedRoot
             FilesFolderFilter = 'exe'
             FilesFolderRecurse = $true
@@ -371,7 +378,7 @@ jobs:
           }
           Invoke-TrustedSigning @signingParams
 
-          foreach ($executable in $executables) {
+          foreach ($executable in $signedFiles) {
             $signature = Get-AuthenticodeSignature -LiteralPath $executable.FullName
             $publisher = if ($signature.SignerCertificate) {
               $signature.SignerCertificate.GetNameInfo(

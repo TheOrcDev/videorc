@@ -1626,18 +1626,23 @@ fn match_pcm_bytes(
         if stop.load(Ordering::Acquire) {
             return Ok(false);
         }
+        // Drain ready PCM before judging the deadline: this thread may have
+        // been descheduled after the worker queued the matching bytes.
+        match receive(Duration::from_millis(5)) {
+            Ok(bytes) => {
+                queued.extend(bytes);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("Capture PCM ended in a partial timestamped packet")
+            }
+        }
         if now() >= deadline {
             bail!(
                 "Capture PCM did not match its timestamp metadata within {}ms",
                 match_budget.as_millis()
             );
-        }
-        match receive(Duration::from_millis(5)) {
-            Ok(bytes) => queued.extend(bytes),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                bail!("Capture PCM ended in a partial timestamped packet")
-            }
         }
     }
     Ok(true)
@@ -2765,6 +2770,40 @@ mod tests {
                 );
                 assert!(queued.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn pcm_match_drains_ready_bytes_after_the_consumer_was_descheduled() {
+        for protocol in [
+            CaptureProtocol::Pulse,
+            CaptureProtocol::AvFoundation,
+            CaptureProtocol::DirectShow,
+        ] {
+            let start = Instant::now();
+            let now = std::cell::Cell::new(start);
+            let budget = max_capture_age(protocol);
+            let mut queued = VecDeque::new();
+            let mut reads = 0;
+            let matched = match_pcm_bytes(
+                &mut queued,
+                4,
+                budget,
+                &AtomicBool::new(false),
+                |_| {
+                    reads += 1;
+                    // Both chunks are ready, but the consumer lost its time
+                    // slice after receiving the first one. Capture freshness
+                    // is checked separately when the packet is delivered.
+                    now.set(start + budget + Duration::from_millis(10));
+                    Ok(vec![1, 2])
+                },
+                || now.get(),
+            )
+            .unwrap();
+            assert!(matched);
+            assert_eq!(reads, 2);
+            assert_eq!(queued, [1, 2, 1, 2]);
         }
     }
 

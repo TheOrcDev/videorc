@@ -1,9 +1,11 @@
 import {
   cameraIsAvailable,
+  cameraSelectionDiagnostics,
   cameraPreviewStartAllowed,
   returningSourceChoices,
   sourceReturnAction
 } from '@/lib/source-return'
+import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 import {
@@ -67,6 +69,7 @@ import {
   sceneSourceProblems,
   sceneSourcesTurnedOff,
   sourceVisibilityFromScene,
+  withSceneDisplay,
   type SceneApp,
   type SceneVisual,
   type SavedScene
@@ -89,6 +92,7 @@ import {
   noteLayoutCommitted,
   noteLayoutLeavingFreeform,
   restoreLayoutUndo,
+  sourceOverrideOf,
   takeLayoutUndo
 } from '@/lib/freeform-memory'
 import {
@@ -417,7 +421,6 @@ import type {
   GateStatus,
   GoLivePreflight,
   HealthEvent,
-  CameraTransform,
   LayoutPreset,
   LayoutSettings,
   LiveLayoutApplyStatus,
@@ -466,6 +469,7 @@ import type {
   SceneConfigParams,
   SceneEditorDraftAck,
   SceneEditorDraftParams,
+  SceneTransformPatch,
   SessionCommentsPage,
   SessionDeletionOperation,
   SessionDetails,
@@ -474,6 +478,7 @@ import type {
   SessionLogEntry,
   SessionSummary,
   SourceSelection,
+  SourceTransformOverride,
   StartSessionParams,
   StreamMetadataDraft,
   StreamMetadataValidation,
@@ -1457,6 +1462,7 @@ export type StudioContextValue = {
   setCaptureConfig: Dispatch<SetStateAction<CaptureConfig>>
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
+  applyCameraLook: (look: NonNullable<LayoutSettings['cameraLook']>) => void
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   /** `keepScene`: the Scene page's Layout edits the saved scene on stream (plan 210 D3). */
@@ -1606,7 +1612,7 @@ export type StudioContextValue = {
   ) => Promise<void>
   setSceneSourceTransform: (
     sourceId: string,
-    patch: { x?: number; y?: number; width?: number; height?: number }
+    patch: SceneTransformPatch
   ) => Promise<TransformCommitResult>
   /** Live drag drafts for the Scene canvas (plan 058); refused while a session runs. */
   setSceneEditorDraft: (params: SceneEditorDraftParams) => Promise<SceneEditorDraftAck>
@@ -2927,7 +2933,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const workingAppRef = useRef<SceneApp | undefined>(
     hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.visual.sources.app
   )
-  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
+  const [settings, setSettings] = useState<SettingsState>(() =>
+    loadJson(STORAGE_KEYS.settings, defaultSettings)
+  )
+  const [storedCaptureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
     const config = loadCaptureConfig()
     const working = hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))
     return working
@@ -2942,6 +2951,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       : config
   })
+  const captureConfig = useMemo(
+    () => ({
+      ...storedCaptureConfig,
+      layout: cameraLookLayout(
+        storedCaptureConfig.layout,
+        storedCaptureConfig.sources.cameraId,
+        settings.cameraLooks
+      )
+    }),
+    [storedCaptureConfig, settings.cameraLooks]
+  )
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
     if (!sessionId) {
@@ -4166,9 +4186,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, wsStatus])
   const [streamMetadataSavePending, setStreamMetadataSavePending] = useState(false)
   const [supportBundleExportPending, setSupportBundleExportPending] = useState(false)
-  const [settings, setSettings] = useState<SettingsState>(() =>
-    loadJson(STORAGE_KEYS.settings, defaultSettings)
-  )
+
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   // Stable handle for callbacks that only need to READ the config (labels,
@@ -4403,6 +4421,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ...current.sources,
           screenId: source.kind === 'screen' ? source.id : undefined,
           screenName: source.kind === 'screen' ? source.name : undefined,
+          screenUuid: source.kind === 'screen' ? source.displayUuid : undefined,
           windowId: source.kind === 'window' ? source.id : undefined,
           windowName: source.kind === 'window' ? source.name : undefined,
           testPattern: false
@@ -4663,7 +4682,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const {
     save: saveSceneEntry,
     remove: removeSceneEntry,
-    autosave: autosaveSavedScene
+    autosave: autosaveSavedScene,
+    refreshDisplay: refreshSavedSceneDisplay
   } = sceneLibrary
   const [activeSavedSceneId, setActiveSavedSceneId] = useState<string | null>(
     () => hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.sceneId ?? null
@@ -7109,6 +7129,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       (params) => {
         if (!clientRef.current) throw offlineError()
         return clientRef.current.requestTyped('sources.resolve_app_window', params)
+      },
+      {
+        disconnectedCameraId:
+          previewCameraStatusRef.current.state === 'disconnected'
+            ? previewCameraStatusRef.current.cameraId
+            : undefined
       }
     )
       .then(({ sources: nextSources, appState }) => {
@@ -9079,14 +9105,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const syncSourceTransformsToLayout = useCallback(
     (nextScene: Scene, changedSourceId?: string) => {
       if (captureConfigRef.current.layout.arrangementMode === 'freeform') {
-        const sourceTransformOverrides: Record<string, CameraTransform> = {}
+        const sourceTransformOverrides: Record<string, SourceTransformOverride> = {}
         for (const source of nextScene.sources) {
-          sourceTransformOverrides[source.id] = {
-            x: source.transform.x,
-            y: source.transform.y,
-            width: source.transform.width,
-            height: source.transform.height
-          }
+          sourceTransformOverrides[source.id] = sourceOverrideOf(source)
         }
         const layout = { ...captureConfigRef.current.layout, sourceTransformOverrides }
         patchLayout({ sourceTransformOverrides })
@@ -9559,10 +9580,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // visible until React has applied this exact commit. BackendClient rejects
   // disconnects/timeouts; failures must never masquerade as acknowledgement.
   const setSceneSourceTransform = useCallback(
-    async (
-      sourceId: string,
-      patch: { x?: number; y?: number; width?: number; height?: number }
-    ): Promise<TransformCommitResult> => {
+    async (sourceId: string, patch: SceneTransformPatch): Promise<TransformCommitResult> => {
       const requestedScene = transformSceneRef.current
       const requestedLayoutIntentId = layoutIntentIdRef.current
       const identity = transformSourceIdentity(requestedScene)
@@ -9982,6 +10000,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       layout: LayoutSettings,
       options?: {
         pendingIndicator?: boolean
+        cameraLookOnly?: boolean
         videoOverride?: VideoSettings
         captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
         sceneApp?: SceneApp
@@ -10066,8 +10085,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               deviceListRef.current.devices,
               // Plan 213 D6: a stand-in never gives way mid-session without a
               // click, not even on a scene switch.
-              { holdStandIns: sessionOwnsTransport(recordingRef.current) }
+              {
+                holdStandIns: sessionOwnsTransport(recordingRef.current),
+                disconnectedCameraId:
+                  previewCameraStatusRef.current.state === 'disconnected'
+                    ? previewCameraStatusRef.current.cameraId
+                    : undefined
+              }
             )
+          layout = cameraLookLayout(
+            layout,
+            requestedSources.cameraId,
+            settingsRef.current.cameraLooks
+          )
           const requestedBackground =
             options && 'backgroundOverride' in options
               ? (options.backgroundOverride ?? undefined)
@@ -10113,7 +10143,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 : current
             )
           }
-          const method = sessionActive ? 'scene.layout.apply_live' : 'scene.layout.apply_preview'
+          const method =
+            sessionActive || options?.cameraLookOnly
+              ? 'scene.layout.apply_live'
+              : 'scene.layout.apply_preview'
           const requestedTransaction = {
             intentId,
             sources: requestedSources,
@@ -10127,7 +10160,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             // Scene motion (opt-in): the committed layout glides into place
             // (320ms ease) in preview, stream, and recording alike. Absent =
             // instant cut.
-            ...(settingsRef.current.animateSceneChanges === true
+            ...(settingsRef.current.animateSceneChanges === true && !options?.cameraLookOnly
               ? { transitionMs: SCENE_TRANSITION_MS }
               : {})
           }
@@ -10369,6 +10402,33 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
     [requestLayoutTransaction]
   )
+
+  const cameraLookThrottleRef = useRef<ReturnType<typeof createCameraLookThrottle> | null>(null)
+  useEffect(() => () => cameraLookThrottleRef.current?.dispose(), [])
+  const applyCameraLook = useCallback((value: NonNullable<LayoutSettings['cameraLook']>): void => {
+    const cameraId = captureConfigRef.current.sources.cameraId
+    if (!cameraId) return
+    const cameraLooks = { ...settingsRef.current.cameraLooks }
+    const look = normalizeCameraLook(value)
+    if (look) cameraLooks[cameraId] = look
+    else delete cameraLooks[cameraId]
+    settingsRef.current = { ...settingsRef.current, cameraLooks }
+    // The live transaction updates the existing source. Suppress the idle
+    // reload so dragging never tears down and reopens the camera.
+    skipNextConfigSceneReloadRef.current = true
+    captureConfigRef.current = {
+      ...captureConfigRef.current,
+      layout: cameraLookLayout(captureConfigRef.current.layout, cameraId, cameraLooks)
+    }
+    setSettings((current) => ({ ...current, cameraLooks }))
+    cameraLookThrottleRef.current ??= createCameraLookThrottle(() => {
+      void requestLayoutTransactionRef.current(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        cameraLookOnly: true
+      })
+    })
+    cameraLookThrottleRef.current.schedule()
+  }, [])
 
   // Single-level undo of the last committed layout change (plan 174 S3.9,
   // D15): the remembered layout goes back through the same transaction, with
@@ -10700,7 +10760,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // or a capture restart (the Clips ring, recovery) may have superseded
       // this switch's own start.
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        visual = normalizeSceneVisual(repaired ?? saved.visual)
+        // Plan 213 F1: the scene's display as listed now, found by its UUID first.
+        visual = withSceneDisplay(
+          normalizeSceneVisual(repaired ?? saved.visual),
+          deviceListRef.current.devices
+        )
         try {
           const resolved = await sceneApply.resolveSceneWindowForApply(
             visual,
@@ -10794,6 +10858,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         layoutIntentBefore = intent
       }
       if (applied) {
+        if (!repaired) refreshSavedSceneDisplay(id, deviceListRef.current.devices)
         rememberedAppsRef.current = sceneApply.rememberSceneWindowApp(
           rememberedAppsRef.current,
           id,
@@ -10861,6 +10926,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [
       sceneLibrary.scenes,
+      refreshSavedSceneDisplay,
       requestLayoutTransaction,
       setSystemAudioEnabled,
       sourceSelectionController,
@@ -11112,6 +11178,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           current.sources.captureOff === sources.captureOff &&
           current.sources.wantedScreenId === sources.wantedScreenId &&
           current.sources.wantedScreenName === sources.wantedScreenName &&
+          current.sources.wantedScreenUuid === sources.wantedScreenUuid &&
           current.sources.wantedWindowId === sources.wantedWindowId &&
           current.sources.wantedWindowName === sources.wantedWindowName
             ? current
@@ -11122,6 +11189,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                   captureOff: sources.captureOff,
                   wantedScreenId: sources.wantedScreenId,
                   wantedScreenName: sources.wantedScreenName,
+                  wantedScreenUuid: sources.wantedScreenUuid,
                   wantedWindowId: sources.wantedWindowId,
                   wantedWindowName: sources.wantedWindowName
                 }
@@ -11276,7 +11344,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         deviceListRef.current.devices,
         key,
         nativePreviewCameraKeyRef.current,
-        current.state
+        current.state,
+        current.cameraId
       )
     )
       return current
@@ -12354,6 +12423,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // identifies the shipped build. Absent → backend degrades to crate.
         appVersion: freshRuntimeInfo?.version,
         rendererDiagnostics: {
+          cameraSelection: cameraSelectionDiagnostics(
+            captureConfigRef.current.sources,
+            previewCameraStatusRef.current
+          ),
           automaticSourceFallbacks: automaticSourceFallbacks.current,
           // Read at export time, including telemetry received while main was
           // refreshing runtime info. Capturing the state here also made this
@@ -18616,6 +18689,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCaptureConfig,
       patchLayout,
       applyLayoutPatch,
+      applyCameraLook,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
@@ -18862,6 +18936,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCaptureConfig,
       patchLayout,
       applyLayoutPatch,
+      applyCameraLook,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,

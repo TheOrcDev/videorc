@@ -3337,6 +3337,9 @@ mod runtime {
                 mirror_x: layout.camera_mirror,
                 mask: windows_scene_mask(camera_mask(layout)),
                 effects: WindowsD3d11LayerEffects {
+                    brightness: layout.camera_look.brightness as f32,
+                    contrast: layout.camera_look.contrast as f32,
+                    saturation: layout.camera_look.saturation as f32,
                     chroma_key,
                     ..Default::default()
                 },
@@ -3493,6 +3496,21 @@ mod runtime {
                             WindowsD3d11SceneMask::None
                         },
                         effects: WindowsD3d11LayerEffects {
+                            brightness: if is_camera {
+                                layout.camera_look.brightness as f32
+                            } else {
+                                0.0
+                            },
+                            contrast: if is_camera {
+                                layout.camera_look.contrast as f32
+                            } else {
+                                1.0
+                            },
+                            saturation: if is_camera {
+                                layout.camera_look.saturation as f32
+                            } else {
+                                1.0
+                            },
                             chroma_key: is_camera.then(|| camera_chroma_key(layout)).flatten().map(
                                 |key| WindowsD3d11ChromaKey {
                                     key_rgb: key.key_rgb,

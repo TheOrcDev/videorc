@@ -373,6 +373,7 @@ impl AudioCaptureStats {
 
     /// Records one callback's raw peak and RMS into the standby level window.
     /// Lock-free, so the realtime callback may call it.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub(crate) fn record_level_window(&self, peak: f32, rms: f32) {
         let micro = |value: f32| (value.clamp(0.0, 4.0) * 1_000_000.0) as u64;
         self.window_peak_micro
@@ -1461,6 +1462,7 @@ fn unavailable_microphone(id: &str, name: &str, detail: &str) -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: id.to_string(),
         name: name.to_string(),
         kind: DeviceKind::Microphone,
@@ -1735,6 +1737,7 @@ mod windows_native {
         Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: windows_dshow_microphone_device_id(&capture_name),
             name: friendly_name.clone(),
             kind: DeviceKind::Microphone,
@@ -1804,6 +1807,7 @@ fn list_platform_microphones() -> Result<Vec<Device>> {
         devices.push(Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: format!("microphone:coreaudio:{device_id}"),
             name,
             kind: DeviceKind::Microphone,

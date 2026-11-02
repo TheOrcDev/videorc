@@ -49,6 +49,14 @@ mod protocol {
         pub elevated: Option<bool>,
         #[serde(default)]
         pub corner_radius: Option<f64>,
+        // In-window origin and host height (plan 213 D2): the in-process layer
+        // uses them; the helper window places itself by screen coordinates.
+        #[serde(default)]
+        pub host_x: Option<f64>,
+        #[serde(default)]
+        pub host_y: Option<f64>,
+        #[serde(default)]
+        pub host_height: Option<f64>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -508,6 +516,7 @@ mod macos {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -594,6 +603,7 @@ mod macos {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,

@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest'
 
-import type { GoLiveDestinationPreflight, GoLivePreflight } from './backend'
-import { goLiveDialogView, goLivePendingLabel, isTitleIssue } from './go-live-dialog-view'
+import type {
+  GoLiveDestinationPreflight,
+  GoLivePreflight,
+  StreamTargetSettings,
+  StreamingSettings
+} from './backend'
+import {
+  VERTICAL_LEG_UNSUPPORTED_PROBLEM,
+  goLiveConfirmGate,
+  goLiveDialogView,
+  goLivePendingLabel,
+  isTitleIssue,
+  verticalLegUnsupported
+} from './go-live-dialog-view'
 
 function destination(
   targetId: string,
@@ -122,5 +134,52 @@ describe('Go Live dialog view (plan 174 S3.4)', () => {
     expect(
       goLiveDialogView(null, { titleField: false, titleMissing: false }).destinationsReady
     ).toBe(false)
+  })
+})
+
+describe('a vertical destination on the raw encoder path (#691)', () => {
+  it('is refused only for a vertical leg on the raw path, once the output check answered', () => {
+    expect(verticalLegUnsupported(true, 'raw-yuv420p')).toBe(true)
+    expect(verticalLegUnsupported(true, 'videotoolbox-h264-mpegts')).toBe(false)
+    expect(verticalLegUnsupported(true, 'windows-media-foundation-h264-mpegts')).toBe(false)
+    expect(verticalLegUnsupported(false, 'raw-yuv420p')).toBe(false)
+    expect(verticalLegUnsupported(true, null)).toBe(false)
+  })
+
+  it('holds the primary with the vertical row needing attention, not "2 of 2 ready"', () => {
+    const target = (id: string, overrides: Partial<StreamTargetSettings> = {}) =>
+      ({ id, platform: 'twitch', label: id, enabled: true, ...overrides }) as StreamTargetSettings
+    const sentStreaming = {
+      enabled: true,
+      mode: 'multi',
+      targets: [target('twitch'), target('tiktok', { outputOrientation: 'vertical' })],
+      enabledTargetIds: ['twitch', 'tiktok']
+    } as unknown as StreamingSettings
+    const input: Parameters<typeof goLiveConfirmGate>[0] = {
+      preflight: {
+        valid: true,
+        issues: [],
+        destinations: [destination('twitch'), destination('tiktok')]
+      },
+      draft: {
+        title: 'Live',
+        description: '',
+        defaultPrivacy: 'private',
+        targetOverrides: [],
+        updatedAt: '2026-11-01T00:00:00Z'
+      },
+      sentStreaming,
+      captionsReadiness: { blocksStart: false },
+      entitlementGate: { allowed: true }
+    }
+
+    expect(goLiveConfirmGate(input).blocked).toBe(false)
+    const gate = goLiveConfirmGate({ ...input, verticalLegUnsupported: true })
+    expect(gate.blocked).toBe(true)
+    expect(gate.view.summary).toBe('1 of 2 ready')
+    expect(gate.view.destinations).toMatchObject([
+      { ready: true, problem: null },
+      { ready: false, problem: VERTICAL_LEG_UNSUPPORTED_PROBLEM }
+    ])
   })
 })

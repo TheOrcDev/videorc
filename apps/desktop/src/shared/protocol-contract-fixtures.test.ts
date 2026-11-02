@@ -101,6 +101,7 @@ import { validateElectronEventPayload, validateElectronInvokeArgs } from './elec
 import { normalizePreviewSurfaceBounds } from './native-preview-bounds'
 
 interface HighRiskContractFixtures {
+  cameraLook: NonNullable<LayoutSettings['cameraLook']>
   schemaVersion: 2
   sessionChatTotals: {
     params: { sessionId: string }
@@ -116,6 +117,7 @@ interface HighRiskContractFixtures {
   layout: {
     legacyWire: Partial<LayoutSettings>
     normalized: LayoutSettings
+    freeformCrop: LayoutSettings
   }
   scene: { wire: Scene }
   recordingStatus: {
@@ -419,6 +421,31 @@ describe('shared high-risk protocol fixture', () => {
     })
   })
 
+  it('round trips camera looks through the strict RPC and IPC contracts and accepts legacy layouts', () => {
+    for (const cameraLook of [undefined, fixtures.cameraLook]) {
+      const layout = { ...fixtures.layout.normalized, ...(cameraLook ? { cameraLook } : {}) }
+      const params = { intentId: 1, layout, sources: {} }
+      expect(validateBackendRpcParams('scene.layout.apply_live', params)).toEqual(params)
+      const snapshot = { revision: 1, scene: null, layout, activeScreen: null }
+      expect(validateElectronInvokeArgs('preview-surface:update-scene', [snapshot])).toEqual([
+        snapshot
+      ])
+    }
+    for (const cameraLook of [
+      null,
+      { ...fixtures.cameraLook, extra: true },
+      { ...fixtures.cameraLook, saturation: 3 }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('scene.layout.apply_live', {
+          intentId: 1,
+          layout: { ...fixtures.layout.normalized, cameraLook },
+          sources: {}
+        })
+      ).toThrow()
+    }
+  })
+
   it('normalizes legacy layouts and validates the exact scene wire shape', () => {
     expect(fixtures.layout.legacyWire).not.toHaveProperty('sourceVisibility')
     expect(normalizeLayoutSettings(fixtures.layout.legacyWire)).toStrictEqual(
@@ -427,6 +454,25 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendRpcResult('scene.get', fixtures.scene.wire))).toEqual(
       fixtures.scene.wire
     )
+  })
+
+  it("keeps a freeform screen's crop on its box, the same bytes as Rust (plan 213 G2)", () => {
+    const layout = fixtures.layout.freeformCrop
+    expect(normalizeLayoutSettings(layout)).toStrictEqual(layout)
+    expect(
+      validateBackendRpcParams('scene.load_from_capture_config', { sources: {}, layout })
+    ).toStrictEqual({ sources: {}, layout })
+    expect(() =>
+      validateBackendRpcParams('scene.load_from_capture_config', {
+        sources: {},
+        layout: {
+          ...layout,
+          sourceTransformOverrides: {
+            'source:base': { x: 0, y: 0, width: 1, height: 1, cropLeft: 2 }
+          }
+        }
+      })
+    ).toThrow()
   })
 
   it('validates full and defaulted recording status shapes', () => {

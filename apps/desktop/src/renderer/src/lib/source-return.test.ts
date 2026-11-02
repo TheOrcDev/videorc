@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Device } from './backend'
+import type { Device, PreviewCameraStatus } from './backend'
 import {
   buildCameraSources,
   persistableCaptureConfig,
@@ -8,6 +8,7 @@ import {
 } from './capture'
 import {
   cameraIsAvailable,
+  cameraSelectionDiagnostics,
   cameraPreviewStartAllowed,
   returningSourceChoices,
   sourceReturnAction
@@ -100,4 +101,108 @@ it('waits for an idle scene change to finish, then restores without a click', ()
   expect(sourceReturnAction(clips, true)).toBe('wait')
   expect(sourceReturnAction(clips, false)).toBe('restore')
   expect(sourceReturnAction({ state: 'recording' }, true)).toBe('offer')
+})
+
+it('lets the backend reconnect a disconnected camera without a renderer re-grab', () => {
+  expect(
+    cameraPreviewStartAllowed(
+      camera.id,
+      devicesForReconnect(),
+      'key',
+      null,
+      'disconnected',
+      camera.id
+    )
+  ).toBe(false)
+  const wanted = { cameraId: camera.id, cameraName: camera.name }
+  expect(
+    reconcileSourceSelection(wanted, [substitute], { disconnectedCameraId: camera.id })
+  ).toMatchObject(wanted)
+  expect(
+    reconcileSourceSelection(wanted, [substitute], { disconnectedCameraId: camera.id })
+      .wantedCameraId
+  ).toBeUndefined()
+  expect(
+    reconcileSourceSelection(wanted, [substitute], { disconnectedCameraId: 'other' }).cameraId
+  ).toBe(substitute.id)
+})
+
+it('allows an explicit pick of another camera while the held camera is disconnected', () => {
+  expect(
+    cameraPreviewStartAllowed(
+      substitute.id,
+      devicesForReconnect(),
+      'builtin-key',
+      'iphone-key',
+      'disconnected',
+      camera.id
+    )
+  ).toBe(true)
+})
+
+function devicesForReconnect(): Device[] {
+  return [camera, substitute]
+}
+
+it('records the wanted camera separately from the camera the backend holds', () => {
+  const status: PreviewCameraStatus = {
+    state: 'disconnected',
+    cameraId: 'builtin',
+    deviceUniqueId: 'builtin-uid',
+    targetFps: 30,
+    framesCaptured: 1,
+    droppedFrames: 0,
+    updatedAt: '2026-11-01T12:00:00Z'
+  }
+  expect(
+    cameraSelectionDiagnostics(
+      { cameraId: 'builtin', wantedCameraId: 'iphone', wantedCameraName: 'iPhone' },
+      status
+    )
+  ).toEqual({
+    wantedCameraId: 'iphone',
+    wantedCameraName: 'iPhone',
+    usedCameraId: 'builtin',
+    deviceUniqueId: 'builtin-uid',
+    state: 'disconnected'
+  })
+  expect(cameraSelectionDiagnostics({ cameraId: 'builtin' }, status).wantedCameraId).toBe('builtin')
+})
+
+describe('a disconnected camera standing in for another camera', () => {
+  const standIn = reconcileSourceSelection({ cameraId: camera.id, cameraName: camera.name }, [
+    screen,
+    substitute
+  ])
+
+  it('retains the last frame without saving the substitute as the wanted camera', () => {
+    const next = reconcileSourceSelection(standIn, [screen], {
+      disconnectedCameraId: substitute.id
+    })
+    expect(next.cameraId).toBe(substitute.id)
+    expect(next.wantedCameraId).toBe(camera.id)
+    expect(
+      persistableCaptureConfig({ ...defaultCaptureConfig, sources: next }).sources.cameraId
+    ).toBe(camera.id)
+  })
+
+  it('holds that frame during a session when the original camera returns', () => {
+    const next = reconcileSourceSelection(standIn, [screen, camera], {
+      holdStandIns: true,
+      disconnectedCameraId: substitute.id
+    })
+    expect(next.cameraId).toBe(substitute.id)
+    expect(next.wantedCameraId).toBe(camera.id)
+    expect(returningSourceChoices(next, [screen, camera])).toEqual([
+      { kind: 'camera', device: camera }
+    ])
+  })
+
+  it('restores the original camera when it returns while idle', () => {
+    const next = reconcileSourceSelection(standIn, [screen, camera], {
+      disconnectedCameraId: substitute.id
+    })
+    expect(next.cameraId).toBe(camera.id)
+    expect(next.wantedCameraId).toBeUndefined()
+  })
 })

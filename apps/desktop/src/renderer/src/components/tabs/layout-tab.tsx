@@ -1,3 +1,4 @@
+import { CameraLookControls } from '@/components/scene/camera-look-controls'
 import {
   AdjustIcon,
   ArrowDownIcon,
@@ -31,9 +32,10 @@ import {
 import { HideScreenSection } from '@/components/scene/hide-screen-section'
 import { SceneList } from '@/components/scene/scene-list'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
+import { ScreenSizeField } from '@/components/scene/screen-size-field'
 import { presetCameraCornerRect } from '@/components/scene/stage-corner'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
-import { SourceTransformFields } from '@/components/scene/source-transform-fields'
+import { SourceCropFields, SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
 import { ScreenFramingControl } from '@/components/studio/scenes-gallery'
 import { Badge } from '@/components/ui/badge'
@@ -76,7 +78,7 @@ import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
-import { freeformEntryPatch, peekLayoutUndo } from '@/lib/freeform-memory'
+import { freeformEntryPatch, peekLayoutUndo, sourceCroppable } from '@/lib/freeform-memory'
 import {
   SCENE_VISIBILITY_LOCK_REASON,
   cameraShapePatch,
@@ -227,6 +229,7 @@ export function LayoutTab(): ReactElement {
     captureConfig,
     patchLayout,
     applyLayoutPatch,
+    applyCameraLook,
     undoLayoutPatch,
     previewWindow,
     togglePreviewWindow,
@@ -684,6 +687,17 @@ export function LayoutTab(): ReactElement {
                 value={layout.verticalScreenFraming}
                 onChange={(verticalScreenFraming) => applyCameraPreset({ verticalScreenFraming })}
               />
+            ) : hasScreen && landscapeScreenFramed(layout.layoutPreset) ? (
+              // Plan 213 G3: the same Fill / Fit for the landscape screen
+              // scenes (Freeform follows the scene it came from); side by
+              // side always fills and Camera only has no screen.
+              <ScreenFramingControl
+                orientation="horizontal"
+                value={layout.horizontalScreenFraming}
+                onChange={(horizontalScreenFraming) =>
+                  applyCameraPreset({ horizontalScreenFraming })
+                }
+              />
             ) : null}
             {/* Scene motion changes what viewers see, so it lives with the
                 layouts, not under Settings (plan 174, D17). */}
@@ -755,6 +769,9 @@ export function LayoutTab(): ReactElement {
                 !preciseEditPending &&
                 !sceneSwitchPending
               }
+              // Plan 213 G2: a crop is saved with the freeform box, so only
+              // Freeform crops; locked while recording or live like the box.
+              cropEnabled={isFreeform && !isSessionActive}
               // The vertical view is the derived stream's canvas: a greyed
               // stage with that stream's overlay rects; the sources stay with
               // the primary (the stream is derived, plan 164 out of scope).
@@ -928,6 +945,14 @@ export function LayoutTab(): ReactElement {
               stageDragging={stageDragging}
               onApplyCameraPreset={applyCameraPreset}
               onApplyLayoutPatch={applyLayoutPatch}
+              onCameraLookChange={applyCameraLook}
+              cameraLookDisabledReason={
+                wsStatus !== 'connected'
+                  ? 'Videorc is reconnecting.'
+                  : !captureConfig.sources.cameraId
+                    ? 'Choose a camera in Sources.'
+                    : undefined
+              }
               onAspectLockedChange={setAspectLocked}
               onPatchLayout={patchLayout}
               onTransformCommit={(patch) =>
@@ -942,7 +967,11 @@ export function LayoutTab(): ReactElement {
             // the disabled-arrow grid read as a broken app).
             <PanelSection
               className="min-w-0"
-              description="Fills the whole canvas. Position is fixed for this layout."
+              description={
+                scene?.background
+                  ? 'Fills the canvas inside the background in this layout. Use Freeform to move, resize or crop it.'
+                  : 'Fills the whole canvas in this layout. Use Freeform to move, resize or crop it.'
+              }
               icon={AdjustIcon}
               title={selectedSource.name}
             >
@@ -952,6 +981,13 @@ export function LayoutTab(): ReactElement {
                 source={selectedSource}
                 onVisibilityChange={setSceneSourceVisible}
               />
+              {/* Plan 213 G4: the background's Visibility, where the screen is. */}
+              {scene?.background ? (
+                <ScreenSizeField
+                  background={scene.background}
+                  disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : null}
+                />
+              ) : null}
             </PanelSection>
           ) : (
             <>
@@ -962,6 +998,12 @@ export function LayoutTab(): ReactElement {
                   source={selectedSource}
                   onVisibilityChange={setSceneSourceVisible}
                 />
+                {scene?.background ? (
+                  <ScreenSizeField
+                    background={scene.background}
+                    disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : null}
+                  />
+                ) : null}
               </PanelSection>
               <PanelSection
                 action={
@@ -1003,6 +1045,17 @@ export function LayoutTab(): ReactElement {
                     runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
                   }
                 />
+                {/* Plan 213 G2: the screen's crop, saved with its freeform box. */}
+                {isFreeform && sourceCroppable(selectedSource.kind) ? (
+                  <SourceCropFields
+                    key={`${selectedSource.id}-crop`}
+                    disabled={isSessionActive || stageDragging}
+                    source={selectedSource}
+                    onCommit={(patch) =>
+                      runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
+                    }
+                  />
+                ) : null}
                 {/* w-fit + auto columns keep the arrows a tight d-pad cluster;
                   1fr side columns stretched, stranding ← at the panel edge
                   (external tester report, 2026-07-06). Shift takes the bigger
@@ -1110,6 +1163,8 @@ function CameraInspector({
   onAspectLockedChange,
   onApplyCameraPreset,
   onApplyLayoutPatch,
+  onCameraLookChange,
+  cameraLookDisabledReason,
   onPatchLayout,
   onTransformCommit,
   onVisibilityChange
@@ -1131,6 +1186,8 @@ function CameraInspector({
   onAspectLockedChange: (locked: boolean) => void
   onApplyCameraPreset: (patch: Partial<CameraLayout>) => void
   onApplyLayoutPatch: (patch: Partial<CameraLayout>) => void
+  onCameraLookChange: (look: NonNullable<CameraLayout['cameraLook']>) => void
+  cameraLookDisabledReason?: string
   onPatchLayout: (patch: Partial<CameraLayout>) => void
   onTransformCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
   onVisibilityChange: (sourceId: string, visible: boolean) => Promise<void>
@@ -1367,6 +1424,11 @@ function CameraInspector({
           onCommit={(cameraOffsetY) => onApplyLayoutPatch({ cameraOffsetY })}
         />
       </PanelSection>
+      <CameraLookControls
+        look={layout.cameraLook}
+        onChange={onCameraLookChange}
+        disabledReason={cameraLookDisabledReason}
+      />
       <PanelSection className="min-w-0" headingLevel={3} title="Green screen">
         <Field orientation="horizontal">
           <FieldContent>
@@ -1580,6 +1642,11 @@ export function OverlayItemInspector({
       </Field>
     </div>
   )
+}
+
+/** The landscape scenes whose screen fits or fills by the user's choice. */
+function landscapeScreenFramed(preset: LayoutPreset): boolean {
+  return preset === 'screen-camera' || preset === 'screen-only'
 }
 
 function sourceIsFullCanvas(source: SceneSource): boolean {

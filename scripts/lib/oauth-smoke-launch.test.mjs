@@ -124,6 +124,7 @@ async function observeCaller(t, script, scenario) {
       }
     )
     t.mock.method(childProcess, 'spawn', (command, args, options) => {
+      // devBackendPrebuildSpec spawns `cargo.exe` on Windows.
       if (command === 'cargo' || command === 'cargo.exe') {
         captureEnvironment(options.env)
         trace.push({ owner: 'preparation', command, args })

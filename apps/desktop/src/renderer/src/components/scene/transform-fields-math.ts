@@ -1,4 +1,9 @@
-import { MIN_SOURCE_FRACTION, type StageRect } from './stage-transform'
+import {
+  MIN_CROP_KEPT,
+  MIN_SOURCE_FRACTION,
+  type StageCrop,
+  type StageRect
+} from './stage-transform'
 
 /**
  * Percent <-> normalized <-> pixel helpers for the Inspector's Position and
@@ -84,6 +89,45 @@ export function transformFieldPatch(
     width: round4(committed.width * scale),
     height: round4(committed.height * scale)
   }
+}
+
+export type CropFieldId = keyof StageCrop
+
+export const CROP_FIELD_IDS: readonly CropFieldId[] = [
+  'cropLeft',
+  'cropTop',
+  'cropRight',
+  'cropBottom'
+]
+
+export const CROP_FIELD_LABELS: Record<CropFieldId, string> = {
+  cropLeft: 'Left',
+  cropTop: 'Top',
+  cropRight: 'Right',
+  cropBottom: 'Bottom'
+}
+
+const OPPOSITE_CROP_SIDE: Record<CropFieldId, CropFieldId> = {
+  cropLeft: 'cropRight',
+  cropRight: 'cropLeft',
+  cropTop: 'cropBottom',
+  cropBottom: 'cropTop'
+}
+
+/**
+ * The patch one crop side's edit commits (plan 213 G2), as a share of the
+ * picture: at least nothing, and at most what leaves 5% of the picture beside
+ * the opposite side's crop (the backend's 95% ceiling per axis). The box
+ * stays where it is; the kept picture fits into it again. The backend commit
+ * remains the authority and its value echoes back into the fields.
+ */
+export function cropFieldPatch(
+  field: CropFieldId,
+  value: number,
+  committed: StageCrop
+): Partial<StageCrop> {
+  const most = Math.max(0, 1 - MIN_CROP_KEPT - committed[OPPOSITE_CROP_SIDE[field]])
+  return { [field]: round4(Math.min(Math.max(value, 0), most)) }
 }
 
 /** Pixel readout for the committed box on the output canvas. */

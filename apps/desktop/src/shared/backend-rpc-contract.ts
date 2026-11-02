@@ -871,6 +871,8 @@ const deviceSchema = objectSchema(
       )
     ),
     windowTitle: optionalText,
+    // Plan 213 F1: a display's UUID, its identity across reconnects.
+    displayUuid: optionalText,
     id: boundedString,
     name: boundedString,
     kind: enumSchema(['screen', 'window', 'camera', 'microphone', 'system-audio']),
@@ -1600,6 +1602,9 @@ const sourceSelectionSchema = objectSchema(
   {
     screenId: optionalText,
     screenName: optionalText,
+    // Plan 213 F1: the chosen display's UUID. Renderer intent; the backend
+    // ignores it.
+    screenUuid: optionalText,
     windowId: optionalText,
     windowName: optionalText,
     captureOff: optionalSchema(booleanSchema),
@@ -1610,6 +1615,7 @@ const sourceSelectionSchema = objectSchema(
     // flags; the backend ignores it.
     wantedScreenId: optionalText,
     wantedScreenName: optionalText,
+    wantedScreenUuid: optionalText,
     wantedWindowId: optionalText,
     wantedWindowName: optionalText,
     wantedCameraId: optionalText,
@@ -1618,6 +1624,22 @@ const sourceSelectionSchema = objectSchema(
     microphoneName: optionalText,
     microphoneOff: optionalSchema(booleanSchema),
     testPattern: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+
+// A freeform box; the screen's crop rides along when it has one (plan 213 G2).
+const cropFraction = optionalSchema(numberSchema({ min: 0, max: 1 }))
+const sourceTransformOverrideSchema = objectSchema(
+  {
+    x: numberSchema(),
+    y: numberSchema(),
+    width: numberSchema(),
+    height: numberSchema(),
+    cropLeft: cropFraction,
+    cropTop: cropFraction,
+    cropRight: cropFraction,
+    cropBottom: cropFraction
   },
   { allowUnknown: false }
 )
@@ -1632,6 +1654,16 @@ const layoutSchema = objectSchema(
     cameraShape: enumSchema(['rectangle', 'rounded', 'circle']),
     cameraCornerRadiusPct: numberSchema({ min: 0, max: 100 }),
     cameraAspect: enumSchema(['source', 'square', 'portrait']),
+    cameraLook: optionalSchema(
+      objectSchema(
+        {
+          brightness: numberSchema({ min: -0.25, max: 0.25 }),
+          contrast: numberSchema({ min: 0.5, max: 1.5 }),
+          saturation: numberSchema({ min: 0, max: 2 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraChromaKeyEnabled: booleanSchema,
     cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
     cameraChromaKeySimilarityPct: numberSchema({ min: 0, max: 100 }),
@@ -1646,6 +1678,7 @@ const layoutSchema = objectSchema(
     sideBySideSplit: enumSchema(['50-50', '60-40', '70-30']),
     sideBySideCameraSide: enumSchema(['left', 'right']),
     verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit'])),
+    horizontalScreenFraming: optionalSchema(enumSchema(['fit', 'fill'])),
     arrangementMode: optionalSchema(enumSchema(['preset', 'freeform'])),
     sourceVisibility: optionalSchema(
       objectSchema(
@@ -1654,7 +1687,7 @@ const layoutSchema = objectSchema(
       )
     ),
     sourceTransformOverrides: optionalSchema(
-      recordSchema(boundedBackendParamValueSchema, { maxKeys: 16 })
+      recordSchema(sourceTransformOverrideSchema, { maxKeys: 16 })
     )
   },
   { allowUnknown: false }
@@ -1746,6 +1779,18 @@ const sceneEditorDraftParamsSchema = objectSchema(
     sourceId: boundedString,
     // Absent = chrome-only (the idle selection holds the frame and handles).
     transform: optionalSchema(cameraTransformSchema),
+    // An ⌥-drag crop's live crop (plan 213 G2); absent keeps the committed one.
+    crop: optionalSchema(
+      objectSchema(
+        {
+          cropLeft: numberSchema({ min: 0, max: 1 }),
+          cropTop: numberSchema({ min: 0, max: 1 }),
+          cropRight: numberSchema({ min: 0, max: 1 }),
+          cropBottom: numberSchema({ min: 0, max: 1 })
+        },
+        { allowUnknown: false }
+      )
+    ),
     chrome: editorChromeSchema
   },
   { allowUnknown: false }
@@ -1898,7 +1943,10 @@ const rendererSafePreviewBoundsSchema = objectSchema(
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     elevated: optionalSchema(booleanSchema),
-    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -1930,7 +1978,10 @@ const mainOwnedPreviewBoundsSchema = objectSchema(
     orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
     orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
     elevated: optionalSchema(booleanSchema),
-    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
+    hostX: optionalSchema(numberSchema()),
+    hostY: optionalSchema(numberSchema()),
+    hostHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 }))
   },
   { allowUnknown: false }
 )
@@ -2028,6 +2079,7 @@ const previewSurfaceStatusFieldsSchema = objectSchema(
         'backend-d3d11-presenter'
       ])
     ),
+    nativePreviewHostWindow: optionalSchema(enumSchema(['main', 'preview'])),
     bounds: optionalSchema(rendererSafePreviewBoundsSchema),
     windowsD3d11Presenter: optionalSchema(windowsD3d11PresenterDiagnosticsSchema),
     updatedAt: timestamp
@@ -2085,7 +2137,14 @@ const previewCameraStatusSchema = boundedSemanticValue(
   'a preview camera status',
   objectSchema(
     {
-      state: enumSchema(['starting', 'live', 'permission-needed', 'device-missing', 'failed']),
+      state: enumSchema([
+        'starting',
+        'live',
+        'permission-needed',
+        'device-missing',
+        'disconnected',
+        'failed'
+      ]),
       targetFps: numberSchema({ min: 0, max: 1000 }),
       framesCaptured: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
@@ -5607,3 +5666,28 @@ function assertExactEnvelopeFields(
     }
   }
 }
+
+// Support bundle camera story (plan 213 H5). Camera type and transport are in
+// Device.detail. cameraConnections is a bundle-only history, never an event.
+export const cameraSelectionDiagnosticsSchema = objectSchema({
+  wantedCameraId: optionalSchema(stringSchema()),
+  wantedCameraName: optionalSchema(stringSchema()),
+  usedCameraId: optionalSchema(stringSchema()),
+  deviceUniqueId: optionalSchema(stringSchema()),
+  state: enumSchema([
+    'starting',
+    'live',
+    'permission-needed',
+    'device-missing',
+    'disconnected',
+    'failed'
+  ])
+})
+export const cameraConnectionHistoryEntrySchema = objectSchema({
+  deviceType: stringSchema(),
+  transport: numberSchema({ integer: true }),
+  uniqueId: stringSchema(),
+  name: stringSchema(),
+  connected: booleanSchema,
+  timestamp
+})

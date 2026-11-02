@@ -1611,6 +1611,7 @@ fn distinct_nonempty_paths<const N: usize>(paths: [Option<String>; N]) -> Vec<St
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
 fn sync_directory(directory: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -12145,9 +12146,11 @@ mod tests {
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
                 vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+                horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
                 arrangement_mode: crate::protocol::ArrangementMode::Preset,
                 source_transform_overrides: std::collections::BTreeMap::new(),
                 source_visibility: Default::default(),
+                camera_look: Default::default(),
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -12496,9 +12499,11 @@ mod tests {
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+            horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
+            camera_look: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

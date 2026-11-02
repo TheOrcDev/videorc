@@ -1,4 +1,11 @@
-import type { Device, RecordingStatus, SourceSelection } from './backend'
+import type {
+  CameraSelectionDiagnostics,
+  Device,
+  PreviewCameraStatus,
+  RecordingStatus,
+  SourceSelection
+} from './backend'
+import { findRememberedSource } from './capture'
 import { sessionOwnsTransport } from '../../../shared/capture-state'
 
 export function returningSourceChoices(sources: SourceSelection, devices: Device[]) {
@@ -22,9 +29,13 @@ export function returningSourceChoices(sources: SourceSelection, devices: Device
     const available = devices.filter(
       (device) => device.kind === deviceKind && device.status === 'available'
     )
-    const device =
-      available.find((device) => device.id === id) ??
-      available.find((device) => device.name === name)
+    // Plan 213 F1: a display comes back by its UUID first, whatever its id.
+    const device = findRememberedSource(
+      id,
+      name,
+      available,
+      deviceKind === 'screen' ? sources.wantedScreenUuid : undefined
+    )
     if (device) choices.push({ kind, device })
   }
   return choices
@@ -45,9 +56,11 @@ export function cameraPreviewStartAllowed(
   devices: Device[],
   key: string,
   previousKey: string | null,
-  state: string
+  state: string,
+  currentCameraId?: string
 ): boolean {
   return (
+    !(state === 'disconnected' && currentCameraId === cameraId) &&
     cameraIsAvailable(cameraId, devices) &&
     !(key === previousKey && ['starting', 'live', 'failed', 'device-missing'].includes(state))
   )
@@ -58,4 +71,17 @@ export function sourceReturnAction(
   blocked = false
 ): 'offer' | 'restore' | 'wait' {
   return sessionOwnsTransport(status) ? 'offer' : blocked ? 'wait' : 'restore'
+}
+
+export function cameraSelectionDiagnostics(
+  sources: SourceSelection,
+  status: PreviewCameraStatus
+): CameraSelectionDiagnostics {
+  return {
+    wantedCameraId: sources.wantedCameraId ?? sources.cameraId,
+    wantedCameraName: sources.wantedCameraName ?? sources.cameraName,
+    usedCameraId: status.cameraId,
+    deviceUniqueId: status.deviceUniqueId,
+    state: status.state
+  }
 }

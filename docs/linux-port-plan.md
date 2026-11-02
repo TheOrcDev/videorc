@@ -112,10 +112,11 @@ which argument the iHD driver rejects (Plan 053, S3).
 - Keep shared geometry and pixel conversion outside Apple-only modules.
 - Return explicit unsupported results for runtime paths with no Linux backend.
 
-The temporary Linux clippy allow list matches the documented Windows
-cross-platform allow list: `dead_code`, `unused_imports`, `unused_variables`,
-and `unused_mut`. Both platform gates should remove those allows together as
-the shared warning wall is eliminated.
+The temporary Linux clippy allow list is `dead_code`, `unused_imports`,
+`unused_variables`, and `unused_mut`. The Windows gate dropped the same list
+once its warning wall was burned down: each helper that only macOS or Linux
+calls carries `#[cfg_attr(target_os = "windows", allow(dead_code))]` (or the
+matching lint) at the item. The Linux gate should drop its list the same way.
 
 ### L1.5 — Encoder policy and provisioning
 

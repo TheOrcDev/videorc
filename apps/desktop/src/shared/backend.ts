@@ -404,6 +404,11 @@ export interface AppPreviewsResult {
 export interface Device {
   app?: DeviceApp
   windowTitle?: string
+  /**
+   * A display's UUID (plan 213 F1), the identity that survives a reconnect;
+   * macOS can hand the same display a new id.
+   */
+  displayUuid?: string
   id: string
   name: string
   kind: DeviceKind
@@ -458,7 +463,16 @@ export interface AutomaticSourceFallbackEvent {
   occurredAt?: string
 }
 
+export interface CameraSelectionDiagnostics {
+  wantedCameraId?: string
+  wantedCameraName?: string
+  usedCameraId?: string
+  deviceUniqueId?: string
+  state: PreviewCameraState
+}
+
 export interface RendererDiagnosticsSnapshot {
+  cameraSelection?: CameraSelectionDiagnostics
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
   nativePreviewSurfaceStatus?: PreviewSurfaceStatus
   runtimeInfo?: RuntimeInfo
@@ -577,6 +591,12 @@ export interface StartRecordingParams {
 export interface SourceSelection {
   screenId?: string
   screenName?: string
+  /**
+   * The chosen display's UUID (plan 213 F1). The choice resolves by it
+   * first, then by id, then by name, so a display macOS gave a new id is
+   * still the same choice. Renderer intent only: the backend ignores it.
+   */
+  screenUuid?: string
   windowId?: string
   windowName?: string
   /**
@@ -607,6 +627,7 @@ export interface SourceSelection {
    */
   wantedScreenId?: string
   wantedScreenName?: string
+  wantedScreenUuid?: string
   wantedWindowId?: string
   wantedWindowName?: string
   wantedCameraId?: string
@@ -668,6 +689,8 @@ export const LAYOUT_PRESET_VALUES = [
 export type CameraTransformMode = 'preset' | 'custom'
 export type SideBySideSplit = '50-50' | '60-40' | '70-30'
 export type VerticalScreenFraming = 'fill' | 'fit'
+/** The landscape screen scenes' framing (plan 213 G3); Fit by default. */
+export type HorizontalScreenFraming = 'fit' | 'fill'
 export type ArrangementMode = 'preset' | 'freeform'
 export type SideBySideCameraSide = 'left' | 'right'
 
@@ -678,12 +701,34 @@ export interface CameraTransform {
   height: number
 }
 
+/** A screen's crop, as fractions of its own picture (plan 213 G2). */
+export interface SourceCrop {
+  cropLeft: number
+  cropTop: number
+  cropRight: number
+  cropBottom: number
+}
+
+/**
+ * One source's freeform box. The screen also keeps its crop; a box with no
+ * crop (and every camera, whose crop comes from zoom and pan) omits it.
+ */
+export interface SourceTransformOverride extends CameraTransform, Partial<SourceCrop> {}
+
 export interface SourceVisibility {
   camera: boolean
   capture: boolean
 }
 
+export interface CameraLook {
+  brightness: number
+  contrast: number
+  saturation: number
+}
+
 export interface LayoutSettings {
+  /** Per-camera setting injected at the output boundary; omitted when neutral. */
+  cameraLook?: CameraLook
   layoutPreset: LayoutPreset
   cameraTransformMode: CameraTransformMode
   cameraTransform: CameraTransform | null
@@ -720,6 +765,13 @@ export interface LayoutSettings {
    */
   verticalScreenFraming: VerticalScreenFraming
   /**
+   * How the SCREEN is framed in the landscape screen scenes (Screen + camera,
+   * Screen only, and Freeform over them), plan 213 G3. 'fit' (default) shows
+   * the whole screen; 'fill' fills the frame and centre-crops the rest.
+   * Side by side always fills; vertical scenes ignore it.
+   */
+  horizontalScreenFraming: HorizontalScreenFraming
+  /**
    * 'preset' (default) composes the fixed layoutPreset arrangement.
    * 'freeform' composes the screen + camera base and applies
    * sourceTransformOverrides: the "arrange it yourself" mode. layoutPreset
@@ -730,7 +782,7 @@ export interface LayoutSettings {
    * Per-source transforms for freeform, keyed by the stable scene source id
    * ('source:base', 'source:camera'). Empty means the base arrangement.
    */
-  sourceTransformOverrides: Record<string, CameraTransform>
+  sourceTransformOverrides: Record<string, SourceTransformOverride>
   /** Independent visual roles; legacy layouts show both. */
   sourceVisibility?: SourceVisibility
 }
@@ -918,6 +970,8 @@ export interface EditorChrome {
 export interface SceneEditorDraftParams {
   sourceId: string
   transform?: CameraTransform
+  /** An ⌥-drag crop's live crop (plan 213 G2); absent keeps the committed crop. */
+  crop?: SourceCrop
   chrome: EditorChrome
 }
 
@@ -2347,6 +2401,18 @@ export interface PreviewSurfaceBounds {
   /** Corner radius in points; docked previews pass the panel radius so the
    * native surface clips to the rounded slot. Absent/0 = square. */
   cornerRadius?: number
+  /** Where the in-process CAMetalLayer sits INSIDE its host window (plan 213
+   * D2): the surface's top-left origin in the host's content coordinates and
+   * the host content's height, in points. The layer is placed from these,
+   * never from screenX/screenY, so a window drag never touches it. The host
+   * height travels too because an AppKit layer measures its origin from the
+   * bottom edge: a taller host must re-place the layer even when the slot
+   * stayed put. The host is the Preview window (below its drag strip) or,
+   * stuck, the main window at the Studio slot. Absent = the layer fills its
+   * host from the origin. */
+  hostX?: number
+  hostY?: number
+  hostHeight?: number
 }
 
 /** Canonical lowercase, fixed-width pointer value. It is never renderer-facing. */
@@ -2385,6 +2451,10 @@ export type NativePreviewHostKind =
   | 'external-module'
   | 'proof-surface'
   | 'backend-d3d11-presenter'
+/** Which app window hosts the in-process CAMetalLayer (plan 213 D3): the main
+ * window while the Preview is stuck to the app, the Preview window otherwise.
+ * Only the in-process host sets it; status names the host, never silently. */
+export type NativePreviewHostWindow = 'main' | 'preview'
 export type CompositorState = 'stopped' | 'starting' | 'live' | 'failed'
 export type CompositorSourceKind = 'camera' | 'screen' | 'window'
 export type CompositorSceneSourceKind = SceneSourceKind | 'screen-image' | 'background-image'
@@ -2720,6 +2790,7 @@ export interface PreviewSurfaceStatus {
   nativePreviewMainLastSkippedFrameSceneRevision?: number
   nativePreviewHostKind?: NativePreviewHostKind
   nativePreviewHostAttached?: boolean
+  nativePreviewHostWindow?: NativePreviewHostWindow
   nativePreviewPlacementEventsReceived?: number
   nativePreviewPlacementsCoalesced?: number
   nativePreviewPlacementsApplied?: number
@@ -2844,6 +2915,7 @@ export interface PreviewSurfaceBoundsParams {
 }
 
 export type PreviewCameraState =
+  | 'disconnected'
   | 'starting'
   | 'live'
   | 'permission-needed'

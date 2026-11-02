@@ -66,6 +66,7 @@ import {
   videoProfileCompatibility,
   videoPresets
 } from './capture'
+import { returningSourceChoices } from './source-return'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -82,6 +83,16 @@ function captureConfigFixture(): CaptureConfig {
 }
 
 describe('reconcileSourceSelection', () => {
+  it('uses native preference order for a fresh profile and preserves an explicit camera', () => {
+    const cameras: Device[] = [
+      { id: 'builtin', name: 'Built-in', kind: 'camera', status: 'available' },
+      { id: 'iphone', name: 'iPhone', kind: 'camera', status: 'available' }
+    ]
+    expect(reconcileSourceSelection({}, cameras).cameraId).toBe('builtin')
+    expect(reconcileSourceSelection({ cameraId: 'iphone' }, cameras).cameraId).toBe('iphone')
+    expect(reconcileSourceSelection({}, [...cameras].reverse()).cameraId).toBe('iphone')
+  })
+
   describe('screen None (release test 146, plan 0002)', () => {
     // Linux: the only screen rows are the portal entries, and selecting one
     // asks the compositor for a share, so None must survive reconcile.
@@ -351,6 +362,100 @@ describe('reconcileSourceSelection', () => {
         [display1, facetime]
       )
       expect(off).toMatchObject({ cameraId: undefined, cameraOff: true, wantedCameraId: undefined })
+    })
+  })
+
+  // Plan 213 F1: macOS can hand a reconnected display a new id. Its UUID
+  // stays, so the pick follows the display rather than the number.
+  describe('a display is found by its UUID first (plan 213 F1)', () => {
+    const builtIn: Device = {
+      id: 'screen:screencapturekit:1',
+      name: 'Built-in Retina Display · 3024 × 1964',
+      displayUuid: '37D8832A-2D66-02CA-B9F7-8F30A301B230',
+      kind: 'screen',
+      status: 'available'
+    }
+    const lg: Device = {
+      id: 'screen:screencapturekit:5',
+      name: 'LG ULTRAWIDE · 3440 × 1440',
+      displayUuid: 'E2D7A1C4-0B6F-4E3A-9C1D-5F8A2B7C9D10',
+      kind: 'screen',
+      status: 'available'
+    }
+    const lgBack: Device = { ...lg, id: 'screen:screencapturekit:9' }
+    const dellOnLgId: Device = {
+      id: lg.id,
+      name: 'DELL U2720Q · 3840 × 2160',
+      displayUuid: '0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0',
+      kind: 'screen',
+      status: 'available'
+    }
+
+    function persisted(sources: SourceSelection): SourceSelection {
+      return persistableCaptureConfig({ ...captureConfigFixture(), sources }).sources
+    }
+
+    it('a display back under a new id is the pick, and the id is rewritten silently', () => {
+      const pick = buildCaptureSources({}, [builtIn, lg], lg.id)
+      expect(pick).toMatchObject({ screenId: lg.id, screenUuid: lg.displayUuid })
+
+      const next = reconcileSourceSelection(pick, [builtIn, lgBack])
+      expect(next).toMatchObject({
+        screenId: lgBack.id,
+        screenName: lg.name,
+        screenUuid: lg.displayUuid
+      })
+      expect(next.wantedScreenId).toBeUndefined()
+      expect(next.wantedScreenUuid).toBeUndefined()
+      expect(sourceSelectionChangeEvents(pick, next)).toEqual([])
+      expect(persisted(next)).toMatchObject({ screenId: lgBack.id, screenUuid: lg.displayUuid })
+    })
+
+    it('its UUID wins over its old id, now on another display', () => {
+      const pick = buildCaptureSources({}, [builtIn, lg], lg.id)
+      expect(reconcileSourceSelection(pick, [builtIn, dellOnLgId, lgBack]).screenId).toBe(lgBack.id)
+
+      // Gone, with its id on another display: a stand-in, and the pick waits.
+      const standIn = reconcileSourceSelection(pick, [dellOnLgId, builtIn])
+      expect(standIn).toMatchObject({
+        screenId: dellOnLgId.id,
+        screenName: dellOnLgId.name,
+        screenUuid: dellOnLgId.displayUuid,
+        wantedScreenId: lg.id,
+        wantedScreenUuid: lg.displayUuid
+      })
+      expect(persisted(standIn)).toMatchObject({
+        screenId: lg.id,
+        screenName: lg.name,
+        screenUuid: lg.displayUuid
+      })
+      expect(returningSourceChoices(standIn, [dellOnLgId, builtIn])).toEqual([])
+
+      // Back under yet another id: the wish is met by its UUID.
+      expect(returningSourceChoices(standIn, [dellOnLgId, builtIn, lgBack])).toEqual([
+        { kind: 'capture', device: lgBack }
+      ])
+      const back = reconcileSourceSelection(standIn, [dellOnLgId, builtIn, lgBack])
+      expect(back).toMatchObject({ screenId: lgBack.id, screenUuid: lg.displayUuid })
+      expect(back.wantedScreenId).toBeUndefined()
+      expect(back.wantedScreenUuid).toBeUndefined()
+    })
+
+    it('a pick saved before UUIDs is found by id, learns its UUID and new name, and is not a fallback', () => {
+      const legacy: SourceSelection = { screenId: lg.id, screenName: 'Display 2' }
+      const next = reconcileSourceSelection(legacy, [builtIn, lg])
+      expect(next).toMatchObject({
+        screenId: lg.id,
+        screenName: lg.name,
+        screenUuid: lg.displayUuid
+      })
+      expect(sourceSelectionChangeEvents(legacy, next)).toEqual([])
+    })
+
+    it('a UUID left without its display picks nothing', () => {
+      const orphan = reconcileSourceSelection({ screenUuid: lg.displayUuid }, [builtIn, lgBack])
+      expect(orphan.screenId).toBe(builtIn.id)
+      expect(orphan.screenUuid).toBe(builtIn.displayUuid)
     })
   })
 
@@ -1021,6 +1126,7 @@ describe('smokePreviewCompositorCaptureConfig', () => {
       sideBySideSplit: '70-30',
       sideBySideCameraSide: 'right',
       verticalScreenFraming: 'fill',
+      horizontalScreenFraming: 'fit',
       arrangementMode: 'preset',
       sourceTransformOverrides: {}
     },
@@ -1109,6 +1215,7 @@ describe('smokePreviewCompositorCaptureConfig', () => {
         sideBySideSplit: '70-30',
         sideBySideCameraSide: 'right',
         verticalScreenFraming: 'fill',
+        horizontalScreenFraming: 'fit',
         arrangementMode: 'preset',
         sourceTransformOverrides: {}
       },
@@ -2316,6 +2423,40 @@ describe('freeform arrangement (plan phase 4)', () => {
     expect(layout.sourceTransformOverrides).toEqual({
       'source:base': { x: 0.1, y: 0.1, width: 0.5, height: 0.5 }
     })
+  })
+
+  it("keeps a screen's crop on its box and clamps it like the backend (plan 213 G2)", () => {
+    const layout = normalizeLayoutSettings({
+      arrangementMode: 'freeform',
+      sourceTransformOverrides: {
+        'source:base': {
+          x: 0.1,
+          y: 0.1,
+          width: 0.5,
+          height: 0.5,
+          cropLeft: 0.25,
+          cropTop: 0,
+          cropRight: 1.5,
+          cropBottom: 'lots'
+        }
+      }
+    } as unknown as Partial<CaptureConfig['layout']>)
+
+    expect(layout.sourceTransformOverrides).toEqual({
+      'source:base': { x: 0.1, y: 0.1, width: 0.5, height: 0.5, cropLeft: 0.25, cropRight: 0.95 }
+    })
+  })
+
+  it('reads the landscape screen framing, Fit unless Fill was chosen (plan 213 G3)', () => {
+    expect(normalizeLayoutSettings({}).horizontalScreenFraming).toBe('fit')
+    expect(
+      normalizeLayoutSettings({ horizontalScreenFraming: 'fill' }).horizontalScreenFraming
+    ).toBe('fill')
+    expect(
+      normalizeLayoutSettings({ horizontalScreenFraming: 'stretch' } as unknown as Partial<
+        CaptureConfig['layout']
+      >).horizontalScreenFraming
+    ).toBe('fit')
   })
 
   it('rejects junk arrangement modes back to preset', () => {

@@ -119,6 +119,7 @@ mac:
   # The unsigned `dist`/`package` scripts override this to false.
   notarize: true
   extendInfo:
+    NSCameraUseContinuityCameraDeviceType: true
     NSCameraUsageDescription: Videorc uses the camera for creator overlays when you select a camera source.
     NSMicrophoneUsageDescription: Videorc uses the microphone when you select a microphone for recording or streaming.
     NSScreenCaptureDescription: Videorc captures your screen or selected windows only when you start a recording or stream.
@@ -154,6 +155,10 @@ win:
     # extraResources); agent apps point at resources\videorc-mcp.exe.
     - from: ../../target/release/videorc-mcp.exe
       to: videorc-mcp.exe
+    # The WER module the backend registers beside itself so heap-corruption
+    # (fail-fast) crashes still leave a minidump; see crates/videorc-wer-helper.
+    - from: ../../target/release/videorc_wer_helper.dll
+      to: videorc_wer_helper.dll
     - from: ../../vendor/ffmpeg/windows-x64
       to: ffmpeg
       filter:

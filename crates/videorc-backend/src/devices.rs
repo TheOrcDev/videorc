@@ -147,6 +147,7 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
                             devices.push(Device {
                                 app: None,
                                 window_title: None,
+                                display_uuid: None,
                                 id: format!("camera:avfoundation:{}", device.index),
                                 name: format!("FFmpeg fallback - {}", device.name),
                                 kind: DeviceKind::Camera,
@@ -234,6 +235,7 @@ fn unsupported_device_list() -> DeviceList {
         Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: "screen:unsupported-platform".to_string(),
             name: "Primary Display".to_string(),
             kind: DeviceKind::Screen,
@@ -245,6 +247,7 @@ fn unsupported_device_list() -> DeviceList {
         Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: "window:unsupported-platform".to_string(),
             name: "Window Capture".to_string(),
             kind: DeviceKind::Window,
@@ -260,6 +263,7 @@ fn unsupported_device_list() -> DeviceList {
     DeviceList { devices, warnings }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
     devices
         .into_iter()
@@ -284,6 +288,7 @@ fn preview_ready_native_capture_devices(devices: Vec<Device>) -> Vec<Device> {
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_screen_devices(
     av_devices: &[AvFoundationDevice],
     screen_capture_permission_required: bool,
@@ -297,6 +302,7 @@ fn avfoundation_screen_devices(
         .map(|device| Device {
             app: None,
             window_title: None,
+            display_uuid: None,
             id: format!("screen:avfoundation:{}", device.index),
             name: device.name.clone(),
             kind: DeviceKind::Screen,
@@ -318,10 +324,12 @@ fn avfoundation_screen_devices(
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn missing_avfoundation_screen_device() -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: "screen:avfoundation-missing".to_string(),
         name: "Primary Display".to_string(),
         kind: DeviceKind::Screen,
@@ -335,10 +343,12 @@ fn missing_avfoundation_screen_device() -> Device {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_probe_failed_screen_device() -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: "screen:probe-failed".to_string(),
         name: "Primary Display".to_string(),
         kind: DeviceKind::Screen,
@@ -477,6 +487,7 @@ fn system_audio_device_for(support: SystemAudioSupport) -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id: SYSTEM_AUDIO_DEVICE_ID.to_string(),
         name: "System audio".to_string(),
         kind: DeviceKind::SystemAudio,
@@ -947,6 +958,7 @@ fn db_to_level(db: f64) -> f64 {
 // available doubled every microphone in the picker and made a broken
 // "Fallback - X" row the fresh-profile default, so they are listed only when
 // no native CoreAudio input can be selected at all.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_microphone_picker_devices(
     av_devices: &[AvFoundationDevice],
     native_microphone_available: bool,
@@ -961,6 +973,7 @@ fn avfoundation_microphone_picker_devices(
         .collect()
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
     // The capture worker and meter only open stable UID identities. An
     // index-only row (FFmpeg without the Videorc AVF identity patch) can never
@@ -981,6 +994,7 @@ fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
     Device {
         app: None,
         window_title: None,
+        display_uuid: None,
         id,
         name: device.name.clone(),
         kind: DeviceKind::Microphone,
@@ -1315,6 +1329,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:1".to_string(),
                 name: "Display 1".to_string(),
                 kind: DeviceKind::Screen,
@@ -1326,6 +1341,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "window:screencapturekit:42".to_string(),
                 name: "Editor".to_string(),
                 kind: DeviceKind::Window,
@@ -1337,6 +1353,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "camera:native".to_string(),
                 name: "Camera".to_string(),
                 kind: DeviceKind::Camera,
@@ -1366,6 +1383,7 @@ mod tests {
                 devices: vec![Device {
                     app: None,
                     window_title: None,
+                    display_uuid: None,
                     id: "screen:dxgi:0000000000000001:0".to_string(),
                     name: "Display 1".to_string(),
                     kind: DeviceKind::Screen,
@@ -1380,6 +1398,7 @@ mod tests {
                 devices: vec![Device {
                     app: None,
                     window_title: None,
+                    display_uuid: None,
                     id: "camera:windows-dshow:5553422043616d657261".to_string(),
                     name: "USB Camera".to_string(),
                     kind: DeviceKind::Camera,
@@ -1393,6 +1412,7 @@ mod tests {
             vec![Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "microphone:windows-dshow:4d6963726f70686f6e65204172726179".to_string(),
                 name: "Microphone Array".to_string(),
                 kind: DeviceKind::Microphone,
@@ -1592,6 +1612,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:111".to_string(),
                 name: "Display 1".to_string(),
                 kind: DeviceKind::Screen,
@@ -1603,6 +1624,7 @@ mod tests {
             Device {
                 app: None,
                 window_title: None,
+                display_uuid: None,
                 id: "screen:screencapturekit:222".to_string(),
                 name: "Display 2".to_string(),
                 kind: DeviceKind::Screen,

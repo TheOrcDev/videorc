@@ -652,6 +652,7 @@ impl<P, M> FrameStore<P, M> {
             .checkout(byte_len, false)
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn checkout_spare_buffer(&mut self, byte_len: usize) -> Option<Vec<u8>> {
         let mut pool = self
             .buffer_pool
@@ -666,6 +667,7 @@ impl<P, M> FrameStore<P, M> {
         Some(buffer)
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn record_buffer_allocation(&mut self) {
         let mut pool = self
             .buffer_pool

@@ -41,7 +41,15 @@ describe('native preview in-process loader', () => {
         }
       }
     ])
-    expect(attachNativePreview).toHaveBeenCalledWith(nativeHandle, 640, 360, 2, true)
+    expect(attachNativePreview).toHaveBeenCalledWith(nativeHandle, {
+      x: 0,
+      y: 0,
+      width: 640,
+      height: 360,
+      scaleFactor: 2,
+      visible: true,
+      cornerRadius: 0
+    })
   })
 
   it('returns the exact module load or export failure instead of claiming native ownership', () => {

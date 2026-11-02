@@ -15,9 +15,11 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::camera_capture::{
-    CameraFormatSummary, CameraFrameRateEndpoint, camera_capability_matrix_for_id,
-    parse_native_camera_id, parse_windows_dshow_camera_id, resolve_camera_frame_rate,
+    CameraFormatSummary, camera_capability_matrix_for_id, parse_native_camera_id,
+    parse_windows_dshow_camera_id,
 };
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
+use crate::camera_capture::{CameraFrameRateEndpoint, resolve_camera_frame_rate};
 use crate::color::{ycbcr_bt709_full_to_bgr, ycbcr_bt709_video_to_bgr};
 use crate::diagnostics::{
     PreviewCameraCaptureStats, PreviewCameraCaptureTimingStats,
@@ -44,6 +46,7 @@ const PREVIEW_CAMERA_MAX_PNG_WIDTH: u32 = 1920;
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
 #[cfg(any(target_os = "windows", test))]
 const CAMERA_REFERENCE_HEIGHT: u32 = 720;
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const CAMERA_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_CAMERA_CAPTURE_CPU_COPY";
 /// Must stay inside the 10 s mutation contract together with the up-to-2 s
 /// device inventory that precedes it: past that contract the whole backend
@@ -102,6 +105,7 @@ fn native_camera_preview_thread_startup_timeout() -> Duration {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn native_preview_surface_env_enabled() -> bool {
     // v1 default: the native CAMetalLayer surface IS the production preview. The env
     // var remains a developer kill switch only (VIDEORC_NATIVE_PREVIEW_SURFACE=0).
@@ -111,10 +115,12 @@ fn native_preview_surface_env_enabled() -> bool {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn forced_camera_capture_cpu_copy_enabled() -> bool {
     truthy_env_value(std::env::var(CAMERA_CAPTURE_CPU_COPY_ENV).ok().as_deref())
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn truthy_env_value(value: Option<&str>) -> bool {
     matches!(
         value.map(|value| value.trim().to_ascii_lowercase()),
@@ -122,6 +128,7 @@ fn truthy_env_value(value: Option<&str>) -> bool {
     )
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn should_skip_camera_capture_cpu_copy_for_config(
     zero_copy_source_handle_available: bool,
     source_zerocopy_enabled: bool,
@@ -134,6 +141,7 @@ fn should_skip_camera_capture_cpu_copy_for_config(
         && !forced_cpu_copy_enabled
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn should_skip_camera_capture_cpu_copy(zero_copy_source_handle_available: bool) -> bool {
     should_skip_camera_capture_cpu_copy_for_config(
         zero_copy_source_handle_available,
@@ -148,6 +156,7 @@ use crate::metal_compositor::source_zerocopy_enabled;
 
 /// Zero-copy source handoff is Metal/IOSurface-backed and exists only on macOS.
 #[cfg(not(target_os = "macos"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn source_zerocopy_enabled() -> bool {
     false
 }
@@ -196,6 +205,7 @@ pub struct PreviewCameraRuntime {
     /// Native ownership registered immediately after a successful thread spawn
     /// and before startup readiness can suspend or panic.
     pending_native: Option<PendingNativeCameraThread>,
+    disconnected: Option<PreviewCameraRestartSnapshot>,
     active: Option<NativeCameraPreviewThread>,
     poll_task: Option<JoinHandle<()>>,
     /// When the current session acked Live. macOS acks Live as soon as
@@ -499,6 +509,7 @@ pub enum PreviewCameraPixelFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 enum CameraCaptureDropReason {
     FrameWasLate,
     OutOfBuffers,
@@ -515,6 +526,7 @@ struct CameraCaptureDropReasonCounts {
 }
 
 impl CameraCaptureDropReasonCounts {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record(&mut self, reason: CameraCaptureDropReason) {
         let counter = match reason {
             CameraCaptureDropReason::FrameWasLate => &mut self.frame_was_late,
@@ -658,6 +670,7 @@ impl CameraCaptureTimingWindow {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_sample_pts(&mut self, sample_pts_seconds: Option<f64>) {
         let Some(sample_pts_seconds) = sample_pts_seconds else {
             return;
@@ -794,6 +807,7 @@ fn stable_effective_camera_fps(selected_fps: f64, requested_fps: u32) -> u32 {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn negotiated_camera_fps(
     active_duration_fps: Option<f64>,
     applied_fps: Option<f64>,
@@ -843,6 +857,7 @@ pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
         transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         failed_recovery_retry: None,
         pending_native: None,
+        disconnected: None,
         active: None,
         poll_task: None,
         live_acked_at: None,
@@ -2441,6 +2456,7 @@ async fn begin_forced_camera_restart(
             registry.acquire(expected.source_key.clone(), SourceConsumerReason::Preview);
             registry.set_status(expected.source_key.clone(), SourceLifecycleStatus::Starting);
         }
+        slot.disconnected = None;
         slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
         let lease = PreviewCameraStartLease::new(start_key.clone(), slot.start_generation);
         slot.starting_transition_completion = Some(Arc::clone(&lease.transition_completion));
@@ -2549,6 +2565,7 @@ async fn begin_failed_camera_recovery_retry(
             registry.acquire(expected_source_key.clone(), SourceConsumerReason::Preview);
             registry.set_status(expected_source_key.clone(), SourceLifecycleStatus::Starting);
         }
+        slot.disconnected = None;
         slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
         let lease = PreviewCameraStartLease::new(start_key.clone(), slot.start_generation);
         slot.starting_transition_completion = Some(Arc::clone(&lease.transition_completion));
@@ -2744,6 +2761,7 @@ async fn try_begin_preview_camera_stop_supervised(
             slot.starting_layout_intent_id = None;
             (status, None, None, explicit_mutation)
         } else {
+            slot.disconnected = None;
             slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
             let generation = slot.start_generation;
             slot.pending_stop_generation = Some(generation);
@@ -2899,6 +2917,103 @@ async fn finish_preview_camera_stop_with_timeout(
         }
         Err(_) => stop.status,
     }
+}
+
+// Disconnects retain the native owner and its frame store. Reconnect admission
+// compares the saved generation under the same lock as ordinary start/stop.
+pub(crate) async fn camera_connection_changed(
+    state: &AppState,
+    event: &crate::device_watch::CameraConnectionEvent,
+) {
+    let mut slot = state.preview_camera.lock().await;
+    if slot.status.device_unique_id.as_deref() != Some(&event.unique_id)
+        || slot.starting.is_some()
+        || slot.pending_stop_generation.is_some()
+        || state.process_shutdown_requested()
+    {
+        return;
+    }
+    if !event.connected {
+        let Some(snapshot) = camera_restart_snapshot_from_slot(&slot) else {
+            return;
+        };
+        let mutation = state.begin_capture_recovery_explicit_camera_mutation();
+        slot.disconnected = Some(snapshot);
+        slot.status.state = PreviewCameraState::Disconnected;
+        slot.status.message = Some(format!("{} disconnected", event.name));
+        slot.status.updated_at = Utc::now().to_rfc3339();
+        let status = slot.status.clone();
+        drop(slot);
+        state.emit_event("preview.camera.status", status);
+        finish_capture_recovery_explicit_camera_configuration_mutation(state, mutation).await;
+        return;
+    }
+    let Some((prepared, mutation)) = prepare_camera_reconnect(state, &mut slot, event) else {
+        return;
+    };
+    let status = slot.status.clone();
+    drop(slot);
+    state.emit_event("preview.camera.status", status);
+    queue_registered_preview_camera(state.clone(), prepared, Some(mutation));
+}
+
+fn prepare_camera_reconnect(
+    state: &AppState,
+    slot: &mut PreviewCameraRuntime,
+    event: &crate::device_watch::CameraConnectionEvent,
+) -> Option<(
+    PreparedCameraStart,
+    CaptureRecoveryExplicitCameraMutationLease,
+)> {
+    if !event.connected || slot.status.device_unique_id.as_deref() != Some(event.unique_id.as_str())
+    {
+        return None;
+    }
+    let expected = slot.disconnected.take()?;
+    if slot.active_generation != Some(expected.generation)
+        || slot.source_key.as_ref() != Some(&expected.source_key)
+        || slot.status.state != PreviewCameraState::Disconnected
+    {
+        return None;
+    }
+    let mutation = state.begin_capture_recovery_explicit_camera_mutation();
+    let config = expected.config;
+    let mut key = camera_restart_start_key(&expected.source_key, &config);
+    key.capture_target = slot.active.as_ref().unwrap().capture_target;
+    slot.disconnected = None;
+    slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
+    let lease = PreviewCameraStartLease::new(key.clone(), slot.start_generation);
+    slot.starting_transition_completion = Some(Arc::clone(&lease.transition_completion));
+    slot.status.state = PreviewCameraState::Starting;
+    slot.status.message = Some(format!("Reconnecting {}", event.name));
+    slot.run_id = None;
+    slot.starting = Some(key);
+    slot.starting_recovery_epoch = None;
+    slot.starting_layout_intent_id = None;
+    slot.failed_recovery_retry = None;
+    let prepared = PreparedCameraStart {
+        camera_id: config.camera_id.clone(),
+        device_unique_id: config.device_unique_id,
+        ffmpeg_path: config.ffmpeg_path.clone(),
+        target_fps: config.target_fps,
+        source_key: expected.source_key,
+        params: PreviewCameraStartParams {
+            sources: SourceSelection {
+                camera_id: Some(config.camera_id),
+                screen_id: None,
+                window_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: config.layout,
+            video: config.video,
+            ffmpeg_path: Some(config.ffmpeg_path),
+        },
+        lease,
+        layout_intent_id: None,
+        recovery: None,
+    };
+    Some((prepared, mutation))
 }
 
 pub async fn preview_camera_status(state: &AppState) -> PreviewCameraStatus {
@@ -3360,6 +3475,7 @@ async fn begin_camera_start(
         SourceLifecycleStatus::Starting,
     );
     slot.failed_recovery_retry = None;
+    slot.disconnected = None;
     slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
     slot.pending_stop_generation = None;
     let lease = PreviewCameraStartLease::new(start_key.clone(), slot.start_generation);
@@ -3605,6 +3721,7 @@ pub(crate) async fn test_install_live_camera_for_layout(
     slot.status.actual_height = Some(video.height);
     slot.status.frames_captured = 42;
     slot.status.sequence = Some(42);
+    slot.disconnected = None;
     slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
     slot.active_generation = Some(slot.start_generation);
     slot.live_acked_at = Some(Instant::now());
@@ -3725,6 +3842,7 @@ pub(crate) async fn test_install_starting_camera_generation(
         capture_target: camera_capture_target_dimensions(layout, video),
     };
     let mut slot = state.preview_camera.lock().await;
+    slot.disconnected = None;
     slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
     slot.pending_stop_generation = None;
     slot.active_generation = None;
@@ -3828,6 +3946,7 @@ pub(crate) async fn test_advance_live_camera_generation(state: &AppState, sequen
         vec![0; configured_output.0 as usize * configured_output.1 as usize * 4],
     );
     let (stop_tx, _stop_rx) = std_mpsc::channel();
+    slot.disconnected = None;
     slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
     let generation = slot.start_generation;
     slot.active_generation = Some(generation);
@@ -3971,7 +4090,9 @@ async fn poll_camera_metrics(
             slot.status.dropped_frames = snapshot.dropped_frames;
             slot.status.source_fps = snapshot.source_fps.or(Some(f64::from(target_fps)));
             if let Some(frame) = snapshot.latest_frame {
-                slot.status.state = PreviewCameraState::Live;
+                if slot.status.state != PreviewCameraState::Disconnected {
+                    slot.status.state = PreviewCameraState::Live;
+                }
                 slot.status.width = Some(frame.width);
                 slot.status.height = Some(frame.height);
                 slot.status.actual_width = Some(frame.width);
@@ -4152,6 +4273,7 @@ fn downscale_rgba_for_preview(
     (next.into_raw(), next_width, next_height)
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn fit_camera_source_in_target_box(
     source_width: u32,
     source_height: u32,
@@ -4175,6 +4297,7 @@ fn fit_camera_source_in_target_box(
     )
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_basis: u32) -> u32 {
     if source_basis == 0 {
         return target_dimension;
@@ -4186,6 +4309,7 @@ fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_
 
 #[derive(Clone)]
 struct NativeCameraPreviewConfig {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     camera_id: String,
     unique_id: String,
     ffmpeg_path: String,
@@ -4234,7 +4358,7 @@ fn windows_camera_preview_output_dimensions(config: &NativeCameraPreviewConfig) 
     camera_capture_target_dimensions(&config.layout, &config.video)
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn windows_camera_preview_ffmpeg_args(
     config: &NativeCameraPreviewConfig,
     width: u32,
@@ -4244,7 +4368,7 @@ fn windows_camera_preview_ffmpeg_args(
     windows_camera_preview_ffmpeg_args_opts(config, width, height, fps, Some(fps))
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn windows_camera_preview_ffmpeg_args_opts(
     config: &NativeCameraPreviewConfig,
     width: u32,
@@ -4618,7 +4742,9 @@ enum NativeCameraStartup {
         selected_fps: f64,
         message: Option<String>,
     },
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     PermissionNeeded(String),
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     DeviceMissing(String),
     Failed(String),
 }
@@ -5484,6 +5610,7 @@ mod windows {
 /// pixel seam available to future Linux PipeWire capture without importing an
 /// Apple framework module.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn nv12_to_bgra(
     y: &[u8],
     y_stride: usize,
@@ -5521,6 +5648,7 @@ fn nv12_to_bgra(
 /// Packed 4:2:2 Y'CbCr -> BGRA, parallelized by row. `uyvy` selects the byte
 /// order: UYVY (`2vuy`, Cb Y0 Cr Y1) when true, YUY2 (`yuvs`, Y0 Cb Y1 Cr)
 /// when false.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn yuv422_to_bgra(
     plane: &[u8],
     stride: usize,
@@ -6573,9 +6701,11 @@ mod tests {
             side_by_side_split: SideBySideSplit::Even,
             side_by_side_camera_side: SideBySideCameraSide::Right,
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+            horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
+            camera_look: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,
@@ -6798,6 +6928,7 @@ mod tests {
 
         let shared = Arc::new(StdMutex::new(PreviewCameraShared::default()));
         let mut slot = state.preview_camera.lock().await;
+        slot.disconnected = None;
         slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
         let generation = slot.start_generation;
         slot.pending_stop_generation = None;
@@ -7188,6 +7319,7 @@ mod tests {
 
         {
             let mut slot = state.preview_camera.lock().await;
+            slot.disconnected = None;
             slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
             slot.starting = None;
             slot.starting_transition_completion = None;
@@ -7273,6 +7405,7 @@ mod tests {
 
         {
             let mut slot = state.preview_camera.lock().await;
+            slot.disconnected = None;
             slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
             slot.starting = None;
             slot.starting_transition_completion = None;
@@ -7457,6 +7590,7 @@ mod tests {
         // gate, so the test never opens a platform camera device.
         {
             let mut slot = state.preview_camera.lock().await;
+            slot.disconnected = None;
             slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
             slot.starting = None;
         }
@@ -8349,6 +8483,83 @@ mod tests {
             capture_target: camera_capture_target_dimensions(layout, video),
         });
         (source_key, shared)
+    }
+
+    #[tokio::test]
+    async fn camera_disconnect_reconnect_retains_frames_and_fences_the_generation() {
+        let state = test_state();
+        let layout = test_layout(true);
+        let video = test_video();
+        let (_, shared) = install_restartable_camera(&state, 7, &layout, &video).await;
+        let mut event = crate::device_watch::CameraConnectionEvent {
+            unique_id: "other".to_string(),
+            name: "iPhone".to_string(),
+            connected: false,
+            timestamp: Utc::now().to_rfc3339(),
+            device_type: "AVCaptureDeviceTypeContinuityCamera".to_string(),
+            transport: 0,
+        };
+        camera_connection_changed(&state, &event).await;
+        assert_eq!(
+            preview_camera_status(&state).await.state,
+            PreviewCameraState::Live
+        );
+        event.unique_id = "test".to_string();
+        camera_connection_changed(&state, &event).await;
+        let status = preview_camera_status(&state).await;
+        assert_eq!(status.state, PreviewCameraState::Disconnected);
+        assert_eq!(status.message.as_deref(), Some("iPhone disconnected"));
+        assert!(preview_camera_restart_snapshot(&state).await.is_none());
+        assert!(Arc::ptr_eq(
+            &state
+                .preview_camera
+                .lock()
+                .await
+                .active
+                .as_ref()
+                .unwrap()
+                .shared,
+            &shared
+        ));
+        camera_connection_changed(&state, &event).await;
+        let mut slot = state.preview_camera.lock().await;
+        assert!(
+            slot.disconnected.is_some(),
+            "duplicate disconnect retains reconnect authority"
+        );
+        event.connected = true;
+        let (prepared, mutation) = prepare_camera_reconnect(&state, &mut slot, &event).unwrap();
+        assert_eq!(prepared.lease.generation, 8);
+        assert_eq!(prepared.params.layout, layout);
+        assert_eq!(prepared.params.video, video);
+        assert!(
+            prepared.recovery.is_none(),
+            "reconnect spends no recovery restart attempt"
+        );
+        assert!(prepare_camera_reconnect(&state, &mut slot, &event).is_none());
+        drop(mutation);
+    }
+
+    #[tokio::test]
+    async fn camera_disconnect_cannot_reconnect_a_replaced_generation() {
+        let state = test_state();
+        install_restartable_camera(&state, 7, &test_layout(false), &test_video()).await;
+        let event = crate::device_watch::CameraConnectionEvent {
+            unique_id: "test".to_string(),
+            name: "iPhone".to_string(),
+            connected: false,
+            timestamp: Utc::now().to_rfc3339(),
+            device_type: "AVCaptureDeviceTypeContinuityCamera".to_string(),
+            transport: 0,
+        };
+        camera_connection_changed(&state, &event).await;
+        let mut slot = state.preview_camera.lock().await;
+        slot.active_generation = Some(8);
+        let event = crate::device_watch::CameraConnectionEvent {
+            connected: true,
+            ..event
+        };
+        assert!(prepare_camera_reconnect(&state, &mut slot, &event).is_none());
     }
 
     #[tokio::test]

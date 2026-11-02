@@ -29,6 +29,8 @@ import type {
 } from './backend'
 import {
   parseBackendWireMessage,
+  cameraSelectionDiagnosticsSchema,
+  cameraConnectionHistoryEntrySchema,
   runtimeValidatedBackendRpcMethods,
   validateMainOwnedPreviewSurfaceBoundsParams,
   validateBackendEventPayload,
@@ -917,7 +919,8 @@ describe('backend RPC contract', () => {
         cameraOffsetY: 0,
         sideBySideSplit: '50-50',
         sideBySideCameraSide: 'left',
-        verticalScreenFraming: 'fill'
+        verticalScreenFraming: 'fill',
+        horizontalScreenFraming: 'fit'
       },
       transitionMs: 320
     }
@@ -937,6 +940,18 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcParams('scene.layout.apply_live', layoutParams)).toEqual(layoutParams)
     expect(validateBackendRpcParams('scene.layout.apply_preview', layoutParams)).toEqual(
       layoutParams
+    )
+    // Plan 213 F1: the chosen display's UUID rides the sources as renderer intent.
+    const withDisplayUuid = {
+      ...layoutParams,
+      sources: {
+        ...layoutParams.sources,
+        screenUuid: '37D8832A-2D66-02CA-B9F7-8F30A301B230',
+        wantedScreenUuid: '6C1A9E2B-58F4-4D0E-9B7A-2F3C4D5E6F70'
+      }
+    }
+    expect(validateBackendRpcParams('scene.layout.apply_preview', withDisplayUuid)).toEqual(
+      withDisplayUuid
     )
     expect(() =>
       validateBackendRpcParams('scene.layout.apply_live', { ...layoutParams, transitionMs: 2000 })
@@ -3418,6 +3433,29 @@ describe('banner backend wire contract (plan 186)', () => {
   })
 })
 
+describe('display identity contracts (plan 213 F1)', () => {
+  it('accepts a display UUID on a listed display, never null', () => {
+    const display = {
+      displayUuid: '37D8832A-2D66-02CA-B9F7-8F30A301B230',
+      id: 'screen:screencapturekit:1',
+      name: 'Built-in Retina Display · 3024 × 1964',
+      kind: 'screen',
+      status: 'available',
+      width: 3024,
+      height: 1964
+    }
+    const payload = { devices: [display], warnings: [] }
+    expect(validateBackendRpcResult('devices.list', payload)).toEqual(payload)
+    expect(validateBackendEventPayload('devices.changed', payload)).toEqual(payload)
+    expect(() =>
+      validateBackendRpcResult('devices.list', {
+        devices: [{ ...display, displayUuid: null }],
+        warnings: []
+      })
+    ).toThrow()
+  })
+})
+
 describe('app window source contracts (plan 210 S1)', () => {
   it('accepts legacy and app-aware devices, rejecting null metadata', () => {
     const device = {
@@ -3600,4 +3638,30 @@ describe('performance check non-recorded reason', () => {
       })
     ).toThrow()
   })
+})
+
+it('accepts disconnected camera status and the support camera story', () => {
+  const status = {
+    state: 'disconnected',
+    cameraId: 'iphone',
+    deviceUniqueId: 'stable-id',
+    targetFps: 30,
+    framesCaptured: 5,
+    droppedFrames: 0,
+    updatedAt: '2026-11-01T12:00:00Z',
+    message: 'iPhone disconnected'
+  }
+  expect(validateBackendEventPayload('preview.camera.status', status)).toEqual(status)
+  const selection = { wantedCameraId: 'iphone', usedCameraId: 'builtin', state: 'live' }
+  expect(cameraSelectionDiagnosticsSchema.parse(selection)).toEqual(selection)
+  const edge = {
+    deviceType: 'AVCaptureDeviceTypeContinuityCamera',
+    transport: 0,
+    uniqueId: 'stable-id',
+    name: 'iPhone',
+    connected: false,
+    timestamp: status.updatedAt
+  }
+  expect(cameraConnectionHistoryEntrySchema.parse(edge)).toEqual(edge)
+  expect(() => cameraConnectionHistoryEntrySchema.parse({ ...edge, timestamp: null })).toThrow()
 })

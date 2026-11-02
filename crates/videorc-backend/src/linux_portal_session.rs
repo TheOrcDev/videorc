@@ -91,6 +91,9 @@ pub enum PortalStart {
     Granted(PortalGrant),
     /// The state that explains why there is no stream.
     Denied(PortalCaptureState),
+    /// The portal did not answer (or failed) before any restore token was
+    /// offered, so nothing refused the token: the caller keeps it.
+    Unavailable(PortalCaptureState),
     /// Videorc stopped waiting (the source was stopped or replaced while the
     /// share dialog was open). The session is closed; nobody waits for this.
     Abandoned,
@@ -100,6 +103,34 @@ fn denied(reason: impl std::fmt::Display) -> PortalStart {
     PortalStart::Denied(PortalCaptureState::MissingSource {
         reason: reason.to_string(),
     })
+}
+
+/// Whether a start that offered a restore token failed on the token itself
+/// (revoked elsewhere, another session), so the caller forgets it and shows
+/// the picker once. A portal that never answered did not refuse it.
+pub fn restore_token_refused(outcome: &PortalStart) -> bool {
+    matches!(
+        outcome,
+        PortalStart::Denied(PortalCaptureState::MissingSource { .. })
+    )
+}
+
+/// Bounds a portal call made before any restore token is offered (the proxy,
+/// `CreateSession`). Its failure is [`PortalStart::Unavailable`]: a wedged
+/// xdg-desktop-portal-hyprland timed out `CreateSession` and the saved token
+/// was forgotten as refused (ogre, 2026-11-01).
+async fn before_restore_token<T, E: std::fmt::Display>(
+    call: impl std::future::Future<Output = Result<T, E>>,
+    failed: &str,
+    unanswered: &str,
+) -> Result<T, PortalStart> {
+    let unavailable =
+        |reason: String| PortalStart::Unavailable(PortalCaptureState::MissingSource { reason });
+    match tokio::time::timeout(PORTAL_CALL_TIMEOUT, call).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(unavailable(format!("{failed}: {error}"))),
+        Err(_) => Err(unavailable(unanswered.to_string())),
+    }
 }
 
 fn is_cancelled(error: &ashpd::Error) -> bool {
@@ -134,7 +165,7 @@ fn picker_step_failed(step: &str, error: ashpd::Error, dialog_shown: bool) -> Po
 
 /// `CreateSession` → `SelectSources` → `Start` → `OpenPipeWireRemote`.
 /// A refused restore token falls back to the picker once (the caller
-/// forgets the token when `restore_token_refused` is set on the outcome).
+/// forgets the token when [`restore_token_refused`] holds for the outcome).
 /// Run it on [`portal_runtime`]; a session that is not granted is closed.
 /// `cancelled` ends the negotiation (the picker steps can wait on a person
 /// indefinitely); closing the session then lets the portal dismiss its dialog.
@@ -144,20 +175,25 @@ pub async fn start_portal_session(
     include_cursor: bool,
     cancelled: impl std::future::Future<Output = ()>,
 ) -> PortalStart {
-    let proxy = match tokio::time::timeout(PORTAL_CALL_TIMEOUT, Screencast::new()).await {
-        Ok(Ok(proxy)) => proxy,
-        Ok(Err(error)) => return denied(format!("ScreenCast portal unreachable: {error}")),
-        Err(_) => return denied("ScreenCast portal did not answer within 10s"),
-    };
-    let session = match tokio::time::timeout(
-        PORTAL_CALL_TIMEOUT,
-        proxy.create_session(CreateSessionOptions::default()),
+    let proxy = match before_restore_token(
+        Screencast::new(),
+        "ScreenCast portal unreachable",
+        "ScreenCast portal did not answer within 10s",
     )
     .await
     {
-        Ok(Ok(session)) => session,
-        Ok(Err(error)) => return denied(format!("CreateSession failed: {error}")),
-        Err(_) => return denied("CreateSession did not answer within 10s"),
+        Ok(proxy) => proxy,
+        Err(outcome) => return outcome,
+    };
+    let session = match before_restore_token(
+        proxy.create_session(CreateSessionOptions::default()),
+        "CreateSession failed",
+        "CreateSession did not answer within 10s",
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(outcome) => return outcome,
     };
     let session = Arc::new(session);
     // Subscribe before the first picker call so a portal that dies while its
@@ -181,7 +217,7 @@ pub async fn start_portal_session(
             let session = Arc::clone(&session);
             tokio::spawn(async move { close_session(&session).await });
         }
-        PortalStart::Denied(_) => close_session(&session).await,
+        PortalStart::Denied(_) | PortalStart::Unavailable(_) => close_session(&session).await,
     }
     outcome
 }
@@ -362,6 +398,38 @@ mod tests {
             ),
             PortalStart::Denied(PortalCaptureState::Cancelled)
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_portal_that_never_answered_did_not_refuse_the_restore_token() {
+        // ogre, 2026-11-01: a wedged xdg-desktop-portal-hyprland never
+        // answered CreateSession, and the saved token was forgotten.
+        let unanswered = before_restore_token(
+            std::future::pending::<Result<(), String>>(),
+            "CreateSession failed",
+            "CreateSession did not answer within 10s",
+        )
+        .await
+        .expect_err("a call that never answers times out");
+        assert!(!restore_token_refused(&unanswered));
+        assert!(matches!(
+            &unanswered,
+            PortalStart::Unavailable(PortalCaptureState::MissingSource { reason })
+                if reason == "CreateSession did not answer within 10s"
+        ));
+        let unreachable = before_restore_token(
+            async { Err::<(), _>("org.freedesktop.DBus.Error.ServiceUnknown") },
+            "ScreenCast portal unreachable",
+            "ScreenCast portal did not answer within 10s",
+        )
+        .await
+        .expect_err("a failed call fails");
+        assert!(!restore_token_refused(&unreachable));
+        // The portal saw the token and refused it: forget it.
+        let other = ashpd::Error::Response(ashpd::desktop::ResponseError::Other);
+        assert!(restore_token_refused(&picker_step_failed(
+            "Start", other, false
+        )));
     }
 
     #[tokio::test]

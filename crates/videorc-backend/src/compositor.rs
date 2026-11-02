@@ -73,6 +73,7 @@ use crate::scene_geometry::{
     chroma_key_alpha, chroma_key_despill, scene_crop_from_transform, scene_source_fit,
     scene_source_rect_pixels, scene_source_render_transform,
 };
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
 pub use crate::source_mask::SourceMask;
 use crate::source_registry::SourceKey;
 use crate::state::AppState;
@@ -91,7 +92,9 @@ const COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER: Duration = Duration::from_sec
 const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER: Duration = Duration::from_millis(67);
 const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES: u32 = 1;
 const COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER: Duration = Duration::from_secs(2);
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const MISSING_SOURCE_PLACEHOLDER_WIDTH: usize = 2;
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 const MISSING_SOURCE_PLACEHOLDER_HEIGHT: usize = 2;
 const COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET: usize = 256;
@@ -308,7 +311,11 @@ pub enum CompositorPixelFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompositorFrameExportKind {
     CpuYuv420p,
-    MetalIosurfaceTarget { width: u32, height: u32 },
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    MetalIosurfaceTarget {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl CompositorPixelFormat {
@@ -318,6 +325,7 @@ impl CompositorPixelFormat {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub const fn yuv420p_with_metal_iosurface_target(width: u32, height: u32) -> Self {
         Self::Yuv420p {
             export: CompositorFrameExportKind::MetalIosurfaceTarget { width, height },
@@ -1453,6 +1461,7 @@ struct CompositorRenderCache {
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
     /// Plan 205 S6: the program leg's store (see `CompositorRuntime`).
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     program_frame_store: CompositorFrameStore,
     program_picture_waiters: ProgramPictureWaiters,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
@@ -2364,6 +2373,8 @@ pub const EDITOR_DRAFT_REFUSED_CODE: &str = "editor-draft-refused";
 pub struct EditorDraft {
     pub source_id: String,
     pub transform: Option<CameraTransform>,
+    /// An ⌥-drag crop's live crop (plan 213 G2); `None` keeps the committed one.
+    pub crop: Option<crate::protocol::SceneCropDraft>,
     pub chrome: EditorChrome,
     pub refreshed_at: Instant,
     pub release_at_revision: Option<u64>,
@@ -2433,9 +2444,10 @@ fn editor_draft_applies(frame_consumer: CompositorFrameConsumer, has_stream_outp
 }
 
 /// Replace the named source's rect with the draft rect, keeping the committed
-/// crops (the same rule as `scene::apply_transform_override`). Other sources
-/// and a snapshot without that source are untouched, and a chrome-only draft
-/// (no `transform`) leaves every rect as committed.
+/// crops (the same rule as `scene::apply_transform_override`) unless the draft
+/// is an ⌥-drag crop, whose crop replaces them too (plan 213 G2). Other
+/// sources and a snapshot without that source are untouched, and a
+/// chrome-only draft (no `transform`) leaves every rect as committed.
 fn snapshot_with_editor_draft(
     snapshot: Option<CompositorSceneSnapshot>,
     draft: Option<&EditorDraft>,
@@ -2455,8 +2467,37 @@ fn snapshot_with_editor_draft(
         source.transform.y = transform.y;
         source.transform.width = transform.width;
         source.transform.height = transform.height;
+        if let Some(crop) = draft.crop {
+            source.transform.crop_left = crop.crop_left;
+            source.transform.crop_top = crop.crop_top;
+            source.transform.crop_right = crop.crop_right;
+            source.transform.crop_bottom = crop.crop_bottom;
+        }
     }
     Some(snapshot)
+}
+
+/// A draft crop under the same 95% ceiling per axis as a committed one, so a
+/// live crop never shows what the commit would refuse.
+fn sanitize_editor_draft_crop(
+    crop: crate::protocol::SceneCropDraft,
+) -> crate::protocol::SceneCropDraft {
+    let transform = crate::scene::sanitize_crop(SceneTransform {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+        crop_left: crop.crop_left,
+        crop_top: crop.crop_top,
+        crop_right: crop.crop_right,
+        crop_bottom: crop.crop_bottom,
+    });
+    crate::protocol::SceneCropDraft {
+        crop_left: transform.crop_left,
+        crop_top: transform.crop_top,
+        crop_right: transform.crop_right,
+        crop_bottom: transform.crop_bottom,
+    }
 }
 
 impl CompositorRuntime {
@@ -2487,6 +2528,7 @@ impl CompositorRuntime {
         self.editor_draft = Some(EditorDraft {
             source_id: params.source_id,
             transform: params.transform.map(sanitize_editor_draft_transform),
+            crop: params.crop.map(sanitize_editor_draft_crop),
             chrome: params.chrome,
             refreshed_at: now,
             release_at_revision: None,
@@ -2689,6 +2731,7 @@ mod editor_draft_tests {
                 width: 0.3,
                 height: 0.4,
             }),
+            crop: None,
             chrome: chrome(),
         }
     }
@@ -2707,6 +2750,7 @@ mod editor_draft_tests {
             transform: params(source_id)
                 .transform
                 .map(sanitize_editor_draft_transform),
+            crop: None,
             chrome: chrome(),
             refreshed_at: now,
             release_at_revision: None,
@@ -2766,6 +2810,43 @@ mod editor_draft_tests {
             snapshot_with_editor_draft(Some(snapshot(3)), None),
             Some(snapshot(3))
         );
+    }
+
+    #[test]
+    fn crop_editor_draft_shows_its_crop_under_the_committed_ceiling() {
+        // Plan 213 G2: an ⌥-drag on the screen's edge drafts its crop with
+        // its rect, so the Preview shows the crop before the commit lands.
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(3));
+        runtime.set_editor_draft(
+            SceneEditorDraftParams {
+                crop: Some(crate::protocol::SceneCropDraft {
+                    crop_left: 0.25,
+                    crop_top: 0.0,
+                    crop_right: 0.9,
+                    crop_bottom: f64::NAN,
+                }),
+                ..params("source:screen")
+            },
+            now,
+        );
+        let drafted = snapshot_with_editor_draft(Some(snapshot(3)), runtime.editor_draft.as_ref())
+            .expect("snapshot survives");
+        let screen = &drafted.scene.as_ref().unwrap().sources[0];
+        assert_eq!(
+            (screen.transform.x, screen.transform.width),
+            (0.1, 0.3),
+            "the rect is drafted with the crop"
+        );
+        assert!(
+            screen.transform.crop_left + screen.transform.crop_right <= 0.95 + 1e-9,
+            "the pair keeps the committed ceiling: {:?}",
+            screen.transform
+        );
+        assert!(screen.transform.crop_left > 0.2 && screen.transform.crop_right > 0.6);
+        assert_eq!(screen.transform.crop_top, 0.0);
+        assert_eq!(screen.transform.crop_bottom, 0.0, "NaN is no crop");
     }
 
     #[test]
@@ -4797,6 +4878,7 @@ pub async fn compositor_status(state: &AppState) -> CompositorStatus {
 
 /// Plan 210 S3: record how the last screen or window switch changed the
 /// capture (in place, or a restart and why), for `compositor.status`.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) async fn note_screen_switch(
     state: &AppState,
     switch: crate::protocol::ScreenSwitchStatus,
@@ -4988,6 +5070,7 @@ pub(crate) fn yuv420p_to_rgb(width: u32, height: u32, bytes: &[u8]) -> Option<Ve
 }
 
 /// Packed BGRA to packed RGB (alpha dropped).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(bgra.len() / 4 * 3);
     for pixel in bgra.chunks_exact(4) {
@@ -7407,6 +7490,7 @@ struct CompositorPublishResult {
 /// not), the program's verdict for the two layout-driven items, and whether
 /// a Preview surface is live to show the picture (no surface, no twin).
 struct ProgramLeg<'a> {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     gpu: &'a mut Option<GpuCompositor>,
     highlight_on_program: bool,
     buddy_on_program: bool,
@@ -7456,10 +7540,12 @@ fn should_emit_preview_surface_compositor_progress(
 
 /// Whether the Metal/GPU compositor path is requested. Metal is default-on for OBS
 /// parity; the env var is now an escape hatch for debugging CPU fallback.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn metal_compositor_enabled() -> bool {
     metal_compositor_enabled_from_env(std::env::var("VIDEORC_METAL_COMPOSITOR").ok().as_deref())
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn metal_compositor_enabled_from_env(value: Option<&str>) -> bool {
     !matches!(
         value.map(|value| value.trim().to_ascii_lowercase()),
@@ -7776,6 +7862,7 @@ struct PreparedGpuSource<'a> {
     /// Camera chroma key; forces `blend` semantics via the shader's computed
     /// alpha, so keyed camera quads set both.
     chroma_key: Option<crate::metal_compositor::GpuChromaKey>,
+    camera_look: Option<[f32; 3]>,
     /// A turned quad (the Buddy sprite, plan 168 S-B2); see `GpuSource`.
     corners: Option<[[f32; 2]; 4]>,
     sampler: crate::metal_compositor::GpuSourceSampler,
@@ -7826,6 +7913,7 @@ impl<'a> PreparedGpuSource<'a> {
             mask: scene_mask_into_metal(self.mask),
             blend: self.blend,
             chroma_key: self.chroma_key,
+            camera_look: self.camera_look,
             corners: self.corners,
             sampler: self.sampler,
             opacity: self.opacity,
@@ -8015,6 +8103,7 @@ fn push_overlay_gpu_source_at<'a>(
         // its alpha-0 pixels overwrite the frame as an opaque black box.
         blend: true,
         chroma_key: None,
+        camera_look: None,
         corners: None,
         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
         opacity: 1.0,
@@ -8090,6 +8179,7 @@ fn push_banner_gpu_sources<'a>(
             // show what is beneath.
             blend: true,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Linear,
             opacity: draw.opacity,
@@ -8184,6 +8274,7 @@ fn push_buddy_sprite_gpu_source<'a>(
         // the linear filter's edge clean.
         blend: true,
         chroma_key: None,
+        camera_look: None,
         corners: Some(corners),
         sampler: crate::metal_compositor::GpuSourceSampler::Linear,
         opacity: draw.opacity,
@@ -8403,6 +8494,7 @@ fn push_editor_chrome_gpu_sources<'a>(
             // picture through, not stamp opaque boxes.
             blend: true,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8503,6 +8595,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Linear,
                     opacity: 1.0,
@@ -8551,6 +8644,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -8614,6 +8708,7 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8694,6 +8789,7 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -8807,6 +8903,11 @@ fn try_gpu_compose_with_chrome(
                         chroma_key: camera_chroma_key(layout)
                             .as_ref()
                             .and_then(scene_chroma_key_into_metal),
+                        camera_look: (!layout.camera_look.is_neutral()).then_some([
+                            layout.camera_look.brightness as f32,
+                            layout.camera_look.contrast as f32,
+                            layout.camera_look.saturation as f32,
+                        ]),
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8838,6 +8939,7 @@ fn try_gpu_compose_with_chrome(
                         mask: camera_mask(layout),
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8895,6 +8997,7 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8926,6 +9029,7 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        camera_look: None,
                         corners: None,
                         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                         opacity: 1.0,
@@ -8964,6 +9068,7 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -9141,6 +9246,7 @@ struct SyntheticTestPatternBgra {
     height: usize,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 struct MissingSourcePlaceholderBgra {
     bytes: Vec<u8>,
     width: usize,
@@ -9170,6 +9276,7 @@ fn evidence_fingerprint(
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn missing_source_black_bgra() -> MissingSourcePlaceholderBgra {
     let width = MISSING_SOURCE_PLACEHOLDER_WIDTH;
     let height = MISSING_SOURCE_PLACEHOLDER_HEIGHT;
@@ -11186,6 +11293,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         )
@@ -11253,6 +11361,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: false,
                             mask: SceneMask::None,
                             chroma_key: None,
+                            camera_look: crate::protocol::CameraLook::default(),
                             linear: false,
                         },
                     )
@@ -11275,6 +11384,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: false,
                             mask: SceneMask::None,
                             chroma_key: None,
+                            camera_look: crate::protocol::CameraLook::default(),
                             linear: false,
                         },
                     )
@@ -11306,6 +11416,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                             mirror_x: snapshot.layout.camera_mirror,
                             mask: camera_mask(&snapshot.layout),
                             chroma_key: camera_chroma_key(&snapshot.layout),
+                            camera_look: snapshot.layout.camera_look,
                             // Plan 200 D3: a scaled camera reads bilinear (CPU agrees
                             // with the Metal linear sampler in kind).
                             linear: true,
@@ -11354,6 +11465,7 @@ fn render_unavailable_source_rect(
             mirror_x: false,
             mask,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -11634,12 +11746,28 @@ struct SourceRenderOptions {
     /// Camera chroma key from the shared spec; keyed pixels blend fractionally
     /// into the frame instead of overwriting (mirrors the Metal shader keyer).
     chroma_key: Option<ChromaKeySpec>,
+    camera_look: crate::protocol::CameraLook,
     /// Plan 200 D3: a scaled draw reads bilinear, like the Metal compositor's
     /// linear sampler for scaled draws; a 1:1 draw stays point-sampled. Only
     /// the camera asks for it: the CPU compositor is the production path on
     /// Windows and Linux, and a full-frame bilinear screen would spend the
     /// per-pixel budget Linux plan 0014 won back (see `map_source_axis`).
     linear: bool,
+}
+
+fn camera_look_rgb(r: u8, g: u8, b: u8, look: crate::protocol::CameraLook) -> (u8, u8, u8) {
+    if look.is_neutral() {
+        return (r, g, b);
+    }
+    let rgb = [r, g, b].map(|value| f64::from(value) / 255.0);
+    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let [r, g, b] = rgb.map(|value| {
+        ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5) + look.saturation * (value - y))
+            .clamp(0.0, 1.0)
+            * 255.0)
+            .round() as u8
+    });
+    (r, g, b)
 }
 
 struct RgbaSource<'a> {
@@ -11667,6 +11795,7 @@ pub(crate) fn render_camera_overlay_bgra(
     contain: bool,
     mirror_x: bool,
     mask: SceneMask,
+    look: crate::protocol::CameraLook,
     output: &mut Vec<u8>,
 ) -> bool {
     let source = RgbaSource {
@@ -11717,6 +11846,7 @@ pub(crate) fn render_camera_overlay_bgra(
                     continue;
                 };
                 let (r, g, b, alpha) = read_source_rgba(&source, source_x, source_y);
+                let (r, g, b) = camera_look_rgb(r, g, b, look);
                 let offset = dest_x * 4;
                 row[offset] = b;
                 row[offset + 1] = g;
@@ -11805,6 +11935,7 @@ fn render_scene_background_with_cache(
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -12000,6 +12131,7 @@ fn render_synthetic_source_rect(
             mirror_x: false,
             mask: SceneMask::None,
             chroma_key: None,
+            camera_look: crate::protocol::CameraLook::default(),
             linear: false,
         },
     );
@@ -12287,6 +12419,7 @@ fn blit_rgba_to_yuv420p(
     let draw_bottom = fit.y.saturating_add(fit.height).min(canvas_height as u32) as usize;
     if options.mask == SceneMask::None
         && options.chroma_key.is_none()
+        && options.camera_look.is_neutral()
         && !options.mirror_x
         && fit.source_x == 0.0
         && fit.source_y == 0.0
@@ -12320,17 +12453,20 @@ fn blit_rgba_to_yuv420p(
     }
 
     // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
-    // None means the pixel keys fully out. Without a spec every pixel is the
-    // historical opaque overwrite (alpha 255) — byte-identical to before.
+    // None means the pixel keys fully out. Grade after despill, keeping the
+    // original pixel's key alpha unchanged.
     let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
-        let Some(spec) = options.chroma_key.as_ref() else {
-            return Some((r, g, b, 255));
+        let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+            let alpha = chroma_key_alpha(spec, r, g, b);
+            if alpha == 0 {
+                return None;
+            }
+            let (r, g, b) = chroma_key_despill(spec, r, g, b);
+            (r, g, b, alpha)
+        } else {
+            (r, g, b, 255)
         };
-        let key_alpha = chroma_key_alpha(spec, r, g, b);
-        if key_alpha == 0 {
-            return None;
-        }
-        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
         Some((r, g, b, key_alpha))
     };
 
@@ -12548,14 +12684,17 @@ fn blit_linear_rgba_to_yuv420p(
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
     let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
-        let Some(spec) = options.chroma_key.as_ref() else {
-            return Some((r, g, b, 255));
+        let (r, g, b, key_alpha) = if let Some(spec) = options.chroma_key.as_ref() {
+            let alpha = chroma_key_alpha(spec, r, g, b);
+            if alpha == 0 {
+                return None;
+            }
+            let (r, g, b) = chroma_key_despill(spec, r, g, b);
+            (r, g, b, alpha)
+        } else {
+            (r, g, b, 255)
         };
-        let key_alpha = chroma_key_alpha(spec, r, g, b);
-        if key_alpha == 0 {
-            return None;
-        }
-        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        let (r, g, b) = camera_look_rgb(r, g, b, options.camera_look);
         Some((r, g, b, key_alpha))
     };
     let uv_left = draw_left / 2;
@@ -12969,6 +13108,7 @@ fn read_source_rgba(source: &RgbaSource<'_>, x: u32, y: u32) -> (u8, u8, u8, u8)
 
 fn camera_state_name(state: &PreviewCameraState) -> &'static str {
     match state {
+        PreviewCameraState::Disconnected => "disconnected",
         PreviewCameraState::DeviceMissing => "device-missing",
         PreviewCameraState::PermissionNeeded => "permission-needed",
         PreviewCameraState::Starting => "starting",
@@ -13239,7 +13379,7 @@ fn active_source_iso_capture_needs(
 /// Derives the ISO leg from confirmed capture selection, including sources
 /// omitted by the primary preset. It is visible and full-frame, under a layout
 /// that contains (never crops), draws no bubble mask, no chroma key and no
-/// background. Mirror is preserved (it is the camera's own orientation).
+/// background. Mirror and look are preserved (the camera's own settings).
 /// `None` when the role is unselected. Generic scenes without selection
 /// authority retain their device-bound source behavior.
 fn source_iso_snapshot(
@@ -13317,6 +13457,9 @@ fn source_iso_snapshot(
     layout.camera_shape = crate::protocol::CameraShape::Rectangle;
     layout.camera_chroma_key_enabled = false;
     layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::default();
+    // The Screen file is the raw source for editing (plan 213 D5): whole,
+    // never filled or cropped like the scene's screen.
+    layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::default();
     Some(CompositorSceneSnapshot {
         synthetic_hard_content: false,
         selected_sources: snapshot.selected_sources.clone(),
@@ -13707,6 +13850,11 @@ mod tests {
         snapshot.layout.camera_offset_x = 12;
         snapshot.layout.camera_chroma_key_enabled = true;
         snapshot.layout.camera_mirror = true;
+        snapshot.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05,
+            contrast: 1.1,
+            saturation: 0.8,
+        };
         if let Some(scene) = snapshot.scene.as_mut() {
             for source in scene.sources.iter_mut() {
                 if matches!(source.kind, SceneSourceKind::Camera) {
@@ -13753,7 +13901,77 @@ mod tests {
             camera.layout.camera_mirror,
             "mirror is the camera's own orientation"
         );
+        assert_eq!(camera.layout.camera_look, snapshot.layout.camera_look);
         assert_eq!(camera.revision, snapshot.revision);
+    }
+
+    #[test]
+    fn source_iso_screen_leg_records_the_whole_uncropped_screen() {
+        // Plan 213 G5 (D5): the Screen file is the raw source for editing.
+        // A scene that crops its screen and fills it in landscape still
+        // records the whole screen, uncropped and fitted, on the Screen leg,
+        // whether the selection is known or only the scene's own source.
+        use crate::scene_geometry::screen_crop_fixture::{CYAN, MAGENTA, RED, WHITE, sample_pixel};
+        let mut cropped = screen_crop_fixture_snapshot();
+        cropped.layout.horizontal_screen_framing = crate::protocol::HorizontalScreenFraming::Fill;
+        cropped.layout.source_transform_overrides.insert(
+            "source:base".to_string(),
+            crate::protocol::SourceTransformOverride {
+                crop_left: 0.25,
+                crop_top: 0.25,
+                crop_right: 0.25,
+                crop_bottom: 0.25,
+                ..crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                    x: 0.25,
+                    y: 0.25,
+                    width: 0.5,
+                    height: 0.5,
+                })
+            },
+        );
+        let mut selected = cropped.clone();
+        selected.selected_sources = Some(SourceSelection {
+            screen_id: Some("screen-1".to_string()),
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        });
+        let frame = screen_crop_fixture_frame();
+        for snapshot in [cropped, selected] {
+            let iso = source_iso_snapshot(Some(&snapshot), SourceIsoRole::Screen)
+                .expect("screen ISO snapshot");
+            let source = &iso.scene.as_ref().expect("scene").sources[0];
+            assert_eq!(source.transform, full_frame_transform(), "no box, no crop");
+            assert_eq!(
+                iso.layout.horizontal_screen_framing,
+                crate::protocol::HorizontalScreenFraming::Fit
+            );
+            assert!(iso.layout.source_transform_overrides.is_empty());
+            assert_eq!(
+                scene_source_fit(&SceneSourceKind::Screen, &iso.layout),
+                SceneFit::Contain
+            );
+
+            // And it draws so: every edge of the picture reaches the file.
+            let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+            render_compositor_yuv420p_frame(screen_crop_inputs(&iso, &frame, 128, 72), &mut bytes);
+            for (point, [r, g, b]) in [
+                ((0.05, 0.50), RED),
+                ((0.95, 0.50), WHITE),
+                ((0.50, 0.05), MAGENTA),
+                ((0.50, 0.95), CYAN),
+            ] {
+                let (x, y) = sample_pixel(point, 128, 72);
+                let (expected, _, _) = rgb_to_yuv(r, g, b);
+                let luma = bytes[y * 128 + x];
+                assert!(
+                    (i16::from(luma) - i16::from(expected)).abs() <= 8,
+                    "the Screen file shows {:?} at {point:?}: Y {luma} vs {expected}",
+                    [r, g, b]
+                );
+            }
+        }
     }
 
     #[test]
@@ -14143,6 +14361,7 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            camera_look: None,
             corners: None,
             sampler: crate::metal_compositor::GpuSourceSampler::Scene,
             opacity: 1.0,
@@ -14268,6 +14487,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14313,6 +14533,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear,
             },
         ));
@@ -14478,6 +14699,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: None,
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14558,6 +14780,186 @@ mod tests {
         }
     }
 
+    fn camera_look_reference(rgb: [u8; 3], look: crate::protocol::CameraLook) -> [u8; 3] {
+        let rgb = rgb.map(|v| f64::from(v) / 255.0);
+        let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        rgb.map(|v| {
+            ((y + look.brightness + (look.contrast - 1.0) * (y - 0.5) + look.saturation * (v - y))
+                .clamp(0.0, 1.0)
+                * 255.0)
+                .round() as u8
+        })
+    }
+
+    #[test]
+    fn camera_look_cpu_and_metal_agree_with_float_law() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
+                .unwrap();
+        let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
+        let (width, height) = (palette.len() as u32 * 4, 4);
+        #[cfg(target_os = "macos")]
+        let gpu = new_gpu_compositor(false);
+        let mut snapshot = test_scene_snapshot(LayoutPreset::CameraOnly, None, Some("camera-look"));
+        snapshot.layout.camera_look = serde_json::from_value(fixture["look"].clone()).unwrap();
+        let mut bgra = Vec::new();
+        let mut expected = Vec::new();
+        for _ in 0..height {
+            for &rgb in &palette {
+                for _ in 0..4 {
+                    bgra.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+                    expected.push(camera_look_reference(rgb, snapshot.layout.camera_look));
+                }
+            }
+        }
+        let camera =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width,
+                height,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: bgra,
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
+        let inputs = CompositorRenderInputs {
+            sequence: 1,
+            width,
+            height,
+            snapshot: Some(&snapshot),
+            camera_frame: Some(&camera),
+            active_image_source: None,
+            background_image_source: None,
+            screen_frame: None,
+            caption_overlay: None,
+            highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
+        };
+        let mut cpu = vec![0; raw_yuv420p_len(width, height)];
+        render_compositor_yuv420p_frame(inputs, &mut cpu);
+        let decode_cpu = |pixel: usize| {
+            let uv =
+                (pixel / width as usize / 2) * (width as usize / 2) + (pixel % width as usize / 2);
+            let y_len = (width * height) as usize;
+            let (b, g, r) = crate::color::ycbcr_bt709_video_to_bgr(
+                cpu[pixel],
+                cpu[y_len + uv],
+                cpu[y_len + y_len / 4 + uv],
+            );
+            [r, g, b]
+        };
+        let mut cpu_max = 0;
+        for (pixel, reference) in expected.iter().enumerate() {
+            for (actual, expected) in decode_cpu(pixel).into_iter().zip(reference) {
+                cpu_max = cpu_max.max(i16::from(actual).abs_diff(i16::from(*expected)));
+            }
+        }
+        assert!(cpu_max <= 2, "CPU vs float law: {cpu_max}/255");
+        eprintln!("camera look CPU vs float law: {cpu_max}/255");
+        #[cfg(target_os = "macos")]
+        {
+            let Some(mut gpu) = gpu else {
+                eprintln!("skipping Metal: no Metal device");
+                return;
+            };
+            let output =
+                try_gpu_compose(Some(&mut gpu), &inputs, true).expect("camera Metal compose");
+            let pixels = gpu
+                .latest_target_pixel_buffer()
+                .and_then(|target| target.copy_bgra())
+                .expect("Metal target readback");
+            let mut metal_max = 0;
+            let mut parity_max = 0;
+            for (pixel, reference) in expected.iter().enumerate() {
+                let offset = pixel * 4;
+                let metal = [pixels[offset + 2], pixels[offset + 1], pixels[offset]];
+                for ((actual, expected), cpu) in
+                    metal.into_iter().zip(reference).zip(decode_cpu(pixel))
+                {
+                    metal_max = metal_max.max(i16::from(actual).abs_diff(i16::from(*expected)));
+                    parity_max = parity_max.max(i16::from(actual).abs_diff(i16::from(cpu)));
+                }
+            }
+            assert!(metal_max <= 2, "Metal vs float law: {metal_max}/255");
+            assert!(parity_max <= 2, "CPU vs Metal: {parity_max}/255");
+            assert!(
+                cpu.iter()
+                    .zip(&output.yuv)
+                    .all(|(a, b)| a.abs_diff(*b) <= 2)
+            );
+            eprintln!(
+                "camera look Metal vs float law: {metal_max}/255; CPU vs Metal: {parity_max}/255"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_look_preserves_original_key_alpha_in_both_cpu_samplers() {
+        let look = crate::protocol::CameraLook {
+            brightness: 0.1,
+            contrast: 1.2,
+            saturation: 0.0,
+        };
+        for (side, linear) in [(2, false), (4, true)] {
+            for rgb in [[0, 255, 0], [128, 128, 128]] {
+                let source = [rgb[0], rgb[1], rgb[2], 255].repeat(side * side);
+                let mut output = blue_yuv_canvas_2x2();
+                assert!(blit_rgba_to_yuv420p(
+                    &RgbaSource {
+                        bytes: &source,
+                        width: side as u32,
+                        height: side as u32,
+                        format: SourcePixelFormat::Rgba
+                    },
+                    &mut output,
+                    2,
+                    2,
+                    PixelRect {
+                        x: 0,
+                        y: 0,
+                        width: 2,
+                        height: 2
+                    },
+                    SourceRenderOptions {
+                        crop: SceneCrop::none(),
+                        pan: (0.0, 0.0),
+                        contain: false,
+                        mirror_x: false,
+                        mask: SceneMask::None,
+                        chroma_key: Some(chroma_key_test_spec()),
+                        camera_look: look,
+                        linear
+                    },
+                ));
+                if rgb[1] == 255 {
+                    assert_eq!(
+                        output,
+                        blue_yuv_canvas_2x2(),
+                        "grade must not move the key (linear={linear})"
+                    );
+                } else {
+                    let [r, g, b] = camera_look_reference(rgb, look);
+                    let (y, u, v) = rgb_to_yuv(r, g, b);
+                    assert_eq!(
+                        output,
+                        vec![y, y, y, y, u, v],
+                        "foreground grade (linear={linear})"
+                    );
+                }
+            }
+        }
+    }
+
     /// A 2×2 blue YUV canvas the chroma-key blit tests composite onto.
     fn blue_yuv_canvas_2x2() -> Vec<u8> {
         let (y, u, v) = rgb_to_yuv(0, 0, 255);
@@ -14610,6 +15012,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: Some(chroma_key_test_spec()),
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14670,6 +15073,7 @@ mod tests {
                 mirror_x: false,
                 mask: SceneMask::None,
                 chroma_key: Some(spec),
+                camera_look: crate::protocol::CameraLook::default(),
                 linear: false,
             },
         ));
@@ -14698,6 +15102,7 @@ mod tests {
                     mask: SourceMask::None,
                     blend: true,
                     chroma_key: scene_chroma_key_into_metal(&spec),
+                    camera_look: None,
                     corners: None,
                     sampler: crate::metal_compositor::GpuSourceSampler::Scene,
                     opacity: 1.0,
@@ -14730,6 +15135,176 @@ mod tests {
             partial_alpha > 0 && partial_alpha < 255,
             "fixture pixel must ramp, got {partial_alpha}"
         );
+    }
+
+    /// Plan 213 G1: the cropped-screen fixture as a Freeform scene on a
+    /// Screen only canvas, the one screen source carrying the fixture's box
+    /// and crop.
+    fn screen_crop_fixture_snapshot() -> CompositorSceneSnapshot {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::ScreenOnly;
+        layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        let transform = crate::scene_geometry::screen_crop_fixture::transform();
+        CompositorSceneSnapshot {
+            synthetic_hard_content: false,
+            selected_sources: None,
+            revision: 1,
+            scene: Some(Scene {
+                id: "scene:screen-crop".to_string(),
+                name: "Screen crop".to_string(),
+                sources: vec![SceneSource {
+                    id: "source:base".to_string(),
+                    name: "Screen capture".to_string(),
+                    kind: SceneSourceKind::Screen,
+                    device_id: Some("screen-1".to_string()),
+                    transform: transform.clone(),
+                    default_transform: transform,
+                    visible: true,
+                    locked: false,
+                }],
+                outputs: Vec::new(),
+                background: None,
+            }),
+            layout,
+            active_screen: None,
+        }
+    }
+
+    fn screen_crop_fixture_frame() -> FrameHandle<PreviewScreenPixelFormat> {
+        use crate::scene_geometry::screen_crop_fixture::{
+            SOURCE_HEIGHT, SOURCE_WIDTH, source_bgra,
+        };
+        crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+            storage: crate::frame_store::FrameStorage::untracked(),
+            sequence: 1,
+            width: SOURCE_WIDTH,
+            height: SOURCE_HEIGHT,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes: source_bgra(),
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            source_d3d11_texture: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        })
+    }
+
+    fn screen_crop_inputs<'a>(
+        snapshot: &'a CompositorSceneSnapshot,
+        screen_frame: &'a FrameHandle<PreviewScreenPixelFormat>,
+        width: u32,
+        height: u32,
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence: 1,
+            width,
+            height,
+            snapshot: Some(snapshot),
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: Some(screen_frame),
+            caption_overlay: None,
+            highlight_overlay: None,
+            buddy_overlay: None,
+            buddy_leg: None,
+            banners: &[],
+            live_background: None,
+            shared_live_frame: None,
+            shared_live_output: None,
+        }
+    }
+
+    /// Every fixture sample's Y, U and V on a YUV420p frame, within the
+    /// rounding two linear colour conversions leave.
+    fn assert_screen_crop_samples(path: &str, yuv: &[u8], width: u32, height: u32) {
+        use crate::scene_geometry::screen_crop_fixture::{expected_samples, sample_pixel};
+        assert_eq!(
+            yuv.len(),
+            raw_yuv420p_len(width, height),
+            "{path}: frame size"
+        );
+        let (w, h) = (width as usize, height as usize);
+        let (chroma_w, chroma_h) = (w.div_ceil(2), h.div_ceil(2));
+        for (point, [r, g, b]) in expected_samples() {
+            let (x, y) = sample_pixel(point, width, height);
+            let expected = rgb_to_yuv(r, g, b);
+            let chroma = (y / 2) * chroma_w + x / 2;
+            let actual = (
+                yuv[y * w + x],
+                yuv[w * h + chroma],
+                yuv[w * h + chroma_w * chroma_h + chroma],
+            );
+            let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 8;
+            assert!(
+                close(actual.0, expected.0)
+                    && close(actual.1, expected.1)
+                    && close(actual.2, expected.2),
+                "{path}: at {point:?} ({x}, {y}) expected {:?} (YUV {expected:?}), got YUV {actual:?}",
+                [r, g, b]
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_compositor_draws_the_screen_crop_fixture() {
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut bytes = vec![0; raw_yuv420p_len(128, 72)];
+        render_compositor_yuv420p_frame(screen_crop_inputs(&snapshot, &frame, 128, 72), &mut bytes);
+        assert_screen_crop_samples("cpu", &bytes, 128, 72);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_compositor_draws_the_screen_crop_fixture_or_skips() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let composed = try_gpu_compose(
+            Some(&mut gpu),
+            &screen_crop_inputs(&snapshot, &frame, 128, 72),
+            true,
+        )
+        .expect("the cropped screen composes on Metal");
+        assert_screen_crop_samples("metal", &composed.yuv, 128, 72);
+    }
+
+    /// The aux leg (a record + stream session's stream leg on macOS) re-renders
+    /// the program snapshot at its own canvas through its own publisher: the
+    /// crop must land there too, on the CPU fallback and on Metal.
+    #[test]
+    fn auxiliary_leg_draws_the_screen_crop_fixture() {
+        let snapshot = screen_crop_fixture_snapshot();
+        let frame = screen_crop_fixture_frame();
+        let mut gpu = new_gpu_compositor(false);
+        let mut legs = vec![("aux cpu", None)];
+        if let Some(gpu) = gpu.as_mut() {
+            legs.push(("aux metal", Some(gpu)));
+        } else {
+            eprintln!("aux metal: skipped, no GPU compositor here");
+        }
+        for (path, gpu) in legs {
+            let store = Arc::new(std::sync::Mutex::new(FrameStore::new(2)));
+            publish_auxiliary_compositor_frame(
+                1,
+                Instant::now(),
+                Instant::now(),
+                store.clone(),
+                screen_crop_inputs(&snapshot, &frame, 64, 36),
+                gpu,
+                CompositorFrameConsumer::RawYuvEncoder,
+                &[],
+                3,
+            );
+            let published = store.lock().unwrap().latest().expect("aux frame");
+            assert_eq!((published.width, published.height), (64, 36), "{path}");
+            assert_screen_crop_samples(path, &published.bytes, 64, 36);
+        }
     }
 
     #[test]
@@ -14845,6 +15420,7 @@ mod tests {
             false,
             true,
             SceneMask::None,
+            crate::protocol::CameraLook::default(),
             &mut mirrored,
         ));
         assert_eq!(
@@ -14865,6 +15441,7 @@ mod tests {
             false,
             false,
             SceneMask::Circle,
+            crate::protocol::CameraLook::default(),
             &mut circle,
         ));
         assert_eq!(circle[3], 0, "top-left corner must be transparent");
@@ -18937,6 +19514,13 @@ mod tests {
     async fn a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths() {
         let state = test_state();
         start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "TEMP-DIAG benchmark arm: preview run started"
+            );
+        }
         // The user's scene: one plain test pattern (the only source a test
         // can draw), committed the way the idle Preview commits it.
         let (user_scene, user_sources) = test_pattern_scene(64, 36);
@@ -18953,6 +19537,13 @@ mod tests {
         )
         .await;
         let before = wait_for_frame_at_revision(&state, Some(10)).await;
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "TEMP-DIAG benchmark arm: user frame at 10"
+            );
+        }
         let user_status = compositor_status(&state).await;
         assert_eq!(user_status.scene_revision, Some(10));
         assert_eq!(
@@ -18997,6 +19588,10 @@ mod tests {
         )
         .await
         .expect("arms in place");
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: armed");
+        }
         assert!(
             commit_benchmark_scene(
                 &state,
@@ -19008,6 +19603,13 @@ mod tests {
             .await
         );
         let benchmark_frame = wait_for_frame_dimensions(&state, 128, 72, before.sequence).await;
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "TEMP-DIAG benchmark arm: benchmark frame"
+            );
+        }
         assert_eq!(
             benchmark_frame.scene_revision,
             Some(11),
@@ -19057,6 +19659,10 @@ mod tests {
         // the user's scene at its own revision (no surface: the run stops).
         release_compositor_capture_lease(&state, "benchmark").await;
         {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: released");
+        }
+        {
             let compositor = state.compositor.lock().await;
             assert!(compositor.benchmark_scene.is_none());
             assert_eq!(
@@ -19066,6 +19672,13 @@ mod tests {
             );
         }
 
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "TEMP-DIAG benchmark arm: before fresh run"
+            );
+        }
         // Fresh run: the benchmark starts its own run.
         start_synthetic_compositor(
             state.clone(),
@@ -19087,6 +19700,10 @@ mod tests {
             .await
         );
         let fresh_frame = wait_for_frame_dimensions(&state, 128, 72, 0).await;
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: fresh frame");
+        }
         assert_eq!(fresh_frame.scene_revision, Some(12));
         {
             let compositor = state.compositor.lock().await;
@@ -19108,6 +19725,10 @@ mod tests {
             );
         }
         stop_compositor(&state).await;
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: stopped");
+        }
         assert!(state.compositor.lock().await.benchmark_scene.is_none());
     }
 
@@ -22782,6 +23403,7 @@ mod buddy_sprite_tests {
         EditorDraft {
             source_id: source_id.to_string(),
             transform,
+            crop: None,
             chrome: EditorChrome {
                 selected: CameraTransform {
                     x: 0.0,
@@ -23757,6 +24379,7 @@ mod banner_tests {
                 width: dragged.w,
                 height: dragged.h,
             }),
+            crop: None,
             chrome: chrome.clone(),
             refreshed_at: now,
             release_at_revision: None,

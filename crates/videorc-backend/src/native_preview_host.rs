@@ -29,6 +29,13 @@ pub struct NativePreviewHostBounds {
     // Corner radius in points; see PreviewSurfaceBounds::corner_radius.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corner_radius: Option<f64>,
+    // In-window origin and host height; see PreviewSurfaceBounds::host_x.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_height: Option<f64>,
     // Cross-process stacking target (detached preview window) + always-on-top.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_above_window_id: Option<u32>,
@@ -56,6 +63,9 @@ impl NativePreviewHostBounds {
             clip_height: bounds.clip_height.map(|height| height.max(0.0)),
             visible: bounds.visible,
             corner_radius: bounds.corner_radius,
+            host_x: bounds.host_x,
+            host_y: bounds.host_y,
+            host_height: bounds.host_height,
             order_above_window_id: bounds.order_above_window_id,
             order_above_window_handle: None,
             preview_generation: None,
@@ -70,6 +80,7 @@ impl NativePreviewHostBounds {
         host_bounds
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn drawable_size(&self) -> (f64, f64) {
         (
             self.width * self.scale_factor,
@@ -78,6 +89,7 @@ impl NativePreviewHostBounds {
     }
 
     /// Sanitized corner radius in points: finite, non-negative, zero when absent.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn corner_radius_points(&self) -> f64 {
         self.corner_radius
             .filter(|radius| radius.is_finite())
@@ -91,6 +103,7 @@ impl NativePreviewHostBounds {
     /// move to a different-scale display leaves the two disagreeing — a classic
     /// macOS multi-display mismatch that renders the surface wrong / stops it
     /// presenting. Never below 1.0.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn contents_scale(&self) -> f64 {
         if self.scale_factor.is_finite() {
             self.scale_factor.max(1.0)
@@ -102,6 +115,7 @@ impl NativePreviewHostBounds {
     /// Whether the drawable size is a finite, positive rect — a transient bad
     /// bounds during a cross-display move must never reach `setDrawableSize`
     /// (a NaN/0 drawable is what macOS clamps to the primary's corner).
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn drawable_is_valid(&self) -> bool {
         let (width, height) = self.drawable_size();
         width.is_finite() && height.is_finite() && width >= 1.0 && height >= 1.0
@@ -117,6 +131,7 @@ impl NativePreviewHostBounds {
 
     /// Whether the surface should be on screen at all: the renderer's visibility
     /// verdict (absent = legacy caller = visible) plus a non-empty clip.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn is_visible(&self) -> bool {
         if !self.visible.unwrap_or(true) {
             return false;
@@ -127,6 +142,7 @@ impl NativePreviewHostBounds {
 
     /// The window frame in AppKit coordinates: the visible clip rect, so a slot that
     /// is half scrolled out of its container crops instead of floating over other UI.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn appkit_clip_frame(&self) -> (f64, f64, f64, f64) {
         let (clip_x, clip_y, clip_width, clip_height) = self.clip_rect_screen();
         let appkit_y = self.appkit_y(clip_y, clip_height);
@@ -136,6 +152,7 @@ impl NativePreviewHostBounds {
     /// The layer view's frame inside the clip-sized window (AppKit bottom-left
     /// origin). The view keeps the full slot size; parts outside the window are
     /// clipped by the window surface, which is exactly the wanted crop.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn view_frame_in_clip(&self) -> (f64, f64, f64, f64) {
         let (clip_x, clip_y, clip_height) = {
             let (x, y, _, h) = self.clip_rect_screen();
@@ -153,6 +170,7 @@ impl NativePreviewHostBounds {
     }
 
     /// Clip rect in screen (top-left origin) coordinates; absent clip = full slot.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn clip_rect_screen(&self) -> (f64, f64, f64, f64) {
         match (self.clip_x, self.clip_y, self.clip_width, self.clip_height) {
             (Some(x), Some(y), Some(width), Some(height)) => (x, y, width, height),
@@ -198,6 +216,7 @@ fn native_preview_command_invalidates_iosurface_cache(
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct NativePreviewIosurfaceCacheMetrics {
     pub hits: u64,
     pub imports: u64,
@@ -209,24 +228,29 @@ pub struct NativePreviewIosurfaceCacheMetrics {
 }
 
 impl NativePreviewIosurfaceCacheMetrics {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_cache_hit(&mut self) {
         self.hits = self.hits.saturating_add(1);
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_import_success(&mut self) {
         self.imports = self.imports.saturating_add(1);
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_import_failure(&mut self) {
         self.import_failures = self.import_failures.saturating_add(1);
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_invalidation(&mut self, cached_entry_count: usize) {
         if cached_entry_count > 0 {
             self.invalidations = self.invalidations.saturating_add(1);
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn record_cache_state(&mut self, cached_entry_count: usize, ceiling: usize) {
         self.live_count = u64::try_from(cached_entry_count).unwrap_or(u64::MAX);
         self.peak_count = self.peak_count.max(self.live_count);
@@ -247,6 +271,7 @@ pub struct NativePreviewHostActivation {
 }
 
 impl NativePreviewHostActivation {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn cametal_layer_presented(presented_frame_id: u64) -> Self {
         Self {
             transport: PreviewTransport::NativeSurface,
@@ -264,10 +289,15 @@ impl NativePreviewHostActivation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativePreviewHostPresentFailure {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     MissingOverlay,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     IosurfaceImportFailed,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     DrawableUnavailable,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     CommandBufferUnavailable,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     EncodeFailed,
 }
 
@@ -908,6 +938,40 @@ pub use macos::{
 mod tests {
     use super::*;
 
+    #[test]
+    fn in_window_placement_survives_the_helper_bounds_and_their_wire_form() {
+        // Plan 213 D2: the in-process layer is placed from these; a mirror
+        // that drops them puts the layer at its host's origin.
+        let bounds = PreviewSurfaceBounds {
+            screen_x: 320.0,
+            screen_y: 276.0,
+            width: 800.0,
+            height: 450.0,
+            scale_factor: 2.0,
+            host_x: Some(240.0),
+            host_y: Some(96.0),
+            host_height: Some(780.0),
+            ..Default::default()
+        };
+        let host = NativePreviewHostBounds::from_surface_bounds(&bounds);
+        assert_eq!(
+            (host.host_x, host.host_y, host.host_height),
+            (Some(240.0), Some(96.0), Some(780.0))
+        );
+        let wire = serde_json::to_value(&host).unwrap();
+        assert_eq!(wire["hostX"], 240.0);
+        assert_eq!(wire["hostY"], 96.0);
+        assert_eq!(wire["hostHeight"], 780.0);
+        let legacy = serde_json::to_value(NativePreviewHostBounds::from_surface_bounds(
+            &PreviewSurfaceBounds::default(),
+        ))
+        .unwrap();
+        assert!(
+            legacy.get("hostX").is_none(),
+            "absent stays absent on the wire"
+        );
+    }
+
     fn slot(screen_x: f64, screen_y: f64, scale: f64) -> NativePreviewHostBounds {
         NativePreviewHostBounds {
             screen_x,
@@ -1157,6 +1221,9 @@ mod tests {
             clip_width: Some(640.0),
             clip_height: Some(200.0),
             visible: Some(true),
+            host_x: None,
+            host_y: None,
+            host_height: None,
             order_above_window_id: None,
             order_above_window_handle: None,
             preview_generation: None,
@@ -1239,6 +1306,9 @@ mod tests {
             visible: Some(true),
             order_above_window_id: None,
             elevated: None,
+            host_x: None,
+            host_y: None,
+            host_height: None,
         };
 
         let host_bounds = NativePreviewHostBounds::from_surface_bounds(&bounds);

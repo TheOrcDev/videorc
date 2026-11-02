@@ -58,6 +58,7 @@ use crate::encoder_bridge::DirectD3D11CameraOverlay;
 #[cfg(any(target_os = "windows", test))]
 use crate::encoder_bridge::encoder_bridge_lifecycle_snapshot;
 #[cfg(target_os = "windows")]
+#[cfg_attr(target_os = "windows", allow(unused_imports))]
 use crate::encoder_bridge::gate_encoder_bridge_lifecycle_persistence;
 use crate::encoder_bridge::{
     EncoderBridgeDiagnosticsContext, EncoderBridgeLifecycleSnapshot, EncoderBridgeOutputProfile,
@@ -2216,6 +2217,7 @@ pub struct ActiveRecording {
     pub pipeline: RecordingPipeline,
     /// Keep only timed silence alive until video-owned FFmpeg exits.
     native_audio_silent_drain: bool,
+    capture_notice: Option<String>,
     pub native_audio: Option<NativeAudioCaptureSession>,
     /// Reduced evidence from this process's final arguments, never an argv or
     /// destination cache. Only the authenticated debug disconnect can read it.
@@ -2303,6 +2305,7 @@ pub struct ActiveRecording {
     /// Capture lease over the preview compositor run when the session armed
     /// it in place (instant-record P4.1). Released after bridge teardown so
     /// the preview returns to its own dimensions and fps.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     compositor_capture_lease: Option<CompositorCaptureLeaseGuard>,
     /// The compositor run this session started itself (the restart path:
     /// Linux, and macOS sessions that can't arm in place). Stopped by exact
@@ -2346,6 +2349,7 @@ impl CompositorCaptureLeaseGuard {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     async fn release(mut self) {
         self.released = true;
         let _ = release_compositor_capture_lease(&self.state, &self.session_id).await;
@@ -2388,6 +2392,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         audio_tracks: Vec::new(),
         pipeline: RecordingPipeline::new(false, true, &[]),
         native_audio_silent_drain: false,
+        capture_notice: None,
         native_audio: None,
         #[cfg(debug_assertions)]
         source_switch_output_audio_timing: None,
@@ -3010,6 +3015,14 @@ impl ActiveRecording {
     }
 
     pub fn status(&self, state: RecordingState, message: Option<String>) -> RecordingStatus {
+        let message = if matches!(
+            state,
+            RecordingState::Starting | RecordingState::Recording | RecordingState::Streaming
+        ) {
+            self.capture_notice.clone().or(message)
+        } else {
+            message
+        };
         RecordingStatus {
             state,
             session_id: Some(self.session_id.clone()),
@@ -5167,8 +5180,10 @@ async fn start_session_with_timeline(
     let duplicate_capture_sources = if use_encoder_bridge {
         Vec::new()
     } else {
-        duplicate_capture_sources_for_capture(&state, &capture).await
+        duplicate_capture_sources_for_capture(&state, &capture, params.sources.camera_id.as_deref())
+            .await
     };
+    let capture_notice = legacy_camera_capture_notice(&duplicate_capture_sources);
     let mut initial_diagnostics = apply_duplicate_capture_sources(
         starting_diagnostics(&session_id, params.output.video.fps, mode),
         duplicate_capture_sources,
@@ -5414,6 +5429,8 @@ async fn start_session_with_timeline(
                 {
                     Some(DirectD3D11CameraOverlay {
                         source,
+                        compositor: state.compositor.clone(),
+                        camera_look: params.layout.camera_look,
                         destination,
                         crop,
                         contain: matches!(
@@ -6918,6 +6935,7 @@ async fn start_session_with_timeline(
         mode: mode.to_string(),
         audio_tracks,
         pipeline,
+        capture_notice,
         native_audio_silent_drain: owned_pcm_silent_drain_policy(
             cfg!(target_os = "windows"),
             windows_encoded_bridge_decision.effective,
@@ -14288,20 +14306,31 @@ async fn resolve_capture_inputs(ffmpeg_path: &str, params: &StartSessionParams) 
     }
 }
 
+fn legacy_camera_capture_notice(duplicate_sources: &[String]) -> Option<String> {
+    duplicate_sources.iter().any(|source| source.starts_with("camera:")).then(||
+        "This recording opens the camera again while Preview is using it. Another app may not be able to use it.".to_string()
+    )
+}
+
 async fn duplicate_capture_sources_for_capture(
     state: &AppState,
     capture: &CaptureInputs,
+    selected_camera_id: Option<&str>,
 ) -> Vec<String> {
     let camera_status = state.preview_camera.lock().await.status.clone();
     let screen_status = state.preview_screen.lock().await.status.clone();
-    duplicate_capture_sources_for_statuses(
+    let mut sources = duplicate_capture_sources_for_statuses(
         capture,
         camera_status.state,
         camera_status.camera_id.as_deref(),
         screen_status.state,
         screen_status.source_kind,
         screen_status.source_id.as_deref(),
-    )
+    );
+    sources.retain(|source| {
+        !source.starts_with("camera:") || camera_status.camera_id.as_deref() == selected_camera_id
+    });
+    sources
 }
 
 fn duplicate_capture_sources_for_statuses(
@@ -15254,7 +15283,7 @@ fn ffmpeg_h264_platform_for_target(
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 static WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<
         std::collections::HashMap<
@@ -15267,7 +15296,7 @@ static WINDOWS_MEDIA_FOUNDATION_PROBE_CACHE: std::sync::OnceLock<
 /// Cached hardware verdict for one capability key, if any. Failures are
 /// cached exactly like successes: a rejected probe must not re-run FFmpeg on
 /// every session start with the same binary + profile.
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 fn windows_media_foundation_cached_outcome(
     key: &WindowsMediaFoundationProbeKey,
 ) -> Option<WindowsMediaFoundationProbeOutcome> {
@@ -15278,7 +15307,7 @@ fn windows_media_foundation_cached_outcome(
         .and_then(|cache| cache.get(key).cloned())
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 fn windows_media_foundation_store_outcome(
     key: WindowsMediaFoundationProbeKey,
     outcome: WindowsMediaFoundationProbeOutcome,
@@ -15310,7 +15339,7 @@ struct WindowsMediaFoundationProbeKey {
 /// One cached hardware-capability verdict for a probe key. `reason` carries
 /// the EXACT failure evidence (exit status + stderr tail) so every session
 /// that falls back logs why, not just that it did.
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WindowsMediaFoundationProbeOutcome {
     accepted: bool,
@@ -15485,7 +15514,7 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
     }
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(test)]
 fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".to_string(),
@@ -16077,6 +16106,51 @@ static LINUX_ENCODER_DECISIONS: std::sync::OnceLock<
     >,
 > = std::sync::OnceLock::new();
 
+/// Held while a decision is resolved. The probe sentinel is one file, and a
+/// resolution adopts any sentinel it finds as a probe that never returned,
+/// so a second resolution running beside the first (the replay ring's start
+/// and the renderer's output check at launch) would quarantine the node the
+/// first is still probing, for good.
+#[cfg(target_os = "linux")]
+static LINUX_ENCODER_PROBE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The cached decision for `key`, or the one `resolve` makes. Resolutions run
+/// one at a time; a caller that waited reads the answer the one before made.
+#[cfg(target_os = "linux")]
+async fn cached_linux_encoder_decision(
+    decisions: &StdMutex<
+        std::collections::HashMap<String, std::result::Result<ResolvedFfmpegH264Encoder, String>>,
+    >,
+    gate: &tokio::sync::Mutex<()>,
+    key: String,
+    resolve: impl std::future::Future<Output = Result<ResolvedFfmpegH264Encoder>>,
+) -> Result<ResolvedFfmpegH264Encoder> {
+    let cached = || {
+        decisions
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+    };
+    if let Some(cached) = cached() {
+        return cached.map_err(anyhow::Error::msg);
+    }
+    let _resolving = gate.lock().await;
+    if let Some(cached) = cached() {
+        return cached.map_err(anyhow::Error::msg);
+    }
+    let resolved = resolve.await;
+    if let Ok(mut cache) = decisions.lock() {
+        cache.insert(
+            key,
+            resolved
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(|error| error.to_string()),
+        );
+    }
+    resolved
+}
+
 #[cfg(target_os = "linux")]
 async fn resolve_linux_h264_encoder_uncached(
     ffmpeg_path: &str,
@@ -16198,25 +16272,13 @@ async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpeg
                 .unwrap_or_default()
         );
         let decisions = LINUX_ENCODER_DECISIONS.get_or_init(|| StdMutex::new(Default::default()));
-        if let Some(cached) = decisions
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(&key).cloned())
-        {
-            return cached.map_err(anyhow::Error::msg);
-        }
-        let resolved =
-            resolve_linux_h264_encoder_uncached(ffmpeg_path, preference, pin.as_deref()).await;
-        if let Ok(mut cache) = decisions.lock() {
-            cache.insert(
-                key,
-                resolved
-                    .as_ref()
-                    .map(Clone::clone)
-                    .map_err(|error| error.to_string()),
-            );
-        }
-        resolved
+        cached_linux_encoder_decision(
+            decisions,
+            &LINUX_ENCODER_PROBE_GATE,
+            key,
+            resolve_linux_h264_encoder_uncached(ffmpeg_path, preference, pin.as_deref()),
+        )
+        .await
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -23418,6 +23480,19 @@ fn camera_circle_mask_applies(layout: &LayoutSettings) -> bool {
     matches!(camera_mask(layout), SceneMask::Circle)
 }
 
+fn camera_look_filter(layout: &LayoutSettings) -> String {
+    let look = layout.camera_look;
+    if look.is_neutral() {
+        return String::new();
+    }
+    // Zero gamma weight preserves unit gamma while selecting eq's float LUT.
+    // Its integer shortcut quantizes negative brightness too coarsely.
+    format!(
+        "format=rgba,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva444p,eq=brightness={}:contrast={}:saturation={}:gamma=1.000001:gamma_r=1.000001:gamma_b=1.000001:gamma_weight=0,scale=in_range=full:out_range=full:in_color_matrix=bt709,format=rgba,",
+        look.brightness, look.contrast, look.saturation
+    )
+}
+
 fn scene_source_layer_filter(
     input_index: usize,
     layer_label: &str,
@@ -23439,6 +23514,11 @@ fn scene_source_layer_filter(
     } else {
         String::new()
     };
+    let look = if matches!(kind, SceneSourceKind::Camera) {
+        camera_look_filter(&params.layout)
+    } else {
+        String::new()
+    };
     let crop = normalized_crop_filter(transform);
     let fit = scene_source_fit_filter(kind, width, height, params);
     let shape = if matches!(kind, SceneSourceKind::Camera) {
@@ -23453,7 +23533,7 @@ fn scene_source_layer_filter(
         String::new()
     };
     format!(
-        "[{input_index}:v]setpts=PTS-STARTPTS,{mirror}{chroma}{crop}{fit}{shape}[{layer_label}]"
+        "[{input_index}:v]setpts=PTS-STARTPTS,{mirror}{chroma}{look}{crop}{fit}{shape}[{layer_label}]"
     )
 }
 
@@ -23697,7 +23777,8 @@ fn camera_only_video_filter(params: &StartSessionParams, preview: bool) -> Strin
     // fit/fill/zoom/pan treatment as the overlay box so preview and output match.
     let frame = camera_frame_filter(video.width, video.height, &params.layout);
     let final_scale = if preview { ",scale=w=960:h=-2" } else { "" };
-    format!("{prefix}{frame},fps={}{final_scale}[v]", video.fps)
+    let look = camera_look_filter(&params.layout);
+    format!("{prefix}{look}{frame},fps={}{final_scale}[v]", video.fps)
 }
 
 fn side_by_side_video_filter(
@@ -23724,8 +23805,9 @@ fn side_by_side_video_filter(
                 ""
             };
             let frame = camera_frame_filter(camera_width, height, &params.layout);
+            let look = camera_look_filter(&params.layout);
             format!(
-                "[{index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[sbs_camera]"
+                "[{index}:v]setpts=PTS-STARTPTS,{mirror}{look}{frame},fps={fps},format=yuv420p[sbs_camera]"
             )
         }
         None => {
@@ -23840,8 +23922,9 @@ fn vertical_video_filter(
     let mut band_layout = params.layout.clone();
     band_layout.camera_fit = CameraFit::Fill;
     let frame = camera_frame_filter(width, camera_height, &band_layout);
+    let look = camera_look_filter(&params.layout);
     let camera = format!(
-        "[{camera_index}:v]setpts=PTS-STARTPTS,{mirror}{frame},fps={fps},format=yuv420p[vt_camera]"
+        "[{camera_index}:v]setpts=PTS-STARTPTS,{mirror}{look}{frame},fps={fps},format=yuv420p[vt_camera]"
     );
     let stack_order = if bands.camera_on_top {
         "[vt_camera][vt_screen]"
@@ -23905,10 +23988,11 @@ fn camera_chain_filter(camera_input_index: usize, params: &StartSessionParams) -
     // Key at native camera resolution (before the frame scale/crop), same
     // ordering as scene_source_layer_filter.
     let chroma = camera_chroma_key_filter(&params.layout);
+    let look = camera_look_filter(&params.layout);
     let prefix = if params.layout.camera_mirror {
-        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,hflip,{chroma}")
+        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,hflip,{chroma}{look}")
     } else {
-        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,{chroma}")
+        format!("[{camera_input_index}:v]setpts=PTS-STARTPTS,{chroma}{look}")
     };
     let frame = camera_frame_filter(width, height, &params.layout);
 
@@ -30030,6 +30114,79 @@ mod tests {
         assert!(matches!(recovered, BlockingProbeOutcome::Finished("ok")));
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_decision_asked_for_during_a_probe_waits_and_never_quarantines_that_node() {
+        use crate::linux_vaapi::{ProbeQuarantine, RenderNodeCandidate};
+
+        let directory =
+            std::env::temp_dir().join(format!("videorc-vaapi-probe-gate-{}", uuid::Uuid::new_v4()));
+        let quarantine = ProbeQuarantine::new(directory.clone());
+        let intel = RenderNodeCandidate {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            driver: Some("i915".to_string()),
+        };
+        let decisions = StdMutex::new(std::collections::HashMap::new());
+        let gate = tokio::sync::Mutex::new(());
+        let resolutions = std::sync::atomic::AtomicUsize::new(0);
+        // What resolve_linux_h264_encoder_uncached does with the sentinel:
+        // adopt a stale one, arm its own, probe, clear it.
+        let (quarantine_ref, intel_ref, resolutions_ref) = (&quarantine, &intel, &resolutions);
+        let resolve = move |probe_returns: Option<oneshot::Receiver<()>>,
+                            armed: Option<oneshot::Sender<()>>| {
+            let (quarantine, intel, resolutions) = (quarantine_ref, intel_ref, resolutions_ref);
+            async move {
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                quarantine.adopt_stale_sentinel()?;
+                quarantine.begin_probe(intel, "/opt/ffmpeg")?;
+                if let Some(armed) = armed {
+                    let _ = armed.send(());
+                }
+                if let Some(probe_returns) = probe_returns {
+                    let _ = probe_returns.await;
+                }
+                quarantine.finish_probe()?;
+                select_linux_h264_encoder(
+                    LinuxH264EncoderPreference::Auto,
+                    Some((intel.path.clone(), LinuxVaapiArgProfile::Standard)),
+                    None,
+                )
+            }
+        };
+        let (armed_tx, armed) = oneshot::channel();
+        let (returns_tx, probe_returns) = oneshot::channel();
+
+        // The renderer's output check starts the probe; the replay ring's
+        // start asks for the same decision while it runs.
+        let (first, second, ()) = tokio::join!(
+            cached_linux_encoder_decision(
+                &decisions,
+                &gate,
+                "ffmpeg|Auto|".to_string(),
+                resolve(Some(probe_returns), Some(armed_tx)),
+            ),
+            cached_linux_encoder_decision(
+                &decisions,
+                &gate,
+                "ffmpeg|Auto|".to_string(),
+                resolve(None, None),
+            ),
+            async {
+                armed.await.expect("the first probe armed its sentinel");
+                tokio::task::yield_now().await;
+                let _ = returns_tx.send(());
+            },
+        );
+
+        let quarantined = quarantine.quarantined();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(quarantined, Vec::new(), "a live probe was quarantined");
+        assert_eq!(resolutions.load(Ordering::SeqCst), 1, "probed twice");
+        let first = first.expect("the probe passed");
+        assert_eq!(first.platform, FfmpegH264Platform::LinuxVaapi);
+        assert_eq!(second.expect("the waiter reads the same answer"), first);
+    }
+
     #[test]
     fn stream_output_topology_requires_every_split_role_to_pass() {
         let video = VideoSettings {
@@ -31277,9 +31434,11 @@ mod tests {
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
                 vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+                horizontal_screen_framing: crate::protocol::HorizontalScreenFraming::Fit,
                 arrangement_mode: crate::protocol::ArrangementMode::Preset,
                 source_transform_overrides: std::collections::BTreeMap::new(),
                 source_visibility: Default::default(),
+                camera_look: Default::default(),
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -31756,8 +31915,8 @@ mod tests {
             // The same capture producers must admit a subsequent real Start.
         }
         state.live_source_switch.lock().unwrap().observe_devices(&[
-            crate::protocol::Device { app: None, window_title: None, id: "camera:iso-runtime".into(), name: "Controlled camera".into(), kind: crate::protocol::DeviceKind::Camera, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
-            crate::protocol::Device { app: None, window_title: None, id: screen_fixture_id.into(), name: "Controlled capture".into(), kind: if screen_fixture_id.starts_with("window:") { crate::protocol::DeviceKind::Window } else { crate::protocol::DeviceKind::Screen }, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+            crate::protocol::Device { app: None, window_title: None, display_uuid: None, id: "camera:iso-runtime".into(), name: "Controlled camera".into(), kind: crate::protocol::DeviceKind::Camera, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+            crate::protocol::Device { app: None, window_title: None, display_uuid: None, id: screen_fixture_id.into(), name: "Controlled capture".into(), kind: if screen_fixture_id.starts_with("window:") { crate::protocol::DeviceKind::Window } else { crate::protocol::DeviceKind::Screen }, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
         ]);
         let failure_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FAILURE").ok();
         // Plan 198 (owner's 0.11.0 take): a screen latch from an incident long
@@ -32854,6 +33013,7 @@ mod tests {
             audio_tracks: Vec::new(),
             pipeline: RecordingPipeline::new(false, true, &[]),
             native_audio_silent_drain: false,
+            capture_notice: None,
             native_audio: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
@@ -33870,6 +34030,26 @@ mod tests {
         }));
         drop(state);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_camera_double_open_is_visible_in_session_status() {
+        assert!(legacy_camera_capture_notice(&[]).is_none());
+        assert!(legacy_camera_capture_notice(&["screen:test".to_string()]).is_none());
+        let mut active = test_active_recording_stub("double-open");
+        active.capture_notice = legacy_camera_capture_notice(&["camera:test".to_string()]);
+        let status = active.status(
+            RecordingState::Recording,
+            Some("Running record session.".to_string()),
+        );
+        assert!(status.message.unwrap().contains("opens the camera again"));
+        assert_eq!(
+            active
+                .status(RecordingState::Failed, Some("Capture failed".to_string()))
+                .message
+                .as_deref(),
+            Some("Capture failed")
+        );
     }
 
     #[test]
@@ -38908,6 +39088,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn camera_look_reaches_every_legacy_camera_graph() {
+        let mut params = base_params(true, false);
+        params.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05,
+            contrast: 1.1,
+            saturation: 0.8,
+        };
+        for preset in [
+            LayoutPreset::ScreenCamera,
+            LayoutPreset::CameraOnly,
+            LayoutPreset::SideBySide,
+            LayoutPreset::VerticalScreenCamera,
+            LayoutPreset::VerticalCameraOnly,
+            LayoutPreset::VerticalCameraTop,
+            LayoutPreset::VerticalCameraBottom,
+            LayoutPreset::VerticalSplit,
+        ] {
+            params.layout.layout_preset = preset.clone();
+            let filter = video_filter(Some(1), &params, false);
+            assert!(
+                filter.contains("eq=brightness=0.05:contrast=1.1:saturation=0.8"),
+                "{preset:?}: camera grade missing from {filter}"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_look_ffmpeg_eq_agrees_with_float_law() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
+                .unwrap();
+        let palette: Vec<[u8; 3]> = serde_json::from_value(fixture["pixels"].clone()).unwrap();
+        let look: crate::protocol::CameraLook =
+            serde_json::from_value(fixture["look"].clone()).unwrap();
+        let width = palette.len() * 4;
+        let mut frame = Vec::new();
+        for _ in 0..4 {
+            for rgb in &palette {
+                for _ in 0..4 {
+                    frame.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 127]);
+                }
+            }
+        }
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_look = look;
+        let filter = camera_look_filter(&layout)
+            .trim_end_matches(',')
+            .to_string();
+        let mut child = Command::new(crate::ffmpeg::default_ffmpeg_path())
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "-s",
+                &format!("{width}x4"),
+                "-i",
+                "pipe:0",
+                "-vf",
+                &filter,
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "pipe:1",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("FFmpeg parity fixture requires FFmpeg");
+        child.stdin.take().unwrap().write_all(&frame).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), frame.len());
+        let mut maximum = 0;
+        for (index, pixel) in frame.chunks_exact(4).enumerate() {
+            assert_eq!(
+                output.stdout[index * 4 + 3],
+                127,
+                "look must preserve key alpha"
+            );
+            let rgb = [pixel[0], pixel[1], pixel[2]].map(|v| f64::from(v) / 255.0);
+            let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+            for (channel, value) in rgb.into_iter().enumerate() {
+                let expected = ((y
+                    + look.brightness
+                    + (look.contrast - 1.0) * (y - 0.5)
+                    + look.saturation * (value - y))
+                    * 255.0)
+                    .round() as u8;
+                assert!(
+                    (1..255).contains(&expected),
+                    "fixture must stay away from clipping"
+                );
+                maximum = maximum.max(expected.abs_diff(output.stdout[index * 4 + channel]));
+            }
+        }
+        // Orchestrator call, plan 213 I, 2026-11-01: legacy eq gets 8/255.
+        // The measured swscale RGB -> YUV -> RGB identity baseline is 2/255;
+        // eq adds about 4/255. CPU/Metal keep the strict 2/255 bound.
+        assert!(maximum <= 8, "FFmpeg eq vs float law: {maximum}/255");
+        eprintln!("camera look FFmpeg eq vs float law: {maximum}/255 (limit 8)");
+    }
+
     /// The FFmpeg-leg twin of scene_geometry's realistic-palette pin: under
     /// chromakey's absolute-CbCr-distance model, the DEFAULT mapping must key
     /// every real screen tone and keep the subject. (Pure synthetic green
@@ -38963,6 +39259,12 @@ mod tests {
     fn camera_layer_filters_key_before_scaling_on_both_ffmpeg_paths() {
         let mut params = base_params(true, false);
         params.layout.camera_chroma_key_enabled = true;
+        params.layout.camera_look = crate::protocol::CameraLook {
+            brightness: 0.05,
+            contrast: 1.1,
+            saturation: 0.8,
+        };
+        assert!(camera_look_filter(&crate::protocol::default_layout_settings()).is_empty());
         params.layout.camera_shape = CameraShape::Circle;
         params.layout.layout_preset = LayoutPreset::ScreenCamera;
         let transform = SceneTransform {
@@ -38988,6 +39290,11 @@ mod tests {
         let key_at = layer.find("chromakey=").expect("scene layer keys");
         let scale_at = layer.find("scale=").expect("scene layer scales");
         assert!(key_at < scale_at, "key must run before scaling: {layer}");
+        let look_at = layer.find("eq=").expect("camera look");
+        assert!(
+            key_at < look_at && look_at < layer.rfind("scale=").unwrap(),
+            "key, look, then frame scale: {layer}"
+        );
         assert!(
             layer.contains("alpha(X,Y)"),
             "shape mask preserves key alpha: {layer}"
@@ -38997,10 +39304,25 @@ mod tests {
         let key_at = chain.find("chromakey=").expect("camera chain keys");
         let scale_at = chain.find("scale=").expect("camera chain scales");
         assert!(key_at < scale_at, "key must run before scaling: {chain}");
+        let look_at = chain.find("eq=").expect("camera look");
+        assert!(
+            key_at < look_at && look_at < chain.rfind("scale=").unwrap(),
+            "key, look, then frame scale: {chain}"
+        );
         assert!(
             chain.contains("alpha(X,Y)"),
             "circle geq preserves key alpha: {chain}"
         );
+        let screen = scene_source_layer_filter(
+            0,
+            "screen",
+            &SceneSourceKind::Screen,
+            &transform,
+            320,
+            180,
+            &params,
+        );
+        assert!(!screen.contains("eq="), "the screen must stay ungraded");
     }
 
     #[test]
@@ -41665,6 +41987,7 @@ mod tests {
             audio_tracks: audio_tracks.clone(),
             pipeline: RecordingPipeline::new(true, false, &audio_tracks),
             native_audio_silent_drain: false,
+            capture_notice: None,
             native_audio: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
@@ -42721,6 +43044,99 @@ mod tests {
         assert!(filter.contains("[1:v]setpts=PTS-STARTPTS"));
         assert!(filter.contains("scale=20:20"));
         assert!(filter.contains("overlay=x=75:y=70"));
+    }
+
+    /// Plan 213 G1: the legacy FFmpeg graph draws the cropped-screen fixture
+    /// the way the compositor does. The production scene graph runs on the
+    /// fixture picture in a real FFmpeg and the samples are read back; it
+    /// skips with a line where FFmpeg is not on PATH (the Rust CI job).
+    #[test]
+    fn ffmpeg_legacy_graph_draws_the_screen_crop_fixture() {
+        use crate::scene_geometry::screen_crop_fixture::{
+            SOURCE_HEIGHT, SOURCE_WIDTH, expected_samples, sample_pixel, source_bgra, transform,
+        };
+        use std::io::Write as _;
+        let ffmpeg_runs = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !ffmpeg_runs {
+            eprintln!(
+                "ffmpeg_legacy_graph_draws_the_screen_crop_fixture: skipped, ffmpeg is not on PATH"
+            );
+            return;
+        }
+        let (width, height) = (128_u32, 72_u32);
+        let mut params = base_params(true, false);
+        params.output.video.width = width;
+        params.output.video.height = height;
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        let scene = scene_with_sources(vec![scene_source(
+            "source:base",
+            SceneSourceKind::Screen,
+            transform(),
+            true,
+        )]);
+        let graph = scene_video_filter(
+            &scene,
+            &CaptureInputs {
+                video: VideoInput::MacScreen { index: 3 },
+                camera_index: None,
+                microphone: None,
+            },
+            &InputLayout {
+                video_input_index: 0,
+                camera_input_index: None,
+                screen_overlay_input_index: None,
+                audio_inputs: Vec::new(),
+                microphone_graph_gain: false,
+                microphone_is_linux_pulse: false,
+            },
+            &params,
+        );
+        let mut child = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "rawvideo"])
+            .args(["-pix_fmt", "bgra", "-framerate", "30", "-video_size"])
+            .arg(format!("{SOURCE_WIDTH}x{SOURCE_HEIGHT}"))
+            .args(["-i", "pipe:0", "-filter_complex"])
+            .arg(&graph)
+            .args(["-map", "[v]", "-frames:v", "1", "-f", "rawvideo"])
+            .args(["-pix_fmt", "rgb24", "pipe:1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("ffmpeg spawns");
+        child
+            .stdin
+            .take()
+            .expect("ffmpeg stdin")
+            .write_all(&source_bgra())
+            .expect("the fixture reaches ffmpeg");
+        let output = child.wait_with_output().expect("ffmpeg finishes");
+        assert!(
+            output.status.success(),
+            "ffmpeg failed on {graph}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), (width * height * 3) as usize);
+        for (point, expected) in expected_samples() {
+            let (x, y) = sample_pixel(point, width, height);
+            let offset = (y * width as usize + x) * 3;
+            let actual = &output.stdout[offset..offset + 3];
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(
+                        |(actual, expected)| (i16::from(*actual) - i16::from(expected)).abs() <= 12
+                    ),
+                "ffmpeg: at {point:?} ({x}, {y}) expected {expected:?}, got {actual:?}"
+            );
+        }
     }
 
     #[test]

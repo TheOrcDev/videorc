@@ -252,6 +252,21 @@ describe('signed Windows electron-builder config', () => {
     assert.match(cleanupStep, /throw "Azure CLI cleanup failed:/)
     assert.doesNotMatch(cleanupStep, /SilentlyContinue|exit 0/)
 
+    // WerFault.exe loads the WER crash-dump helper on a backend crash, so both
+    // signing paths sign it beside the executables and verify its signature.
+    const candidateSigningWorkflow = await readFile(
+      new URL('../../.github/workflows/sign-windows-alpha.yml', import.meta.url),
+      'utf8'
+    )
+    for (const job of [signingJob, candidateSigningWorkflow]) {
+      assert.match(
+        job,
+        /\$werHelper = Get-Item -LiteralPath \(Join-Path \$unpackedRoot 'resources\\videorc_wer_helper\.dll'\)/
+      )
+      assert.match(job, /Files = \$werHelper\.FullName\n\s+FilesFolder = \$unpackedRoot/)
+      assert.match(job, /foreach \(\$executable in \$signedFiles\)/)
+    }
+
     const promotionWorkflow = await readFile(
       new URL('../../.github/workflows/promote-windows-alpha.yml', import.meta.url),
       'utf8'

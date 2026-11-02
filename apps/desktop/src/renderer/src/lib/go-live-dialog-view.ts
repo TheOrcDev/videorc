@@ -2,6 +2,7 @@ import type {
   GoLiveDestinationPreflight,
   GoLivePreflight,
   StreamMetadataDraft,
+  StreamOutputBridge,
   StreamPlatform,
   StreamTargetSettings,
   StreamingSettings
@@ -68,6 +69,24 @@ function withPlatform(issue: { platform?: StreamPlatform; message: string }): st
 }
 
 /**
+ * The raw-frame encoder path (Linux, and Windows when Media Foundation was
+ * rejected) has no second encoder for the vertical leg, so the engine refuses
+ * a start that streams both orientations (#691). The dialog says so on each
+ * vertical row, with its "Go live without …", instead of "3 of 3 ready" and
+ * then a refusal.
+ */
+export const VERTICAL_LEG_UNSUPPORTED_PROBLEM =
+  "This computer can't encode a separate vertical stream yet, so this destination would get the landscape video."
+
+/** The engine would refuse this Go Live's vertical leg (#691). */
+export function verticalLegUnsupported(
+  simulcast: boolean,
+  effectiveBridgeOutput: StreamOutputBridge | null
+): boolean {
+  return simulcast && effectiveBridgeOutput === 'raw-yuv420p'
+}
+
+/**
  * The preflight as the dialog shows it. `titleField` is true when the dialog
  * carries the Title field (a destination streams the instant draft);
  * `titleMissing` when that field is still empty, so a destination held only
@@ -75,7 +94,16 @@ function withPlatform(issue: { platform?: StreamPlatform; message: string }): st
  */
 export function goLiveDialogView(
   preflight: GoLivePreflight | null,
-  { titleField, titleMissing }: { titleField: boolean; titleMissing: boolean }
+  {
+    titleField,
+    titleMissing,
+    verticalUnsupportedIds
+  }: {
+    titleField: boolean
+    titleMissing: boolean
+    /** Rows the engine can't stream on this computer (`verticalLegUnsupported`). */
+    verticalUnsupportedIds?: ReadonlySet<string>
+  }
 ): GoLiveDialogView {
   const destinations = preflight?.destinations ?? []
   const rowIds = new Set(destinations.map((destination) => destination.targetId))
@@ -86,6 +114,9 @@ export function goLiveDialogView(
     const own = errors.filter((issue) => issue.targetId === destination.targetId)
     const onlyTitle = own.length > 0 && own.every(titleHandled)
     if (destination.ready || (onlyTitle && !titleMissing)) {
+      if (verticalUnsupportedIds?.has(destination.targetId)) {
+        return { destination, ready: false, problem: VERTICAL_LEG_UNSUPPORTED_PROBLEM }
+      }
       return { destination, ready: true, problem: null }
     }
     return {
@@ -146,13 +177,16 @@ export function goLiveConfirmGate({
   draft,
   sentStreaming,
   captionsReadiness,
-  entitlementGate
+  entitlementGate,
+  verticalLegUnsupported = false
 }: {
   preflight: GoLivePreflight | null
   draft: StreamMetadataDraft | null
   sentStreaming: StreamingSettings
   captionsReadiness: Pick<GoLiveCaptionsReadiness, 'blocksStart'>
   entitlementGate: EntitlementUiGate
+  /** `verticalLegUnsupported(...)` for this Go Live, when the output check has answered. */
+  verticalLegUnsupported?: boolean
 }): GoLiveConfirmGate {
   const sentTargets = sentStreaming.targets.filter((target) => target.enabled)
   const hasScheduledTargets = sentTargets.some((target) => target.scheduledEventId)
@@ -166,7 +200,14 @@ export function goLiveConfirmGate({
     hasInstantTargets && draft ? broadcastInfoIssues(draft, { titleRequired: true }) : null
   const view = goLiveDialogView(preflight, {
     titleField: hasInstantTargets,
-    titleMissing: hasInstantTargets && (!draft || draft.title.trim() === '')
+    titleMissing: hasInstantTargets && (!draft || draft.title.trim() === ''),
+    verticalUnsupportedIds: verticalLegUnsupported
+      ? new Set(
+          sentTargets
+            .filter((target) => target.outputOrientation === 'vertical')
+            .map((target) => target.id)
+        )
+      : undefined
   })
   const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
   const blocked =

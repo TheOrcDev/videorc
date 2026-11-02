@@ -2959,3 +2959,42 @@ Private receipts include `stop-tail-scheduling-classification.json`,
 `powered-audio-recheck-classification.json`,
 `powered-audio-recheck-cleanup.json`, `optimized-2f8cdbed-tf_77z4_/report.json`,
 and the `linux-procfs-native` verification under the existing evidence root.
+
+### Main integration and restored desktop, 2026-11-02
+
+Integrated protected main through `a2b674ea` (including the inherited 0.18.0
+version) into this development branch. No Linux Beta version was selected.
+The merge retains the deterministic PCM matching tests and folds in main's
+receive-before-deadline behavior: ready PCM must still be drained if the
+consumer was descheduled. A new regression exercises that case for all three
+capture protocols, while the existing timeout and cancellation checks remain.
+The Windows hidden-screen start test remains enabled with its per-state
+capability fixture. Metal golden limits remain mean 2.0 / maximum cell 10;
+main's relaxed paravirtual limits were not adopted.
+
+Verification on the merged source: 411 focused desktop tests pass; the full
+desktop suite passes 6,888 tests across 624 files, with one Windows-only test
+skipped. All 3,064 Node tests pass with zero skips. Typecheck, lint, formatting,
+production build and dependency audits pass. The UI registry check still
+fails on the inherited responsive `page.tsx` change; its behavior was retained.
+Native audio validation passes 43 tests, with two ignored entries (an explicit
+child fixture and a real Pulse-source probe). Clippy passes with the four
+existing Linux allowances, and Rust formatting passes. The full backend suite
+reports 4,234 passed, one failed and 19 ignored in 479.29 seconds. The sole
+failure is the unchanged GLES Beams comparison (mean 20.405, maximum 193).
+Owned cleanup completes without supervisor cleanup signals or leaked
+descendants. Skips and ignored tests do not count as physical acceptance.
+
+The owner restored Ogre's desktop. Session-environment and compositor queries
+now respond after reboot, with AC power connected. Six empty loose Git blobs
+encountered during staging were reconstructed only from working files whose
+canonical Git hashes exactly matched the missing objects. Full Git integrity
+verification passes; no source files were changed by that repair. The prior
+optimized `ac9fdf95` binary is not evidence for this merged source. A fresh
+optimized build and recording comparison are still required.
+
+Private evidence: `merge-main-a2b-validation.json`, the `merge-main-a2b-source`
+and `merge-main-a2b-native` reports, their cleanup receipts, and
+`merge-main-a2b-desktop-restored.json` in the existing evidence root. AppImage,
+physical Ubuntu/Hyprland, endurance, seven-day pilot, update/rollback and
+publication gates remain open. No Beta candidate is accepted or published.

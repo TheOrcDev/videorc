@@ -299,6 +299,7 @@ pub(crate) fn rename_session_file_no_replace(source: &Path, destination: &Path) 
     std::fs::remove_file(source)
 }
 
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
 pub(crate) fn sync_session_file_parent(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {

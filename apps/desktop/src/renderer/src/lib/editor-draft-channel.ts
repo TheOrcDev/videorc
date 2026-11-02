@@ -1,4 +1,9 @@
-import type { CameraTransform, EditorChrome, SceneEditorDraftParams } from '@/lib/backend'
+import type {
+  CameraTransform,
+  EditorChrome,
+  SceneEditorDraftParams,
+  SourceCrop
+} from '@/lib/backend'
 
 /**
  * Live drafts from the Scene stage to the compositor (plan 058, decision 3).
@@ -20,8 +25,9 @@ import type { CameraTransform, EditorChrome, SceneEditorDraftParams } from '@/li
  *   no-op) and `hold(null)` clears the wire once and stops the heartbeat;
  * - a gesture (`begin` … `release`/`cancel`) suspends the hold: `cancel()`
  *   sends `scene.editor.draft.clear` once, drops any pending sample and
- *   re-sends the hold at once; `release(rect)` sends one final `set` with the
- *   rounded rect (the draft and the commit are then bit-identical), stops the
+ *   re-sends the hold at once; `release(rect, crop?)` sends one final `set`
+ *   with the rounded rect (the draft and the commit are then bit-identical;
+ *   an ⌥-drag crop carries its crop the same way, plan 213 G2), stops the
  *   heartbeat, never clears, and FORGETS the hold: the backend drops the
  *   released draft when the commit's revision installs, and the stage holds
  *   again when the committed scene arrives. A hold sent any earlier would
@@ -46,6 +52,8 @@ export const EDITOR_DRAFT_REFUSED = 'editor-draft-refused'
 
 export interface EditorDraftSample {
   transform: CameraTransform
+  /** An ⌥-drag crop's live crop (plan 213 G2). */
+  crop?: SourceCrop
   chrome: EditorChrome
 }
 
@@ -73,7 +81,7 @@ export interface EditorDraftChannel {
   hold(sourceId: null): void
   begin(sourceId: string): void
   sample(draft: EditorDraftSample): void
-  release(rect: CameraTransform): void
+  release(rect: CameraTransform, crop?: SourceCrop): void
   cancel(): void
   dispose(): void
 }
@@ -102,6 +110,13 @@ const rectOf = ({ x, y, width, height }: CameraTransform): CameraTransform => ({
   y,
   width,
   height
+})
+/** The crop's own four fields, for the same reason. */
+const cropOf = ({ cropLeft, cropTop, cropRight, cropBottom }: SourceCrop): SourceCrop => ({
+  cropLeft,
+  cropTop,
+  cropRight,
+  cropBottom
 })
 const sameRect = (a: CameraTransform, b: CameraTransform): boolean =>
   a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
@@ -285,6 +300,7 @@ export function createEditorDraftChannel(options: EditorDraftChannelOptions): Ed
       const params: SceneEditorDraftParams = {
         sourceId: owner.sourceId,
         transform: rectOf(draft.transform),
+        ...(draft.crop ? { crop: cropOf(draft.crop) } : {}),
         chrome: { ...draft.chrome, selected: rectOf(draft.chrome.selected) }
       }
       owner.last = params
@@ -295,7 +311,7 @@ export function createEditorDraftChannel(options: EditorDraftChannelOptions): Ed
       }
       dispatch(params, owner)
     },
-    release(rect) {
+    release(rect, crop) {
       const owner = gesture
       if (disposed || !owner) return
       const last = owner.last
@@ -308,6 +324,7 @@ export function createEditorDraftChannel(options: EditorDraftChannelOptions): Ed
       const final: SceneEditorDraftParams = {
         sourceId: owner.sourceId,
         transform: rectOf(rect),
+        ...(crop ? { crop: cropOf(crop) } : {}),
         chrome: { ...chrome, selected: rectOf(rect), guides: [] }
       }
       if (inFlight) {

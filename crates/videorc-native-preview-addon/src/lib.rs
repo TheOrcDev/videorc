@@ -136,6 +136,24 @@ mod macos {
         }
     }
 
+    /// Where the layer sits inside its host NSView (plan 213 D2): a top-left
+    /// origin in the host's content coordinates (Electron's CSS space, points),
+    /// so the same frame places the layer below the Preview window's drag strip
+    /// or at the Studio slot of the main window. The addon converts it to the
+    /// host layer's own space (flipped or not) with `layer_frame_in_host`.
+    #[napi(object)]
+    pub struct NativePreviewLayerFrame {
+        pub x: f64,
+        pub y: f64,
+        pub width: f64,
+        pub height: f64,
+        pub scale_factor: f64,
+        pub visible: bool,
+        /// Corner radius in points; 0 = square. A radius masks the layer to
+        /// its bounds so the video clips to the slot's rounded panel.
+        pub corner_radius: f64,
+    }
+
     struct InProcessPreviewHost {
         _host_view: Retained<NSView>,
         layer: Retained<CAMetalLayer>,
@@ -143,9 +161,17 @@ mod macos {
         cached_textures: Vec<MetalImportedIosurfaceTexture>,
         visible_requested: bool,
         presented: bool,
+        x: f64,
+        y: f64,
         width: f64,
         height: f64,
         scale_factor: f64,
+        corner_radius: f64,
+        // The host layer's geometry the frame was last converted against: a
+        // non-flipped host measures the layer's origin from its bottom edge,
+        // so a taller host moves the layer unless the frame is set again.
+        host_height: f64,
+        host_flipped: bool,
         layer_hidden: bool,
     }
 
@@ -161,13 +187,7 @@ mod macos {
             ca_layer.superlayer().is_some() && self._host_view.window().is_some()
         }
 
-        fn attach(
-            native_window_handle: &Buffer,
-            width: f64,
-            height: f64,
-            scale_factor: f64,
-            visible: bool,
-        ) -> Result<Self> {
+        fn attach(native_window_handle: &Buffer, frame: &NativePreviewLayerFrame) -> Result<Self> {
             MainThreadMarker::new().ok_or_else(|| {
                 Error::from_reason("Native preview must attach on the macOS main thread.")
             })?;
@@ -183,8 +203,8 @@ mod macos {
                 .ok_or_else(|| Error::from_reason("Metal preview presenter is unavailable."))?;
             let layer = make_preview_layer(
                 presenter.device(),
-                drawable_dimension(width, scale_factor),
-                drawable_dimension(height, scale_factor),
+                drawable_dimension(frame.width, frame.scale_factor),
+                drawable_dimension(frame.height, frame.scale_factor),
             );
             let ca_layer: &CALayer = layer.as_super();
             without_implicit_layer_actions(|| {
@@ -199,31 +219,67 @@ mod macos {
                 layer,
                 presenter,
                 cached_textures: Vec::new(),
-                visible_requested: visible,
+                visible_requested: frame.visible,
                 presented: false,
+                x: 0.0,
+                y: 0.0,
                 width: 0.0,
                 height: 0.0,
                 scale_factor: 0.0,
+                corner_radius: 0.0,
+                host_height: 0.0,
+                host_flipped: false,
                 layer_hidden: true,
             };
-            host.update(width, height, scale_factor, visible);
+            host.update(frame);
             Ok(host)
         }
 
-        fn update(&mut self, width: f64, height: f64, scale_factor: f64, visible: bool) {
-            let scale_factor = scale_factor.max(1.0);
-            let width = width.max(1.0);
-            let height = height.max(1.0);
+        /// The host layer's current geometry: its height in points and whether
+        /// its sublayers' origins are measured from the top (flipped) or the
+        /// bottom (AppKit's default). Read on every update: the host is
+        /// Electron's own view and resizes with its window.
+        fn host_geometry(&self) -> (f64, bool) {
+            match self._host_view.layer() {
+                Some(host_layer) => (
+                    host_layer.bounds().size.height,
+                    host_layer.isGeometryFlipped(),
+                ),
+                None => (self.host_height, self.host_flipped),
+            }
+        }
+
+        fn update(&mut self, frame: &NativePreviewLayerFrame) {
+            let scale_factor = frame.scale_factor.max(1.0);
+            let width = frame.width.max(1.0);
+            let height = frame.height.max(1.0);
+            let x = finite_or(frame.x, 0.0);
+            let y = finite_or(frame.y, 0.0);
+            let corner_radius = finite_or(frame.corner_radius, 0.0).max(0.0);
+            let (host_height, host_flipped) = self.host_geometry();
             let drawable = CGSize {
                 width: drawable_dimension(width, scale_factor),
                 height: drawable_dimension(height, scale_factor),
             };
             let size_changed = self.width != width || self.height != height;
+            let frame_changed = size_changed
+                || self.x != x
+                || self.y != y
+                || self.host_height != host_height
+                || self.host_flipped != host_flipped;
             let scale_changed = self.scale_factor != scale_factor;
-            let visibility_transition =
-                preview_layer_visibility_transition(self.layer_hidden, visible, self.presented);
-            if !size_changed && !scale_changed && visibility_transition.is_none() {
-                self.visible_requested = visible;
+            let radius_changed = self.corner_radius != corner_radius;
+            let visibility_transition = preview_layer_visibility_transition(
+                self.layer_hidden,
+                frame.visible,
+                self.presented,
+            );
+            if !frame_changed
+                && !scale_changed
+                && !radius_changed
+                && visibility_transition.is_none()
+            {
+                self.visible_requested = frame.visible;
                 return;
             }
             let ca_layer: &CALayer = self.layer.as_super();
@@ -234,20 +290,35 @@ mod macos {
                 if scale_changed {
                     ca_layer.setContentsScale(scale_factor);
                 }
-                if size_changed {
-                    ca_layer.setFrame(CGRect {
-                        origin: CGPoint { x: 0.0, y: 0.0 },
-                        size: CGSize { width, height },
-                    });
+                if frame_changed {
+                    ca_layer.setFrame(layer_frame_in_host(
+                        LayerFrame {
+                            x,
+                            y,
+                            width,
+                            height,
+                        },
+                        host_height,
+                        host_flipped,
+                    ));
+                }
+                if radius_changed {
+                    ca_layer.setCornerRadius(corner_radius);
+                    ca_layer.setMasksToBounds(corner_radius > 0.0);
                 }
                 if let Some(hidden) = visibility_transition {
                     ca_layer.setHidden(hidden);
                 }
             });
-            self.visible_requested = visible;
+            self.visible_requested = frame.visible;
+            self.x = x;
+            self.y = y;
             self.width = width;
             self.height = height;
             self.scale_factor = scale_factor;
+            self.corner_radius = corner_radius;
+            self.host_height = host_height;
+            self.host_flipped = host_flipped;
             if let Some(hidden) = visibility_transition {
                 self.layer_hidden = hidden;
             }
@@ -323,18 +394,9 @@ mod macos {
     #[napi]
     pub fn attach_native_preview(
         native_window_handle: Buffer,
-        width: f64,
-        height: f64,
-        scale_factor: f64,
-        visible: bool,
+        frame: NativePreviewLayerFrame,
     ) -> Result<()> {
-        let host = InProcessPreviewHost::attach(
-            &native_window_handle,
-            width,
-            height,
-            scale_factor,
-            visible,
-        )?;
+        let host = InProcessPreviewHost::attach(&native_window_handle, &frame)?;
         HOST.with(|slot| {
             let previous = slot.borrow_mut().replace(host);
             METRICS.with(|metrics| {
@@ -349,18 +411,13 @@ mod macos {
     }
 
     #[napi]
-    pub fn update_native_preview(
-        width: f64,
-        height: f64,
-        scale_factor: f64,
-        visible: bool,
-    ) -> Result<()> {
+    pub fn update_native_preview(frame: NativePreviewLayerFrame) -> Result<()> {
         HOST.with(|slot| {
             let mut slot = slot.borrow_mut();
             let host = slot
                 .as_mut()
                 .ok_or_else(|| Error::from_reason("Native preview is not attached."))?;
-            host.update(width, height, scale_factor, visible);
+            host.update(&frame);
             Ok(())
         })
     }
@@ -947,6 +1004,38 @@ mod macos {
         (points.max(1.0) * scale_factor.max(1.0)).round().max(1.0)
     }
 
+    fn finite_or(value: f64, fallback: f64) -> f64 {
+        if value.is_finite() { value } else { fallback }
+    }
+
+    /// A layer rect in the host's content coordinates: top-left origin, points.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct LayerFrame {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    }
+
+    /// Converts a top-left frame into the host layer's own coordinate space.
+    /// AppKit layers measure a sublayer's origin from the bottom edge unless the
+    /// host is geometry-flipped, so the same slot rect lands at `y` in a flipped
+    /// host and at `host_height - y - height` in a plain one (plan 213 D2).
+    fn layer_frame_in_host(frame: LayerFrame, host_height: f64, host_flipped: bool) -> CGRect {
+        let y = if host_flipped {
+            frame.y
+        } else {
+            host_height - frame.y - frame.height
+        };
+        CGRect {
+            origin: CGPoint { x: frame.x, y },
+            size: CGSize {
+                width: frame.width,
+                height: frame.height,
+            },
+        }
+    }
+
     fn preview_layer_visibility_transition(
         layer_hidden: bool,
         visible_requested: bool,
@@ -959,10 +1048,80 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::{
-            DARK_SNAPSHOT_BASE, DEFAULT_CLEAR_GLASS_BLUR_RADIUS, LIGHT_SNAPSHOT_BASE,
+            DARK_SNAPSHOT_BASE, DEFAULT_CLEAR_GLASS_BLUR_RADIUS, LIGHT_SNAPSHOT_BASE, LayerFrame,
             NativePreviewMetricState, clear_glass_blur_radius, drawable_dimension, filter_is_blur,
-            filter_is_saturation, preview_layer_visibility_transition, without_addresses,
+            filter_is_saturation, finite_or, layer_frame_in_host,
+            preview_layer_visibility_transition, without_addresses,
         };
+
+        #[test]
+        fn a_flipped_host_keeps_the_top_left_origin() {
+            let slot = LayerFrame {
+                x: 240.0,
+                y: 96.0,
+                width: 800.0,
+                height: 450.0,
+            };
+            let rect = layer_frame_in_host(slot, 780.0, true);
+            assert_eq!((rect.origin.x, rect.origin.y), (240.0, 96.0));
+            assert_eq!((rect.size.width, rect.size.height), (800.0, 450.0));
+        }
+
+        #[test]
+        fn a_plain_host_measures_the_origin_from_its_bottom_edge() {
+            // The Studio slot in a 780 pt tall main window.
+            let slot = LayerFrame {
+                x: 240.0,
+                y: 96.0,
+                width: 800.0,
+                height: 450.0,
+            };
+            let rect = layer_frame_in_host(slot, 780.0, false);
+            assert_eq!(
+                (rect.origin.x, rect.origin.y),
+                (240.0, 780.0 - 96.0 - 450.0)
+            );
+            assert_eq!((rect.size.width, rect.size.height), (800.0, 450.0));
+        }
+
+        #[test]
+        fn the_floating_preview_video_still_sits_below_its_drag_strip() {
+            // 960x568 content with a 28 pt strip: the video region starts at
+            // y=28 from the top, which is y=0 from the bottom (the placement the
+            // layer had when its origin was fixed at 0,0).
+            let video = LayerFrame {
+                x: 0.0,
+                y: 28.0,
+                width: 960.0,
+                height: 540.0,
+            };
+            let rect = layer_frame_in_host(video, 568.0, false);
+            assert_eq!((rect.origin.x, rect.origin.y), (0.0, 0.0));
+        }
+
+        #[test]
+        fn a_taller_host_moves_the_same_slot_in_a_plain_host_only() {
+            let slot = LayerFrame {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            };
+            let short = layer_frame_in_host(slot, 300.0, false);
+            let tall = layer_frame_in_host(slot, 500.0, false);
+            assert_eq!(tall.origin.y - short.origin.y, 200.0);
+            assert_eq!(
+                layer_frame_in_host(slot, 300.0, true).origin.y,
+                layer_frame_in_host(slot, 500.0, true).origin.y
+            );
+        }
+
+        #[test]
+        fn non_finite_frame_values_fall_back() {
+            assert_eq!(finite_or(f64::NAN, 0.0), 0.0);
+            assert_eq!(finite_or(f64::INFINITY, 3.0), 3.0);
+            assert_eq!(finite_or(-12.5, 0.0), -12.5);
+        }
 
         #[test]
         fn clear_glass_defaults_match_ghostex_and_the_solid_palette() {
