@@ -591,7 +591,10 @@ import {
   previewSurfaceNativeDrawableMatchesBounds,
   sanitizeRendererPreviewSurfaceStatus
 } from '../shared/native-preview-bounds'
-import { withTrustedPreviewWindowStacking } from './native-preview-window-stacking'
+import {
+  proofSurfaceParentWindow,
+  withTrustedPreviewWindowStacking
+} from './native-preview-window-stacking'
 import {
   accountCoalescedPreviewFrame,
   accountSkippedPreviewFrame
@@ -6737,6 +6740,27 @@ function surfaceWindowPlacement(bounds: PreviewSurfaceBounds): {
   }
 }
 
+function proofSurfaceParent(): BrowserWindow | null {
+  return proofSurfaceParentWindow({
+    dockedInMainWindow: previewDockedInWindow(),
+    mainWindow,
+    previewWindow
+  })
+}
+
+// Re-parented only where the surface is about to show: the dock's host changes
+// with Pop out / Stick to app and with the driver, and moving a shown child
+// onto a hidden window would bring that window up too.
+function syncProofSurfaceParent(surface: ProofSurfaceHost): void {
+  if (!(surface instanceof BrowserWindow)) {
+    return
+  }
+  const parent = proofSurfaceParent()
+  if (parent && surface.getParentWindow() !== parent) {
+    surface.setParentWindow(parent)
+  }
+}
+
 // Linux hosts the proof surface inside its window (in-window-proof-surface.ts):
 // Wayland compositors ignore the absolute frames a separate surface window and
 // the docked preview window ask for, so both landed wherever the compositor
@@ -6754,9 +6778,9 @@ function proofSurfaceWebPreferences(): Electron.WebPreferences {
 
 function createProofSurfaceBrowserWindow(): BrowserWindow {
   const surfaceWindow = new BrowserWindow({
-    // The fallback surface is a child of the preview window: it stacks above
-    // it and moves with it like one app.
-    parent: previewWindow ?? mainWindow ?? undefined,
+    // The fallback surface is a child of the window the Preview is seen in:
+    // it stacks above it and moves with it like one app.
+    parent: proofSurfaceParent() ?? undefined,
     frame: false,
     // Transparency requires the GPU compositor on Windows — with a broken
     // GPU process (Windows Insider builds) a transparent window composites
@@ -6967,6 +6991,7 @@ async function createNativePreviewSurface(
   }
   nativePreviewSurfaceWindow.setBounds(rect)
   if (placement.visible && !nativeSurfaceOwnsPlacement()) {
+    syncProofSurfaceParent(nativePreviewSurfaceWindow)
     nativePreviewSurfaceWindow.showInactive()
   } else if (!placement.visible) {
     nativePreviewSurfaceWindow.hide()
@@ -7061,6 +7086,7 @@ async function updateNativePreviewSurfaceBounds(
   const rect = placement.rect
   nativePreviewSurfaceWindow.setBounds(rect)
   if (placement.visible && !nativeSurfaceOwnsPlacement()) {
+    syncProofSurfaceParent(nativePreviewSurfaceWindow)
     if (!nativePreviewSurfaceWindow.isVisible()) {
       nativePreviewSurfaceWindow.showInactive()
     }
@@ -7127,6 +7153,9 @@ async function showNativePreviewProofSurfaceIfVisible(): Promise<void> {
   }
   const placement = surfaceWindowPlacement(bounds)
   nativePreviewSurfaceWindow.setBounds(placement.rect)
+  if (placement.visible) {
+    syncProofSurfaceParent(nativePreviewSurfaceWindow)
+  }
   if (placement.visible && !nativePreviewSurfaceWindow.isVisible()) {
     nativePreviewSurfaceWindow.showInactive()
   }
