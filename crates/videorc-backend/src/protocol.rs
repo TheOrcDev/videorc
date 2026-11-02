@@ -758,6 +758,7 @@ fn crop_side_is_zero(value: &f64) -> bool {
 
 impl SourceTransformOverride {
     /// The box alone, with no crop.
+    #[cfg(test)]
     pub fn from_box(transform: CameraTransform) -> Self {
         Self {
             x: transform.x,
