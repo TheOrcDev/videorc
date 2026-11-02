@@ -313,6 +313,7 @@
     "release:sync:controlled": "gh workflow run release-sync-origins.yml --ref main",
     "release:recover": "gh workflow run release-recover-publication.yml --ref main",
     "smoke:windows-mf-probe": "node scripts/smoke-windows-mf-probe.mjs",
+    "smoke:windows-system-audio-start": "node scripts/smoke-windows-system-audio-start.mjs",
     "probe:windows-openh264": "node scripts/probe-windows-openh264-comparison.mjs"
   },
   "devDependencies": {

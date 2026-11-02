@@ -334,6 +334,7 @@ pub(crate) use capture::{
 
 #[cfg(windows)]
 mod capture {
+    use std::mem::ManuallyDrop;
     use std::ptr;
     use std::slice;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -931,6 +932,32 @@ mod capture {
         })
     }
 
+    /// A `VT_BLOB` PROPVARIANT whose data is `value`, borrowed: the caller
+    /// keeps `value` alive for as long as the variant is in use.
+    ///
+    /// It is never dropped. windows-rs's `PROPVARIANT` runs `PropVariantClear`
+    /// on drop, and `PropVariantClear` hands a `VT_BLOB`'s data to
+    /// `CoTaskMemFree`; on a borrowed value that frees memory the heap never
+    /// handed out. Every Windows System audio start did exactly that, and the
+    /// heap terminated the backend with 0xC0000374 (2026-11-01 field dump,
+    /// 0.17.4: thread `system-audio-wasapi`, bucket
+    /// `HEAP_CORRUPTION_ACTIONABLE_BlockNotBusy_DOUBLE_FREE_c0000374_combase.dll!PropVariantClearWorker`).
+    fn borrowed_blob_variant<T>(value: &mut T) -> ManuallyDrop<PROPVARIANT> {
+        let mut variant = ManuallyDrop::new(PROPVARIANT::default());
+        // SAFETY: `variant` is zeroed (VT_EMPTY); this selects its VT_BLOB
+        // arm, which is plain data (a length and a pointer).
+        unsafe {
+            let inner = &mut *variant.Anonymous.Anonymous;
+            inner.vt = VT_BLOB;
+            inner.Anonymous.blob = BLOB {
+                cbSize: u32::try_from(std::mem::size_of::<T>())
+                    .expect("an activation blob is a small struct"),
+                pBlobData: ptr::from_mut(value).cast(),
+            };
+        }
+        variant
+    }
+
     /// Activates the process-loopback `IAudioClient` and waits for the
     /// completion handler (the readiness signal) for up to
     /// [`ACTIVATION_TIMEOUT`].
@@ -938,7 +965,9 @@ mod capture {
         let starting = |stage: &str, error: &windows::core::Error| {
             failure_from_error(SystemAudioPhase::Starting, stage, error)
         };
-        let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
+        // Both live on the heap: a timed-out activation may still read them
+        // after this returns, so that path leaks them instead of freeing.
+        let mut params = Box::new(AUDIOCLIENT_ACTIVATION_PARAMS {
             ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
             Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
                 ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
@@ -946,35 +975,26 @@ mod capture {
                     ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
                 },
             },
-        };
-        let mut variant = PROPVARIANT::default();
-        // SAFETY: `variant` is zeroed; this sets its VT_BLOB arm to point at
-        // `params`, which outlives the activation (this function waits for
-        // completion before returning). The raw PROPVARIANT has no Drop, so
-        // the borrowed blob is never freed by PropVariantClear.
-        unsafe {
-            let inner = &mut *variant.Anonymous.Anonymous;
-            inner.vt = VT_BLOB;
-            inner.Anonymous.blob = BLOB {
-                cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                pBlobData: ptr::from_mut(&mut params).cast(),
-            };
-        }
+        });
+        let variant = Box::new(borrowed_blob_variant(&mut *params));
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         let handler: IActivateAudioInterfaceCompletionHandler =
             ActivationCompletion { done: done_tx }.into();
-        // SAFETY: a static device path, a valid IID and a PROPVARIANT that
-        // lives until the activation completed.
+        // SAFETY: a static device path, a valid IID and a PROPVARIANT whose
+        // blob points at `params`; both outlive the activation (completion
+        // is awaited, and a timeout leaks them).
         let operation = unsafe {
             ActivateAudioInterfaceAsync(
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                 &IAudioClient::IID,
-                Some(ptr::from_ref(&variant)),
+                Some(ptr::from_ref::<PROPVARIANT>(&variant)),
                 &handler,
             )
         }
         .map_err(|error| starting("ActivateAudioInterfaceAsync", &error))?;
         if done_rx.recv_timeout(ACTIVATION_TIMEOUT).is_err() {
+            Box::leak(params);
+            Box::leak(variant);
             return Err(SystemAudioFailure::StartFailed(format!(
                 "process loopback activation did not complete within {} s",
                 ACTIVATION_TIMEOUT.as_secs()
@@ -1098,6 +1118,37 @@ mod capture {
                     shared.rejected_buffers.fetch_add(1, Ordering::Relaxed);
                     return Err(SystemAudioFailure::UnsupportedFormat(error));
                 }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod blob_variant_tests {
+        use super::*;
+
+        /// The pre-fix construction (a plain `PROPVARIANT` over a stack
+        /// value, dropped) killed the process with 0xC0000374 on the first
+        /// round (reproduced 2026-11-01 with windows 0.62.2), so reaching the
+        /// asserts is the regression check.
+        #[test]
+        fn a_borrowed_blob_variant_never_frees_the_value_it_points_at() {
+            for round in 0..8_u32 {
+                let mut params = [round; 3];
+                let expected_data = ptr::from_mut(&mut params).cast::<u8>();
+                {
+                    let variant = borrowed_blob_variant(&mut params);
+                    // SAFETY: reads the VT_BLOB arm `borrowed_blob_variant` wrote.
+                    let (vt, blob) = unsafe {
+                        let inner = &variant.Anonymous.Anonymous;
+                        (inner.vt, inner.Anonymous.blob)
+                    };
+                    assert_eq!(vt, VT_BLOB);
+                    assert_eq!(blob.cbSize, 12);
+                    assert_eq!(blob.pBlobData, expected_data);
+                    // `variant` leaves scope here, as it does when
+                    // `activate_process_loopback` returns.
+                }
+                assert_eq!(params, [round; 3], "the borrowed value is untouched");
             }
         }
     }
