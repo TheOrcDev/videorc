@@ -1,5 +1,35 @@
 # Implementation Plans
 
+- 2026-11-02: [Plan 214](214-videorc-camera-in-meet-and-zoom.md), Videorc
+  Camera in Meet and Zoom. Owner ask: a virtual camera like OBS's, so the
+  program shows up as a camera in Google Meet, Zoom, Teams and Discord, on
+  macOS, Windows 11 and Linux. Three spikes outside the tree (a signed,
+  notarized macOS Camera Extension; a Windows Media Foundation virtual
+  camera in the Frame Server; v4l2loopback), then six workstreams:
+  - A: the output tap, reading the program as the Preview shows it,
+    converting off the compositor tick, and asking for pixels at idle on
+    Windows and Linux.
+  - B: the macOS Camera Extension in the bundle, with the restricted
+    entitlement, two Developer ID provisioning profiles, split
+    entitlements, activation from Electron main, and the release
+    validator.
+  - C: the Windows media-source DLL, a cross-session shared ring, and a
+    one-time elevated setup.
+  - D: the Linux v4l2loopback writer with install guidance.
+  - E: the Output page switch, the approval guidance, ⌘K and the agents'
+    mirror, Health.
+  - F: a packaged read-back smoke that compares the camera with a
+    recording and proves Hide screen, plus acceptance on each box.
+
+  No audio (a virtual microphone is a separate, harder project).
+  Fourteen owner decisions, each with a recommendation; D1 is the go on
+  an OBS-parity feature after the goal pivot.
+
+  **EXECUTING** 2026-11-03: the owner said "execute the entire plan and
+  create a pr". So D1 is go, D2 to D14 are as recommended, and the plan
+  ships as one PR. The spikes wait on the Apple portal (B0) and the
+  Windows and Linux boxes.
+
 - 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
   feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,
   Continuity Camera). Ten workstreams, one PR each:
