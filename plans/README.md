@@ -8,17 +8,27 @@
   - C: pages that fit a small window or display.
   - D: Stick to app draws inside the main window, and a floating Preview
     stops fighting a tiling window manager.
-  - E: a missing screen or camera never rewrites your choice (implemented;
-    draft PR, physical camera/display checks owed).
+  - E: a missing screen or camera never rewrites your choice.
   - F: real display names, hot-plug, and resolution changes.
   - G: screen crop and Fill.
   - H: Continuity Camera disconnects and returns cleanly.
   - I: camera brightness, contrast and saturation.
   - J: X chat with a stream key says how to get it.
 
-  **EXECUTING** 2026-11-01: the owner took every recommendation except
-  D2 (no window-size change; C2 dropped) and asked for one PR per
-  workstream.
+  The owner took every recommendation except D2 (no window-size change;
+  C2 dropped) and asked for one PR per workstream.
+
+  **BUILT** 2026-11-02: every workstream is on main as of `d74018b0`.
+  - PRs: #1001, #1010, #1003, #1018, #1000 and #1011, #1019, #1029,
+    #1015, #1017, #1002.
+  - Fixes found along the way: #1007 and #1030.
+  - The combined full desktop suite, `test:scripts` and the
+    recording-studio stages pass, apart from the known 4K separate-source
+    and live-background reds and four smokes the dev app can't run
+    without a camera.
+  - Open: videorc-ui#1, the synced `page.tsx` for C.
+  - Owed: owner acceptance by eye, with AeroSpace, a virtual display, an
+    iPhone and X.
 
 - 2026-10-31: [Plan 212](212-the-preview-never-shows-test-noise.md), The
   Preview never shows test noise. Owner report: on the first launch after
