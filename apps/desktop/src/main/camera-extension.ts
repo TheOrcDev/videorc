@@ -10,6 +10,7 @@
 // "off" still). Deactivation exists for Health, "Remove Videorc Camera".
 
 import identifiers from '../../camera-extension/identifiers.json'
+import type { VirtualCameraPlatformReportParams, VirtualCameraStatus } from '../shared/backend'
 
 /** `dev.theorcdev.videorc.camera`, from the one identifiers file. */
 export const CAMERA_EXTENSION_IDENTIFIER: string = identifiers.extensionBundleId
@@ -257,6 +258,71 @@ export function applyCameraExtensionUpdate(
 /** Pure. The updates that settle an `activate()` or `deactivate()` promise. */
 export function updateSettlesRequest(kind: CameraExtensionUpdateKind): boolean {
   return kind !== 'replacing'
+}
+
+/** What main reports for an unpackaged (dev) build, which carries no extension. */
+export const CAMERA_EXTENSION_DEV_BUILD_REPORT =
+  "Videorc Camera needs the installed Videorc app; a development build can't run it."
+
+/**
+ * Pure. Plan 214 B3's last step: what main tells the backend
+ * (`virtualCamera.platform.report`) for one extension state. Null when the
+ * state says nothing new about the platform (no request yet, a removal in
+ * progress or done) or the platform has no extension at all (the backend
+ * hides those platforms on its own).
+ */
+export function platformReportForCameraExtension(
+  state: CameraExtensionState,
+  options: { platform: string; isPackaged: boolean }
+): VirtualCameraPlatformReportParams | null {
+  if (options.platform !== 'darwin') return null
+  switch (state.phase) {
+    case 'needs-approval':
+      return { platformStep: 'needs-approval' }
+    case 'activating':
+    case 'replacing':
+      return { platformStep: 'installing' }
+    case 'active':
+      return { platformStep: 'ready' }
+    case 'reboot-required':
+      return { platformStep: 'needs-reboot' }
+    case 'failed':
+      return {
+        platformStep: 'failed',
+        message: state.reason ?? 'macOS reported an error installing Videorc Camera.'
+      }
+    case 'unavailable':
+      return {
+        platformStep: 'failed',
+        message: options.isPackaged
+          ? (state.reason ?? CAMERA_EXTENSION_DEV_BUILD_REPORT)
+          : CAMERA_EXTENSION_DEV_BUILD_REPORT
+      }
+    case 'idle':
+    case 'deactivating':
+    case 'removed':
+      return null
+  }
+}
+
+/**
+ * Pure. Whether the camera switch (`virtualCamera.changed`, or the saved
+ * switch read at launch) should activate the extension now: on where main
+ * last saw it off (`previousOn`; null at launch and at every backend READY),
+ * and no request live or finished. A status that changed for another reason
+ * while the switch stays on (the extension's own report, the sink's health)
+ * never retries: a failed activation is reported to the backend as `failed`,
+ * which the backend publishes as a change, and retrying on that would loop
+ * forever. Off never deactivates (D12: the extension draws the "off" still);
+ * deactivation is Health's "Remove Videorc Camera" alone.
+ */
+export function cameraExtensionShouldActivateForSwitch(
+  status: Pick<VirtualCameraStatus, 'on'>,
+  phase: CameraExtensionPhase,
+  previousOn: boolean | null = null
+): boolean {
+  if (!status.on || previousOn === true) return false
+  return phase === 'idle' || phase === 'failed' || phase === 'removed'
 }
 
 export function createCameraExtensionController(options: {

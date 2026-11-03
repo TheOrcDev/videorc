@@ -81,8 +81,10 @@ final class VideorcCameraSourceStreamSource: NSObject, CMIOExtensionStreamSource
     }
 }
 
-/// The stream the Videorc producer pushes into (the OBS model). CMIO exposes
-/// no direction to clients, so the producer finds it as the second stream.
+/// The stream the Videorc producer pushes into (the OBS model). Clients read
+/// its `kCMIOStreamPropertyDirection` as 0 (the source stream's is 1; plan
+/// 214 P0a, measured), and that is how the backend picks it; its name,
+/// "Videorc Camera Sink", is the fallback.
 final class VideorcCameraSinkStreamSource: NSObject, CMIOExtensionStreamSource {
     private(set) var stream: CMIOExtensionStream!
     private let streamFormat: CMIOExtensionStreamFormat

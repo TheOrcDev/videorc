@@ -123,8 +123,23 @@ final class VideorcCameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
             relayQueue.async {
                 self.relay.producerWord = ProducerWord(word: word)
                 cameraLog.info("producer word: \(word, privacy: .public)")
+                self.publishProducerWord()
             }
         }
+    }
+
+    /// Runs on `relayQueue`. CMIO caches custom properties in every client
+    /// until the extension says they changed (plan 214 P0a, measured), so
+    /// each change to the producer word, the producer's own set and the
+    /// reset when it lets go of the sink, is announced; a reader (the
+    /// backend's diagnostics, the F2 smoke) then sees the word the still is
+    /// drawn from.
+    private func publishProducerWord() {
+        device.notifyPropertiesChanged([
+            producerWordProperty: CMIOExtensionPropertyState<AnyObject>(
+                value: relay.producerWord.rawValue as NSString
+            )
+        ])
     }
 
     // MARK: - Source clients (D13)
@@ -182,6 +197,9 @@ final class VideorcCameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
         relayQueue.async {
             self.relay.sinkStopped()
             self.sinkClient = nil
+            // The word reset to `unknown` with the sink: say so, or a client
+            // keeps reading the producer's last word.
+            self.publishProducerWord()
         }
     }
 

@@ -2,9 +2,12 @@ import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
 import {
   cameraExtensionBindingFromModule,
+  cameraExtensionShouldActivateForSwitch,
   createCameraExtensionController,
+  platformReportForCameraExtension,
   shouldActivateCameraExtensionAtLaunch,
-  type CameraExtensionController
+  type CameraExtensionController,
+  type CameraExtensionState
 } from './camera-extension'
 import { runVirtualCameraAction } from './virtual-camera-action'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
@@ -38,7 +41,8 @@ import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
   SessionMediaGrantResult,
-  ShortcutRecorderArmResult
+  ShortcutRecorderArmResult,
+  VirtualCameraStatus
 } from '../shared/backend'
 import {
   SESSION_MEDIA_HOST,
@@ -222,7 +226,8 @@ import {
   parseMainPreviewSurfaceStatus,
   parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatus,
-  parseMainRecordingStatusEvent
+  parseMainRecordingStatusEvent,
+  parseMainVirtualCameraChangedEvent
 } from './backend-event-message'
 import {
   fallbackPreviewSurfaceCanvas,
@@ -1407,8 +1412,12 @@ if (windowAppearanceLoad.unavailableReason && process.platform === 'darwin') {
 }
 // Plan 214 B3: the Videorc Camera system extension, activated from this
 // process (macOS looks it up in the requester's bundle). The controller holds
-// the last state; the camera switch and the backend RPC that receives this
-// state are plan 214 A4's, see `cameraExtensionSwitchOnAtLaunch` below.
+// the last state and reports every change to the backend
+// (`virtualCamera.platform.report`), whose status the Output page shows. The
+// camera switch itself is the backend's (plan 214 A4, D4): main reads it at
+// every backend READY (`reconcileCameraExtensionWithBackend`) and on
+// `virtualCamera.changed`, and activates the extension when it turns on.
+// Off never deactivates (D12).
 let cameraExtensionController: CameraExtensionController | undefined
 function cameraExtension(): CameraExtensionController {
   if (!cameraExtensionController) {
@@ -1427,18 +1436,106 @@ function cameraExtension(): CameraExtensionController {
       isPackaged: app.isPackaged,
       binding,
       log: (line) => logBackend('info', line),
-      onState: () => {
-        // Plan 214 A4 (last step of Workstream B): forward the state to the
-        // backend's virtual_camera RPC so the Output page shows it.
+      onState: (state) => {
+        void reportCameraExtensionToBackend(state)
       }
     })
   }
   return cameraExtensionController
 }
-// Plan 214 A4 supplies the saved switch (D4). Until then only the lab env
-// VIDEORC_CAMERA_EXTENSION_ACTIVATE_AT_LAUNCH=1 activates at launch.
-function cameraExtensionSwitchOnAtLaunch(): boolean {
-  return false
+/** Plan 214 B3's last step: one extension state to the backend, never fatal. */
+async function reportCameraExtensionToBackend(state: CameraExtensionState): Promise<void> {
+  const report = platformReportForCameraExtension(state, {
+    platform: process.platform,
+    isPackaged: app.isPackaged
+  })
+  if (!report) {
+    return
+  }
+  try {
+    await requestBackendAdmin('virtualCamera.platform.report', { ...report })
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Videorc Camera's extension state did not reach the backend: ${errorMessage(error)}`
+    )
+  }
+}
+/**
+ * Plan 214 D4: the saved camera switch lives in the backend's settings store;
+ * `virtualCamera.status` answers it once the backend is ready. False when the
+ * backend cannot answer (the extension then waits for `virtualCamera.changed`).
+ */
+async function cameraExtensionSwitchOnAtLaunch(): Promise<boolean> {
+  try {
+    const status = await requestBackendAdmin<VirtualCameraStatus>('virtualCamera.status')
+    return status.on === true
+  } catch (error) {
+    logBackend('warn', `Could not read the Videorc Camera switch: ${errorMessage(error)}`)
+    return false
+  }
+}
+/**
+ * The switch as main last saw it (null until the backend answered once).
+ * Only an off-to-on edge activates: `virtualCamera.changed` also fires for
+ * the extension's own reports and the sink's health, and a failed
+ * activation must not retry itself on its own `failed` report.
+ */
+let lastVirtualCameraSwitchOn: boolean | null = null
+/**
+ * At every backend READY (a launch or a backend restart): the backend learns
+ * where the extension is, and a switch saved on activates the extension when
+ * no request is live (Apple: as early as possible, so an update replaces the
+ * installed copy).
+ */
+async function reconcileCameraExtensionWithBackend(): Promise<void> {
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const controller = cameraExtension()
+  await reportCameraExtensionToBackend(controller.state())
+  if (!controller.availability().available) {
+    return
+  }
+  const switchOn = await cameraExtensionSwitchOnAtLaunch()
+  // A fresh backend is a fresh read of the switch: whatever main saw before
+  // its restart no longer counts as "already on".
+  const shouldActivate = cameraExtensionShouldActivateForSwitch(
+    { on: switchOn },
+    controller.state().phase,
+    null
+  )
+  lastVirtualCameraSwitchOn = switchOn
+  if (shouldActivate) {
+    logBackend('info', 'Videorc Camera is on in the saved settings; activating its extension.')
+    void controller.activate()
+  }
+}
+/** `virtualCamera.changed`: the switch turning on at runtime activates the extension. */
+function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
+  let status: VirtualCameraStatus
+  try {
+    status = parse()
+  } catch (error) {
+    logBackend('warn', `Main dropped a Videorc Camera status: ${errorMessageText(error)}`)
+    return
+  }
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const controller = cameraExtension()
+  const shouldActivate =
+    controller.availability().available &&
+    cameraExtensionShouldActivateForSwitch(
+      status,
+      controller.state().phase,
+      lastVirtualCameraSwitchOn
+    )
+  lastVirtualCameraSwitchOn = status.on
+  if (shouldActivate) {
+    logBackend('info', 'Videorc Camera switched on; activating its extension.')
+    void controller.activate()
+  }
 }
 type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
 const nativePreviewRealSurfaceDriverLoad = loadNativePreviewPrimaryDriver()
@@ -10552,6 +10649,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
       }
+      if (process.platform === 'darwin') {
+        // Plan 214 B3: the camera switch turning on activates the extension.
+        includedEvents.push('virtualCamera.changed')
+      }
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
       }
@@ -10667,6 +10768,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         )
         return
       }
+      if (parsed.event === 'virtualCamera.changed') {
+        acceptVirtualCameraStatus(() => parseMainVirtualCameraChangedEvent(parsed.payload))
+        return
+      }
       if (parsed.event === 'preview.surface.status') {
         const status = parseMainPreviewSurfaceStatusEvent(parsed.payload)
         const authority = windowsD3d11BackendEventAuthority(status)
@@ -10745,6 +10850,9 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_background_path',
   'resource.admin.preview_surface_bounds',
   'overlays.layout.migrate_highlight_anchor',
+  // Plan 214 B3: the saved camera switch, and main's word on the extension.
+  'virtualCamera.status',
+  'virtualCamera.platform.report',
   // Plan 168 S-A3: register a pet pack folder main just copied.
   'cohost.pet.import',
   // Plan 170 D18: the videorc://buddy deep link syncs, uses and polls.
@@ -11103,6 +11211,7 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
           safeConsole.log(`[smoke] backend-ready ${publicBackendConnectionJson(backendConnection)}`)
         }
         connectBackendEventSocket(backendAdminConnection)
+        void reconcileCameraExtensionWithBackend()
         const rendererConnection = backendConnection
         const adminConnection = backendAdminConnection
         backendAuthorityReady = Promise.all([
@@ -16304,11 +16413,13 @@ app.whenReady().then(async () => {
 
   installRendererSessionPermissions(session.defaultSession)
   // Plan 214 B3: Apple asks for the activation as early as possible so an
-  // update replaces the installed extension at launch.
+  // update replaces the installed extension at launch. The saved switch is
+  // the backend's and arrives at its READY (`reconcileCameraExtensionWithBackend`);
+  // only the lab aid VIDEORC_CAMERA_EXTENSION_ACTIVATE_AT_LAUNCH=1 is known here.
   if (
     shouldActivateCameraExtensionAtLaunch({
       availability: cameraExtension().availability(),
-      switchOn: cameraExtensionSwitchOnAtLaunch(),
+      switchOn: false,
       env: process.env
     })
   ) {

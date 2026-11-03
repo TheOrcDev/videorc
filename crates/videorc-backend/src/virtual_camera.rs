@@ -689,8 +689,17 @@ pub trait VirtualCameraSink: Send {
     /// after an error that disconnected the sink.
     fn connect(&mut self) -> Result<(), VirtualCameraSinkError>;
 
-    /// Close the device. Called on off, on a disconnecting error and at exit.
+    /// Close the device. Called on off and on a disconnecting error.
     fn disconnect(&mut self);
+
+    /// Close the device because Videorc is quitting with the switch still
+    /// on (the output is dropped, not stopped). Defaults to `disconnect`;
+    /// macOS tells the extension nothing then, so its still says "Videorc
+    /// isn't running" rather than "off" (D12), and the switch comes back on
+    /// at the next launch (D4).
+    fn disconnect_at_exit(&mut self) {
+        self.disconnect();
+    }
 
     /// Hand one frame to the device at `pts`. Returns inside the frame's
     /// lifetime: a GPU sink blits before returning.
@@ -708,11 +717,12 @@ pub trait VirtualCameraSink: Send {
 /// The platform has no camera sink yet, or this build cannot run one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualCameraUnavailable {
+    /// Plain copy for the status line.
     pub reason: String,
-    /// The platform's camera is in this build but has not passed its spike
-    /// on a real box (plan 214 D): the status reports
-    /// `platformStep: unsupported` and the Output page hides the section,
-    /// instead of showing an unavailable camera.
+    /// Owner, 2026-11-03: a platform whose camera hasn't passed its on-device
+    /// spike stays hidden. The status reports `platformStep: unsupported`
+    /// and the UI shows no section at all; a non-hidden unavailability shows
+    /// the section with the reason.
     pub hidden: bool,
 }
 
@@ -724,31 +734,39 @@ impl VirtualCameraUnavailable {
         }
     }
 
-    /// Hidden until the named platform's spike passes (`PROVEN` flips).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Only the Linux arm hides today (plan 214 D).
+    /// Owner, 2026-11-03: a platform whose camera hasn't passed its on-device
+    /// spike stays hidden.
+    #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))] // The Windows and Linux arms of `platform_sink` use it.
     pub fn hidden_until_proven(platform: &str) -> Self {
         Self {
-            reason: format!(
-                "Videorc Camera on {platform} is in this build but hidden until it has passed its spike on a real {platform} box (plan 214)."
-            ),
+            reason: format!("Videorc Camera isn't available on {platform} yet."),
             hidden: true,
         }
     }
 }
 
 /// The sink for this platform, or why there is none. Never a silent stub.
+///
+/// Windows (C) and Linux (D) land hidden and flip to their sink once each
+/// machine passes its spike: `if PROVEN { sink() } else { hidden_until_proven(..) }`.
 pub fn platform_sink() -> Result<Box<dyn VirtualCameraSink>, VirtualCameraUnavailable> {
+    // `cargo test` on a Mac with the extension installed must never start
+    // its sink stream: a unit test that turns the switch on gets no sink,
+    // and a test that wants one injects a fake through
+    // `VirtualCameraService::with_sink_factory`. The lab aids that do touch
+    // CoreMediaIO are `#[ignore]` and build their transport directly.
+    if cfg!(test) {
+        return Err(VirtualCameraUnavailable::new(
+            "Videorc Camera isn't available in unit tests (the sink is injected).",
+        ));
+    }
     #[cfg(target_os = "macos")]
     {
-        Err(VirtualCameraUnavailable::new(
-            "Videorc Camera isn't available on macOS yet (the Camera Extension sink, plan 214 B4, hasn't shipped).",
-        ))
+        Ok(Box::new(crate::virtual_camera_macos::CmioSink::system()))
     }
     #[cfg(target_os = "windows")]
     {
-        Err(VirtualCameraUnavailable::new(
-            "Videorc Camera isn't available on Windows yet (the Media Foundation camera, plan 214 C3, hasn't shipped).",
-        ))
+        Err(VirtualCameraUnavailable::hidden_until_proven("Windows"))
     }
     #[cfg(target_os = "linux")]
     {
@@ -878,6 +896,9 @@ pub struct OutputShared {
     demanded: AtomicBool,
     viewers: AtomicI64,
     health: StdMutex<SinkHealth>,
+    /// The output was dropped with the switch on (Videorc is quitting), not
+    /// stopped by the switch: the sink disconnects "at exit".
+    exiting: AtomicBool,
 }
 
 impl Default for OutputShared {
@@ -889,6 +910,7 @@ impl Default for OutputShared {
             demanded: AtomicBool::new(false),
             viewers: AtomicI64::new(VIEWERS_UNCHECKED),
             health: StdMutex::new(SinkHealth::default()),
+            exiting: AtomicBool::new(false),
         }
     }
 }
@@ -1286,7 +1308,11 @@ impl OutputEngine {
         self.demand_guard = None;
         self.shared.demanded.store(false, Ordering::Release);
         if self.connected {
-            self.sink.disconnect();
+            if self.shared.exiting.load(Ordering::Acquire) {
+                self.sink.disconnect_at_exit();
+            } else {
+                self.sink.disconnect();
+            }
             self.connected = false;
         }
         self.shared.set_health(SinkHealth {
@@ -1355,7 +1381,8 @@ impl VirtualCameraOutput {
         &self.shared
     }
 
-    /// Stop the thread and join it (at most one tick late).
+    /// The switch turned off: stop the thread and join it (at most one tick
+    /// late). The sink disconnects as "off".
     pub fn stop(mut self) {
         self.stop_and_join();
     }
@@ -1369,7 +1396,12 @@ impl VirtualCameraOutput {
 }
 
 impl Drop for VirtualCameraOutput {
+    /// Dropped with the switch on: Videorc is quitting. `stop` joined the
+    /// thread already when the switch turned off, and this is a no-op then.
     fn drop(&mut self) {
+        if self.thread.is_some() {
+            self.shared.exiting.store(true, Ordering::Release);
+        }
         self.stop_and_join();
     }
 }
@@ -1420,8 +1452,9 @@ pub fn is_videorc_camera_ffmpeg_name(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusInputs {
     pub on: bool,
-    /// `Err` when this build has no sink for the platform.
-    pub sink: Result<(), String>,
+    /// `Err` when this build has no sink for the platform; a hidden one
+    /// (owner, 2026-11-03) reports `platformStep: unsupported`.
+    pub sink: Result<(), VirtualCameraUnavailable>,
     /// What main reported for the platform (the extension's activation, the
     /// Windows setup step), with its message; `None` until it reports.
     pub platform: Option<(VirtualCameraPlatformStep, Option<String>)>,
@@ -1448,10 +1481,14 @@ pub fn derive_status(inputs: &StatusInputs) -> VirtualCameraStatus {
         platform_step,
         message: None,
     };
-    if let Err(reason) = &inputs.sink {
+    if let Err(unavailable) = &inputs.sink {
         status.available = false;
         status.state = VirtualCameraState::Unavailable;
-        status.message = Some(reason.clone());
+        status.message = Some(unavailable.reason.clone());
+        if unavailable.hidden {
+            // The UI hides the whole section exactly on `unsupported`.
+            status.platform_step = Some(VirtualCameraPlatformStep::Unsupported);
+        }
         return status;
     }
     match platform_step {
@@ -1536,6 +1573,8 @@ pub(crate) mod test_support {
         pub pushes: Vec<FakePush>,
         pub connects: u32,
         pub disconnects: u32,
+        /// `disconnect_at_exit` calls (the output dropped, not stopped).
+        pub exit_disconnects: u32,
         pub viewers: Option<u32>,
         pub connect_error: Option<String>,
         pub push_result: Option<Result<VirtualCameraPush, VirtualCameraSinkError>>,
@@ -1576,6 +1615,10 @@ pub(crate) mod test_support {
 
         fn disconnect(&mut self) {
             self.state.lock().unwrap().disconnects += 1;
+        }
+
+        fn disconnect_at_exit(&mut self) {
+            self.state.lock().unwrap().exit_disconnects += 1;
         }
 
         fn push(
@@ -2197,9 +2240,32 @@ mod tests {
         output.stop();
         assert!(!demand.demanded(), "stop releases the demand");
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.disconnects, 1);
+        assert_eq!(seen.disconnects, 1, "the switch turned off");
+        assert_eq!(seen.exit_disconnects, 0);
         let counters = store.lock().unwrap().stats();
         assert!(counters.buffer_count >= 1);
+    }
+
+    /// D12: an output dropped with the switch on (Videorc quitting) tells
+    /// the sink it is exiting, never that the camera is off.
+    #[test]
+    fn an_output_dropped_with_the_switch_on_disconnects_at_exit() {
+        let (sink, seen) = FakeSink::new(Some(1));
+        let store = cpu_store();
+        publish_cpu_frame(&store, 1, 16, 8, 100);
+        let demand = PixelDemand::new();
+        let engine = engine_with(sink, store, &demand);
+        let output = VirtualCameraOutput::spawn(engine).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().connects < 1 {
+            assert!(Instant::now() < deadline, "the output never connected");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(output);
+        assert!(!demand.demanded(), "exit releases the demand");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.exit_disconnects, 1);
+        assert_eq!(seen.disconnects, 0, "never off");
     }
 
     // --- never list yourself ---
@@ -2317,15 +2383,24 @@ mod tests {
         );
         let no_sink = derive_status(&StatusInputs {
             on: true,
-            sink: Err(fixture["unavailableNoSink"]["message"]
-                .as_str()
-                .unwrap()
-                .to_string()),
+            sink: Err(VirtualCameraUnavailable::new(
+                fixture["unavailableNoSink"]["message"].as_str().unwrap(),
+            )),
             ..inputs()
         });
         assert_eq!(
             serde_json::to_value(&no_sink).unwrap(),
             fixture["unavailableNoSink"]
+        );
+        // Owner, 2026-11-03: a hidden platform reports `unsupported` even
+        // while off, so the UI shows no section at all.
+        let hidden = derive_status(&StatusInputs {
+            sink: Err(VirtualCameraUnavailable::hidden_until_proven("Windows")),
+            ..inputs()
+        });
+        assert_eq!(
+            serde_json::to_value(&hidden).unwrap(),
+            fixture["unavailableHidden"]
         );
         let approval = derive_status(&StatusInputs {
             on: true,
@@ -2407,6 +2482,7 @@ mod tests {
         for key in [
             "off",
             "unavailableNoSink",
+            "unavailableHidden",
             "needsApproval",
             "needsSetup",
             "ready",
@@ -2446,12 +2522,43 @@ mod tests {
 
         let no_sink = derive_status(&StatusInputs {
             on: true,
-            sink: Err("No sink here.".to_string()),
+            sink: Err(VirtualCameraUnavailable::new("No sink here.")),
             ..inputs()
         });
         assert_eq!(no_sink.state, VirtualCameraState::Unavailable);
         assert!(!no_sink.available && no_sink.on);
         assert_eq!(no_sink.message.as_deref(), Some("No sink here."));
+        assert!(no_sink.platform_step.is_none(), "shown, with the reason");
+    }
+
+    /// Owner, 2026-11-03: Windows and Linux code lands hidden until each
+    /// machine passes its spike. Hidden outranks the switch and any platform
+    /// report; a non-hidden unavailability keeps today's behaviour.
+    #[test]
+    fn a_hidden_platform_is_unsupported_on_and_off() {
+        let hidden = VirtualCameraUnavailable::hidden_until_proven("Linux");
+        assert_eq!(
+            hidden.reason,
+            "Videorc Camera isn't available on Linux yet."
+        );
+        assert!(hidden.hidden);
+        assert!(!VirtualCameraUnavailable::new("x").hidden);
+        for on in [false, true] {
+            let status = derive_status(&StatusInputs {
+                on,
+                sink: Err(hidden.clone()),
+                platform: Some((VirtualCameraPlatformStep::Ready, None)),
+                ..inputs()
+            });
+            assert_eq!(status.on, on);
+            assert!(!status.available);
+            assert_eq!(status.state, VirtualCameraState::Unavailable);
+            assert_eq!(
+                status.platform_step,
+                Some(VirtualCameraPlatformStep::Unsupported)
+            );
+            assert_eq!(status.message.as_deref(), Some(hidden.reason.as_str()));
+        }
     }
 
     #[test]
