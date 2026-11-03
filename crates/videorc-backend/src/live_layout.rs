@@ -5698,4 +5698,203 @@ mod tests {
         assert!(messages[0].contains("dropped: 7"));
         assert!(messages[0].contains("latest frame age: none"));
     }
+
+    /// The camera id whose start seam never opens a device: a warm start on
+    /// it reports the slot as it stands. With a frameless slot installed, the
+    /// base shows the real readiness wait and its bail, never a TCC prompt.
+    const FRAMELESS_TEST_CAMERA: &str = "camera:iso-runtime";
+
+    fn freeform_arrangement_of(params: &SceneConfigParams, scene: &Scene) -> SceneConfigParams {
+        use crate::protocol::{ArrangementMode, SourceTransformOverride};
+        let mut freeform = params.clone();
+        freeform.layout.arrangement_mode = ArrangementMode::Freeform;
+        freeform.layout.source_transform_overrides = scene
+            .sources
+            .iter()
+            .map(|source| {
+                let override_box = match source.kind {
+                    SceneSourceKind::Camera => SourceTransformOverride {
+                        x: 0.7,
+                        y: 0.7,
+                        width: 0.25,
+                        height: 0.25,
+                        crop_left: 0.0,
+                        crop_top: 0.0,
+                        crop_right: 0.0,
+                        crop_bottom: 0.0,
+                    },
+                    // The streamer's box: 9.3% in, 90.7% wide and tall.
+                    _ => SourceTransformOverride {
+                        x: 0.093,
+                        y: 0.093,
+                        width: 0.907,
+                        height: 0.907,
+                        crop_left: 0.0,
+                        crop_top: 0.0,
+                        crop_right: 0.0,
+                        crop_bottom: 0.0,
+                    },
+                };
+                (source.id.clone(), override_box)
+            })
+            .collect();
+        freeform
+    }
+
+    /// Plan 216 A1 (red first): the streamer's Freeform click. Their MacBook
+    /// camera acked Live and never sent a frame, the scene already composed
+    /// it, and the click only rearranged the same two sources. A change that
+    /// adds no source never waits for one (D1).
+    #[tokio::test(start_paused = true)]
+    async fn an_arrangement_only_change_never_waits_for_a_frameless_camera_the_scene_composes() {
+        let state = test_state();
+        let mut params = config(LayoutPreset::ScreenCamera, true, true);
+        params.sources.camera_id = Some(FRAMELESS_TEST_CAMERA.to_string());
+        let video = params.video.clone().unwrap();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            FRAMELESS_TEST_CAMERA,
+            &params.layout,
+            &video,
+        )
+        .await;
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            params.sources.screen_id.as_deref().unwrap(),
+            1,
+            1,
+            &video,
+        )
+        .await;
+        let installed = apply_layout_preview(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(1),
+                simulcast_leg: false,
+                config: params.clone(),
+            },
+        )
+        .await
+        .expect("the scene installs while both sources are live");
+        assert_eq!(installed.mode, "idle");
+
+        // The camera then stops for good: Live, zero frames, past the reuse
+        // grace (the plan's support bundle).
+        crate::preview_camera::test_install_frameless_live_camera_for_layout(
+            &state,
+            FRAMELESS_TEST_CAMERA,
+            &params.layout,
+            &video,
+        )
+        .await;
+        assert!(
+            !camera_status_is_live(&preview_camera_status(&state).await),
+            "the scenario needs a camera that is not delivering frames"
+        );
+
+        let applied = apply_layout_preview(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(2),
+                simulcast_leg: false,
+                config: freeform_arrangement_of(&params, &installed.scene),
+            },
+        )
+        .await
+        .expect("an arrangement-only change commits without waiting for the camera");
+        assert_eq!(
+            applied.mode, "idle",
+            "the same sources rearranged must never go through a warm start"
+        );
+        assert_eq!(
+            applied
+                .compositor_status
+                .scene_layout
+                .as_ref()
+                .map(|layout| layout.arrangement_mode.clone()),
+            Some(crate::protocol::ArrangementMode::Freeform)
+        );
+        let camera = preview_camera_status(&state).await;
+        assert_eq!(camera.state, PreviewCameraState::Live);
+        assert_eq!(
+            camera.frames_captured, 0,
+            "the scene change leaves the frameless camera to the recovery driver"
+        );
+    }
+
+    /// Plan 216 A1: a switch that ADDS a camera still waits for its first
+    /// frame, and gives up after the budget when it never comes. A2 letting
+    /// this commit is a STOP condition.
+    #[tokio::test(start_paused = true)]
+    async fn a_switch_that_adds_a_camera_still_waits_for_its_first_frame() {
+        let state = test_state();
+        let screen_only = config(LayoutPreset::ScreenOnly, false, true);
+        let video = screen_only.video.clone().unwrap();
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            screen_only.sources.screen_id.as_deref().unwrap(),
+            1,
+            1,
+            &video,
+        )
+        .await;
+        let installed = apply_layout_preview(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(1),
+                simulcast_leg: false,
+                config: screen_only.clone(),
+            },
+        )
+        .await
+        .expect("the screen-only scene installs");
+        assert!(
+            installed
+                .scene
+                .sources
+                .iter()
+                .all(|source| source.kind != SceneSourceKind::Camera),
+            "the installed scene must compose no camera"
+        );
+
+        // The camera comes up Live but frameless before the switch.
+        let mut with_camera = config(LayoutPreset::ScreenCamera, true, true);
+        with_camera.sources.camera_id = Some(FRAMELESS_TEST_CAMERA.to_string());
+        crate::preview_camera::test_install_frameless_live_camera_for_layout(
+            &state,
+            FRAMELESS_TEST_CAMERA,
+            &with_camera.layout,
+            &video,
+        )
+        .await;
+
+        let error = apply_layout_preview(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(2),
+                simulcast_leg: false,
+                config: with_camera,
+            },
+        )
+        .await
+        .expect_err("a switch that adds a frameless camera must not commit");
+        let message = error.to_string();
+        assert!(
+            message.contains("exceeded its source-start/readiness budget"),
+            "the switch must wait out the camera budget, got: {message}"
+        );
+        assert!(
+            message.contains("camera"),
+            "the refusal must name the camera, got: {message}"
+        );
+        let compositor = state.compositor.lock().await.status.clone();
+        assert_eq!(
+            compositor
+                .scene_layout
+                .as_ref()
+                .map(|layout| layout.layout_preset.clone()),
+            Some(LayoutPreset::ScreenOnly),
+            "the previous scene stays the program"
+        );
+    }
 }
