@@ -3424,3 +3424,71 @@ Windows startup incident diagnostics at `3e0d0573` (job 125686709899): 48
 of 48 controlled cases pass; the FFmpeg-tone control passes 12 and fails 36
 on the packet-tail limit (114 to 267 ms), nine also on frame count. Same as
 main.
+
+### Windows gates at `3e0d0573`, 2026-11-03
+
+"Windows release source gates" at `3e0d0573` (job 125686710094) passed. The
+Rust test step ran three stability passes of 4,283 passed, 0 failed, 21
+ignored, including the `live_chat` fanout test that failed pass 3 at
+`3a75c934`. Node logic tests then ran for the first time on this branch's
+Windows gates: 3,066 tests, 2,963 passed, 0 failed, 103 skipped, including
+the parity pin that `bundledFfmpegPath` broke on Windows (`pins the camera
+look parity test to the bundled FFmpeg, never PATH (plan 213 I)`). That
+verifies the `bundledFfmpegPath` fix on Windows. One green run shows the
+`live_chat` change holds there; it is not stability evidence for a race that
+failed once in main's last fifteen runs.
+
+### Main merged through `57b0c457`, 2026-11-03
+
+Merge `e88d5bd9` takes main's #1052 (nine Linux test fixes). The only
+conflict was `scripts/smoke-remote-control-app.mjs`. Before the clipMark
+relay, this branch turned Clips on with the switch on every host; main's
+version waits for the default ring, logs a SKIP naming the software encoder
+guard when the guard keeps it off, and only then turns it on with the
+switch. Main's version covers this branch's OpenH264 case and still proves
+the default ring where the guard does not apply, so the file now matches
+main byte for byte. After `1cf872a8`'s silent revert, both directions were
+checked. Every file #1052 touched that this branch never edited matches
+main. #1052's patch reverse-applies cleanly to all seven files both sides
+changed. Each file's change from `51e335b3` to the merge equals #1052's
+patch, except the resolved file.
+
+Main's #1052 widens the GLES golden check for Beams and Ghost Fibers to the
+paravirtual Metal bounds, after measuring radeonsi against Apple-GPU
+goldens. On Ogre's Intel UHD 630, pinned to the approved `renderD128`, the
+test ran alone with output shown: it printed no SKIP line, so every golden
+was compared, and all passed. Beams' earlier miss (mean 20.405, maximum 193)
+is inside main's new Beams bound (24.0, 240). The gate now passes because
+main widened the tolerance, not because of a shader change on this branch.
+
+Validation on Ogre at `e88d5bd9`: the three touched Node test files pass 37
+of 37, the five touched smoke scripts parse, typecheck and Rust formatting
+pass. The other test targets passed 26 of 26. Clippy with the Linux CI flags
+passes; plain `-D warnings` fails on platform dead code, as it does on Linux
+by design.
+
+The full backend suite ran 4,241 passed, 1 failed, 20 ignored. The failure
+is `source_iso_stop_flushes_delayed_system_without_future_microphone`
+(session_audio.rs:11904), a test from main; this branch only added
+diagnostics to its assertion messages. Alone it failed 1 of 20 runs. Those
+diagnostics measured both failures: the bus wrote 113,280 and 121,920 frames
+against the 127,259 and 127,273 the assertion needs (stop sample plus the
+48,000-frame system delay), and Stop returned after 327 and 334 ms. No
+microphone or system frame was discarded or dropped. The stop drain extends
+its target by the system delay but not its deadline, 250 ms after Stop here
+(150 ms system playout plus the 100 ms margin). Its unpaced flush starts 60
+ms after Stop, so it must render about 110 chunks of 480 frames in 190 ms,
+about 1.7 ms each; the failing runs managed roughly 2.4 and 1.9 ms per
+chunk. This ran at test opt-level 0 with Ogre's cores near 800 MHz; the dev
+backend builds at opt-level 2 and release at 3, and neither has been
+measured. In production the system delay reaches 1 s when the microphone
+offset is -1000 ms with separate source recordings on. Extending the
+deadline would change a stop-latency budget, so that is left for the owner.
+
+The full desktop suite ran 6,911 passed, 2 failed, 1 skipped while the
+backend suite compiled at load average 10 or more: `buddy-onboarding` and
+`schedule-stream-dialog` each hit vitest's 5 s timeout. Both files then
+passed 3 of 3 runs alone (23 tests). `comments-snapshot-delta` hit the same
+5 s timeout on a second full run (6,912 passed, 1 failed, 1 skipped) and
+passed 3 of 3 runs alone (6 tests). None of the three files is changed by
+this branch.
