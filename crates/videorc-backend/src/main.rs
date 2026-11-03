@@ -11549,10 +11549,12 @@ async fn handle_text_message_with_role(
                             // buffer-only start on a software encoder is a
                             // typed refusal, so the renderer keeps the switch
                             // off and says why instead of retrying.
-                            let code = if error
-                                .downcast_ref::<replay_buffer::AutoStartRefused>()
-                                .is_some()
+                            let code = if let Some(refusal) =
+                                error.downcast_ref::<replay_buffer::AutoStartRefused>()
                             {
+                                // The ring's status carries the reason too,
+                                // not a bare "off".
+                                replay_buffer::note_auto_start_refused(state, &refusal.message);
                                 replay_buffer::SOFTWARE_ENCODER_REFUSAL_CODE
                             } else if error
                                 .downcast_ref::<replay_buffer::AutoStartSourcesNotReady>()
