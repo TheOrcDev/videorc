@@ -211,7 +211,7 @@ pub fn parse_windows_dshow_camera_id(id: &str) -> Option<String> {
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn windows_dshow_camera_device_id(device_name: &str) -> String {
+pub(crate) fn windows_dshow_camera_device_id(device_name: &str) -> String {
     format!(
         "{WINDOWS_DSHOW_CAMERA_PREFIX}{}",
         encode_hex(device_name.as_bytes())
@@ -508,8 +508,10 @@ mod windows_native {
         let mut devices = Vec::new();
         for index in 0..count {
             let activate = unsafe { activates.add(index as usize).read() };
-            if let Some(activate) = activate {
-                devices.push(device_from_activate(&activate, index));
+            if let Some(device) =
+                activate.and_then(|activate| device_from_activate(&activate, index))
+            {
+                devices.push(device);
             }
         }
         unsafe { CoTaskMemFree(Some(activates.cast())) };
@@ -517,13 +519,21 @@ mod windows_native {
         Ok(devices)
     }
 
-    fn device_from_activate(activate: &IMFActivate, index: u32) -> Device {
+    /// `None` for Videorc Camera itself (plan 214 A5): by the media source
+    /// CLSID in the symbolic link, and by the name prefix as a belt.
+    fn device_from_activate(activate: &IMFActivate, index: u32) -> Option<Device> {
         let friendly_name = mf_string(activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)
             .unwrap_or_else(|| format!("Camera {}", index + 1));
         let symbolic_link = mf_string(
             activate,
             &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
         );
+        if crate::virtual_camera::is_videorc_camera_windows(
+            symbolic_link.as_deref(),
+            &friendly_name,
+        ) {
+            return None;
+        }
         // The capture name is what ffmpeg's dshow demuxer receives as
         // `-i video=<name>`. dshow's device selector is the DirectShow FRIENDLY
         // NAME, not the MediaFoundation symbolic link — feeding it the MF
@@ -532,7 +542,7 @@ mod windows_native {
         // tester "camera granted but not working" report). The symbolic link
         // stays in the detail for support triage, not as the ffmpeg arg.
         let capture_name = friendly_name.clone();
-        Device {
+        Some(Device {
             app: None,
             window_title: None,
             display_uuid: None,
@@ -546,7 +556,7 @@ mod windows_native {
             )),
             width: None,
             height: None,
-        }
+        })
     }
 
     fn mf_string(activate: &IMFActivate, key: &GUID) -> Option<String> {
@@ -712,6 +722,10 @@ mod macos {
             let name = unsafe { camera.localizedName() };
             let name =
                 ns_string_to_string(&name).unwrap_or_else(|| format!("Camera {}", index + 1));
+            // Plan 214 A5: never list Videorc Camera as a source of itself.
+            if crate::virtual_camera::is_videorc_camera_macos(&unique_id, &name) {
+                continue;
+            }
             let device_type = unsafe { camera.deviceType() }.to_string();
             let is_continuity = device_type == "AVCaptureDeviceTypeContinuityCamera"
                 || (objc2::available!(macos = 13.0) && unsafe { camera.isContinuityCamera() });
@@ -793,6 +807,10 @@ mod macos {
     }
 
     pub fn camera_name_for_unique_id(unique_id: &str) -> Option<String> {
+        // Plan 214 A5: a saved id naming Videorc Camera resolves to nothing.
+        if crate::virtual_camera::is_videorc_camera_macos(unique_id, "") {
+            return None;
+        }
         let unique_id = NSString::from_str(unique_id);
         let camera = unsafe { AVCaptureDevice::deviceWithUniqueID(&unique_id) }?;
         let name = unsafe { camera.localizedName() };

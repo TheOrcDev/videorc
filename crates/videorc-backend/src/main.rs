@@ -167,6 +167,8 @@ mod usage_stats;
 mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
+mod virtual_camera;
+mod virtual_camera_service;
 mod warm_microphone;
 #[allow(dead_code)]
 mod windows_capture_owner;
@@ -622,6 +624,8 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     }
     // Plan 186 S10: "Hide after" and "Show every" for the whole process.
     tokio::spawn(banner_timers::run_banner_timers(state.clone()));
+    // Plan 214 D4: Videorc Camera comes back on when it was on.
+    virtual_camera_service::start_from_settings(&state).await;
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -5791,7 +5795,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.live.start"
         | "preview.live.stop"
         | "screen.hide"
-        | "screen.show" => Some(DEFAULT_MUTATION_POLICY),
+        | "screen.show"
+        | "virtualCamera.set"
+        | "virtualCamera.platform.report" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.source.switch" => Some(Mutation {
             max_execution_age: live_source_switch::SOURCE_SWITCH_EXECUTION_TIMEOUT,
@@ -5989,6 +5995,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "session.sources.get"
         | "recording.status"
         | "screen.privacy.get"
+        | "virtualCamera.status"
         | "stream.targets.snapshot" => Some(Observation),
 
         "screens.active" => Some(DEFAULT_MUTATION_POLICY),
@@ -13593,6 +13600,49 @@ async fn handle_text_message_with_role(
                 ServerResponse::ok(command.id, privacy)
             }
         }
+        // Plan 214 A4: Videorc Camera. The switch is saved (D4); the status
+        // rides `virtualCamera.changed` on every change.
+        "virtualCamera.status" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "virtualCamera.status does not accept parameters",
+                )
+            } else {
+                ServerResponse::ok(command.id, virtual_camera_service::status(state))
+            }
+        }
+        "virtualCamera.set" => {
+            match serde_json::from_value::<protocol::VirtualCameraSetParams>(command.params) {
+                Ok(params) => match virtual_camera_service::set_on(state, params.on).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "virtual-camera-setting", error)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "virtualCamera.platform.report" => {
+            match serde_json::from_value::<protocol::VirtualCameraPlatformReportParams>(
+                command.params,
+            ) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    virtual_camera_service::report_platform(
+                        state,
+                        params.platform_step,
+                        params.message,
+                    ),
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "session.remux_mp4" => {
             match serde_json::from_value::<protocol::RemuxSessionParams>(command.params) {
                 Ok(params)
@@ -16747,6 +16797,78 @@ mod tests {
                 "{method} can change authoritative takeover state and must use mutation execution"
             );
         }
+    }
+
+    /// Plan 214 A4: the switch through the renderer socket, the platform
+    /// report through the admin socket only, with the event and the exact
+    /// wire shapes (absent fields omitted, never null).
+    #[tokio::test]
+    async fn virtual_camera_rpcs_round_trip_with_the_event() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let status =
+            json!({ "id": "status", "method": "virtualCamera.status", "params": {} }).to_string();
+        let response = handle_text_message_with_role(&state, &status, BackendRole::Renderer).await;
+        assert!(response.ok);
+        assert_eq!(
+            response.payload.unwrap(),
+            json!({ "on": false, "available": true, "state": "off" })
+        );
+        // The platform report is main's: the renderer never forges it.
+        let report = json!({
+            "id": "report", "method": "virtualCamera.platform.report",
+            "params": { "platformStep": "needs-approval", "message": "Allow it in System Settings." }
+        })
+        .to_string();
+        let refused = handle_text_message_with_role(&state, &report, BackendRole::Renderer).await;
+        assert!(!refused.ok, "{refused:?}");
+        let reported = handle_text_message_with_role(&state, &report, BackendRole::Admin).await;
+        assert!(reported.ok, "{reported:?}");
+        let payload = reported.payload.unwrap();
+        assert_eq!(payload["state"], "needs-approval");
+        assert_eq!(payload["platformStep"], "needs-approval");
+        assert_eq!(payload["message"], "Allow it in System Settings.");
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.event, "virtualCamera.changed");
+        assert_eq!(event.payload, payload);
+        // The switch is saved on (D4). This build has no platform sink yet,
+        // which outranks the platform's report: the status says so, never
+        // a silent success.
+        let set = json!({ "id": "set", "method": "virtualCamera.set", "params": { "on": true } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &set, BackendRole::Renderer).await;
+        assert!(response.ok, "{response:?}");
+        let payload = response.payload.unwrap();
+        assert_eq!(payload["on"], true);
+        assert_eq!(payload["available"], false);
+        assert_eq!(payload["state"], "unavailable");
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("isn't available")),
+            "{payload}"
+        );
+        assert!(state.virtual_camera_setting().unwrap().on);
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.event, "virtualCamera.changed");
+        assert_eq!(event.payload["on"], true);
+        let bad = json!({ "id": "bad", "method": "virtualCamera.set", "params": { "on": "yes" } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &bad, BackendRole::Renderer).await;
+        assert!(!response.ok);
+        let off = json!({ "id": "off", "method": "virtualCamera.set", "params": { "on": false } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &off, BackendRole::Renderer).await;
+        assert!(response.ok);
+        assert!(!state.virtual_camera_setting().unwrap().on);
+        assert!(
+            websocket_command_is_read_only(&status),
+            "virtualCamera.status is an observation"
+        );
+        assert!(
+            websocket_command_mutation_max_execution_age(&set).is_some(),
+            "virtualCamera.set is a mutation"
+        );
     }
 
     /// Plan 210 S7: hide and show through the renderer socket, with the event

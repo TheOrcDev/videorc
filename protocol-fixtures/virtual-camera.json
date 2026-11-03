@@ -1,0 +1,79 @@
+{
+  "$comment": "Videorc Camera wire shapes (plan 214 A4). Absent fields are omitted, never null. Rust: cargo test -p videorc-backend virtual_camera_fixture. TypeScript: pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts",
+  "off": {
+    "on": false,
+    "available": true,
+    "state": "off"
+  },
+  "unavailableNoSink": {
+    "on": true,
+    "available": false,
+    "state": "unavailable",
+    "message": "Videorc Camera isn't available on macOS yet (the Camera Extension sink, plan 214 B4, hasn't shipped)."
+  },
+  "needsApproval": {
+    "on": true,
+    "available": true,
+    "state": "needs-approval",
+    "platformStep": "needs-approval",
+    "message": "Allow Videorc Camera in System Settings → General → Login Items & Extensions → Camera Extensions."
+  },
+  "needsSetup": {
+    "on": false,
+    "available": true,
+    "state": "needs-setup",
+    "platformStep": "needs-setup"
+  },
+  "ready": {
+    "on": true,
+    "available": true,
+    "state": "ready",
+    "viewers": 0,
+    "platformStep": "ready"
+  },
+  "streaming": {
+    "on": true,
+    "available": true,
+    "state": "streaming",
+    "viewers": 2,
+    "platformStep": "ready"
+  },
+  "streamingUnknownViewers": {
+    "on": true,
+    "available": true,
+    "state": "streaming"
+  },
+  "setParams": {
+    "on": true
+  },
+  "platformReportParams": {
+    "platformStep": "failed",
+    "message": "Move Videorc to the Applications folder."
+  },
+  "platformReportParamsBare": {
+    "platformStep": "ready"
+  },
+  "rejected": [
+    {
+      "on": true,
+      "available": true,
+      "state": "ready",
+      "viewers": null
+    },
+    {
+      "on": true,
+      "available": true,
+      "state": "sleeping"
+    },
+    {
+      "on": "yes",
+      "available": true,
+      "state": "off"
+    },
+    {
+      "on": false,
+      "state": "off"
+    },
+    {}
+  ]
+}
