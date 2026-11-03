@@ -2,15 +2,19 @@ import { describe, expect, it } from 'vitest'
 
 import {
   CAMERA_EXTENSION_ACTIVATE_AT_LAUNCH_ENV,
+  CAMERA_EXTENSION_DEV_BUILD_REPORT,
   CAMERA_EXTENSION_IDENTIFIER,
   applyCameraExtensionUpdate,
   cameraExtensionAvailability,
   cameraExtensionBindingFromModule,
+  cameraExtensionShouldActivateForSwitch,
   createCameraExtensionController,
   normalizeUpdate,
+  platformReportForCameraExtension,
   shouldActivateCameraExtensionAtLaunch,
   updateSettlesRequest,
   type CameraExtensionBinding,
+  type CameraExtensionPhase,
   type CameraExtensionState,
   type CameraExtensionUpdate
 } from './camera-extension'
@@ -345,5 +349,130 @@ describe('createCameraExtensionController', () => {
       available: false,
       reason: expect.stringContaining('dev app')
     })
+  })
+})
+
+describe('the backend report for an extension state (plan 214 B3, last step)', () => {
+  const state = (
+    phase: CameraExtensionPhase,
+    reason: string | null = null
+  ): CameraExtensionState => ({
+    phase,
+    action: 'activate',
+    reason,
+    code: null,
+    codeName: null,
+    detail: null,
+    existingVersion: null,
+    newVersion: null,
+    updatedAt: 1
+  })
+  const packaged = { platform: 'darwin', isPackaged: true }
+
+  it('maps every phase to the platform step the backend knows', () => {
+    expect(platformReportForCameraExtension(state('needs-approval'), packaged)).toEqual({
+      platformStep: 'needs-approval'
+    })
+    expect(platformReportForCameraExtension(state('activating'), packaged)).toEqual({
+      platformStep: 'installing'
+    })
+    expect(platformReportForCameraExtension(state('replacing'), packaged)).toEqual({
+      platformStep: 'installing'
+    })
+    expect(platformReportForCameraExtension(state('active'), packaged)).toEqual({
+      platformStep: 'ready'
+    })
+    expect(platformReportForCameraExtension(state('reboot-required'), packaged)).toEqual({
+      platformStep: 'needs-reboot'
+    })
+    expect(
+      platformReportForCameraExtension(
+        state('failed', 'Move Videorc to the Applications folder.'),
+        packaged
+      )
+    ).toEqual({ platformStep: 'failed', message: 'Move Videorc to the Applications folder.' })
+    expect(platformReportForCameraExtension(state('failed'), packaged)).toEqual({
+      platformStep: 'failed',
+      message: 'macOS reported an error installing Videorc Camera.'
+    })
+  })
+
+  it('reports a dev build as failed with the plain reason, and a packaged build without the addon with its own', () => {
+    expect(
+      platformReportForCameraExtension(state('unavailable', 'The dev app carries no extension.'), {
+        platform: 'darwin',
+        isPackaged: false
+      })
+    ).toEqual({ platformStep: 'failed', message: CAMERA_EXTENSION_DEV_BUILD_REPORT })
+    expect(
+      platformReportForCameraExtension(state('unavailable', 'No addon export.'), packaged)
+    ).toEqual({ platformStep: 'failed', message: 'No addon export.' })
+    expect(platformReportForCameraExtension(state('unavailable'), packaged)).toEqual({
+      platformStep: 'failed',
+      message: CAMERA_EXTENSION_DEV_BUILD_REPORT
+    })
+  })
+
+  it('says nothing before a request, during a removal, after one, or off macOS', () => {
+    for (const phase of ['idle', 'deactivating', 'removed'] as const) {
+      expect(platformReportForCameraExtension(state(phase), packaged)).toBeNull()
+    }
+    for (const platform of ['win32', 'linux']) {
+      expect(
+        platformReportForCameraExtension(state('unavailable', 'macOS only'), {
+          platform,
+          isPackaged: true
+        })
+      ).toBeNull()
+      expect(
+        platformReportForCameraExtension(state('active'), { platform, isPackaged: true })
+      ).toBeNull()
+    }
+  })
+
+  it('activates for a switch turning on only when nothing is live, and never deactivates for off (D12)', () => {
+    for (const phase of ['idle', 'failed', 'removed'] as const) {
+      expect(cameraExtensionShouldActivateForSwitch({ on: true }, phase)).toBe(true)
+      expect(cameraExtensionShouldActivateForSwitch({ on: false }, phase)).toBe(false)
+    }
+    for (const phase of [
+      'unavailable',
+      'activating',
+      'needs-approval',
+      'replacing',
+      'active',
+      'reboot-required',
+      'deactivating'
+    ] as const) {
+      expect(cameraExtensionShouldActivateForSwitch({ on: true }, phase)).toBe(false)
+      expect(cameraExtensionShouldActivateForSwitch({ on: false }, phase)).toBe(false)
+    }
+  })
+
+  it('wires onState to the report, including the dev build at creation', () => {
+    const reports: unknown[] = []
+    const { controller: dev } = controller(null, {
+      isPackaged: false,
+      onState: (next) =>
+        reports.push(
+          platformReportForCameraExtension(next, { platform: 'darwin', isPackaged: false })
+        )
+    })
+    expect(reports).toEqual([])
+    expect(
+      platformReportForCameraExtension(dev.state(), { platform: 'darwin', isPackaged: false })
+    ).toEqual({ platformStep: 'failed', message: CAMERA_EXTENSION_DEV_BUILD_REPORT })
+    const { binding, emit } = fakeBinding()
+    const { controller: real } = controller(binding, {
+      onState: (next) => reports.push(platformReportForCameraExtension(next, packaged))
+    })
+    void real.activate()
+    emit({ kind: 'needs-approval' })
+    emit({ kind: 'completed' })
+    expect(reports).toEqual([
+      { platformStep: 'installing' },
+      { platformStep: 'needs-approval' },
+      { platformStep: 'ready' }
+    ])
   })
 })
