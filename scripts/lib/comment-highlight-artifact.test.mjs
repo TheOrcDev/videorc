@@ -17,9 +17,12 @@ import {
   mirrorCommentHighlightAnchor,
   captionStimulusPngBase64,
   analyzeCommentHighlightArtifact,
+  chatBoxRegions,
   classifyCommentHighlightResult,
   commentHighlightStimulusPngBase64,
+  evaluateChatBoxArtifactMetrics,
   evaluateCommentHighlightArtifactMetrics,
+  measureChatBoxArtifactRgb,
   measureCommentHighlightArtifactRgb
 } from './comment-highlight-artifact.mjs'
 import { ffmpegAvailable } from './ffmpeg-available.mjs'
@@ -562,3 +565,61 @@ function fillRect(rgb, frameWidth, startColumn, startRow, endColumn, endRow, col
     }
   }
 }
+
+describe('chat box artifact (plan 215 G)', () => {
+  const rect = { x: 0, y: 0, w: 0.5, h: 0.5 }
+  // A 4x4 frame: the top-left quarter is the chat rect.
+  const frame = ({ emote = false, dark = false } = {}) => {
+    const rgb = new Uint8Array(4 * 4 * 3).fill(128)
+    const paint = (x, y, [red, green, blue]) => {
+      const offset = (y * 4 + x) * 3
+      rgb[offset] = red
+      rgb[offset + 1] = green
+      rgb[offset + 2] = blue
+    }
+    if (dark) {
+      paint(0, 0, [16, 16, 18])
+      paint(1, 0, [16, 16, 18])
+    }
+    if (emote) paint(0, 1, COMMENT_HIGHLIGHT_EMOTE_RGB)
+    return rgb
+  }
+  const frames = (...parts) => {
+    const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0))
+    let offset = 0
+    for (const part of parts) {
+      out.set(part, offset)
+      offset += part.length
+    }
+    return out
+  }
+
+  it('maps the rect and its mirror to sampled pixels', () => {
+    assert.deepEqual(
+      chatBoxRegions({ x: 0.1, y: 0.2, w: 0.3, h: 0.4 }, { width: 10, height: 10 }),
+      {
+        box: { xStart: 1, xEnd: 4, yStart: 2, yEnd: 6 },
+        mirrored: { xStart: 6, xEnd: 9, yStart: 2, yEnd: 6 }
+      }
+    )
+  })
+
+  it('passes when the emote and the glass sit in the chat rect', () => {
+    const box = frame({ emote: true, dark: true })
+    const metrics = measureChatBoxArtifactRgb(frames(box, box), { width: 4, height: 4, rect })
+    const verdict = evaluateChatBoxArtifactMetrics(metrics)
+    assert.equal(verdict.pass, true, verdict.failures.join('; '))
+    assert.equal(verdict.observations.boxFrames, 2)
+  })
+
+  it('fails without the emote, without the glass, or with one frame', () => {
+    for (const parts of [
+      [frame({ dark: true }), frame({ dark: true })],
+      [frame({ emote: true }), frame({ emote: true })],
+      [frame({ emote: true, dark: true }), frame()]
+    ]) {
+      const metrics = measureChatBoxArtifactRgb(frames(...parts), { width: 4, height: 4, rect })
+      assert.equal(evaluateChatBoxArtifactMetrics(metrics).pass, false)
+    }
+  })
+})

@@ -1668,16 +1668,20 @@ const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
   highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
   captions:
     'The caption bar. Drag its edges to set its width; style and text size live in Captions.',
-  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.'
+  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.',
+  // Plan 215 D5: viewers' names go on stream, so the switches say so.
+  chat: "The last five chat messages, with each viewer's name. Drag the box on the stage or snap it to a corner."
 }
 
 /** What the selected overlay item's first row says while both switches are
  * off (plan 205 S3, D4): no output carries it, so the Preview draws nothing
- * for it, even while it is selected, and these words say why. Only Buddy has
- * a picture you'd look for at rest; the highlight card's and the caption
- * bar's chips still say "Off". */
+ * for it, even while it is selected, and these words say why. Only Buddy and
+ * the chat box (plan 215 D5, off by default because it shows viewers' names)
+ * have a picture you'd look for at rest; the highlight card's and the
+ * caption bar's chips still say "Off". */
 export const OVERLAY_ITEM_OFF_LINES: Partial<Record<OverlayItem, string>> = {
-  buddy: "Off. Viewers don't see Buddy."
+  buddy: "Off. Viewers don't see Buddy.",
+  chat: "Off. Viewers don't see chat."
 }
 
 /** The selected overlay item's section: its name, then its state while no

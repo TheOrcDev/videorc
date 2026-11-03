@@ -143,7 +143,8 @@ export interface StageOverlays {
 const OVERLAY_ICONS: Record<OverlayItem, ElementType> = {
   highlight: ChatIcon,
   captions: CaptionsIcon,
-  buddy: BuddyIcon
+  buddy: BuddyIcon,
+  chat: ChatIcon
 }
 const stageItemIcon = (entry: OverlayStageItem): ElementType =>
   entry.kind === 'overlay' ? OVERLAY_ICONS[entry.item] : ImageIcon

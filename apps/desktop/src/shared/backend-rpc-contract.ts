@@ -49,6 +49,10 @@ import type {
   BuddyReactionTable,
   MigrateHighlightAnchorParams,
   OverlayLayout,
+  OverlayItemLayout,
+  ChatOverlayCanvases,
+  ChatOverlayInfo,
+  SetChatOverlayParams,
   Banner,
   BannerHideParams,
   Sound,
@@ -507,6 +511,11 @@ export interface BackendRpcMethodMap {
     OverlayLayout
   >
   // --- end overlay layout (plan 164) ---
+  // --- Chat on stream (plan 215 G) ---
+  'chat.overlay.set': BackendRpcDefinition<SetChatOverlayParams, ChatOverlayInfo>
+  'chat.overlay.clear': BackendRpcDefinition<undefined, ChatOverlayInfo>
+  'chat.overlay.canvases': BackendRpcDefinition<undefined, ChatOverlayCanvases>
+  // --- end chat on stream (plan 215 G) ---
   // --- Banners (plan 186) ---
   'banners.list': BackendRpcDefinition<undefined, Banner[]>
   'banners.importImage': BackendRpcDefinition<BannerImportImageParams, Banner>
@@ -3452,11 +3461,36 @@ const overlayItemLayoutSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+/** `OverlayLayout::default().chat` (plan 215 D5): the chat box top-left and
+ * off for both outputs. Pinned to the renderer's `DEFAULT_OVERLAY_LAYOUT` and
+ * the shared fixture by the contract test. */
+export const DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT: Readonly<OverlayItemLayout> = Object.freeze({
+  horizontal: Object.freeze({ x: 0.0225, y: 0.04, w: 0.3, h: 0.44 }),
+  vertical: Object.freeze({ x: 0.071111, y: 0.08, w: 0.8, h: 0.3 }),
+  showOnStream: false,
+  showInRecording: false
+})
+// A layout from before the chat box (plan 215 G) has no `chat`: it takes the
+// default, as the stored row does through `#[serde(default)]`, and keeps its
+// highlight, captions and Buddy placement. Present, it is exact.
+const chatOverlayItemLayoutSchema = runtimeSchema<OverlayItemLayout>(
+  `${overlayItemLayoutSchema.description} or undefined (the default chat box)`,
+  (value, path) =>
+    value === undefined
+      ? {
+          ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT,
+          horizontal: { ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT.horizontal },
+          vertical: { ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT.vertical }
+        }
+      : overlayItemLayoutSchema.parse(value, path)
+)
+// The backend always serializes every item; the other three stay required.
 const overlayLayoutSchema = objectSchema(
   {
     highlight: overlayItemLayoutSchema,
     captions: overlayItemLayoutSchema,
-    buddy: overlayItemLayoutSchema
+    buddy: overlayItemLayoutSchema,
+    chat: chatOverlayItemLayoutSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<OverlayLayout>
@@ -3465,6 +3499,45 @@ const migrateHighlightAnchorParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<MigrateHighlightAnchorParams>
 // --- end overlay layout (plan 164) ---
+// --- Chat on stream (plan 215 G) ---
+// A 4 MB PNG cap on the Rust side: base64 of that is 5.6 M characters. The
+// rects are the overlay layout's, optional like the highlight's.
+const setChatOverlayParamsSchema = objectSchema(
+  {
+    pngBase64: stringSchema({ minLength: 4, maxLength: 5_600_000 }),
+    rect: optionalSchema(overlayRectSchema),
+    verticalPngBase64: optionalSchema(stringSchema({ minLength: 4, maxLength: 5_600_000 })),
+    verticalRect: optionalSchema(overlayRectSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SetChatOverlayParams>
+const chatOverlayInfoSchema = objectSchema(
+  {
+    active: booleanSchema,
+    width: numberSchema({ integer: true, min: 0 }),
+    height: numberSchema({ integer: true, min: 0 }),
+    revision: numberSchema({ integer: true, min: 0 }),
+    vertical: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatOverlayInfo>
+// `vertical` is omitted, never null, when the session has no portrait leg
+// (`skip_serializing_if` on the Rust side).
+const chatOverlayCanvasesSchema = objectSchema(
+  {
+    vertical: optionalSchema(
+      objectSchema(
+        {
+          width: numberSchema({ integer: true, min: 1 }),
+          height: numberSchema({ integer: true, min: 1 })
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatOverlayCanvases>
+// --- end chat on stream (plan 215 G) ---
 // --- Banners (plan 186) ---
 // Exact: the pinned `banner` fixture. The only optional fields are the Phase 2
 // timer, omitted when off (`skip_serializing_if`); a `null` is refused, the
@@ -5388,6 +5461,11 @@ const runtimeContracts = {
     result: overlayLayoutSchema
   },
   // --- end overlay layout (plan 164) ---
+  // --- Chat on stream (plan 215 G) ---
+  'chat.overlay.set': { params: setChatOverlayParamsSchema, result: chatOverlayInfoSchema },
+  'chat.overlay.clear': { params: undefinedSchema, result: chatOverlayInfoSchema },
+  'chat.overlay.canvases': { params: undefinedSchema, result: chatOverlayCanvasesSchema },
+  // --- end chat on stream (plan 215 G) ---
   // --- Banners (plan 186) ---
   'banners.list': { params: undefinedSchema, result: bannerListSchema },
   'banners.importImage': { params: bannerImportImageParamsSchema, result: bannerSchema },

@@ -4855,6 +4855,41 @@ export interface CommentHighlightCanvases {
   vertical?: { width: number; height: number }
 }
 
+// --- Chat on stream (plan 215 G, D5) -----------------------------------------
+// The last five chat messages as one card the renderer paints
+// (`lib/chat-overlay.ts`) and the backend draws on every leg the overlay
+// layout's `chat` switches carry, like the highlight card. Off by default.
+
+/** `chat.overlay.set`: mirrors Rust `SetChatOverlayParams`. */
+export interface SetChatOverlayParams {
+  pngBase64: string
+  /** The placed chat rect for the horizontal canvas; omitted keeps the
+   *  default corner. */
+  rect?: OverlayRect
+  /** The box rasterized for the vertical simulcast leg; sent only when
+   *  `chat.overlay.canvases` reports a vertical canvas. */
+  verticalPngBase64?: string
+  /** The placed chat rect for the vertical leg. */
+  verticalRect?: OverlayRect
+}
+
+/** What `chat.overlay.set` and `chat.overlay.clear` answer: mirrors Rust
+ *  `ChatOverlayInfo`. */
+export interface ChatOverlayInfo {
+  active: boolean
+  width: number
+  height: number
+  revision: number
+  /** A portrait raster is installed beside the landscape one. */
+  vertical: boolean
+}
+
+/** `chat.overlay.canvases`: the extra canvas the running session has (the
+ *  vertical simulcast leg's), whatever the chat switches say; the same shape
+ *  as `comments.highlight.canvases`. */
+export type ChatOverlayCanvases = CommentHighlightCanvases
+// --- end chat on stream (plan 215 G) -----------------------------------------
+
 export interface CommentsCommandResolution<T> {
   requestId: string
   ok: boolean
@@ -6462,7 +6497,9 @@ export interface OverlayItemLayout {
   showInRecording: boolean
 }
 
-export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy'] as const
+/** The placeable overlay items; `chat` (plan 215 G) is the chat box, off by
+ * default because it shows viewers' names. */
+export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy', 'chat'] as const
 export type OverlayItem = (typeof OVERLAY_ITEMS)[number]
 
 export type OverlayLayout = Record<OverlayItem, OverlayItemLayout>
@@ -7665,6 +7702,10 @@ export interface CohostWindowState {
    * and operates. Absent from a relay seeded without it (older Studio,
    * smokes); the window then shows no header. */
   buddy?: CohostWindowBuddy
+  /** Chat on stream (plan 215 G, D5): `overlayLayout.chat.showOnStream`, for
+   * the chat pane's switch. Absent from a relay seeded without it (older
+   * Studio, smokes); the window then shows no switch. */
+  chatOnStream?: boolean
 }
 
 /** The Buddy as the Stream Manager operates it (plan 164 S-C4). The window
@@ -7749,11 +7790,15 @@ export type CohostBuddyActionCommand =
   /** Plan 168 S-D3: a reaction chip beside the Say box; Studio routes it to
    * `cohost.pet.react`. `reaction` is a reaction id (`[a-z0-9-]{1,40}`). */
   | { requestId: string; kind: 'buddy-react'; reaction: string }
+  /** Plan 215 G (D5): the chat pane's Chat on stream switch. It rides this
+   * relay like the Buddy's switch; Studio writes `overlayLayout.chat`. */
+  | { requestId: string; kind: 'chat-show-on-stream'; showOnStream: boolean }
 
 export const COHOST_BUDDY_ACTION_KINDS = [
   'buddy-say',
   'buddy-show-on-stream',
-  'buddy-react'
+  'buddy-react',
+  'chat-show-on-stream'
 ] as const
 
 /** Correlated co-host action from the Comments window, brokered through main
