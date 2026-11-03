@@ -1153,6 +1153,7 @@ mod tests {
                 "resolution",
                 "separateSourceRecordings",
                 "theme",
+                "videorcCamera",
             ]
         );
         for name in [

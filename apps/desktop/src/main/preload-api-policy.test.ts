@@ -56,6 +56,15 @@ describe('preload API policy', () => {
     }
   })
 
+  it('keeps Videorc Camera actions in the Studio renderer only (plan 214 E)', () => {
+    const studio = { ...fakeApi, virtualCameraAction: async () => ({ ok: true }) }
+    expect(apiForRendererRole(studio, 'main')).toHaveProperty('virtualCameraAction')
+    for (const role of ['notes', 'comments', 'captions'] as const) {
+      expect(AUXILIARY_API_KEYS[role]).not.toContain('virtualCameraAction')
+      expect(apiForRendererRole(studio, role)).not.toHaveProperty('virtualCameraAction')
+    }
+  })
+
   it('fails closed when the preload has no main-owned role argument', () => {
     expect(apiForRendererRole(fakeApi, null)).toEqual({})
     expect(Object.isFrozen(apiForRendererRole(fakeApi, null))).toBe(true)
