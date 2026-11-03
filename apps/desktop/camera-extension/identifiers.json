@@ -27,7 +27,8 @@
   "stills": {
     "notRunningTitle": "Videorc isn't running",
     "offTitle": "Videorc Camera is off",
-    "offSubtitle": "Output → Videorc Camera"
+    "offSubtitle": "Output → Videorc Camera",
+    "startingTitle": "Starting Videorc Camera…"
   },
   "deploymentTarget": "13.0",
   "usageDescription": "Videorc Camera shows your Videorc program as a camera in Meet, Zoom, Teams and Discord.",

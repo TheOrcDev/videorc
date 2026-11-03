@@ -28,4 +28,5 @@ public enum VideorcCameraIdentifiers {
     public static let stillNotRunningTitle = "Videorc isn't running"
     public static let stillOffTitle = "Videorc Camera is off"
     public static let stillOffSubtitle = "Output → Videorc Camera"
+    public static let stillStartingTitle = "Starting Videorc Camera…"
 }

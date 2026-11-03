@@ -10,9 +10,20 @@ final class PictureSelectionTests: XCTestCase {
 
     func testStaleAtExactlyOneSecond() {
         XCTAssertEqual(
-            PictureSelection.picture(producerWord: .on, lastPushAt: 10.0, now: 11.0),
+            PictureSelection.picture(producerWord: .unknown, lastPushAt: 10.0, now: 11.0),
             .still(.notRunning)
         )
+    }
+
+    func testOnWordShowsStartingUntilTheFirstFrame() {
+        // An app picked the camera and Videorc said on: never "isn't
+        // running" while its first frame is on the way.
+        XCTAssertEqual(PictureSelection.picture(producerWord: .on, lastPushAt: nil, now: 0), .still(.starting))
+        XCTAssertEqual(
+            PictureSelection.picture(producerWord: .on, lastPushAt: 10.0, now: 11.0),
+            .still(.starting)
+        )
+        XCTAssertEqual(PictureSelection.picture(producerWord: .on, lastPushAt: 10.0, now: 10.5), .live)
     }
 
     func testNeverPushedShowsNotRunning() {
@@ -43,6 +54,8 @@ final class PictureSelectionTests: XCTestCase {
         XCTAssertNil(Still.notRunning.subtitle)
         XCTAssertEqual(Still.off.title, "Videorc Camera is off")
         XCTAssertEqual(Still.off.subtitle, "Output → Videorc Camera")
+        XCTAssertEqual(Still.starting.title, "Starting Videorc Camera…")
+        XCTAssertNil(Still.starting.subtitle)
     }
 
     func testProducerWordParsing() {
