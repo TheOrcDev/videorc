@@ -111,24 +111,35 @@ test('configuring waits for the renderer to list the screen, and only for that',
     ),
     notListed
   )
+})
 
-  // A retry wait longer than the time left still ends at the deadline.
-  calls = 0
-  const started = Date.now()
-  await assert.rejects(
-    configureWindowsD3d11RendererSourcesWhenListed(
-      async () => {
-        calls += 1
-        throw notListed
-      },
-      SCREEN,
-      started + 50,
-      10_000
-    ),
-    notListed
+test('a retry wait longer than the time left still ends at the deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
+  const notListed = new Error(
+    `Windows D3D11 preview smoke could not select available screen ${SCREEN}.`
   )
+  let calls = 0
+  const configuring = configureWindowsD3d11RendererSourcesWhenListed(
+    async () => {
+      calls += 1
+      throw notListed
+    },
+    SCREEN,
+    50,
+    10_000
+  )
+  // Let the first attempt fail and the retry wait start.
+  await new Promise((resolve) => setImmediate(resolve))
+  t.mock.timers.tick(50)
+  const settled = await Promise.race([
+    configuring.then(
+      () => 'resolved',
+      (error) => error
+    ),
+    new Promise((resolve) => setImmediate(() => resolve('still waiting')))
+  ])
+  assert.equal(settled, notListed)
   assert.equal(calls, 1)
-  assert.ok(Date.now() - started < 5_000)
 })
 
 test('the layout intent commits the probe screen alone in ScreenOnly', () => {
