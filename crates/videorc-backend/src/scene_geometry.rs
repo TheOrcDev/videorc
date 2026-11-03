@@ -1624,7 +1624,7 @@ mod tests {
         assert!(tester.allows(70, 70));
         // ...and outside it, still on the canvas and still inside the box.
         assert!(!tester.allows(90, 90));
-        assert!(!tester.allows(99, 0));
+        assert!(!tester.allows(99, 50));
         // The same box as an on-canvas rect gives the same f64s.
         let on_canvas = PixelRect {
             x: 40,
@@ -1913,13 +1913,16 @@ pub(crate) mod screen_beyond_canvas_fixture {
     /// Canvas points (fractions, so any 16:9 canvas) and the colour each
     /// shows when the box is cut at the edge. With the box squashed onto the
     /// canvas instead, the first four points would show red, white, magenta
-    /// and cyan.
+    /// and cyan. Every point sits mid-stripe: x 0.5 lands on the green/blue
+    /// column edge (source x 32), where the bilinear paths (Metal, the aux
+    /// leg, FFmpeg) rightly blend, so the vertical probes use x 0.6875, the
+    /// middle of the blue column (source x 40).
     pub fn expected_samples() -> [((f64, f64), [u8; 3]); 8] {
         [
             ((0.20, 0.50), GREEN),
             ((0.80, 0.50), BLUE),
-            ((0.50, 0.18), BLUE),
-            ((0.50, 0.82), BLUE),
+            ((0.6875, 0.18), BLUE),
+            ((0.6875, 0.82), BLUE),
             ((0.05, 0.50), RED),
             ((0.95, 0.50), WHITE),
             ((0.50, 0.05), MAGENTA),
