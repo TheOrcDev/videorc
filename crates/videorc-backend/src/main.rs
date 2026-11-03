@@ -16977,6 +16977,73 @@ mod tests {
         assert_eq!(response.payload.unwrap()["mode"], "idle");
     }
 
+    /// Plan 215 D1, review fix: the replay-only Clips ring (plan 181) runs
+    /// while the user is idle, and on a profile outside the bridge envelope
+    /// it runs on the legacy graph. An idle edit must keep landing in the
+    /// Preview then, as it always did; only a recording or a livestream on a
+    /// fixed picture refuses.
+    #[tokio::test]
+    async fn scene_edits_are_never_refused_for_a_clips_ring_on_a_fixed_picture() {
+        let state = test_state();
+        let mut layout = protocol::default_layout_settings();
+        layout.layout_preset = protocol::LayoutPreset::ScreenCamera;
+        let config = protocol::SceneConfigParams {
+            transition_ms: None,
+            sources: protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: Some("camera:avfoundation-native:camera-1".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: None,
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let scene = scene_from_capture_config(config);
+        live_layout::commit_scene_with_layout(&state, &scene, layout, None)
+            .await
+            .expect("the idle scene commits");
+        let edit = json!({
+            "id": "move",
+            "method": "scene.source.transform.update",
+            "params": { "sourceId": "source:camera", "transform": { "x": 0.5, "y": 0.5 } }
+        })
+        .to_string();
+
+        let mut ring = recording::test_active_recording_stub("clips-ring");
+        ring.replay_only = true;
+        ring.set_accepts_live_scene_edits_for_test(false);
+        *state.recording.lock().await = Some(ring);
+        let response = handle_text_message_with_role(&state, &edit, BackendRole::Renderer).await;
+        assert!(
+            response.ok,
+            "a Clips ring on a fixed picture must not refuse an idle edit: {:?}",
+            response.error
+        );
+        let moved = state
+            .scene
+            .lock()
+            .await
+            .sources
+            .iter()
+            .find(|source| source.id == "source:camera")
+            .map(|source| (source.transform.x, source.transform.y))
+            .expect("the camera is in the scene");
+        assert_eq!(moved, (0.5, 0.5), "the idle edit landed");
+
+        // The same picture, recorded for real: refused.
+        let mut session = recording::test_active_recording_stub("legacy");
+        session.set_accepts_live_scene_edits_for_test(false);
+        *state.recording.lock().await = Some(session);
+        let response = handle_text_message_with_role(&state, &edit, BackendRole::Renderer).await;
+        assert_eq!(
+            response.error.expect("refused").code,
+            recording::LIVE_SCENE_EDIT_REFUSED_CODE
+        );
+    }
+
     #[test]
     fn camera_start_replies_inside_its_mutation_execution_contract() {
         // A slow camera must get a Starting reply, never a backend restart.

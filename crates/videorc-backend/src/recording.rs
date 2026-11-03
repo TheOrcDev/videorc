@@ -2283,8 +2283,11 @@ pub struct ActiveRecording {
     /// compositor paths (Metal, CPU, the Windows D3D11 media session) read
     /// the installed scene every tick; the legacy FFmpeg graph is static and
     /// the direct D3D11 recording composes nothing. `scene.source.transform.update`,
-    /// `.nudge` and `.reset` refuse while this is false, and `recording.status`
-    /// carries it so the Scene page unlocks only when the edit would land.
+    /// `.nudge` and `.reset` refuse while this is false on a session the user
+    /// is recording or streaming, and `recording.status` carries it so the
+    /// Scene page unlocks only when the edit would land. A replay-only Clips
+    /// ring (plan 181) reports it too but never refuses: the page is idle,
+    /// the edit lands in the Preview, and the ring keeps what it started with.
     accepts_live_scene_edits: bool,
     pub _capture_permit: Option<CapturePermit>,
     /// Signals the process monitor at the exact user-stop edge. The monitor
@@ -3168,15 +3171,19 @@ pub const LIVE_SCENE_EDIT_REFUSED_CODE: &str = "scene-edit-refused";
 pub const LIVE_SCENE_EDIT_REFUSED_MESSAGE: &str =
     "Moving and resizing isn't available on this recording. Stop and record again.";
 
-/// `Some(reason)` while a session that cannot take a scene edit runs: the
-/// edit is refused before it touches the scene, so the committed scene, the
-/// session and its picture all stay as they were. `None` while nothing runs
-/// or the session composes live.
+/// `Some(reason)` while a recording or livestream that cannot take a scene
+/// edit runs: the edit is refused before it touches the scene, so the
+/// committed scene, the session and its picture all stay as they were.
+/// `None` while nothing runs, the session composes live, or the only session
+/// is the replay-only Clips ring (plan 181): the user is idle then, the Scene
+/// page is unlocked, and an idle edit must keep landing in the Preview even
+/// when the ring itself runs on the legacy graph (a profile outside the
+/// bridge envelope) and keeps the picture it started with.
 pub async fn live_scene_edit_refusal(state: &AppState) -> Option<&'static str> {
     let recording = state.recording.lock().await;
     recording
         .as_ref()
-        .filter(|active| !active.accepts_live_scene_edits())
+        .filter(|active| !active.replay_only && !active.accepts_live_scene_edits())
         .map(|_| LIVE_SCENE_EDIT_REFUSED_MESSAGE)
 }
 

@@ -1686,7 +1686,10 @@ export type StudioContextValue = {
   /** The running session's word on a scene edit (plan 215 D1), from
    * `recording.status.acceptsLiveSceneEdits`: true on every compositor
    * path, false on the legacy FFmpeg graph (a fixed picture), null while it
-   * has not said (nothing runs, a start still pending, an older backend). */
+   * has not said (nothing runs, a start still pending, an older backend).
+   * Read it only while `isSessionActive`: a replay-only Clips ring reports
+   * its own word, but the page never locks for a ring and the backend
+   * never refuses an idle edit for one. */
   acceptsLiveSceneEdits: boolean | null
   /** A recording, livestream or Clips ring has a running audio bus (plan 201). */
   audioBusActive: boolean
