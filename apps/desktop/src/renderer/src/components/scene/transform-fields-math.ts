@@ -1,6 +1,10 @@
 import {
+  MAX_SOURCE_FRACTION,
+  MAX_SOURCE_POSITION,
   MIN_CROP_KEPT,
   MIN_SOURCE_FRACTION,
+  MIN_SOURCE_POSITION,
+  clampSourcePosition,
   type StageCrop,
   type StageRect
 } from './stage-transform'
@@ -47,23 +51,29 @@ export function parsePercentValue(text: string): number | null {
 }
 
 /**
- * Clamp a parsed field value to the range the UI accepts. Position mirrors the
- * backend sanitizer's [-1, 2]; size keeps the stage's 5% minimum and the
- * canvas maximum. The backend commit remains the final authority (snap and
- * crop normalization included) and the committed value echoes back into the
- * fields.
+ * Clamp a parsed field value to the range the UI accepts (plan 215 E3, D2).
+ * Position mirrors the backend sanitizer's [-3, 4]; size keeps the stage's 5%
+ * minimum and goes up to 400% of the canvas. A position edit is clamped
+ * against the committed size so at least 5% of the canvas stays covered
+ * (`clampSourcePosition`); `transformFieldPatch` does that with the box. The
+ * backend commit remains the final authority (snap and crop normalization
+ * included) and the committed value echoes back into the fields.
  */
 export function clampTransformField(field: TransformFieldId, normalized: number): number {
   if (field === 'x' || field === 'y') {
-    return Math.min(Math.max(normalized, -1), 2)
+    return Math.min(Math.max(normalized, MIN_SOURCE_POSITION), MAX_SOURCE_POSITION)
   }
-  return Math.min(Math.max(normalized, MIN_SOURCE_FRACTION), 1)
+  return Math.min(Math.max(normalized, MIN_SOURCE_FRACTION), MAX_SOURCE_FRACTION)
 }
 
 /**
- * The transform patch a single field edit commits. With the aspect locked, a
- * size edit scales BOTH axes around the committed aspect, clamped so neither
- * axis leaves [min, 1] (the limiting axis wins and the aspect holds).
+ * The transform patch a single field edit commits. A position edit keeps at
+ * least 5% of the canvas covered on its axis (the box may hang off the
+ * canvas by the rest, plan 215 E3). With the aspect locked, a size edit
+ * scales BOTH axes around the committed aspect, clamped so neither axis
+ * leaves [min, 400%] (the limiting axis wins and the aspect holds); a size
+ * that would leave less than 5% of the canvas covered moves the box back
+ * onto it.
  */
 export function transformFieldPatch(
   field: TransformFieldId,
@@ -72,23 +82,49 @@ export function transformFieldPatch(
   aspectLocked: boolean
 ): { x?: number; y?: number; width?: number; height?: number } {
   const clamped = clampTransformField(field, value)
-  if (field === 'x' || field === 'y') {
-    return { [field]: clamped }
+  if (field === 'x') {
+    return { x: round4(clampSourcePosition(clamped, committed.width)) }
+  }
+  if (field === 'y') {
+    return { y: round4(clampSourcePosition(clamped, committed.height)) }
   }
   if (!aspectLocked || committed.width <= 0 || committed.height <= 0) {
-    return { [field]: clamped }
+    return { [field]: clamped, ...onCanvasPosition(committed, { [field]: clamped }) }
   }
   let scale = field === 'width' ? clamped / committed.width : clamped / committed.height
   const minScale = Math.max(
     MIN_SOURCE_FRACTION / committed.width,
     MIN_SOURCE_FRACTION / committed.height
   )
-  const maxScale = Math.min(1 / committed.width, 1 / committed.height)
+  const maxScale = Math.min(
+    MAX_SOURCE_FRACTION / committed.width,
+    MAX_SOURCE_FRACTION / committed.height
+  )
   scale = Math.min(Math.max(scale, minScale), Math.max(maxScale, minScale))
-  return {
-    width: round4(committed.width * scale),
-    height: round4(committed.height * scale)
+  const width = round4(committed.width * scale)
+  const height = round4(committed.height * scale)
+  return { width, height, ...onCanvasPosition(committed, { width, height }) }
+}
+
+/**
+ * The position fields a size edit must also move, if any: a box that shrank
+ * or grew so that less than 5% of the canvas stays covered slides back onto
+ * it. A box that still covers that much keeps its place.
+ */
+function onCanvasPosition(
+  committed: StageRect,
+  size: { width?: number; height?: number }
+): { x?: number; y?: number } {
+  const patch: { x?: number; y?: number } = {}
+  if (size.width !== undefined) {
+    const x = clampSourcePosition(committed.x, size.width)
+    if (x !== committed.x) patch.x = round4(x)
   }
+  if (size.height !== undefined) {
+    const y = clampSourcePosition(committed.y, size.height)
+    if (y !== committed.y) patch.y = round4(y)
+  }
+  return patch
 }
 
 export type CropFieldId = keyof StageCrop

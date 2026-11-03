@@ -33,6 +33,7 @@ import { HideScreenSection } from '@/components/scene/hide-screen-section'
 import { SceneList } from '@/components/scene/scene-list'
 import { SceneStage, type StagePhase } from '@/components/scene/scene-stage'
 import { ScreenSizeField } from '@/components/scene/screen-size-field'
+import { ScreenZoomField } from '@/components/scene/screen-zoom-field'
 import { presetCameraCornerRect } from '@/components/scene/stage-corner'
 import { stageUndoControl } from '@/components/scene/stage-undo-control'
 import { SourceCropFields, SourceTransformFields } from '@/components/scene/source-transform-fields'
@@ -1134,6 +1135,21 @@ export function LayoutTab(): ReactElement {
                     runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
                   }
                 />
+                {/* Plan 215 E4 (D2): the screen's Zoom, 100 to 400% of the
+                  canvas, around its centre; what runs past the canvas is cut
+                  off. Zooming softens text, so the crop below is the sharp
+                  way to show part of the screen. */}
+                {isFreeform && sourceCroppable(selectedSource.kind) ? (
+                  <ScreenZoomField
+                    key={`${selectedSource.id}-zoom`}
+                    disabled={positionLocked || stageDragging}
+                    disabledReason={placement.lockReason ?? undefined}
+                    source={selectedSource}
+                    onCommit={(patch) =>
+                      runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
+                    }
+                  />
+                ) : null}
                 {/* Plan 213 G2: the screen's crop, saved with its freeform box. */}
                 {isFreeform && sourceCroppable(selectedSource.kind) ? (
                   <SourceCropFields

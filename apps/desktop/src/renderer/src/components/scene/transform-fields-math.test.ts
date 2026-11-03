@@ -41,16 +41,18 @@ describe('parsePercentValue', () => {
   })
 })
 
-describe('clampTransformField', () => {
+describe('clampTransformField (plan 215 E3)', () => {
   it('mirrors the backend position range', () => {
-    expect(clampTransformField('x', -5)).toBe(-1)
-    expect(clampTransformField('y', 5)).toBe(2)
+    expect(clampTransformField('x', -5)).toBe(-3)
+    expect(clampTransformField('y', 5)).toBe(4)
     expect(clampTransformField('x', 0.4)).toBe(0.4)
+    expect(clampTransformField('x', -0.25)).toBe(-0.25)
   })
 
-  it('keeps sizes between the stage minimum and the canvas', () => {
+  it('keeps sizes between the stage minimum and 400% of the canvas', () => {
     expect(clampTransformField('width', 0)).toBe(MIN_SOURCE_FRACTION)
-    expect(clampTransformField('height', 3)).toBe(1)
+    expect(clampTransformField('height', 3)).toBe(3)
+    expect(clampTransformField('height', 9)).toBe(4)
   })
 })
 
@@ -62,8 +64,33 @@ describe('transformFieldPatch', () => {
     expect(transformFieldPatch('y', 0.1, committed, false)).toEqual({ y: 0.1 })
   })
 
+  it('a position edit may hang the box off the canvas, keeping 5% of it covered', () => {
+    // The box (0.3 wide) may start 0.25 left of the canvas: 0.05 stays on.
+    expect(transformFieldPatch('x', -0.25, committed, false)).toEqual({ x: -0.25 })
+    expect(transformFieldPatch('x', -0.9, committed, false)).toEqual({ x: -0.25 })
+    // And end 0.05 in from the right edge.
+    expect(transformFieldPatch('y', 3, committed, false)).toEqual({ y: 0.95 })
+    // A 400% box may sit anywhere its bounds allow.
+    const huge = { x: -1.5, y: -1.5, width: 4, height: 4 }
+    expect(transformFieldPatch('x', -3, huge, false)).toEqual({ x: -3 })
+    expect(transformFieldPatch('x', -3.5, huge, false)).toEqual({ x: -3 })
+    expect(transformFieldPatch('x', 0.95, huge, false)).toEqual({ x: 0.95 })
+  })
+
   it('free size edits patch one axis', () => {
     expect(transformFieldPatch('width', 0.5, committed, false)).toEqual({ width: 0.5 })
+    // Up to 400% of the canvas: the box grows to the right from its place.
+    expect(transformFieldPatch('width', 4, committed, false)).toEqual({ width: 4 })
+    expect(transformFieldPatch('width', 9, committed, false)).toEqual({ width: 4 })
+  })
+
+  it('a size edit that would leave less than 5% of the canvas covered moves the box back on', () => {
+    // At x 0.97 a width of 0.3 keeps 0.03 on the canvas; shrinking to 0.1
+    // would leave 0.03 still, so the box slides to 0.95.
+    expect(transformFieldPatch('width', 0.1, { ...committed, x: 0.97 }, false)).toEqual({
+      width: 0.1,
+      x: 0.95
+    })
   })
 
   it('locked size edits scale both axes around the committed aspect', () => {
@@ -78,11 +105,15 @@ describe('transformFieldPatch', () => {
   })
 
   it('locked edits clamp to the limiting axis and keep the aspect', () => {
-    // Height would need 2/3 at width=1; the height axis limits at 1 first? No:
-    // width 1 gives height 0.6667 which fits, so width is the limiter here.
+    // Width 4 (the 400% ceiling) gives height 2.6667, which fits, so width
+    // is the limiter here (plan 215 E3; before, the canvas was).
+    expect(transformFieldPatch('width', 9, committed, true)).toEqual({
+      width: 4,
+      height: 2.6667
+    })
     expect(transformFieldPatch('width', 2, committed, true)).toEqual({
-      width: 1,
-      height: 0.6667
+      width: 2,
+      height: 1.3333
     })
     // Shrinking: the height axis hits the 5% floor first (aspect 1.5).
     expect(transformFieldPatch('width', 0.01, committed, true)).toEqual({
