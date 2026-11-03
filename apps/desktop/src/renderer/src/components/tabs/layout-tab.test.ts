@@ -4,7 +4,13 @@ import { describe, expect, it } from 'vitest'
 
 import { overlayEditsBlockedReason } from '@/components/scene/overlay-stage'
 import type { OverlayItem } from '@/lib/backend'
-import { OVERLAY_ITEM_OFF_LINES, OverlayItemInspector, OverlayItemSection } from './layout-tab'
+import {
+  OVERLAY_ITEM_OFF_LINES,
+  OverlayItemInspector,
+  OverlayItemSection,
+  SCENE_POSITION_LOCK_REASON,
+  placementControls
+} from './layout-tab'
 
 // Plan 174, C-6: overlay changes never fail silently. Without the backend the
 // controls are off, with one reason above them.
@@ -103,5 +109,29 @@ describe('the overlay section (plan 205 S3, D4)', () => {
       expect(markup).not.toContain('data-videorc-overlay-off-line')
       expect(markup).not.toContain('Viewers don&#x27;t see')
     }
+  })
+})
+
+// Plan 215 D4 (B2): Edit scene turns the editor on, which wakes the arrows.
+// While recording or live it still opens the editor, and the line says why
+// the arrows stay off.
+describe('the Placement section (plan 215 B2)', () => {
+  const idle = { isSessionActive: false, stageDragging: false }
+
+  it('wakes the arrows once the editor is on', () => {
+    expect(placementControls({ ...idle, sceneEditMode: false }).nudgeDisabled).toBe(true)
+    expect(placementControls({ ...idle, sceneEditMode: true })).toEqual({
+      nudgeDisabled: false,
+      description: 'Click the source on the stage to edit it: drag it, or nudge it with the arrows.'
+    })
+    expect(
+      placementControls({ ...idle, sceneEditMode: true, stageDragging: true }).nudgeDisabled
+    ).toBe(true)
+  })
+
+  it('keeps them off while recording or live, and says why', () => {
+    expect(
+      placementControls({ sceneEditMode: true, isSessionActive: true, stageDragging: false })
+    ).toEqual({ nudgeDisabled: true, description: SCENE_POSITION_LOCK_REASON })
   })
 })
