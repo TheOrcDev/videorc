@@ -2905,14 +2905,41 @@ mod tests {
         (total as f64 / frame.expected.len() as f64, max)
     }
 
+    /// Hosted macOS CI runners draw on "Apple Paravirtual device", not an
+    /// Apple GPU.
+    fn is_paravirtual(renderer: &LiveBackgroundMetalRenderer) -> bool {
+        let name = renderer.device.name().to_string();
+        eprintln!("golden device: {name}");
+        name.contains("Paravirtual")
+    }
+
+    /// The (mean, max cell) bound a golden frame of `css` stays inside, in
+    /// 0–255 units: mean 2.0 and cell 10 on an Apple GPU.
+    ///
+    /// The paravirtual GPU of hosted CI misses Beams and Ghost Fibers the way
+    /// WARP does on Windows CI (see the D3D11 golden test): both hash with
+    /// `sin` of large arguments (Ghost Fibers' reach about 1e7 rad), and its
+    /// range reduction is not ANGLE's. CI on 2026-10-25 measured Beams at means 10.3–21.7 with a
+    /// worst cell of 229, and Ghost Fibers at means up to 1.68 with a worst
+    /// cell of 88, while an Apple GPU matched them inside the strict bound.
+    /// The dedicated bounds keep those numbers in the log; a mean over them
+    /// is still a port bug, and every other background keeps the strict one.
+    fn golden_bound(css: &str, paravirtual: bool) -> (f64, u8) {
+        match (paravirtual, css) {
+            (true, "beams") => (24.0, 240),
+            (true, "ghost-fibers") => (2.0, 96),
+            _ => (2.0, 10),
+        }
+    }
+
     /// Plan 190 S2: every golden grid (the GLSL in WebGL2, 640 × 360 box
-    /// filtered to 64 × 36) matches the MSL within a mean absolute error of
-    /// 2.0 and a maximum cell error of 10 (0–255 units).
+    /// filtered to 64 × 36) matches the MSL within `golden_bound`.
     #[test]
     fn golden_grids_match_the_glsl_reference() {
         let Some((mut renderer, _board)) = renderer() else {
             return;
         };
+        let paravirtual = is_paravirtual(&renderer);
         let golden = load_golden();
         let mut worst: Vec<(&str, f64, u8)> = Vec::new();
         let mut failures = Vec::new();
@@ -2920,7 +2947,8 @@ mod tests {
             let (mean, max) = golden_error(&mut renderer, &golden, frame);
             let name = format!("{}/{}@{}", frame.css, frame.look.id, frame.phase);
             eprintln!("golden {name}: mean {mean:.3}, max cell {max}");
-            if mean > 2.0 || max > 10 {
+            let (mean_limit, max_cell) = golden_bound(frame.css, paravirtual);
+            if mean > mean_limit || max > max_cell {
                 failures.push(format!("{name}: mean {mean:.3}, max {max}"));
             }
             match worst.iter_mut().find(|(seen, _, _)| *seen == frame.css) {
@@ -2947,6 +2975,7 @@ mod tests {
         let Some((mut renderer, _board)) = renderer() else {
             return;
         };
+        let paravirtual = is_paravirtual(&renderer);
         let golden = load_golden();
         for id in [
             LiveBackgroundId::PlasmaWave,
@@ -2969,7 +2998,11 @@ mod tests {
                     "{} light {name}: worst mean {worst_mean:.3}, worst max cell {worst_max}, {bytes} scratch bytes at 640x360",
                     css_id(id)
                 );
-                assert!(worst_mean <= 2.0 && worst_max <= 10, "{id:?} {name}");
+                let (mean_limit, max_cell) = golden_bound(css_id(id), paravirtual);
+                assert!(
+                    worst_mean <= mean_limit && worst_max <= max_cell,
+                    "{id:?} {name}"
+                );
             }
         }
         renderer.set_light_format(LIGHT_FORMAT);

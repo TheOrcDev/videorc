@@ -3307,3 +3307,29 @@ not run in either full run.
 The six unpublished workflow edits are preserved. Private evidence is
 retained under `merge-b7e68a2c/` in the existing evidence root. No Beta
 candidate is accepted or published; the open gates above are unchanged.
+
+### Metal CI golden bound restored, 2026-11-03
+
+macOS Rust CI at `2708aa98` (job 125626463237) reported 4,404 passed, two
+failed and 23 ignored. Both failures were the strict Metal golden tests:
+Beams at means 10.3 to 21.7 with a worst cell of 229, and Ghost Fibers
+at a worst cell of 88. The two missing-FFmpeg fixture failures from earlier
+macOS runs are gone, because the parity fixture is now ignored. Main's
+macOS job at `b7e68a2c` (125590814242) passes both golden tests on the same
+`macos-15-arm64` image.
+
+The cause was merge `1cf872a8`. Main's #1012 (`f374e3c2`) gave the
+"Apple Paravirtual device" of hosted CI dedicated Beams and Ghost Fibers
+bounds, and kept the strict gate for Apple GPUs. This branch never edited
+`live_background/metal.rs`, yet that merge recorded the pre-#1012 file and
+silently reverted main's change. A remerge diff of `1cf872a8` shows no other
+file where main's side was dropped without a conflict; the conflicted
+files were resolved deliberately. The file is now restored to main's
+version, byte for byte. It compiles only on macOS, so the evidence for it
+is main's passing job, plus this branch's next macOS run.
+
+This is main's CI allowance for a virtual GPU, not Metal validation on an
+Apple GPU. The strict bound still applies there and has not been run for
+this branch. Ogre's GLES Beams miss (mean 20.405, max 193) falls in the
+same range; that it has the same cause is unproven and that failure stays
+open.
