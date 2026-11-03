@@ -9826,10 +9826,9 @@ async fn handle_text_message_with_role(
         "chat.overlay.clear" => {
             ServerResponse::ok(command.id, chat_overlay::clear_chat_overlay(state))
         }
-        "chat.overlay.canvases" => ServerResponse::ok(
-            command.id,
-            chat_overlay::chat_overlay_canvases(state).await,
-        ),
+        "chat.overlay.canvases" => {
+            ServerResponse::ok(command.id, chat_overlay::chat_overlay_canvases(state).await)
+        }
         "cohost.status" => ServerResponse::ok(command.id, cohost::cohost_status(state).await),
         "cohost.start" => {
             match serde_json::from_value::<protocol::CohostStartParams>(command.params) {

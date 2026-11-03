@@ -21622,7 +21622,9 @@ mod tests {
             100,
             [255, 0, 0, 255],
             OverlayPlacement::new(
-                Some(crate::overlay_layout::OverlayRect::new(0.15, 0.2, 0.25, 0.2)),
+                Some(crate::overlay_layout::OverlayRect::new(
+                    0.15, 0.2, 0.25, 0.2,
+                )),
                 crate::captions::CaptionOverlayPosition::Top,
             ),
         );

@@ -924,7 +924,11 @@ mod tests {
         assert_close(layout.chat.vertical.w, 0.80);
         assert!(!layout.chat.show_on_stream && !layout.chat.show_in_recording);
         layout.validate().expect("defaults validate");
-        for item in [OverlayItem::Highlight, OverlayItem::Captions, OverlayItem::Buddy] {
+        for item in [
+            OverlayItem::Highlight,
+            OverlayItem::Captions,
+            OverlayItem::Buddy,
+        ] {
             assert!(layout.item(item).horizontal.bottom_gravity());
             assert!(layout.item(item).vertical.bottom_gravity());
         }

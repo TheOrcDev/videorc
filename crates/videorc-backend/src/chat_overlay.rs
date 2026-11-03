@@ -214,7 +214,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(full.rect, Some(OverlayRect::new(0.1, 0.2, 0.3, 0.4)));
-        assert_eq!(full.vertical_rect, Some(OverlayRect::new(0.05, 0.1, 0.8, 0.3)));
+        assert_eq!(
+            full.vertical_rect,
+            Some(OverlayRect::new(0.05, 0.1, 0.8, 0.3))
+        );
         assert!(full.vertical_png_base64.is_some());
     }
 
@@ -340,7 +343,10 @@ mod tests {
         assert!(matches!(error, ChatOverlayError::InvalidImage(_)));
         assert_eq!(error.code(), "chat-overlay-invalid");
         let after = crate::captions::current_caption_overlay(&state.chat_overlay).unwrap();
-        assert_eq!(after.revision, before.revision, "a bad push changes nothing");
+        assert_eq!(
+            after.revision, before.revision,
+            "a bad push changes nothing"
+        );
     }
 
     #[tokio::test]
