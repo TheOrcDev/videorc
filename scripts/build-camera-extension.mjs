@@ -2,7 +2,13 @@
 // Plan 214 B1. Builds the Videorc Camera system extension and assembles its
 // bundle:
 //
-//   pnpm build:camera-extension [--debug] [--test] [--version <semver>]
+//   pnpm build:camera-extension [--debug] [--test] [--force] [--version <semver>]
+//
+// Without VIDEORC_MACOS_PROFILE_APP the build logs the one "Videorc Camera
+// skipped" line and exits 0: a no-profile package embeds no extension, so it
+// needs no Swift toolchain either (`pnpm package:desktop` on a Mac without
+// Xcode stays today's build). --test (the Swift unit tests) and --force
+// always build.
 //
 // 1. Fails if Identifiers.swift drifted from identifiers.json.
 // 2. `swift build` (SwiftPM, arm64, deployment target 13.0 from Package.swift).
@@ -49,11 +55,13 @@ import {
   plistXml,
   swiftIdentifierDrift
 } from './lib/camera-extension-identifiers.mjs'
+import { cameraProfileDecision, cameraSkippedLogLine } from './lib/camera-extension-packaging.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
 const debug = args.includes('--debug')
 const runTests = args.includes('--test')
+const force = args.includes('--force')
 const versionIndex = args.indexOf('--version')
 const configuration = debug ? 'debug' : 'release'
 
@@ -62,6 +70,18 @@ if (process.platform !== 'darwin') {
     `build-camera-extension: skipped, the Camera Extension is macOS only (${process.platform}).`
   )
   process.exit(0)
+}
+
+if (!runTests && !force) {
+  const decision = cameraProfileDecision(process.env)
+  if (decision.mode === 'error') {
+    console.error(`build-camera-extension: ${decision.reason}`)
+    process.exit(1)
+  }
+  if (decision.mode === 'skip') {
+    console.log(`build-camera-extension: ${cameraSkippedLogLine(decision.reason)}`)
+    process.exit(0)
+  }
 }
 
 const identifiers = loadCameraExtensionIdentifiers(repoRoot)

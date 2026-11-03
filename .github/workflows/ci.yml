@@ -122,6 +122,14 @@ jobs:
       - name: Install dependencies for process/memory sentinel
         run: pnpm install --frozen-lockfile
 
+      - name: Videorc Camera extension build and Swift tests
+        # Plan 214: without this the Swift extension first compiles inside a
+        # release or lab-candidate build. --test builds the debug bundle,
+        # checks its identifiers and entitlements, and runs the pure Swift
+        # unit tests. No profile, no signing identity, no activation.
+        timeout-minutes: 15
+        run: pnpm test:camera-extension
+
       - name: Short no-device process/memory sentinel
         run: pnpm smoke:process-memory:sentinel
 
