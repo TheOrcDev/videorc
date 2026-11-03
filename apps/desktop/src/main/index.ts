@@ -5846,6 +5846,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         let framePollingSuppressed = false;
         let framePollingIntervalMs = 40;
         let framePollingMaxWidth = 1920;
+        let framePollingCeilingWidth = 1920;
         let proofSurfaceSuspended = false;
         let animationFrameId = null;
         let compositorStatus = null;
@@ -5899,20 +5900,22 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
 
         // displayedWidth (source layers only): ask the backend for exactly the
         // width the frame is drawn at, so Chromium shows its pixels 1:1. The
-        // profile width is quantized up in 160 px steps, and the main
-        // process's hint is floored at 1280: either left Chromium a second,
-        // slightly-off downscale (1920 -> 960 -> 941) that blurred every pixel
-        // of a screen share. The profile ceiling still caps it (recording).
+        // profile width is quantized up in 160 px steps from a surface width
+        // main measured at its last geometry push, and the main process's
+        // hint is floored at 1280: a docked Preview grown from 941 to 1320 px
+        // kept asking for 960 and Chromium stretched it, blurring every pixel
+        // of a screen share. A measured layer is bounded only by the profile's
+        // own ceiling (1920 idle, 960 while recording).
         function profiledFrameUrl(url, displayedWidth) {
           try {
             const parsed = new URL(url);
             const requested = Number(parsed.searchParams.get('maxWidth'));
-            const hinted = typeof displayedWidth === 'number' && displayedWidth > 0
-              ? displayedWidth
-              : requested;
-            const maxWidth = Number.isFinite(hinted) && hinted > 0
-              ? Math.min(hinted, framePollingMaxWidth)
-              : framePollingMaxWidth;
+            const measured = typeof displayedWidth === 'number' && displayedWidth > 0;
+            const maxWidth = measured
+              ? Math.min(displayedWidth, framePollingCeilingWidth)
+              : Number.isFinite(requested) && requested > 0
+                ? Math.min(requested, framePollingMaxWidth)
+                : framePollingMaxWidth;
             parsed.searchParams.set('maxWidth', String(Math.max(1, Math.round(maxWidth))));
             return parsed.toString();
           } catch {
@@ -6099,6 +6102,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (Number.isFinite(maxWidth) && maxWidth >= 1) {
             framePollingMaxWidth = Math.round(maxWidth);
           }
+          const ceilingWidth = Number(profile?.ceilingWidth);
+          framePollingCeilingWidth = Number.isFinite(ceilingWidth) && ceilingWidth >= 1
+            ? Math.round(ceilingWidth)
+            : framePollingMaxWidth;
         }
 
         function startFramePolling(id, kind, image, url) {

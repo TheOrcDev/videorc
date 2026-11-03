@@ -1,6 +1,12 @@
 export interface NativePreviewProofPollingProfile {
   intervalMs: number
   maxWidth: number
+  /**
+   * The profile's own cap with no geometry applied. A source layer that
+   * measures its drawn width asks for exactly that, bounded only by this, so
+   * a stale or quantized surface width never undersupplies it.
+   */
+  ceilingWidth: number
 }
 
 /**
@@ -17,13 +23,13 @@ export const PROOF_POLLING_MIN_MAX_WIDTH = 640
  */
 export const PROOF_POLLING_WIDTH_STEP = 160
 
-const IDLE_PROOF_POLLING_PROFILE: NativePreviewProofPollingProfile = {
+const IDLE_PROOF_POLLING_PROFILE: Omit<NativePreviewProofPollingProfile, 'ceilingWidth'> = {
   intervalMs: 40,
   // Absolute ceiling — a 4K proof window still never asks for more than this.
   maxWidth: 1920
 }
 
-const RECORDING_PROOF_POLLING_PROFILE: NativePreviewProofPollingProfile = {
+const RECORDING_PROOF_POLLING_PROFILE: Omit<NativePreviewProofPollingProfile, 'ceilingWidth'> = {
   // Windows' proof surface is production preview, so it must stay live while
   // recording. Keep it useful without spending the recording's CPU budget on
   // 25 full-resolution channel swaps, Lanczos resizes, and PNG encodes/sec.
@@ -75,7 +81,8 @@ export function nativePreviewProofPollingProfile(
   const base = recordingActive ? RECORDING_PROOF_POLLING_PROFILE : IDLE_PROOF_POLLING_PROFILE
   return {
     intervalMs: base.intervalMs,
-    maxWidth: nativePreviewProofPollingMaxWidth(base.maxWidth, surfacePixelWidth)
+    maxWidth: nativePreviewProofPollingMaxWidth(base.maxWidth, surfacePixelWidth),
+    ceilingWidth: base.maxWidth
   }
 }
 
@@ -83,7 +90,7 @@ export function nativePreviewProofPollingProfileKey(
   surfaceWindowId: number,
   profile: NativePreviewProofPollingProfile
 ): string {
-  return `${surfaceWindowId}:${profile.intervalMs}:${profile.maxWidth}`
+  return `${surfaceWindowId}:${profile.intervalMs}:${profile.maxWidth}:${profile.ceilingWidth}`
 }
 
 /**
