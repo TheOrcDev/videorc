@@ -407,6 +407,17 @@ async function recordWithLiveMove({
   const sourceIds = Object.keys(transforms)
   const fields = ['x', 'y', 'width', 'height']
   const timestamp = '2026-01-01T00:00:00.000Z'
+  // The pass starts from the saved transforms. A session.start installs its
+  // own scene without a scene.changed, so the editor would keep the last
+  // pass's live move and treat the same value as a no-op; put the transforms
+  // back through an announced commit first, so the editor reads them.
+  for (const [sourceId, rect] of Object.entries(transforms)) {
+    await request(backend, timeoutMs, 'scene.source.transform.update', {
+      sourceId,
+      transform: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      snap: 'none'
+    })
+  }
   const started = await request(backend, timeoutMs, 'session.start', {
     sources: { testPattern: true },
     scene,
@@ -477,6 +488,13 @@ async function recordWithLiveMove({
   await waitUntil(`document.body.textContent.includes(${JSON.stringify(LIVE_PLACEMENT_HINT)})`)
   await waitUntil(`document.querySelector('[data-videorc-transform-field="x"]')?.disabled===false`)
   await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  const percent = (value) => {
+    const rounded = Math.round(value * 1000) / 10
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+  }
+  await waitUntil(
+    `document.querySelector('[data-videorc-transform-field="x"]')?.value === ${JSON.stringify(percent(transforms['source:camera'].x))}`
+  )
   const runBefore = (await request(backend, timeoutMs, 'compositor.status')).runId ?? null
   await sleep(LIVE_MOVE_SETTLE_MS)
 
