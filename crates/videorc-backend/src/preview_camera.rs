@@ -2649,6 +2649,43 @@ pub async fn stop_preview_camera(state: &AppState) -> PreviewCameraStatus {
     finish_preview_camera_stop(stop).await
 }
 
+/// The status message when the renderer's stop is refused because a separate
+/// source take still records the camera.
+pub const CAMERA_STOP_REFUSED_BY_SOURCE_TAKE_MESSAGE: &str =
+    "Camera kept running: the separate Camera file of the current take records it.";
+
+/// `preview.camera.stop` from a client. The renderer stops the preview camera
+/// whenever its own scene shows none (an app scene, screen-only), but a
+/// record+stream take armed with Separate source recordings and a camera
+/// composes that camera into its Camera file on every tick: the compositor's
+/// completed-batch store promotes a tick only when every live member rendered
+/// (`SourceIsoBatchStore::publish`), so a torn-down camera leaves the Combined
+/// recording, the Screen file and the Clips ring on their first frame for the
+/// whole take while the stream leg stays live (2026-11-03, smoke:smart-scenes
+/// `hide`). Layout transactions own source retirement during a take
+/// (`retire_unused_camera_after_grace` rechecks the take's demand); the
+/// client's stop honours the same demand and is refused while the take needs
+/// the camera. The status reports the refusal.
+pub async fn stop_preview_camera_from_client(state: &AppState) -> PreviewCameraStatus {
+    if source_take_records_camera(state).await {
+        let mut status = preview_camera_status(state).await;
+        status.message = Some(CAMERA_STOP_REFUSED_BY_SOURCE_TAKE_MESSAGE.to_string());
+        return status;
+    }
+    stop_preview_camera(state).await
+}
+
+/// True while the installed program scene names a camera that an armed
+/// separate source take still records (the Camera member is active).
+pub(crate) async fn source_take_records_camera(state: &AppState) -> bool {
+    state
+        .compositor
+        .lock()
+        .await
+        .source_iso_capture_needs()
+        .camera
+}
+
 pub(crate) async fn begin_preview_camera_stop(state: &AppState) -> PreviewCameraStop {
     try_begin_preview_camera_stop_supervised(state, false, None, None)
         .await

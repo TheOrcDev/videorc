@@ -229,7 +229,7 @@ use futures_util::stream;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use preview_camera::{
     latest_preview_camera_bmp, latest_preview_camera_png, preview_camera_status,
-    start_preview_camera, stop_preview_camera,
+    start_preview_camera, stop_preview_camera_from_client,
 };
 use preview_screen::{
     latest_preview_screen_bmp, latest_preview_screen_png, preview_screen_status,
@@ -11041,7 +11041,7 @@ async fn handle_text_message_with_role(
             }
         }
         "preview.camera.stop" => {
-            let status = stop_preview_camera(state).await;
+            let status = stop_preview_camera_from_client(state).await;
             ServerResponse::ok(command.id, status)
         }
         "preview.camera.status" => {
