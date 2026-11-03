@@ -11,6 +11,13 @@
     "state": "unavailable",
     "message": "Videorc Camera isn't available on macOS yet (the Camera Extension sink, plan 214 B4, hasn't shipped)."
   },
+  "unavailableHidden": {
+    "on": false,
+    "available": false,
+    "state": "unavailable",
+    "platformStep": "unsupported",
+    "message": "Videorc Camera isn't available on Windows yet."
+  },
   "needsApproval": {
     "on": true,
     "available": true,

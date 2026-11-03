@@ -55,7 +55,7 @@ struct ServiceState {
     platform: Option<(VirtualCameraPlatformStep, Option<String>)>,
     /// Why this build has no sink (`platform_sink` refused); set when the
     /// switch is turned on and the factory fails, cleared when it succeeds.
-    sink_unavailable: Option<String>,
+    sink_unavailable: Option<VirtualCameraUnavailable>,
     output: Option<VirtualCameraOutput>,
     last_published: Option<VirtualCameraStatus>,
     supervisor_started: bool,
@@ -68,6 +68,10 @@ pub struct VirtualCameraService {
     /// release path runs under its own locks and must never wait on ours.
     wants_lease: AtomicBool,
     sink_factory: SinkFactory,
+    /// Owner, 2026-11-03: a platform whose camera hasn't passed its spike is
+    /// hidden from the first status on, switch or no switch. Probed once from
+    /// the factory at construction (a hidden refusal is static).
+    hidden: Option<VirtualCameraUnavailable>,
     canvas: (u32, u32),
 }
 
@@ -93,10 +97,17 @@ impl Default for VirtualCameraService {
 impl VirtualCameraService {
     /// A service with its own sink and canvas (tests; the dev smokes later).
     pub fn with_sink_factory(sink_factory: SinkFactory, canvas: (u32, u32)) -> Self {
+        let hidden = match sink_factory() {
+            Err(unavailable) if unavailable.hidden => Some(unavailable),
+            // A sink, or a shown refusal: nothing to remember; the switch
+            // asks the factory again when it turns on.
+            Ok(_) | Err(_) => None,
+        };
         Self {
             state: StdMutex::new(ServiceState::default()),
             wants_lease: AtomicBool::new(false),
             sink_factory,
+            hidden,
             canvas,
         }
     }
@@ -120,8 +131,8 @@ impl VirtualCameraService {
             state.output.as_ref().map(|output| output.shared().clone());
         StatusInputs {
             on: state.on,
-            sink: match &state.sink_unavailable {
-                Some(reason) => Err(reason.clone()),
+            sink: match self.hidden.as_ref().or(state.sink_unavailable.as_ref()) {
+                Some(unavailable) => Err(unavailable.clone()),
                 None => Ok(()),
             },
             platform: state.platform.clone(),
@@ -251,15 +262,15 @@ async fn set_on_without_saving(state: &AppState, on: bool) -> VirtualCameraStatu
                     match VirtualCameraOutput::spawn(engine) {
                         Ok(output) => inner.output = Some(output),
                         Err(error) => {
-                            inner.sink_unavailable = Some(format!(
+                            inner.sink_unavailable = Some(VirtualCameraUnavailable::new(format!(
                                 "Could not start the Videorc Camera output: {error}"
-                            ));
+                            )));
                         }
                     }
                 }
-                Err(VirtualCameraUnavailable { reason }) => {
-                    tracing::warn!("Videorc Camera is unavailable here: {reason}");
-                    inner.sink_unavailable = Some(reason);
+                Err(unavailable) => {
+                    tracing::warn!("Videorc Camera is unavailable here: {}", unavailable.reason);
+                    inner.sink_unavailable = Some(unavailable);
                 }
             }
         }
@@ -528,14 +539,18 @@ mod tests {
     async fn a_build_without_a_sink_says_unavailable_and_never_claims_success() {
         let service = VirtualCameraService::with_sink_factory(
             Box::new(|| {
-                Err(VirtualCameraUnavailable {
-                    reason: "No sink on this platform yet.".to_string(),
-                })
+                Err(VirtualCameraUnavailable::new(
+                    "No sink on this platform yet.",
+                ))
             }),
             (192, 108),
         )
         .without_supervisor();
         let state = test_state_with(service);
+        // A shown refusal is only learned when the switch turns on.
+        let off = state.virtual_camera.status();
+        assert_eq!(off.state, VirtualCameraState::Off);
+        assert!(off.available && off.platform_step.is_none());
         let mut events = state.events.subscribe();
         let status = set_on(&state, true).await.unwrap();
         assert!(status.on && !status.available);
@@ -544,10 +559,50 @@ mod tests {
             status.message.as_deref(),
             Some("No sink on this platform yet.")
         );
+        assert!(status.platform_step.is_none(), "shown, with the reason");
         assert!(state.virtual_camera.lock().output.is_none());
         let event = events.try_recv().expect("the change event");
         assert_eq!(event.event, VIRTUAL_CAMERA_CHANGED_EVENT);
         assert!(lease_wanted(&state).is_none());
+    }
+
+    /// Owner, 2026-11-03: a platform that hasn't passed its spike is hidden
+    /// from the first status on, before and after the switch, and no report
+    /// from main un-hides it.
+    #[tokio::test]
+    async fn a_hidden_platform_reports_unsupported_before_and_after_the_switch() {
+        let service = VirtualCameraService::with_sink_factory(
+            Box::new(|| Err(VirtualCameraUnavailable::hidden_until_proven("Windows"))),
+            (192, 108),
+        )
+        .without_supervisor();
+        let state = test_state_with(service);
+        let off = state.virtual_camera.status();
+        assert!(!off.on && !off.available);
+        assert_eq!(off.state, VirtualCameraState::Unavailable);
+        assert_eq!(
+            off.platform_step,
+            Some(VirtualCameraPlatformStep::Unsupported)
+        );
+        assert_eq!(
+            off.message.as_deref(),
+            Some("Videorc Camera isn't available on Windows yet.")
+        );
+        let on = set_on(&state, true).await.unwrap();
+        assert!(on.on && !on.available);
+        assert_eq!(
+            on.platform_step,
+            Some(VirtualCameraPlatformStep::Unsupported)
+        );
+        assert!(state.virtual_camera.lock().output.is_none());
+        let reported = report_platform(&state, VirtualCameraPlatformStep::Ready, None);
+        assert_eq!(
+            reported.platform_step,
+            Some(VirtualCameraPlatformStep::Unsupported),
+            "hidden outranks main's report"
+        );
+        assert!(lease_wanted(&state).is_none());
+        set_on(&state, false).await.unwrap();
     }
 
     #[tokio::test]

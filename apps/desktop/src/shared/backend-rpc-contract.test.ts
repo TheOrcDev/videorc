@@ -3677,6 +3677,7 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
   ) as {
     off: unknown
     unavailableNoSink: unknown
+    unavailableHidden: unknown
     needsApproval: unknown
     needsSetup: unknown
     ready: unknown
@@ -3692,6 +3693,7 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
     for (const state of [
       fixture.off,
       fixture.unavailableNoSink,
+      fixture.unavailableHidden,
       fixture.needsApproval,
       fixture.needsSetup,
       fixture.ready,
@@ -3703,6 +3705,13 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
       expect(validateBackendRpcResult('virtualCamera.platform.report', state)).toEqual(state)
       expect(validateBackendEventPayload('virtualCamera.changed', state)).toEqual(state)
     }
+    // Owner, 2026-11-03: a hidden platform is exactly `platformStep: unsupported`;
+    // the Output page shows no section on it.
+    expect(fixture.unavailableHidden).toMatchObject({
+      available: false,
+      state: 'unavailable',
+      platformStep: 'unsupported'
+    })
     expect(validateBackendRpcParams('virtualCamera.set', fixture.setParams)).toEqual(
       fixture.setParams
     )

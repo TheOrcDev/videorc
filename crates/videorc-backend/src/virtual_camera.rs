@@ -708,34 +708,57 @@ pub trait VirtualCameraSink: Send {
 /// The platform has no camera sink yet, or this build cannot run one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualCameraUnavailable {
+    /// Plain copy for the status line.
     pub reason: String,
+    /// Owner, 2026-11-03: a platform whose camera hasn't passed its on-device
+    /// spike stays hidden. The status reports `platformStep: unsupported`
+    /// and the UI shows no section at all; a non-hidden unavailability shows
+    /// the section with the reason.
+    pub hidden: bool,
+}
+
+impl VirtualCameraUnavailable {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            hidden: false,
+        }
+    }
+
+    /// Owner, 2026-11-03: a platform whose camera hasn't passed its on-device
+    /// spike stays hidden.
+    pub fn hidden_until_proven(platform: &str) -> Self {
+        Self {
+            reason: format!("Videorc Camera isn't available on {platform} yet."),
+            hidden: true,
+        }
+    }
 }
 
 /// The sink for this platform, or why there is none. Never a silent stub.
+///
+/// Windows (C) and Linux (D) land hidden and flip to their sink once each
+/// machine passes its spike: `if PROVEN { sink() } else { hidden_until_proven(..) }`.
 pub fn platform_sink() -> Result<Box<dyn VirtualCameraSink>, VirtualCameraUnavailable> {
     #[cfg(target_os = "macos")]
     {
-        Err(VirtualCameraUnavailable {
-            reason: "Videorc Camera isn't available on macOS yet (the Camera Extension sink, plan 214 B4, hasn't shipped).".to_string(),
-        })
+        Err(VirtualCameraUnavailable::new(
+            "Videorc Camera isn't available on macOS yet (the Camera Extension sink, plan 214 B4, hasn't shipped).",
+        ))
     }
     #[cfg(target_os = "windows")]
     {
-        Err(VirtualCameraUnavailable {
-            reason: "Videorc Camera isn't available on Windows yet (the Media Foundation camera, plan 214 C3, hasn't shipped).".to_string(),
-        })
+        Err(VirtualCameraUnavailable::hidden_until_proven("Windows"))
     }
     #[cfg(target_os = "linux")]
     {
-        Err(VirtualCameraUnavailable {
-            reason: "Videorc Camera isn't available on Linux yet (the v4l2loopback writer, plan 214 D2, hasn't shipped).".to_string(),
-        })
+        Err(VirtualCameraUnavailable::hidden_until_proven("Linux"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(VirtualCameraUnavailable {
-            reason: "Videorc Camera isn't available on this platform.".to_string(),
-        })
+        Err(VirtualCameraUnavailable::new(
+            "Videorc Camera isn't available on this platform.",
+        ))
     }
 }
 
@@ -1393,8 +1416,9 @@ pub fn is_videorc_camera_ffmpeg_name(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusInputs {
     pub on: bool,
-    /// `Err` when this build has no sink for the platform.
-    pub sink: Result<(), String>,
+    /// `Err` when this build has no sink for the platform; a hidden one
+    /// (owner, 2026-11-03) reports `platformStep: unsupported`.
+    pub sink: Result<(), VirtualCameraUnavailable>,
     /// What main reported for the platform (the extension's activation, the
     /// Windows setup step), with its message; `None` until it reports.
     pub platform: Option<(VirtualCameraPlatformStep, Option<String>)>,
@@ -1421,10 +1445,14 @@ pub fn derive_status(inputs: &StatusInputs) -> VirtualCameraStatus {
         platform_step,
         message: None,
     };
-    if let Err(reason) = &inputs.sink {
+    if let Err(unavailable) = &inputs.sink {
         status.available = false;
         status.state = VirtualCameraState::Unavailable;
-        status.message = Some(reason.clone());
+        status.message = Some(unavailable.reason.clone());
+        if unavailable.hidden {
+            // The UI hides the whole section exactly on `unsupported`.
+            status.platform_step = Some(VirtualCameraPlatformStep::Unsupported);
+        }
         return status;
     }
     match platform_step {
@@ -2290,15 +2318,24 @@ mod tests {
         );
         let no_sink = derive_status(&StatusInputs {
             on: true,
-            sink: Err(fixture["unavailableNoSink"]["message"]
-                .as_str()
-                .unwrap()
-                .to_string()),
+            sink: Err(VirtualCameraUnavailable::new(
+                fixture["unavailableNoSink"]["message"].as_str().unwrap(),
+            )),
             ..inputs()
         });
         assert_eq!(
             serde_json::to_value(&no_sink).unwrap(),
             fixture["unavailableNoSink"]
+        );
+        // Owner, 2026-11-03: a hidden platform reports `unsupported` even
+        // while off, so the UI shows no section at all.
+        let hidden = derive_status(&StatusInputs {
+            sink: Err(VirtualCameraUnavailable::hidden_until_proven("Windows")),
+            ..inputs()
+        });
+        assert_eq!(
+            serde_json::to_value(&hidden).unwrap(),
+            fixture["unavailableHidden"]
         );
         let approval = derive_status(&StatusInputs {
             on: true,
@@ -2380,6 +2417,7 @@ mod tests {
         for key in [
             "off",
             "unavailableNoSink",
+            "unavailableHidden",
             "needsApproval",
             "needsSetup",
             "ready",
@@ -2419,12 +2457,43 @@ mod tests {
 
         let no_sink = derive_status(&StatusInputs {
             on: true,
-            sink: Err("No sink here.".to_string()),
+            sink: Err(VirtualCameraUnavailable::new("No sink here.")),
             ..inputs()
         });
         assert_eq!(no_sink.state, VirtualCameraState::Unavailable);
         assert!(!no_sink.available && no_sink.on);
         assert_eq!(no_sink.message.as_deref(), Some("No sink here."));
+        assert!(no_sink.platform_step.is_none(), "shown, with the reason");
+    }
+
+    /// Owner, 2026-11-03: Windows and Linux code lands hidden until each
+    /// machine passes its spike. Hidden outranks the switch and any platform
+    /// report; a non-hidden unavailability keeps today's behaviour.
+    #[test]
+    fn a_hidden_platform_is_unsupported_on_and_off() {
+        let hidden = VirtualCameraUnavailable::hidden_until_proven("Linux");
+        assert_eq!(
+            hidden.reason,
+            "Videorc Camera isn't available on Linux yet."
+        );
+        assert!(hidden.hidden);
+        assert!(!VirtualCameraUnavailable::new("x").hidden);
+        for on in [false, true] {
+            let status = derive_status(&StatusInputs {
+                on,
+                sink: Err(hidden.clone()),
+                platform: Some((VirtualCameraPlatformStep::Ready, None)),
+                ..inputs()
+            });
+            assert_eq!(status.on, on);
+            assert!(!status.available);
+            assert_eq!(status.state, VirtualCameraState::Unavailable);
+            assert_eq!(
+                status.platform_step,
+                Some(VirtualCameraPlatformStep::Unsupported)
+            );
+            assert_eq!(status.message.as_deref(), Some(hidden.reason.as_str()));
+        }
     }
 
     #[test]
