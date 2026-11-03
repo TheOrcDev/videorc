@@ -90,6 +90,8 @@ function buddyActionContext(command: BuddyActionBody): UserErrorContext {
       return { action: command.showOnStream ? 'show' : 'hide', object: 'Buddy on stream' }
     case 'buddy-react':
       return { action: 'play', object: "Buddy's reaction" }
+    case 'chat-show-on-stream':
+      return { action: command.showOnStream ? 'show' : 'hide', object: 'chat on stream' }
   }
 }
 
@@ -639,6 +641,10 @@ function CommentsWindowApp(): ReactElement {
   const setBuddyShowOnStream = (showOnStream: boolean): void => {
     void sendBuddyAction({ kind: 'buddy-show-on-stream', showOnStream })
   }
+  // Plan 215 G (D5): Chat on stream rides the same relay to Studio.
+  const setChatOnStream = (showOnStream: boolean): void => {
+    void sendBuddyAction({ kind: 'chat-show-on-stream', showOnStream })
+  }
   // Plan 168 S-D3: a reaction chip plays on air (Studio calls cohost.pet.react).
   const reactBuddy = (reaction: string): void => {
     void sendBuddyAction({ kind: 'buddy-react', reaction })
@@ -827,6 +833,8 @@ function CommentsWindowApp(): ReactElement {
           buddyPending={buddyPending}
           onBuddySay={sayBuddy}
           onBuddyShowOnStream={setBuddyShowOnStream}
+          chatOnStream={cohost.chatOnStream}
+          onChatOnStream={setChatOnStream}
           onBuddyReact={reactBuddy}
           moderationOperations={moderationOperations}
           removalAnsweringIds={removalAnsweringIds}

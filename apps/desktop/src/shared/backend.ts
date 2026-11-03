@@ -7630,6 +7630,10 @@ export interface CohostWindowState {
    * and operates. Absent from a relay seeded without it (older Studio,
    * smokes); the window then shows no header. */
   buddy?: CohostWindowBuddy
+  /** Chat on stream (plan 215 G, D5): `overlayLayout.chat.showOnStream`, for
+   * the chat pane's switch. Absent from a relay seeded without it (older
+   * Studio, smokes); the window then shows no switch. */
+  chatOnStream?: boolean
 }
 
 /** The Buddy as the Stream Manager operates it (plan 164 S-C4). The window
@@ -7714,11 +7718,15 @@ export type CohostBuddyActionCommand =
   /** Plan 168 S-D3: a reaction chip beside the Say box; Studio routes it to
    * `cohost.pet.react`. `reaction` is a reaction id (`[a-z0-9-]{1,40}`). */
   | { requestId: string; kind: 'buddy-react'; reaction: string }
+  /** Plan 215 G (D5): the chat pane's Chat on stream switch. It rides this
+   * relay like the Buddy's switch; Studio writes `overlayLayout.chat`. */
+  | { requestId: string; kind: 'chat-show-on-stream'; showOnStream: boolean }
 
 export const COHOST_BUDDY_ACTION_KINDS = [
   'buddy-say',
   'buddy-show-on-stream',
-  'buddy-react'
+  'buddy-react',
+  'chat-show-on-stream'
 ] as const
 
 /** Correlated co-host action from the Comments window, brokered through main

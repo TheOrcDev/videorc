@@ -3852,7 +3852,8 @@ function buddyActionCommand(
     }
     return { requestId, kind, text: trimmed, state, sessionId }
   }
-  if (kind === 'buddy-show-on-stream') {
+  // Plan 215 G: Chat on stream needs no live session either; it is a switch.
+  if (kind === 'buddy-show-on-stream' || kind === 'chat-show-on-stream') {
     const { showOnStream } = value as { showOnStream?: unknown }
     if (typeof showOnStream !== 'boolean') {
       return new Error('Show on stream needs true or false.')

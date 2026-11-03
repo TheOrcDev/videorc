@@ -5570,6 +5570,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // the relay carries the off shape, never null.
   const buddyShowOnStream = overlayLayout.buddy.showOnStream
   const buddyShowInRecording = overlayLayout.buddy.showInRecording
+  const chatOnStream = overlayLayout.chat.showOnStream
   const cohostAutoChat = cohostSettings?.autoChat
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
@@ -5601,10 +5602,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           }
         : {}),
-      ...(cohostAutoChat ? { autoChat: cohostAutoChat } : {})
+      ...(cohostAutoChat ? { autoChat: cohostAutoChat } : {}),
+      // Plan 215 G: the chat pane's Chat on stream switch.
+      chatOnStream
     }),
     [
       aiConsent,
+      chatOnStream,
       cohostAutoChat,
       cohostEnabled,
       cohostGate,
@@ -5701,6 +5705,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             await setOverlayLayout({
               ...current,
               buddy: { ...current.buddy, showOnStream: command.showOnStream }
+            })
+          }
+          return cohostStateRef.current ?? offCohostState()
+        }
+        // Plan 215 G (D5): Chat on stream, the same overlay write.
+        if (command.kind === 'chat-show-on-stream') {
+          const current = overlayLayoutRef.current
+          if (current.chat.showOnStream !== command.showOnStream) {
+            await setOverlayLayout({
+              ...current,
+              chat: { ...current.chat, showOnStream: command.showOnStream }
             })
           }
           return cohostStateRef.current ?? offCohostState()

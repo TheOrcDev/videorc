@@ -82,6 +82,30 @@ function renderSection(
 
 const OFF_LINE = "Off. Viewers don't see Buddy."
 
+// Plan 215 G (D5): the chat box is an overlay item like Highlight and
+// Captions, with the same two switches, off by default.
+describe('the Chat item (plan 215 G)', () => {
+  it('has Show on stream and Show in recording, and says it carries names', () => {
+    const markup = renderSection('chat', { showOnStream: false, showInRecording: false })
+    expect(markup).toContain('data-videorc-overlay-inspector="chat"')
+    expect(markup).toContain('id="overlay-chat-stream"')
+    expect(markup).toContain('id="overlay-chat-recording"')
+    expect(markup).toContain('Show on stream')
+    expect(markup).toContain('Show in recording')
+    expect(markup.replace(/&#x27;/g, "'")).toContain("with each viewer's name")
+    expect(switches(markup)).toHaveLength(2)
+    for (const control of switches(markup)) expect(control).toContain('aria-checked="false"')
+    const line = markup.match(/<span data-videorc-overlay-off-line="chat">([^<]*)<\/span>/)
+    expect(line?.[1].replace(/&#x27;/g, "'")).toBe("Off. Viewers don't see chat.")
+  })
+
+  it('drops the off line once either switch is on', () => {
+    const markup = renderSection('chat', { showOnStream: true, showInRecording: false })
+    expect(markup).not.toContain('data-videorc-overlay-off-line')
+    expect(switches(markup)[0]).toContain('aria-checked="true"')
+  })
+})
+
 describe('the overlay section (plan 205 S3, D4)', () => {
   it('says an off Buddy goes nowhere, above its two switches', () => {
     const markup = renderSection('buddy', { showOnStream: false, showInRecording: false })
