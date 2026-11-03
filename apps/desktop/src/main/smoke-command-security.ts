@@ -127,6 +127,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'proof-window-state',
   'raise-window',
   'resize-window',
+  'restore-native-preview-driver',
   'restore-window',
   'resume-native-preview-surface',
   'scroll-studio',

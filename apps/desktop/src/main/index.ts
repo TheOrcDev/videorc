@@ -12203,6 +12203,15 @@ async function runSmokePreviewMotionCommand(
       throw new Error('Preview window must be open before exercising proof fallback.')
     }
     await disableNativePreviewRealSurfaceDriver('Smoke requested explicit proof fallback.')
+    // Plan 216 C: a probe that drives a real mouse over the fallback needs it
+    // to outlast the retry cooldown, or the next host command brings the
+    // native presenter back mid-drag. `restore-native-preview-driver` ends
+    // the hold.
+    if (typeof params.holdMs === 'number' && Number.isFinite(params.holdMs) && params.holdMs > 0) {
+      const retryAtMs = Date.now() + Math.min(params.holdMs, 10 * 60_000)
+      nativePreviewPrimaryDriverRetryAtMs = retryAtMs
+      nativePreviewHelperDriverRetryAtMs = retryAtMs
+    }
     const window = nativePreviewSurfaceWindow
     return {
       exists: Boolean(window && !window.isDestroyed()),
@@ -12213,6 +12222,23 @@ async function runSmokePreviewMotionCommand(
         ? surfaceWindowPlacement(nativePreviewSurfaceStatus.bounds)
         : null,
       status: nativePreviewSurfaceStatus
+    }
+  }
+
+  // Plan 216 C: the presenting watchdog's `reset-native-path`, run on request.
+  // The retry cooldowns clear and the presenter is resolved again, so a probe
+  // that forced the proof fallback leaves the app back on its native path.
+  if (command === 'restore-native-preview-driver') {
+    if (!previewWindowIsOpenForSurface()) {
+      throw new Error('Preview window must be open before restoring the native presenter.')
+    }
+    await resetNativePreviewRealSurfaceDriver('Smoke restored the native presenter.')
+    return {
+      ...previewWindowState(),
+      realDriverActive: Boolean(nativePreviewRealSurfaceDriver),
+      realDriverKind: nativePreviewRealSurfaceDriverKind,
+      nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
+      transport: nativePreviewSurfaceStatus.transport
     }
   }
 
