@@ -462,12 +462,16 @@ fn redact_string(
         summary.url_credentials += 1;
         return Some(redacted);
     }
-    if let Some(redacted) = redact_inline_sensitive_text(text, summary) {
-        return Some(redacted);
+    // Both rules run: a raw error line can carry a credentialed URL and a
+    // home path at once (plan 216 A5, rendererDiagnostics.recentUserErrors).
+    let inline = redact_inline_sensitive_text(text, summary);
+    match redact_home_path(inline.as_deref().unwrap_or(text)) {
+        Some(redacted) => {
+            summary.home_paths += 1;
+            Some(redacted)
+        }
+        None => inline,
     }
-    let redacted = redact_home_path(text)?;
-    summary.home_paths += 1;
-    Some(redacted)
 }
 
 fn redact_sessions(
@@ -944,6 +948,14 @@ mod tests {
             "videorc-support-bundle-test-{}",
             uuid::Uuid::new_v4()
         ));
+        // Plan 216 A5: the renderer's error ring ships raw error text, which
+        // can carry a home path and a credentialed URL in one line.
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        let raw_user_error = format!(
+            "Live preview layout switch blocked after camera (15s): camera session never delivered a frame ({home}/Library/Logs/camera.log, https://user:password2@example.test/support)."
+        );
         let input = SupportBundleExportInput {
             output_directory: Some(directory.clone()),
             // Plan 024 S2: the renderer forwards the Electron app version.
@@ -959,7 +971,18 @@ mod tests {
                         "occurredAt": "2026-07-07T21:01:33Z"
                     }
                 ],
-                "debugUrl": "https://user:password@example.test/support"
+                "debugUrl": "https://user:password@example.test/support",
+                "recentUserErrors": [
+                    {
+                        "at": "2026-11-03T14:51:46Z",
+                        "action": "switch",
+                        "object": "the scene",
+                        "code": "layout-camera-not-ready",
+                        "kind": "known",
+                        "title": "Couldn't switch the scene",
+                        "raw": raw_user_error
+                    }
+                ]
             })),
             database_path: directory.join("videorc.sqlite3"),
             health: BackendHealth {
@@ -1031,6 +1054,14 @@ mod tests {
         assert!(!text.contains("sk-test"));
         assert!(!text.contains("password@example"));
         assert!(text.contains("\"rendererDiagnostics\""));
+        assert!(text.contains("\"recentUserErrors\""));
+        assert!(text.contains("layout-camera-not-ready"));
+        assert!(text.contains("Couldn't switch the scene"));
+        assert!(!text.contains("password2@example"));
+        if !home.is_empty() {
+            assert!(!text.contains(&format!("{home}/Library/Logs")));
+            assert!(text.contains("~/Library/Logs/camera.log"));
+        }
         assert!(text.contains("\"cameraConnections\""));
         assert!(text.contains("Cam Link 4K"));
         assert!(text.contains("MacBook Pro Camera"));
