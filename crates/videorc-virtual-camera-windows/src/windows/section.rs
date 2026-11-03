@@ -18,12 +18,15 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows::Win32::Security::{
+    ACL, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_ATTRIBUTES,
+};
 use windows::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
     OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile,
 };
-use windows::core::HSTRING;
+use windows::core::{BOOL, HSTRING};
 
 use crate::SECTION_SDDL;
 use crate::ring::RingRegion;
@@ -55,10 +58,10 @@ fn win32(step: &'static str, error: windows::core::Error) -> SectionError {
 }
 
 /// A self-relative security descriptor built from SDDL, freed on drop.
-struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+pub(crate) struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
 impl SecurityDescriptor {
-    fn from_sddl(sddl: &str) -> Result<Self, SectionError> {
+    pub(crate) fn from_sddl(sddl: &str) -> Result<Self, SectionError> {
         let sddl = HSTRING::from(sddl);
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `sddl` is a valid NUL-terminated string and `descriptor`
@@ -78,6 +81,40 @@ impl SecurityDescriptor {
             )
         })?;
         Ok(Self(descriptor))
+    }
+
+    /// The owner SID the SDDL named (`O:`), borrowed from the descriptor.
+    pub(crate) fn owner(&self) -> Result<PSID, SectionError> {
+        let mut owner = PSID::default();
+        let mut defaulted = BOOL(0);
+        // SAFETY: the descriptor is alive; both out pointers are ours.
+        unsafe { GetSecurityDescriptorOwner(self.0, &mut owner, &mut defaulted) }
+            .map_err(|error| win32("GetSecurityDescriptorOwner", error))?;
+        if owner.is_invalid() {
+            return Err(SectionError::Win32 {
+                step: "GetSecurityDescriptorOwner (no owner in the SDDL)",
+                code: 0,
+            });
+        }
+        Ok(owner)
+    }
+
+    /// The DACL the SDDL named (`D:`), borrowed from the descriptor. A
+    /// missing or NULL DACL is an error, never something to apply.
+    pub(crate) fn dacl(&self) -> Result<*mut ACL, SectionError> {
+        let mut present = BOOL(0);
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut defaulted = BOOL(0);
+        // SAFETY: the descriptor is alive; the out pointers are ours.
+        unsafe { GetSecurityDescriptorDacl(self.0, &mut present, &mut dacl, &mut defaulted) }
+            .map_err(|error| win32("GetSecurityDescriptorDacl", error))?;
+        if !present.as_bool() || dacl.is_null() {
+            return Err(SectionError::Win32 {
+                step: "GetSecurityDescriptorDacl (no DACL in the SDDL)",
+                code: 0,
+            });
+        }
+        Ok(dacl)
     }
 }
 

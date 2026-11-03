@@ -19,10 +19,10 @@ use windows::Win32::System::Ole::SELFREG_E_CLASS;
 use windows::core::{GUID, HRESULT, Interface, PCWSTR};
 
 use crate::SOURCE_CLSID_U128;
-use crate::setup::CAMERA_DLL_VERSION;
+use crate::setup::{CAMERA_DLL_VERSION, is_installed_dll_path};
 
-use super::media_source::{LIVE_OBJECTS, VideorcCameraClassFactory};
-use super::registration;
+use super::media_source::{LIVE_OBJECTS, SERVER_LOCKS, VideorcCameraClassFactory};
+use super::{registration, setup_exe};
 
 /// The media source CLSID as a GUID.
 pub const SOURCE_CLSID_GUID: GUID = GUID::from_u128(SOURCE_CLSID_U128);
@@ -53,31 +53,42 @@ pub unsafe extern "system" fn DllGetClassObject(
     }
 }
 
-/// `S_OK` once no object of this module lives.
+/// `S_OK` once no object of this module lives and no `LockServer` holds it.
 ///
 /// # Safety
 ///
 /// No arguments; always safe to call.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
-    if LIVE_OBJECTS.load(Ordering::Acquire) == 0 {
+    if LIVE_OBJECTS.load(Ordering::Acquire) == 0 && SERVER_LOCKS.load(Ordering::Acquire) == 0 {
         S_OK
     } else {
         S_FALSE
     }
 }
 
-/// `regsvr32`: register this very file under HKLM at this build's version.
-/// The setup exe does the same for the copy it installs.
+/// `regsvr32`: register this very file under HKLM at this build's version,
+/// but only when it is the installed copy under `%ProgramData%` (the setup
+/// exe's work). Registering the copy in the per-user install's `resources`
+/// would have the Frame Server load, as Local Service, a file the user can
+/// replace.
 ///
 /// # Safety
 ///
 /// No arguments; always safe to call.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllRegisterServer() -> HRESULT {
-    match module_path().and_then(|path| {
+    let registered = module_path().and_then(|path| {
+        let program_data = setup_exe::program_data()?;
+        if !is_installed_dll_path(&path, &program_data, CAMERA_DLL_VERSION) {
+            return Err(format!(
+                "{} is not the installed copy; run videorc-camera-setup.exe",
+                path.display()
+            ));
+        }
         registration::register(&path, CAMERA_DLL_VERSION).map_err(|error| error.to_string())
-    }) {
+    });
+    match registered {
         Ok(()) => S_OK,
         Err(_) => SELFREG_E_CLASS,
     }

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, WIN32_ERROR};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
-    RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
-    RegGetValueW, RegSetValueExW,
+    RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegCloseKey, RegCreateKeyExW, RegDeleteKeyExW,
+    RegDeleteTreeW, RegGetValueW, RegSetValueExW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -135,11 +135,17 @@ fn delete_tree(subkey: &str) -> Result<(), RegistrationError> {
 pub fn unregister() -> Result<(), RegistrationError> {
     delete_tree(CLSID_SUBKEY)?;
     delete_tree(CAMERA_SUBKEY)?;
-    // `SOFTWARE\Videorc` goes only when nothing else lives under it: a tree
-    // delete would take unrelated keys, so delete it as a plain key and
-    // ignore a refusal.
-    // SAFETY: as in `delete_tree`.
-    let _ = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, &HSTRING::from(VENDOR_SUBKEY)) };
+    // `SOFTWARE\Videorc` goes only when nothing else lives under it: a plain
+    // key delete refuses a key with subkeys, and that refusal is fine.
+    // SAFETY: as in `delete_tree`; the 64-bit view the keys were written in.
+    let _ = unsafe {
+        RegDeleteKeyExW(
+            HKEY_LOCAL_MACHINE,
+            &HSTRING::from(VENDOR_SUBKEY),
+            KEY_WOW64_64KEY.0,
+            None,
+        )
+    };
     Ok(())
 }
 

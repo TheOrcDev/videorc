@@ -75,8 +75,11 @@ use crate::{CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, FRAME_DURATION_100NS};
 
 use super::frame_source::FrameSource;
 
-/// How many of this module's objects are alive: `DllCanUnloadNow`'s answer.
+/// How many of this module's objects are alive: half of `DllCanUnloadNow`'s
+/// answer.
 pub static LIVE_OBJECTS: AtomicUsize = AtomicUsize::new(0);
+/// `IClassFactory::LockServer` holds: the other half.
+pub static SERVER_LOCKS: AtomicUsize = AtomicUsize::new(0);
 
 /// The one stream's identifier.
 const STREAM_ID: u32 = 0;
@@ -160,7 +163,15 @@ impl IClassFactory_Impl for VideorcCameraClassFactory_Impl {
         unsafe { activate.query(riid, ppvobject) }.ok()
     }
 
-    fn LockServer(&self, _flock: BOOL) -> Result<()> {
+    fn LockServer(&self, flock: BOOL) -> Result<()> {
+        if flock.as_bool() {
+            SERVER_LOCKS.fetch_add(1, Ordering::AcqRel);
+        } else {
+            // An unbalanced unlock is the caller's bug; never wrap below zero.
+            let _ = SERVER_LOCKS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |locks| {
+                Some(locks.saturating_sub(1))
+            });
+        }
         Ok(())
     }
 }
@@ -171,6 +182,12 @@ impl IClassFactory_Impl for VideorcCameraClassFactory_Impl {
 
 /// `IMFActivate` for the CLSID. Attributes the Frame Server sets before
 /// activation are kept in `attributes` and copied into the source.
+///
+/// Lifetime as Microsoft's sample (`VirtualCameraMediaSourceActivate.cpp`):
+/// every `ActivateObject` makes a new source and the activate keeps the
+/// newest; `ShutdownObject` is a no-op (the Frame Server shuts the source
+/// down itself); `DetachObject` lets the activate's reference go. A source
+/// is never handed out twice, so a shut-down one is never handed back.
 #[implement(IMFActivate)]
 pub struct VideorcCameraActivate {
     attributes: IMFAttributes,
@@ -206,19 +223,12 @@ impl IMFActivate_Impl for VideorcCameraActivate_Impl {
         }
         // SAFETY: checked non-null.
         unsafe { *ppv = null_mut() };
-        let mut slot = lock_recovering(&self.source);
-        let source = match slot.as_ref() {
-            Some(source) => source.clone(),
-            None => {
-                let source = VideorcCameraSource::create(&self.attributes)?;
-                *slot = Some(source.clone());
-                source
-            }
-        };
-        drop(slot);
+        let source = VideorcCameraSource::create(&self.attributes)?;
         let unknown: IUnknown = source.cast()?;
         // SAFETY: valid pointers (checked above).
-        unsafe { unknown.query(riid, ppv) }.ok()
+        unsafe { unknown.query(riid, ppv) }.ok()?;
+        *lock_recovering(&self.source) = Some(source);
+        Ok(())
     }
 
     fn ShutdownObject(&self) -> Result<()> {

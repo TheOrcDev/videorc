@@ -4,9 +4,9 @@
 //! for a second (plan 214 C1, D12).
 //!
 //! The media source owns the section: it creates it (with the camera DACL)
-//! the first time a stream starts and keeps it until shutdown, so a
-//! restarted source meets a surviving ring and Videorc's writer sees one
-//! name for the life of the camera.
+//! on the first sample request and keeps it until shutdown, so a restarted
+//! source meets a surviving ring and Videorc's writer sees one name for the
+//! life of the camera.
 
 use crate::ring::{ReadOutcome, RingLayout, RingReader};
 use crate::still::not_running_still;
@@ -17,12 +17,20 @@ use super::section::SharedSection;
 /// How long after a failed section create the next attempt waits.
 const CREATE_RETRY_MS: u64 = 1000;
 
+/// The reader and the section it reads. The reader is declared first so it
+/// drops before the view it points into is unmapped.
+struct OpenRing {
+    reader: RingReader,
+    _section: SharedSection,
+}
+
 pub struct FrameSource {
     layout: RingLayout,
-    ring: Option<(SharedSection, RingReader)>,
+    ring: Option<OpenRing>,
     still: Vec<u8>,
-    last: Vec<u8>,
-    have_last: bool,
+    /// Whether the reader's frame is one this source may show (cleared when
+    /// the ring goes stale, so a returning Videorc starts from the still).
+    have_frame: bool,
     next_create_attempt_ms: u64,
     viewers: u32,
     last_error: Option<String>,
@@ -34,8 +42,7 @@ impl FrameSource {
             layout,
             ring: None,
             still: not_running_still(layout.width, layout.height),
-            last: vec![0; layout.frame_bytes],
-            have_last: false,
+            have_frame: false,
             next_create_attempt_ms: 0,
             viewers: 0,
             last_error: None,
@@ -62,9 +69,12 @@ impl FrameSource {
         }
         match SharedSection::create(&self.layout.section_name(), self.layout.total_bytes()) {
             Ok(section) => match RingReader::initialize(section.region(), self.layout) {
-                Ok(reader) => {
+                Ok(mut reader) => {
                     reader.set_viewers(self.viewers);
-                    self.ring = Some((section, reader));
+                    self.ring = Some(OpenRing {
+                        reader,
+                        _section: section,
+                    });
                     self.last_error = None;
                     true
                 }
@@ -82,12 +92,12 @@ impl FrameSource {
         }
     }
 
-    /// D13: how many started streams hold the camera. Written into the ring
-    /// header as soon as there is one.
+    /// D13: how many started streams of this source hold the camera. Added
+    /// to the ring header's shared count as soon as there is a ring.
     pub fn set_viewers(&mut self, viewers: u32) {
         self.viewers = viewers;
-        if let Some((_, reader)) = &self.ring {
-            reader.set_viewers(viewers);
+        if let Some(ring) = &mut self.ring {
+            ring.reader.set_viewers(viewers);
         }
     }
 
@@ -97,30 +107,37 @@ impl FrameSource {
         if !self.ensure_ring(now_ms) {
             return &self.still;
         }
-        let Some((_, reader)) = self.ring.as_mut() else {
+        let Some(ring) = self.ring.as_mut() else {
             return &self.still;
         };
-        match reader.read_latest_into(&mut self.last, now_ms) {
+        match ring.reader.read_latest(now_ms) {
             ReadOutcome::Fresh { .. } => {
-                self.have_last = true;
-                &self.last
+                self.have_frame = true;
+                ring.reader.frame()
             }
-            ReadOutcome::Unchanged if self.have_last => &self.last,
+            ReadOutcome::Unchanged if self.have_frame => ring.reader.frame(),
             ReadOutcome::Unchanged | ReadOutcome::Stale | ReadOutcome::Empty => {
                 // A stale ring forgets its last frame: when Videorc comes
                 // back it starts from the still, never from a minute-old
                 // picture.
-                self.have_last = false;
+                self.have_frame = false;
                 &self.still
             }
         }
     }
 
-    /// Shutdown: nobody views, the section goes (Videorc's own handle keeps
-    /// the memory alive until it closes too).
+    /// Shutdown: this source's viewers leave the shared count, then the
+    /// section goes (Videorc's own handle keeps the memory alive until it
+    /// closes too).
     pub fn close(&mut self) {
         self.set_viewers(0);
         self.ring = None;
-        self.have_last = false;
+        self.have_frame = false;
+    }
+}
+
+impl Drop for FrameSource {
+    fn drop(&mut self) {
+        self.close();
     }
 }

@@ -173,7 +173,9 @@ mod windows_sink {
         MFVirtualCameraType_SoftwareCameraSource,
     };
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows::Win32::System::LibraryLoader::{
+        GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+    };
     use windows::core::{GUID, HRESULT, HSTRING, Interface, PCSTR, PCWSTR};
 
     use super::{bgra_to_i420, nv12_to_i420};
@@ -243,12 +245,17 @@ mod windows_sink {
     }
 
     fn resolve_create_virtual_camera() -> Result<MfCreateVirtualCamera, String> {
-        // SAFETY: a plain system DLL load by name; the handle is never freed
-        // (the function pointer lives for the process).
-        let module =
-            unsafe { LoadLibraryW(&HSTRING::from("mfsensorgroup.dll")) }.map_err(|error| {
-                format!("Videorc Camera needs Windows 11 (mfsensorgroup.dll: {error}).")
-            })?;
+        // SAFETY: a system DLL loaded from System32 only, so nothing beside
+        // the backend can stand in for it; the handle is never freed (the
+        // function pointer lives for the process).
+        let module = unsafe {
+            LoadLibraryExW(
+                &HSTRING::from("mfsensorgroup.dll"),
+                None,
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        }
+        .map_err(|error| format!("Videorc Camera needs Windows 11 (mfsensorgroup.dll: {error})."))?;
         // SAFETY: the module is loaded; the name is NUL-terminated.
         let address = unsafe { GetProcAddress(module, PCSTR(b"MFCreateVirtualCamera\0".as_ptr())) }
             .ok_or_else(|| {
@@ -336,6 +343,14 @@ mod windows_sink {
         source_planes: I420Planes,
         fit: CpuFit,
     }
+
+    // SAFETY: the factory builds the sink with no camera, apartment or ring,
+    // and `VirtualCameraOutput::spawn` moves it once onto the output thread.
+    // `connect`, `push` and `viewers` create the COM camera and the ring views
+    // on that thread, and `disconnect`, `engine.shutdown()` and drop release
+    // them there. A sink whose spawn failed drops where it was built, holding
+    // nothing, and `Apartment::drop` refuses a foreign thread.
+    unsafe impl Send for WindowsCameraSink {}
 
     impl WindowsCameraSink {
         /// Open the ring when the media source has created it; a miss is
@@ -551,8 +566,13 @@ mod windows_sink {
                 // opened the camera.
                 return Some(0);
             }
+            let now_ms = videorc_virtual_camera_windows::windows::boot_clock_ms();
             let slot = self.ring.borrow();
-            Some(slot.ring.as_ref().map_or(0, |(_, writer)| writer.viewers()))
+            Some(
+                slot.ring
+                    .as_ref()
+                    .map_or(0, |(_, writer)| writer.viewers(now_ms)),
+            )
         }
     }
 
@@ -656,6 +676,25 @@ mod tests {
         let mut back = Vec::new();
         i420_to_nv12(&planes.view(), &mut back);
         assert_eq!(back, nv12);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_sink_and_the_media_source_agree_on_the_camera() {
+        use crate::virtual_camera::{
+            VIRTUAL_CAMERA_HEIGHT, VIRTUAL_CAMERA_WIDTH, VIRTUAL_CAMERA_WINDOWS_SOURCE_CLSID,
+        };
+        assert_eq!(
+            VIRTUAL_CAMERA_WINDOWS_SOURCE_CLSID,
+            videorc_virtual_camera_windows::SOURCE_CLSID
+        );
+        assert_eq!(
+            (VIRTUAL_CAMERA_WIDTH, VIRTUAL_CAMERA_HEIGHT),
+            (
+                videorc_virtual_camera_windows::CAMERA_WIDTH,
+                videorc_virtual_camera_windows::CAMERA_HEIGHT
+            )
+        );
     }
 
     #[test]

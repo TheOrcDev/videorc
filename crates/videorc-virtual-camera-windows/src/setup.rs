@@ -8,6 +8,20 @@
 //! `%ProgramData%\Videorc\camera\<version>\` and writes the keys below.
 //! `/remove` undoes both.
 //!
+//! Videorc starts the exe unelevated with one fixed verb; the exe asks for
+//! elevation itself (`ShellExecuteExW` with `runas` on its own path and
+//! fixed arguments) and waits for its elevated copy. An elevated process
+//! inherits no handles from an unelevated parent, so the outcome travels
+//! back as the exit code ([`SetupExit`]) and the unelevated copy prints the
+//! line Videorc shows.
+//!
+//! `%ProgramData%` lets any user create folders, and the Frame Server runs
+//! what this folder holds as Local Service, so the elevated step refuses a
+//! link or a folder someone else owns on the way down, gives each folder
+//! [`INSTALL_DIR_SDDL`] (protected, Administrators own it, everyone only
+//! reads), copies into it, and checks the copy's publisher there before it
+//! takes the place of the registered DLL.
+//!
 //! Registry (all under `HKEY_LOCAL_MACHINE`, 64-bit view):
 //!
 //! - `SOFTWARE\Classes\CLSID\{B629EEBB-4B8E-4CAB-A549-EB17570B1382}`
@@ -42,6 +56,15 @@ pub const DLL_PATH_VALUE: &str = "DllPath";
 /// Under `%ProgramData%`: `Videorc\camera`.
 pub const INSTALL_ROOT_COMPONENTS: [&str; 2] = ["Videorc", "camera"];
 
+/// `%ProgramData%\Videorc`, `…\camera` and `…\<version>`: Administrators
+/// own them; SYSTEM and Administrators have full control; everyone reads and
+/// executes (the Frame Server loads the DLL as Local Service). Protected, so
+/// nothing is inherited from `%ProgramData%`, whose ACL lets any user create
+/// folders. Never a NULL DACL.
+pub const INSTALL_DIR_SDDL: &str = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;WD)";
+/// The installed DLL itself: the same principals, no inheritance flags.
+pub const INSTALL_FILE_SDDL: &str = "O:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;WD)";
+
 /// `%ProgramData%\Videorc\camera\<version>`.
 pub fn install_dir(program_data: &Path, version: &str) -> PathBuf {
     let mut dir = program_data.to_path_buf();
@@ -55,6 +78,20 @@ pub fn install_dir(program_data: &Path, version: &str) -> PathBuf {
 /// `%ProgramData%\Videorc\camera\<version>\videorc_virtual_camera_windows.dll`.
 pub fn installed_dll_path(program_data: &Path, version: &str) -> PathBuf {
     install_dir(program_data, version).join(DLL_FILE_NAME)
+}
+
+/// Whether `dll` is this version's installed copy (Windows compares paths
+/// without case). `DllRegisterServer` registers nothing else: a DLL the
+/// Frame Server loads as Local Service must not sit in a folder the user
+/// can write, such as the per-user install's `resources`.
+pub fn is_installed_dll_path(dll: &Path, program_data: &Path, version: &str) -> bool {
+    fn normalized(path: &Path) -> String {
+        path.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    }
+    normalized(dll) == normalized(&installed_dll_path(program_data, version))
 }
 
 /// What HKLM says about the camera, as the registry reader found it.
@@ -112,61 +149,165 @@ pub fn setup_state(registered: &RegisteredCamera, bundled_version: &str) -> Setu
     }
 }
 
-/// `videorc-camera-setup.exe`'s command line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SetupCommand {
-    /// Copy the DLL (the one next to the exe unless `/dll <path>` names
-    /// another) and write HKLM. The default when no verb is given.
-    Install {
-        dll: Option<PathBuf>,
-    },
+/// What `videorc-camera-setup.exe` was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupVerb {
+    /// Copy the DLL beside the exe and write HKLM. The default.
+    Install,
     /// Remove the HKLM keys and the installed copies.
     Remove,
-    Usage,
 }
 
-pub const USAGE: &str = "videorc-camera-setup.exe [/install] [/dll <path>] | /remove\n\
-Copies Videorc Camera's media source to %ProgramData%\\Videorc\\camera\\<version>\\ and registers it in HKLM (needs elevation); /remove undoes both.";
+/// A parsed command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupRequest {
+    pub verb: SetupVerb,
+    /// Set by the exe on the copy it starts elevated, so a copy that still
+    /// is not elevated fails instead of asking again.
+    pub relaunched: bool,
+}
 
-/// Parse the arguments after the program name. Verbs take `/` or `--`.
-pub fn parse_setup_args<S: AsRef<str>>(args: &[S]) -> SetupCommand {
-    let mut dll = None;
-    let mut verb: Option<&str> = None;
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index].as_ref();
-        let flag = arg.trim_start_matches(['/', '-']).to_ascii_lowercase();
-        match flag.as_str() {
-            "install" | "remove" => {
-                if verb.is_some() {
-                    return SetupCommand::Usage;
-                }
-                verb = Some(if flag == "install" {
-                    "install"
-                } else {
-                    "remove"
-                });
+/// The marker the unelevated copy passes to its elevated copy.
+pub const RELAUNCHED_FLAG: &str = "/elevated";
+
+pub const USAGE: &str = "videorc-camera-setup.exe [/install] | /remove\n\
+Copies the Videorc Camera media source beside this exe to %ProgramData%\\Videorc\\camera\\<version>\\ and registers it in HKLM, asking Windows for elevation once; /remove undoes both.";
+
+/// Parse the arguments after the program name. Verbs take `/` or `--`; no
+/// verb means install. Nothing else is accepted: the elevated copy only
+/// ever installs the DLL that sits beside it.
+pub fn parse_setup_args<S: AsRef<str>>(args: &[S]) -> Option<SetupRequest> {
+    let mut verb = None;
+    let mut relaunched = false;
+    for arg in args {
+        let flag = arg.as_ref().trim_start_matches(['/', '-']).to_ascii_lowercase();
+        let next = match flag.as_str() {
+            "install" => SetupVerb::Install,
+            "remove" => SetupVerb::Remove,
+            "elevated" if !relaunched => {
+                relaunched = true;
+                continue;
             }
-            "dll" => {
-                let Some(path) = args.get(index + 1) else {
-                    return SetupCommand::Usage;
-                };
-                dll = Some(PathBuf::from(path.as_ref()));
-                index += 1;
-            }
-            _ => return SetupCommand::Usage,
+            _ => return None,
+        };
+        if verb.replace(next).is_some() {
+            return None;
         }
-        index += 1;
     }
+    Some(SetupRequest {
+        verb: verb.unwrap_or(SetupVerb::Install),
+        relaunched,
+    })
+}
+
+/// The elevated copy's arguments: fixed words, nothing from the caller.
+pub fn relaunch_parameters(verb: SetupVerb) -> &'static str {
     match verb {
-        Some("remove") => {
-            if dll.is_some() {
-                SetupCommand::Usage
-            } else {
-                SetupCommand::Remove
+        SetupVerb::Install => "/install /elevated",
+        SetupVerb::Remove => "/remove /elevated",
+    }
+}
+
+/// `videorc-camera-setup.exe`'s exit codes, the only channel back from its
+/// elevated copy. `Declined` (3) is mirrored as
+/// `WINDOWS_CAMERA_SETUP_DECLINED_EXIT_CODE` in
+/// `apps/desktop/src/main/virtual-camera-windows-setup.ts`; Videorc shows
+/// the exe's first line for the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupExit {
+    Done,
+    Failed,
+    Usage,
+    /// The UAC prompt was declined.
+    Declined,
+    /// The DLL beside the exe is missing.
+    DllMissing,
+    /// The installed DLL of this version is loaded and differs.
+    InUse,
+    /// A folder on the way down is a link or owned by someone else.
+    UnsafeFolder,
+    /// The DLL's signature does not match the setup exe's publisher.
+    Untrusted,
+    /// Still not elevated after the prompt (a standard user with UAC off).
+    NotElevated,
+}
+
+impl SetupExit {
+    const ALL: [Self; 9] = [
+        Self::Done,
+        Self::Failed,
+        Self::Usage,
+        Self::Declined,
+        Self::DllMissing,
+        Self::InUse,
+        Self::UnsafeFolder,
+        Self::Untrusted,
+        Self::NotElevated,
+    ];
+
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Done => 0,
+            Self::Failed => 1,
+            Self::Usage => 2,
+            Self::Declined => 3,
+            Self::DllMissing => 4,
+            Self::InUse => 5,
+            Self::UnsafeFolder => 6,
+            Self::Untrusted => 7,
+            Self::NotElevated => 8,
+        }
+    }
+
+    /// The code an elevated copy exited with; an unknown one is a failure.
+    pub fn from_code(code: u32) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|exit| u32::from(exit.code()) == code)
+            .unwrap_or(Self::Failed)
+    }
+
+    /// The line the unelevated copy prints for its elevated copy's code.
+    pub fn line(self, verb: SetupVerb) -> &'static str {
+        match (self, verb) {
+            (Self::Done, SetupVerb::Install) => "Videorc Camera is set up.",
+            (Self::Done, SetupVerb::Remove) => "Videorc Camera was removed from this PC.",
+            (Self::Failed, SetupVerb::Install) => {
+                "Videorc Camera setup failed. Run videorc-camera-setup.exe from an administrator terminal to see why."
+            }
+            (Self::Failed, SetupVerb::Remove) => {
+                "Videorc Camera removal failed. Run videorc-camera-setup.exe /remove from an administrator terminal to see why."
+            }
+            (Self::Usage, _) => USAGE,
+            (Self::Declined, _) => "Windows did not get permission to change Videorc Camera.",
+            (Self::DllMissing, _) => {
+                "This Videorc build is missing the Videorc Camera files. Reinstall Videorc."
+            }
+            (Self::InUse, _) => {
+                "Videorc Camera is in use. Close every app that uses it and set it up again."
+            }
+            (Self::UnsafeFolder, _) => {
+                "A folder under C:\\ProgramData\\Videorc is a link or belongs to someone else. Delete C:\\ProgramData\\Videorc and set up again."
+            }
+            (Self::Untrusted, _) => {
+                "The Videorc Camera file is not signed by Videorc's publisher. Reinstall Videorc."
+            }
+            (Self::NotElevated, _) => {
+                "Videorc Camera setup needs an administrator. Ask one to approve the Windows prompt."
             }
         }
-        _ => SetupCommand::Install { dll },
+    }
+}
+
+/// Whether the DLL may be installed, from the two Authenticode publishers
+/// (`None`: unsigned). A signed setup exe accepts only a DLL its own
+/// publisher signed; an unsigned build (dev, unsigned Alpha) has nothing to
+/// compare and accepts any.
+pub fn publisher_allows(exe: Option<&[u8]>, dll: Option<&[u8]>) -> bool {
+    match (exe, dll) {
+        (None, _) => true,
+        (Some(exe), Some(dll)) => exe == dll,
+        (Some(_), None) => false,
     }
 }
 
@@ -238,37 +379,97 @@ mod tests {
         );
     }
 
+    fn request(verb: SetupVerb, relaunched: bool) -> Option<SetupRequest> {
+        Some(SetupRequest { verb, relaunched })
+    }
+
     #[test]
-    fn the_setup_command_line_parses_install_remove_and_the_dll_override() {
+    fn the_command_line_takes_one_verb_and_nothing_from_outside() {
         let none: [&str; 0] = [];
-        assert_eq!(parse_setup_args(&none), SetupCommand::Install { dll: None });
+        assert_eq!(parse_setup_args(&none), request(SetupVerb::Install, false));
         assert_eq!(
             parse_setup_args(&["/install"]),
-            SetupCommand::Install { dll: None }
+            request(SetupVerb::Install, false)
         );
         assert_eq!(
-            parse_setup_args(&["--install", "--dll", r"C:\x\y.dll"]),
-            SetupCommand::Install {
-                dll: Some(PathBuf::from(r"C:\x\y.dll"))
+            parse_setup_args(&["--REMOVE"]),
+            request(SetupVerb::Remove, false)
+        );
+        assert_eq!(
+            parse_setup_args(&["/remove", "/elevated"]),
+            request(SetupVerb::Remove, true)
+        );
+        for bad in [
+            &["/install", "/remove"][..],
+            &["/dll", r"C:\x\y.dll"],
+            &["/install", r"C:\x\y.dll"],
+            &["/elevated", "/elevated"],
+            &["/frobnicate"],
+        ] {
+            assert_eq!(parse_setup_args(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_elevated_copy_gets_fixed_words_that_parse_back_as_relaunched() {
+        for verb in [SetupVerb::Install, SetupVerb::Remove] {
+            let words: Vec<&str> = relaunch_parameters(verb).split(' ').collect();
+            assert_eq!(parse_setup_args(&words), request(verb, true));
+            assert!(words.contains(&RELAUNCHED_FLAG));
+        }
+    }
+
+    #[test]
+    fn every_exit_code_round_trips_and_an_unknown_one_is_a_failure() {
+        for exit in SetupExit::ALL {
+            assert_eq!(SetupExit::from_code(u32::from(exit.code())), exit);
+        }
+        assert_eq!(SetupExit::Done.code(), 0);
+        assert_eq!(SetupExit::Declined.code(), 3);
+        assert_eq!(SetupExit::from_code(1223), SetupExit::Failed);
+        assert_eq!(SetupExit::from_code(u32::MAX), SetupExit::Failed);
+    }
+
+    #[test]
+    fn a_signed_setup_installs_only_its_own_publishers_dll() {
+        let videorc = b"CN=Videorc".as_slice();
+        let other = b"CN=Someone".as_slice();
+        assert!(publisher_allows(Some(videorc), Some(videorc)));
+        assert!(!publisher_allows(Some(videorc), Some(other)));
+        assert!(!publisher_allows(Some(videorc), None));
+        assert!(publisher_allows(None, None), "an unsigned dev build");
+        assert!(publisher_allows(None, Some(other)));
+    }
+
+    #[test]
+    fn only_the_installed_copy_may_be_registered() {
+        let program_data = Path::new(r"C:\ProgramData");
+        let installed = installed_dll_path(program_data, "0.1.0");
+        assert!(is_installed_dll_path(&installed, program_data, "0.1.0"));
+        assert!(is_installed_dll_path(
+            Path::new(r"c:\programdata\VIDEORC\camera\0.1.0\videorc_virtual_camera_windows.dll"),
+            program_data,
+            "0.1.0"
+        ));
+        assert!(!is_installed_dll_path(&installed, program_data, "0.2.0"));
+        assert!(!is_installed_dll_path(
+            Path::new(
+                r"C:\Users\ana\AppData\Local\Programs\Videorc\resources\videorc_virtual_camera_windows.dll"
+            ),
+            program_data,
+            "0.1.0"
+        ));
+    }
+
+    #[test]
+    fn the_install_folders_are_protected_and_never_null() {
+        for sddl in [INSTALL_DIR_SDDL, INSTALL_FILE_SDDL] {
+            assert!(sddl.starts_with("O:BAD:PAI("), "{sddl}");
+            assert!(sddl.contains(";FA;;;SY)") && sddl.contains(";FA;;;BA)"));
+            assert!(sddl.contains(";FRFX;;;WD)"), "everyone only reads");
+            for writer in ["BU", "AU", "IU", "CO"] {
+                assert!(!sddl.contains(&format!(";;;{writer})")), "{writer}");
             }
-        );
-        assert_eq!(
-            parse_setup_args(&["/dll", r"C:\x\y.dll"]),
-            SetupCommand::Install {
-                dll: Some(PathBuf::from(r"C:\x\y.dll"))
-            }
-        );
-        assert_eq!(parse_setup_args(&["/remove"]), SetupCommand::Remove);
-        assert_eq!(parse_setup_args(&["/REMOVE"]), SetupCommand::Remove);
-        assert_eq!(
-            parse_setup_args(&["/remove", "/dll", "x"]),
-            SetupCommand::Usage
-        );
-        assert_eq!(
-            parse_setup_args(&["/install", "/remove"]),
-            SetupCommand::Usage
-        );
-        assert_eq!(parse_setup_args(&["/dll"]), SetupCommand::Usage);
-        assert_eq!(parse_setup_args(&["/frobnicate"]), SetupCommand::Usage);
+        }
     }
 }

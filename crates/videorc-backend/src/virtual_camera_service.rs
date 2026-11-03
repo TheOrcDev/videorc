@@ -59,6 +59,9 @@ struct ServiceState {
     /// Why this build has no sink (`platform_sink` refused); set when the
     /// switch is turned on and the factory fails, cleared when it succeeds.
     sink_unavailable: Option<String>,
+    /// The platform's camera is hidden until proven: `platform` stays
+    /// `unsupported` whatever main reports.
+    hidden: bool,
     output: Option<VirtualCameraOutput>,
     last_published: Option<VirtualCameraStatus>,
     supervisor_started: bool,
@@ -138,6 +141,7 @@ impl VirtualCameraService {
     pub(crate) fn hidden(self, unavailable: VirtualCameraUnavailable) -> Self {
         {
             let mut state = self.lock();
+            state.hidden = true;
             state.platform = Some((
                 VirtualCameraPlatformStep::Unsupported,
                 Some(unavailable.reason.clone()),
@@ -348,6 +352,7 @@ async fn set_on_without_saving(state: &AppState, on: bool) -> VirtualCameraStatu
                     if hidden {
                         // Plan 214 C, D: written but unproven on a box. The
                         // UI hides the section on `unsupported`.
+                        inner.hidden = true;
                         inner.platform =
                             Some((VirtualCameraPlatformStep::Unsupported, Some(reason.clone())));
                     }
@@ -374,7 +379,8 @@ async fn set_on_without_saving(state: &AppState, on: bool) -> VirtualCameraStatu
 }
 
 /// `virtualCamera.platform.report`: main's word on the extension or the
-/// Windows setup step. The backend never guesses it.
+/// Windows setup step. The backend never guesses it. A hidden camera keeps
+/// its `unsupported`, so no report can show the section before its spike.
 pub fn report_platform(
     state: &AppState,
     step: VirtualCameraPlatformStep,
@@ -382,7 +388,9 @@ pub fn report_platform(
 ) -> VirtualCameraStatus {
     {
         let mut inner = state.virtual_camera.lock();
-        inner.platform = Some((step, message));
+        if !inner.hidden {
+            inner.platform = Some((step, message));
+        }
     }
     publish_if_changed(state)
 }
@@ -631,10 +639,30 @@ mod tests {
             status
                 .message
                 .as_deref()
-                .is_some_and(|message| message.contains("hidden until a Test box")),
+                .is_some_and(|message| message.contains("hidden until it has passed its spike on a real Test box")),
             "{:?}",
             status.message
         );
+    }
+
+    #[tokio::test]
+    async fn no_platform_report_reveals_a_hidden_camera() {
+        let (service, _) = fake_service(Some(0));
+        let state = test_state_with(
+            service.hidden(VirtualCameraUnavailable::hidden_until_proven("Test")),
+        );
+        for step in [
+            VirtualCameraPlatformStep::Ready,
+            VirtualCameraPlatformStep::NeedsSetup,
+            VirtualCameraPlatformStep::Failed,
+        ] {
+            let status = report_platform(&state, step, Some("From main.".to_string()));
+            assert_eq!(status.state, VirtualCameraState::Unavailable);
+            assert_eq!(
+                status.platform_step,
+                Some(VirtualCameraPlatformStep::Unsupported)
+            );
+        }
     }
 
     #[tokio::test]

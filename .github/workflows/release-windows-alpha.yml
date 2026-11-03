@@ -778,7 +778,8 @@ jobs:
             Endpoint = $env:VIDEORC_WINDOWS_SIGNING_ENDPOINT
             CodeSigningAccountName = $env:VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME
             CertificateProfileName = $env:VIDEORC_WINDOWS_CERTIFICATE_PROFILE_NAME
-            Files = @($werHelper.FullName, $cameraSource.FullName)
+            # TrustedSigning 0.5.0 takes -Files as one comma-separated string.
+            Files = "$($werHelper.FullName),$($cameraSource.FullName)"
             FilesFolder = $unpackedRoot
             FilesFolderFilter = 'exe'
             FilesFolderRecurse = $true

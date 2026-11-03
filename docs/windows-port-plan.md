@@ -535,21 +535,60 @@ the code, prove it on a box, then show it.
   30 fps, BT.709 video range. The Windows Frame Server loads it as Local
   Service in session 0, never Videorc's process.
 - `resources\videorc-camera-setup.exe`: the one elevated step (D8). It
-  copies the DLL to `%ProgramData%\Videorc\camera\<version>\` and writes
-  HKLM; `/remove` undoes both. Command line:
-  `videorc-camera-setup.exe [/install] [/dll <path>] | /remove` (no verb
-  means `/install` with the DLL beside the exe). Exit 0 on success, 1 on
-  failure, 2 on a bad command line. The app runs it through one UAC prompt
-  (PowerShell `Start-Process -Verb RunAs -Wait`,
+  copies the DLL beside it to `%ProgramData%\Videorc\camera\<version>\` and
+  writes HKLM; `/remove` undoes both. Command line:
+  `videorc-camera-setup.exe [/install] | /remove` (no verb means
+  `/install`; the DLL is always the one beside the exe, never a path
+  argument). The app runs it unelevated with an argv array
+  (`execFile(exe, ['/install'])`, never a shell string;
   `apps/desktop/src/main/virtual-camera-windows-setup.ts`,
-  `runWindowsCameraSetup(): Promise<{ ok: boolean; message?: string }>`).
+  `runWindowsCameraSetup(options?: { remove?: boolean }): Promise<{ ok:
+  boolean; message?: string }>`). Unelevated, the exe starts itself again
+  through one UAC prompt (`ShellExecuteExW`, verb `runas`, fixed parameters
+  `/install /elevated` or `/remove /elevated`), waits, prints one plain line
+  for the elevated copy's exit code and exits with it. Elevated (that copy,
+  or an administrator terminal) it does the work and also prints the
+  detail. Exit codes, the only channel back from the elevated copy: 0 done,
+  1 failed, 2 bad command line, 3 the UAC prompt was declined, 4 the DLL
+  beside the exe is missing, 5 the installed DLL is loaded and differs (an
+  app holds the camera), 6 a folder under `%ProgramData%\Videorc` is a link
+  or has a foreign owner, 7 the DLL is not signed by the exe's publisher,
+  8 the relaunched copy was not elevated. The app shows its own copy for 3
+  and the exe's first line for the rest.
+- Planting: the Frame Server runs the DLL as Local Service, so whoever can
+  replace it can run code there. The exe resolves `%ProgramData%` with
+  `SHGetKnownFolderPath(FOLDERID_ProgramData)` (an elevated process must not
+  trust the user's environment), refuses reparse points and folders owned by
+  anyone but Administrators, SYSTEM or the elevated user, and sets each of
+  `Videorc`, `Videorc\camera` and `Videorc\camera\<version>` to
+
+  ```text
+  O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;WD)
+  ```
+
+  (owner Administrators, protected: System and Administrators full control,
+  Everyone read and execute) before copying. It copies to `<dll>.new`
+  inside that folder, compares Authenticode publishers (the leaf signer's
+  subject, `WinVerifyTrust`) of the exe and the copy, renames it into
+  place and sets the file to
+  `O:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;WD)`. A signed exe accepts
+  only a DLL its own publisher signed; an unsigned build (dev, unsigned
+  Alpha) has nothing to compare and accepts any. The same version with the
+  same bytes is left alone ("already set up"); older version folders are
+  pruned. `DllRegisterServer` registers only from
+  `%ProgramData%\Videorc\camera\<its version>\`, so `regsvr32` on a copy in
+  a user-writable folder refuses.
 - Registry, all under `HKLM` (64-bit view):
   `SOFTWARE\Classes\CLSID\{B629EEBB-4B8E-4CAB-A549-EB17570B1382}` (default:
   "Videorc Camera media source"), its `InProcServer32` (default: the DLL
   path, `ThreadingModel` = `Both`), and `SOFTWARE\Videorc\Camera`
   (`Version`, `DllPath`). The backend reads these itself every two seconds:
   the version equal to the bundled crate version and the DLL present is
-  `ready`, anything else is `needs-setup` with the reason.
+  `ready`, anything else is `needs-setup` with the reason. `/remove` deletes
+  the CLSID and `SOFTWARE\Videorc\Camera` trees, `SOFTWARE\Videorc` only
+  when nothing else is under it, `%ProgramData%\Videorc\camera` (a loaded
+  DLL keeps its folder until every app lets go; the exe says so) and
+  `%ProgramData%\Videorc` only when empty.
 - Both files are signed by `sign-windows-alpha.yml` beside the WER helper
   and the executables; `pnpm check:packaged-app` on Windows fails when
   either is missing from `resources\`.
@@ -559,16 +598,39 @@ the code, prove it on a box, then show it.
 Videorc writes frames into a named section the media source creates:
 `Global\VideorcCamera.1920x1080` (the geometry is part of the name, so a
 size change is a new section). A 4 KiB header page then three page-aligned
-NV12 slots (`3 112 960` bytes each, `9 342 976` in all). The header carries
-the magic `VCAM`, layout version 1, width, height, fourcc `NV12`, frame
-bytes, slot count, slot stride, the producer heartbeat (`GetTickCount64`
-milliseconds at the last write), the latest frame sequence and slot, the
-viewer count (how many started streams hold the camera, D13), and one
-32-byte seqlock descriptor per slot. The writer makes a slot's word odd,
-writes, makes it even, then publishes; a reader retries a torn copy and
-keeps its previous frame. A heartbeat older than one second, or none, shows
-the "Videorc isn't running" still. Layout and tests:
-`crates/videorc-virtual-camera-windows/src/ring.rs` (pure, run on any OS).
+NV12 slots (`3 112 960` bytes each, `9 342 976` in all). Header, little
+endian, byte offsets:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | magic `VCAM` |
+| 4 | 4 | layout version, 1 |
+| 8 | 4 | width, 1920 |
+| 12 | 4 | height, 1080 |
+| 16 | 4 | fourcc `NV12` |
+| 20 | 4 | frame bytes, 3 110 400 |
+| 24 | 4 | slot count, 3 |
+| 28 | 4 | slot stride, 3 112 960 |
+| 32 | 8 | producer heartbeat: `GetTickCount64` ms at Videorc's last write |
+| 40 | 8 | latest frame sequence |
+| 48 | 4 | latest slot |
+| 52 | 4 | viewers: started streams holding the camera, summed over every source instance |
+| 56 | 8 | reader heartbeat: `GetTickCount64` ms at a stream's last sample request |
+| 64 | 3 × 32 | per slot: seqlock word, frame sequence, pts (100 ns) |
+| 4096 | 3 × 3 112 960 | the slots |
+
+The writer makes a slot's word odd, writes, makes it even, then publishes;
+a reader copies into a scratch frame and swaps it in only when the word
+held still, so a torn read keeps the previous frame whole. A producer
+heartbeat older than one second, or none, shows the "Videorc isn't
+running" still. Each source instance adds and removes only its own viewers,
+so the Frame Server and FrameServerMonitor loading the source at once never
+clobber each other, and a restarted source keeps the frames and viewers of
+a section that survived. Videorc counts the viewers only while the reader
+heartbeat is under one second old, so a crashed Frame Server that never
+took its viewers back reads as no viewers instead of holding the compositor
+awake. Layout and tests: `crates/videorc-virtual-camera-windows/src/ring.rs`
+(pure, run on any OS).
 
 DACL (SDDL), set by the media source on creation; a NULL DACL is never
 acceptable:
@@ -587,8 +649,10 @@ whatever the service's integrity level is.
 `virtual_camera_windows.rs` creates the camera off the main thread with
 `MFCreateVirtualCamera(SoftwareCameraSource, Session, CurrentUser,
 "Videorc Camera", "{B629EEBB-4B8E-4CAB-A549-EB17570B1382}")`, resolved from
-`mfsensorgroup.dll` at run time so the backend loads on any Windows, and
-`Start`s it; off or exit `Stop`s and `Shutdown`s it. CPU frames go through
+`mfsensorgroup.dll` at run time (System32 only) so the backend loads on any
+Windows, and `Start`s it; off or exit `Stop`s and `Shutdown`s it. The COM
+camera and the ring views are created, used and released on the output
+thread only. CPU frames go through
 A1's `i420_to_nv12`; a D3D11 session's texture is read back on the media
 thread through a staging texture (`WindowsD3d11MediaClient::
 readback_texture`), converted to I420 here, fitted with A1's `CpuFit`, then
@@ -602,14 +666,29 @@ local `pnpm package:desktop:windows` build, Chrome, and the Camera app. Keep
 the Frame Server scripts from Microsoft's sample handy
 (`Scripts/Debug-FrameServer.ps1`) for a debugger.
 
+0. Before the app: from an administrator PowerShell 7 in the installed
+   `resources\` folder run `.\videorc-camera-setup.exe`. Expect "Videorc
+   Camera is set up." with the DLL path and version, exit 0, and no
+   prompt. Check `Get-Acl "$env:ProgramData\Videorc\camera" | Format-List`
+   (owner `BUILTIN\Administrators`, protected, System and Administrators
+   full, Everyone read and execute, nothing for Users) and
+   `dumpbin /DEPENDENTS` on the installed DLL: `VCRUNTIME140.dll` is
+   expected (the backend needs it too, so a box that runs Videorc has it;
+   if the Frame Server still reports it missing, link the DLL's vcruntime
+   statically as Microsoft's sample does). Run it again: "(already set
+   up)". Then `.\videorc-camera-setup.exe /remove` and check the keys and
+   the folder are gone. `regsvr32` on the DLL in `resources\` must refuse.
 1. Flip `PROVEN` to `true` in `virtual_camera_windows.rs` on a branch,
    build and install the package.
 2. Output → Videorc Camera → "Set up Videorc Camera". Expect exactly one
-   UAC prompt. Check `%ProgramData%\Videorc\camera\<version>\
+   UAC prompt, in front of Videorc (note it if it only flashes in the
+   taskbar). Check `%ProgramData%\Videorc\camera\<version>\
    videorc_virtual_camera_windows.dll` exists and `reg query
    "HKLM\SOFTWARE\Videorc\Camera"` shows `Version` and `DllPath`. The
-   status line must say ready; a declined prompt must say so and offer the
-   button again.
+   status line must say ready; a declined prompt must say "Windows needs
+   your permission to set up Videorc Camera…" and offer the button again.
+   On a signed build, swap the DLL in `resources\` for an unsigned copy and
+   run setup: it must refuse with "…is not signed by Videorc's publisher".
 3. Turn the switch on. The Camera app lists "Videorc Camera Windows Virtual
    Camera" and shows the "Videorc isn't running" still only until the first
    frame, then the program (the Preview's picture, 1920×1080, a vertical
@@ -629,14 +708,23 @@ the Frame Server scripts from Microsoft's sample handy
 8. Turn the switch off: the camera leaves every app's list.
 9. Setup again on the same version (expect "already set up", no copy), then
    with a bumped crate version (expect one prompt and a new folder).
-   `videorc-camera-setup.exe /remove` (elevated) clears the keys and the
-   folder; the app shows "needs setup".
+   `videorc-camera-setup.exe /remove` from a normal terminal (one UAC
+   prompt) clears the keys and the folder; the app shows "needs setup".
 10. The non-elevated case: `MFCreateVirtualCamera` with Session and
     CurrentUser from a standard user must succeed; the `Global\` section
     must open from the user session with the DACL above (never a NULL
-    DACL); the Frame Server must load the DLL from `%ProgramData%`.
+    DACL); the Frame Server must load the DLL from `%ProgramData%`. If the
+    Frame Server's service SID is write-restricted, its own create of the
+    section fails with access denied and every app shows the still: the
+    fix is a section ACE for the service SID (`NT SERVICE\FrameServer`),
+    not a wider DACL. Note which process created the section (Process
+    Explorer, handle search `VideorcCamera`).
+11. Kill the Frame Server host (`Stop-Service FrameServer -Force`) while an
+    app shows the camera: within a second Health shows 0 viewers and the
+    compositor goes idle, and reopening the app brings frames back.
 
-Go when 3, 4, 5 and 10 pass. No-go, and a STOP for workstream C, when the
-Frame Server will not load the DLL from `%ProgramData%`, the user session
-cannot open the section with that DACL, or Chrome does not list the camera.
+Go when 0, 3, 4, 5, 10 and 11 pass. No-go, and a STOP for workstream C,
+when the Frame Server will not load the DLL from `%ProgramData%`, the user
+session cannot open the section with that DACL, or Chrome does not list the
+camera.
 Record the run in `docs/acceptance/<date>-videorc-camera-windows.md`.

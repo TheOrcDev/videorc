@@ -22,22 +22,30 @@
 //! | 40     | 8    | latest frame sequence (0: none yet)                        |
 //! | 48     | 4    | latest slot index                                          |
 //! | 52     | 4    | viewers: how many started streams hold the camera (D13)    |
-//! | 56     | 8    | reserved                                                   |
+//! | 56     | 8    | reader heartbeat: `GetTickCount64` ms at the last request  |
 //! | 64     | 3×32 | slot descriptors: seqlock word, frame sequence, pts 100 ns |
 //! | 4096   |      | slot 0, then slot 1, then slot 2                           |
 //!
 //! Seqlock: the single writer rotates through the slots; before it touches a
 //! slot it makes the slot's word odd, after the frame and its descriptor are
 //! in place it makes the word even and publishes the slot in the header. A
-//! reader copies the published slot and keeps the copy only when the word
-//! was even and unchanged around the copy; a torn copy is retried, then the
-//! previous frame is kept. With three slots the writer is two frames away
-//! from the slot a reader is copying, so a retry is rare.
+//! reader copies the published slot into its own scratch buffer and adopts
+//! the copy only when the word was even and unchanged around it; a torn copy
+//! is retried, then the previous frame is kept untouched. With three slots
+//! the writer is two frames away from the slot a reader is copying, so a
+//! retry is rare.
 //!
-//! Staleness: the writer refreshes the heartbeat with every frame. A reader
-//! treats a heartbeat older than [`STALE_AFTER_MS`] (or a never-written
-//! ring) as "Videorc isn't running". Both sides read the same boot clock
-//! (`GetTickCount64`), so no wall-clock skew is involved.
+//! Staleness: the writer refreshes the producer heartbeat with every frame.
+//! A reader treats a heartbeat older than [`STALE_AFTER_MS`] (or a
+//! never-written ring) as "Videorc isn't running". Both sides read the same
+//! boot clock (`GetTickCount64`), so no wall-clock skew is involved.
+//!
+//! Viewers: the Frame Server may load more than one instance of the media
+//! source (its monitor service does during registration), so each instance
+//! adds and removes only its own started streams, atomically. The reader
+//! heartbeat is stamped on every sample request; the writer counts viewers
+//! only while it is fresh, so a Frame Server that died holding the camera
+//! never keeps Videorc composing for nobody.
 //!
 //! A different size is a different section: the name carries the geometry
 //! ([`RingLayout::section_name`]) and the header repeats it, so an old
@@ -77,6 +85,7 @@ const OFF_HEARTBEAT: usize = 32;
 const OFF_LATEST_SEQUENCE: usize = 40;
 const OFF_LATEST_SLOT: usize = 48;
 const OFF_VIEWERS: usize = 52;
+const OFF_READER_HEARTBEAT: usize = 56;
 const OFF_SLOTS: usize = 64;
 const SLOT_DESCRIPTOR_BYTES: usize = 32;
 const DESC_SEQLOCK: usize = 0;
@@ -348,6 +357,7 @@ impl<'a> Header<'a> {
         r.u64_at(OFF_LATEST_SEQUENCE).store(0, Ordering::Release);
         r.u32_at(OFF_LATEST_SLOT).store(0, Ordering::Release);
         r.u32_at(OFF_VIEWERS).store(0, Ordering::Release);
+        r.u64_at(OFF_READER_HEARTBEAT).store(0, Ordering::Release);
         for slot in 0..SLOT_COUNT {
             let descriptor = self.slot(slot);
             descriptor.seqlock().store(0, Ordering::Release);
@@ -380,6 +390,16 @@ impl<'a> Header<'a> {
     fn viewers(&self) -> &AtomicU32 {
         self.region.u32_at(OFF_VIEWERS)
     }
+
+    fn reader_heartbeat(&self) -> &AtomicU64 {
+        self.region.u64_at(OFF_READER_HEARTBEAT)
+    }
+}
+
+/// Whether a heartbeat stamped at `heartbeat` is fresh at `now_ms` (0 is
+/// "never").
+fn fresh(heartbeat: u64, now_ms: u64) -> bool {
+    heartbeat != 0 && now_ms.saturating_sub(heartbeat) <= STALE_AFTER_MS
 }
 
 /// Videorc's side: writes frames into a ring the media source initialised.
@@ -468,22 +488,28 @@ impl RingWriter {
         Ok(self.sequence)
     }
 
-    /// How many started streams hold the camera, as the media source last
-    /// wrote it (D13).
-    pub fn viewers(&self) -> u32 {
-        Header::new(&self.region)
-            .map(|header| header.viewers().load(Ordering::Acquire))
-            .unwrap_or(0)
+    /// How many started streams hold the camera (D13): the media sources'
+    /// count while one of them requested a sample within
+    /// [`STALE_AFTER_MS`] of `now_ms`, else none.
+    pub fn viewers(&self, now_ms: u64) -> u32 {
+        let Ok(header) = Header::new(&self.region) else {
+            return 0;
+        };
+        if !fresh(header.reader_heartbeat().load(Ordering::Acquire), now_ms) {
+            return 0;
+        }
+        header.viewers().load(Ordering::Acquire)
     }
 }
 
 /// What a read found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOutcome {
-    /// A frame newer than the last one this reader returned was copied.
+    /// A frame newer than the last one this reader adopted is now
+    /// [`RingReader::frame`].
     Fresh { sequence: u64, pts_100ns: i64 },
     /// Nothing newer than the reader's last frame (or the newest frame was
-    /// torn too often: keep the previous one).
+    /// torn too often): [`RingReader::frame`] is unchanged.
     Unchanged,
     /// The producer has not written for [`STALE_AFTER_MS`].
     Stale,
@@ -491,17 +517,25 @@ pub enum ReadOutcome {
     Empty,
 }
 
-/// The media source's side: owns the header, reads the newest frame.
+/// The media source's side: initialises the header, counts its own viewers
+/// into it, reads the newest frame.
 pub struct RingReader {
     region: RingRegion,
     layout: RingLayout,
     last_sequence: u64,
+    /// The started streams this instance added to the header's count.
+    held_viewers: u32,
+    /// The last frame adopted (valid once a read was `Fresh`).
+    frame: Vec<u8>,
+    /// Where a copy lands until the seqlock says it was not torn.
+    scratch: Vec<u8>,
 }
 
 impl RingReader {
-    /// Take ownership of a region: keep a valid header of the same geometry
-    /// (the section outlived a media source instance; frames and sequence
-    /// stay, viewers restart at zero), else write a fresh one.
+    /// Take a region: keep a valid header of the same geometry (the section
+    /// outlived a media source instance, or another instance shares it:
+    /// frames, sequence and the other instances' viewers stay), else write a
+    /// fresh one.
     pub fn initialize(region: RingRegion, layout: RingLayout) -> Result<Self, RingError> {
         if region.len() < layout.total_bytes() {
             return Err(RingError::RegionTooSmall {
@@ -514,11 +548,13 @@ impl RingReader {
             Ok(found) if found == layout => {}
             _ => header.write_layout(&layout),
         }
-        header.viewers().store(0, Ordering::Release);
         Ok(Self {
             region,
             layout,
             last_sequence: 0,
+            held_viewers: 0,
+            frame: vec![0; layout.frame_bytes],
+            scratch: vec![0; layout.frame_bytes],
         })
     }
 
@@ -526,13 +562,26 @@ impl RingReader {
         &self.layout
     }
 
-    /// D13: the number of started streams on this source.
-    pub fn set_viewers(&self, viewers: u32) {
-        if let Ok(header) = Header::new(&self.region) {
-            header.viewers().store(viewers, Ordering::Release);
+    /// D13: this instance now has `viewers` started streams. Only the
+    /// difference to what it held goes into the shared count, so instances
+    /// never overwrite each other.
+    pub fn set_viewers(&mut self, viewers: u32) {
+        let Ok(header) = Header::new(&self.region) else {
+            return;
+        };
+        let count = header.viewers();
+        if viewers > self.held_viewers {
+            count.fetch_add(viewers - self.held_viewers, Ordering::AcqRel);
+        } else if viewers < self.held_viewers {
+            let release = self.held_viewers - viewers;
+            let _ = count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(release))
+            });
         }
+        self.held_viewers = viewers;
     }
 
+    /// The shared count across every instance, as the header holds it.
     pub fn viewers(&self) -> u32 {
         Header::new(&self.region)
             .map(|header| header.viewers().load(Ordering::Acquire))
@@ -544,16 +593,22 @@ impl RingReader {
         let Ok(header) = Header::new(&self.region) else {
             return false;
         };
-        let heartbeat = header.heartbeat().load(Ordering::Acquire);
-        heartbeat != 0 && now_ms.saturating_sub(heartbeat) <= STALE_AFTER_MS
+        fresh(header.heartbeat().load(Ordering::Acquire), now_ms)
     }
 
-    /// Copy the newest frame into `dst` (one tightly packed NV12 frame) when
-    /// it is newer than the last frame this reader returned.
-    pub fn read_latest_into(&mut self, dst: &mut [u8], now_ms: u64) -> ReadOutcome {
+    /// The last frame a `Fresh` read adopted, tightly packed NV12. Never a
+    /// torn copy: a failed read leaves it as it was.
+    pub fn frame(&self) -> &[u8] {
+        &self.frame
+    }
+
+    /// One sample request: stamp the reader heartbeat, then adopt the newest
+    /// frame when it is newer than the last one this reader adopted.
+    pub fn read_latest(&mut self, now_ms: u64) -> ReadOutcome {
         let Ok(header) = Header::new(&self.region) else {
             return ReadOutcome::Empty;
         };
+        header.reader_heartbeat().store(now_ms, Ordering::Release);
         let latest = header.latest_sequence().load(Ordering::Acquire);
         if latest == 0 {
             return ReadOutcome::Empty;
@@ -562,9 +617,6 @@ impl RingReader {
             return ReadOutcome::Stale;
         }
         if latest <= self.last_sequence {
-            return ReadOutcome::Unchanged;
-        }
-        if dst.len() < self.layout.frame_bytes {
             return ReadOutcome::Unchanged;
         }
         for _ in 0..READ_RETRIES {
@@ -578,12 +630,16 @@ impl RingReader {
             let source = self
                 .region
                 .bytes_at(self.layout.slot_offset(slot), self.layout.frame_bytes);
-            // SAFETY: in bounds (validated layout); the writer may be
-            // overwriting these bytes concurrently, which the seqlock word
-            // detects after the copy. No reference to the shared bytes is
-            // formed.
+            // SAFETY: in bounds (validated layout) and `scratch` is
+            // `frame_bytes` long; the writer may be overwriting these bytes
+            // concurrently, which the seqlock word detects after the copy. No
+            // reference to the shared bytes is formed.
             unsafe {
-                std::ptr::copy_nonoverlapping(source, dst.as_mut_ptr(), self.layout.frame_bytes)
+                std::ptr::copy_nonoverlapping(
+                    source,
+                    self.scratch.as_mut_ptr(),
+                    self.layout.frame_bytes,
+                )
             };
             let sequence = descriptor.sequence().load(Ordering::Acquire);
             let pts_100ns = descriptor.pts().load(Ordering::Acquire) as i64;
@@ -598,6 +654,7 @@ impl RingReader {
                 return ReadOutcome::Unchanged;
             }
             self.last_sequence = sequence;
+            std::mem::swap(&mut self.frame, &mut self.scratch);
             return ReadOutcome::Fresh {
                 sequence,
                 pts_100ns,
@@ -676,20 +733,19 @@ mod tests {
         let (owned, layout) = ring();
         let mut reader = RingReader::initialize(owned.region(), layout).unwrap();
         let mut writer = RingWriter::attach(owned.region(), &layout).unwrap();
-        let mut dst = vec![0u8; layout.frame_bytes];
-        assert_eq!(reader.read_latest_into(&mut dst, 10), ReadOutcome::Empty);
+        assert_eq!(reader.read_latest(10), ReadOutcome::Empty);
 
         assert_eq!(writer.write_frame(&frame(&layout, 7), 333, 10).unwrap(), 1);
         assert_eq!(
-            reader.read_latest_into(&mut dst, 20),
+            reader.read_latest(20),
             ReadOutcome::Fresh {
                 sequence: 1,
                 pts_100ns: 333
             }
         );
-        assert!(dst.iter().all(|byte| *byte == 7));
+        assert!(reader.frame().iter().all(|byte| *byte == 7));
         assert_eq!(
-            reader.read_latest_into(&mut dst, 30),
+            reader.read_latest(30),
             ReadOutcome::Unchanged
         );
 
@@ -699,13 +755,13 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            reader.read_latest_into(&mut dst, 50),
+            reader.read_latest(50),
             ReadOutcome::Fresh {
                 sequence: 5,
                 pts_100ns: 11
             }
         );
-        assert!(dst.iter().all(|byte| *byte == 11));
+        assert!(reader.frame().iter().all(|byte| *byte == 11));
         // Five frames over three slots: the newest sits in slot 1.
         let region = owned.region();
         let header = Header::new(&region).unwrap();
@@ -724,54 +780,87 @@ mod tests {
         let (owned, layout) = ring();
         let mut reader = RingReader::initialize(owned.region(), layout).unwrap();
         let mut writer = RingWriter::attach(owned.region(), &layout).unwrap();
-        let mut dst = vec![0u8; layout.frame_bytes];
         assert!(!reader.producer_alive(5_000));
         writer.write_frame(&frame(&layout, 1), 0, 5_000).unwrap();
         assert!(reader.producer_alive(5_000 + STALE_AFTER_MS));
         assert!(!reader.producer_alive(5_000 + STALE_AFTER_MS + 1));
         assert!(matches!(
-            reader.read_latest_into(&mut dst, 5_999),
+            reader.read_latest(5_999),
             ReadOutcome::Fresh { .. }
         ));
-        assert_eq!(reader.read_latest_into(&mut dst, 6_001), ReadOutcome::Stale);
+        assert_eq!(reader.read_latest(6_001), ReadOutcome::Stale);
         // A new frame wakes it up again.
         writer.write_frame(&frame(&layout, 2), 0, 6_001).unwrap();
         assert!(matches!(
-            reader.read_latest_into(&mut dst, 6_002),
+            reader.read_latest(6_002),
             ReadOutcome::Fresh { sequence: 2, .. }
         ));
     }
 
     #[test]
-    fn viewers_flow_from_the_source_to_the_writer() {
+    fn viewers_reach_the_writer_only_while_a_stream_requests_samples() {
         let (owned, layout) = ring();
-        let reader = RingReader::initialize(owned.region(), layout).unwrap();
+        let mut reader = RingReader::initialize(owned.region(), layout).unwrap();
         let writer = RingWriter::attach(owned.region(), &layout).unwrap();
-        assert_eq!(writer.viewers(), 0);
+        assert_eq!(writer.viewers(1_000), 0);
         reader.set_viewers(1);
-        assert_eq!(writer.viewers(), 1);
         assert_eq!(reader.viewers(), 1);
+        // Started, but no sample requested yet: nobody is looking.
+        assert_eq!(writer.viewers(1_000), 0);
+        assert_eq!(reader.read_latest(1_000), ReadOutcome::Empty);
+        assert_eq!(writer.viewers(1_000 + STALE_AFTER_MS), 1);
+        // The Frame Server stopped asking (it died holding the camera).
+        assert_eq!(writer.viewers(1_000 + STALE_AFTER_MS + 1), 0);
+        reader.set_viewers(0);
+        reader.read_latest(3_000);
+        assert_eq!(writer.viewers(3_000), 0);
     }
 
     #[test]
-    fn a_source_restart_over_a_surviving_section_keeps_frames_and_resets_viewers() {
+    fn two_source_instances_count_their_own_viewers_into_one_header() {
         let (owned, layout) = ring();
-        let reader = RingReader::initialize(owned.region(), layout).unwrap();
+        let mut monitor = RingReader::initialize(owned.region(), layout).unwrap();
+        let mut server = RingReader::initialize(owned.region(), layout).unwrap();
+        let writer = RingWriter::attach(owned.region(), &layout).unwrap();
+        server.set_viewers(1);
+        monitor.set_viewers(1);
+        assert_eq!(server.viewers(), 2);
+        // One instance stopping never takes the other's viewer away.
+        monitor.set_viewers(0);
+        monitor.set_viewers(0);
+        server.read_latest(50);
+        assert_eq!(writer.viewers(50), 1);
+        server.set_viewers(0);
+        assert_eq!(server.viewers(), 0);
+        // A release past zero (a count reset under it) stays at zero.
+        server.set_viewers(2);
+        let region = owned.region();
+        Header::new(&region)
+            .unwrap()
+            .viewers()
+            .store(1, Ordering::SeqCst);
+        server.set_viewers(0);
+        assert_eq!(server.viewers(), 0);
+    }
+
+    #[test]
+    fn a_source_restart_over_a_surviving_section_keeps_frames_and_viewers() {
+        let (owned, layout) = ring();
+        let mut reader = RingReader::initialize(owned.region(), layout).unwrap();
         let mut writer = RingWriter::attach(owned.region(), &layout).unwrap();
         writer.write_frame(&frame(&layout, 3), 7, 100).unwrap();
         writer.write_frame(&frame(&layout, 4), 8, 101).unwrap();
         reader.set_viewers(2);
         let mut restarted = RingReader::initialize(owned.region(), layout).unwrap();
-        assert_eq!(restarted.viewers(), 0);
-        let mut dst = vec![0u8; layout.frame_bytes];
+        assert_eq!(restarted.viewers(), 2, "another instance's viewers stay");
         assert_eq!(
-            restarted.read_latest_into(&mut dst, 102),
+            restarted.read_latest(102),
             ReadOutcome::Fresh {
                 sequence: 2,
                 pts_100ns: 8
             }
         );
-        assert!(dst.iter().all(|byte| *byte == 4));
+        assert!(restarted.frame().iter().all(|byte| *byte == 4));
         // A relaunched writer continues the numbering.
         let mut relaunched = RingWriter::attach(owned.region(), &layout).unwrap();
         assert_eq!(
@@ -791,11 +880,7 @@ mod tests {
         // Simulate a writer that died mid-write of the published slot.
         let descriptor = header.slot(0);
         descriptor.seqlock().fetch_add(1, Ordering::SeqCst);
-        let mut dst = vec![0u8; layout.frame_bytes];
-        assert_eq!(
-            reader.read_latest_into(&mut dst, 11),
-            ReadOutcome::Unchanged
-        );
+        assert_eq!(reader.read_latest(11), ReadOutcome::Unchanged);
         // The next writer normalises the word and the frame reads cleanly.
         let mut relaunched = RingWriter::attach(owned.region(), &layout).unwrap();
         // The relaunched writer continues at slot 1; write three so slot 0
@@ -806,10 +891,29 @@ mod tests {
                 .unwrap();
         }
         assert!(matches!(
-            reader.read_latest_into(&mut dst, 13),
+            reader.read_latest(13),
             ReadOutcome::Fresh { sequence: 4, .. }
         ));
-        assert!(dst.iter().all(|byte| *byte == 4));
+        assert!(reader.frame().iter().all(|byte| *byte == 4));
+    }
+
+    #[test]
+    fn a_torn_read_keeps_the_previous_frame_intact() {
+        let (owned, layout) = ring();
+        let mut reader = RingReader::initialize(owned.region(), layout).unwrap();
+        let mut writer = RingWriter::attach(owned.region(), &layout).unwrap();
+        writer.write_frame(&frame(&layout, 1), 0, 10).unwrap();
+        assert!(matches!(reader.read_latest(10), ReadOutcome::Fresh { .. }));
+        writer.write_frame(&frame(&layout, 2), 0, 11).unwrap();
+        // The newly published slot is mid-write forever: every retry fails.
+        let region = owned.region();
+        Header::new(&region)
+            .unwrap()
+            .slot(1)
+            .seqlock()
+            .fetch_add(1, Ordering::SeqCst);
+        assert_eq!(reader.read_latest(12), ReadOutcome::Unchanged);
+        assert!(reader.frame().iter().all(|byte| *byte == 1));
     }
 
     #[test]
@@ -839,18 +943,25 @@ mod tests {
                 }
                 frames
             });
-            let mut dst = vec![0u8; layout.frame_bytes];
             let mut fresh = 0;
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(80);
             while std::time::Instant::now() < deadline {
-                if let ReadOutcome::Fresh { pts_100ns, .. } = reader.read_latest_into(&mut dst, 1) {
+                let outcome = reader.read_latest(1);
+                if let ReadOutcome::Fresh { pts_100ns, .. } = outcome {
                     fresh += 1;
-                    let fill = dst[0];
-                    assert!(
-                        dst.iter().all(|byte| *byte == fill),
-                        "a frame was mixed from two writes"
+                    assert_eq!(
+                        i64::from(reader.frame()[0]),
+                        pts_100ns,
+                        "descriptor and pixels disagree"
                     );
-                    assert_eq!(i64::from(fill), pts_100ns, "descriptor and pixels disagree");
+                }
+                if fresh > 0 {
+                    // Whatever the outcome, the adopted frame is whole.
+                    let fill = reader.frame()[0];
+                    assert!(
+                        reader.frame().iter().all(|byte| *byte == fill),
+                        "a frame was mixed from two writes ({outcome:?})"
+                    );
                 }
             }
             stop.store(true, Ordering::Relaxed);

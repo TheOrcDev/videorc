@@ -711,14 +711,14 @@ pub trait VirtualCameraSink: Send {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualCameraUnavailable {
     pub reason: String,
-    /// The camera exists in the code but is kept out of the UI until the
-    /// platform's spike passes on a real box (plan 214 C, D): the status maps
-    /// it to `platformStep: unsupported` and the Output section stays hidden.
+    /// The platform's camera is in this build but has not passed its spike
+    /// on a real box (plan 214 D): the status reports
+    /// `platformStep: unsupported` and the Output page hides the section,
+    /// instead of showing an unavailable camera.
     pub hidden: bool,
 }
 
 impl VirtualCameraUnavailable {
-    /// A plain refusal the UI shows with its reason.
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -726,14 +726,12 @@ impl VirtualCameraUnavailable {
         }
     }
 
-    /// The platform's camera is written but not yet proven on a box
-    /// (`PROVEN` in its platform module is false): hidden, with a reason
-    /// for the logs and Health.
-    #[allow(dead_code)] // Only the platforms still hidden call it (Windows, C).
+    /// Hidden until the named platform's spike passes (`PROVEN` flips).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // Only the Windows arm hides on this branch (plan 214 C).
     pub fn hidden_until_proven(platform: &str) -> Self {
         Self {
             reason: format!(
-                "Videorc Camera on {platform} is hidden until a {platform} box passes its spike (plan 214)."
+                "Videorc Camera on {platform} is in this build but hidden until it has passed its spike on a real {platform} box (plan 214)."
             ),
             hidden: true,
         }

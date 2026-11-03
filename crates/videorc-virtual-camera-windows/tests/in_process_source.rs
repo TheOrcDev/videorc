@@ -5,6 +5,8 @@
 #![cfg(windows)]
 
 use std::ptr::null_mut;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use videorc_virtual_camera_windows::ring::RingLayout;
 use videorc_virtual_camera_windows::windows::dll::{
@@ -136,8 +138,14 @@ fn the_source_opens_in_process_and_a_reader_pulls_nv12_frames() {
         drop(activate);
     }
     drop(factory);
+    // Media Foundation's work-queue threads can drop their last reference to
+    // a stream just after `Shutdown` returns, so wait on the count itself.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while LIVE_OBJECTS.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(
-        LIVE_OBJECTS.load(std::sync::atomic::Ordering::Acquire),
+        LIVE_OBJECTS.load(Ordering::Acquire),
         0,
         "every object was released"
     );

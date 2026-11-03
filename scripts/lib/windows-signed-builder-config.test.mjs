@@ -268,9 +268,11 @@ describe('signed Windows electron-builder config', () => {
         job,
         /\$cameraSource = Get-Item -LiteralPath \(Join-Path \$unpackedRoot 'resources\\videorc_virtual_camera_windows\.dll'\)/
       )
+      // TrustedSigning 0.5.0 declares -Files as [string] and splits it on
+      // commas; an array would reach it as one space-joined path.
       assert.match(
         job,
-        /Files = @\(\$werHelper\.FullName, \$cameraSource\.FullName\)\n\s+FilesFolder = \$unpackedRoot/
+        /Files = "\$\(\$werHelper\.FullName\),\$\(\$cameraSource\.FullName\)"\n\s+FilesFolder = \$unpackedRoot/
       )
       assert.match(
         job,
