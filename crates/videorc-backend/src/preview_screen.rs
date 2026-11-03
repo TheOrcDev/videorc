@@ -110,7 +110,9 @@ const SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE: &str = if cfg!(target_os = "linux
     "Native screen preview source reused; the capture exclusion set updates at the next capture start."
 };
 /// Plan 215 C2: the running ScreenCaptureKit stream took the new exclusion
-/// set through `updateContentFilter`, with no restart.
+/// set through `updateContentFilter`, with no restart. Only macOS applies a
+/// set in place; elsewhere the Linux copy test still reads the words.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SCREEN_PREVIEW_REUSED_EXCLUSION_APPLIED_MESSAGE: &str = if cfg!(target_os = "linux") {
     "Screen capture source reused; the capture exclusion set was applied to the running capture."
 } else {
