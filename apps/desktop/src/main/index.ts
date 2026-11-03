@@ -294,6 +294,7 @@ import {
   refusePackagedTestHooks
 } from './packaged-test-hooks'
 import { SmokeAppQuitGuard } from './smoke-app-quit-guard'
+import { smokeRaiseWindowPlacement } from './smoke-raise-window-level'
 import { PreviewLifecycleSmokeEvidence } from './preview-lifecycle-smoke-evidence'
 import {
   PACKAGED_SMOKE_COMMAND_NAMES,
@@ -13969,6 +13970,9 @@ async function runSmokePreviewMotionCommand(
   // Lifts one app window just above the floating backdrop and reports where it
   // is, so a probe can shoot exactly its rect. `focus: true` also makes it key;
   // probes leave it off so the run never steals the user's focus.
+  // `level: 'screen-saver'` lifts it above the invisibility smokes' native
+  // motion stimulus instead (plan 215 C5), so the recording can see the
+  // window whenever the capture filter lets it through.
   // close-backdrop-window restores every lifted window's own level.
   if (command === 'raise-window') {
     const role = typeof params.role === 'string' ? params.role : ''
@@ -13976,6 +13980,7 @@ async function runSmokePreviewMotionCommand(
     if (!target || target.isDestroyed()) {
       throw new Error(`No open window for role: ${role}`)
     }
+    const placement = smokeRaiseWindowPlacement(params.level)
     // Every other app window drops below the floating backdrop: a window's
     // glass blurs whatever sits directly behind it, so an overlapping app
     // window would be measured instead of the backdrop.
@@ -13987,7 +13992,7 @@ async function runSmokePreviewMotionCommand(
       }
     }
     smokeRaisedWindowRoles.set(target, role)
-    target.setAlwaysOnTop(true, 'floating', 1)
+    target.setAlwaysOnTop(true, placement.level, placement.relativeLevel)
     if (params.focus === true) {
       target.show()
       target.focus()
@@ -13998,6 +14003,7 @@ async function runSmokePreviewMotionCommand(
     const match = /^window:(\d+):/.exec(target.getMediaSourceId())
     return {
       role,
+      level: placement.level,
       bounds: target.getBounds(),
       windowId: match ? Number(match[1]) : null,
       focused: target.isFocused(),
