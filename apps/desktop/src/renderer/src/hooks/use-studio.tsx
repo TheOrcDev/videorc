@@ -355,6 +355,7 @@ import {
 import {
   mergePreviewSurfaceHostStatus,
   nativePreviewFramePollingRequestKey,
+  nativePreviewProofPollingRecording,
   nativePreviewFramePollingResponseCanCommit,
   nativePreviewFramePollingShouldSuppress,
   nativePreviewMainStatusReadGenerationMatches,
@@ -11801,17 +11802,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       generation,
       status: previewSurfaceStatusRef.current
     })
+    // The polling profile ignores a Clips-only session; suppression above
+    // still reads it as recording (macOS keeps its native presenter alone).
+    const profileRecording = nativePreviewProofPollingRecording(
+      recordingActive,
+      recordingRef.current.replayOnly
+    )
     const requestKey = nativePreviewFramePollingRequestKey({
       generation,
       suppress,
-      recordingActive
+      recordingActive: profileRecording
     })
     if (nativePreviewFramePollingRequestKeyRef.current === requestKey) {
       return
     }
     nativePreviewFramePollingRequestKeyRef.current = requestKey
     void window.videorc
-      .setNativePreviewSurfaceFramePollingSuppressed(suppress, generation, recordingActive)
+      .setNativePreviewSurfaceFramePollingSuppressed(suppress, generation, profileRecording)
       .then((status) => {
         if (
           nativePreviewFramePollingResponseCanCommit({

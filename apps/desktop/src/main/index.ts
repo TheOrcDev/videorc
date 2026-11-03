@@ -5846,6 +5846,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         let framePollingSuppressed = false;
         let framePollingIntervalMs = 40;
         let framePollingMaxWidth = 1920;
+        let framePollingCeilingWidth = 1920;
         let proofSurfaceSuspended = false;
         let animationFrameId = null;
         let compositorStatus = null;
@@ -5870,13 +5871,51 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           return String(next * 100) + '%';
         }
 
-        function profiledFrameUrl(url) {
+        // The device pixels a source layer's frame is actually drawn across:
+        // the <img> box (already widened by any crop) narrowed by its
+        // object-fit to the frame's aspect. Null while the layer has no
+        // laid-out box (hidden, not yet attached).
+        function displayedFramePixelWidth(image) {
+          if (!image || typeof image.getBoundingClientRect !== 'function') {
+            return null;
+          }
+          const box = image.getBoundingClientRect();
+          if (!(box.width > 0) || !(box.height > 0)) {
+            return null;
+          }
+          let width = box.width;
+          const naturalWidth = image.naturalWidth;
+          const naturalHeight = image.naturalHeight;
+          const fit = image.style.objectFit;
+          if (naturalWidth > 0 && naturalHeight > 0 && fit !== 'fill') {
+            const fitted = box.height * (naturalWidth / naturalHeight);
+            width = fit === 'cover' ? Math.max(box.width, fitted) : Math.min(box.width, fitted);
+          }
+          const dpr = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+            ? window.devicePixelRatio
+            : 1;
+          const pixels = Math.ceil(width * dpr);
+          return Number.isFinite(pixels) && pixels > 0 ? pixels : null;
+        }
+
+        // displayedWidth (source layers only): ask the backend for exactly the
+        // width the frame is drawn at, so Chromium shows its pixels 1:1. The
+        // profile width is quantized up in 160 px steps from a surface width
+        // main measured at its last geometry push, and the main process's
+        // hint is floored at 1280: a docked Preview grown from 941 to 1320 px
+        // kept asking for 960 and Chromium stretched it, blurring every pixel
+        // of a screen share. A measured layer is bounded only by the profile's
+        // own ceiling (1920).
+        function profiledFrameUrl(url, displayedWidth) {
           try {
             const parsed = new URL(url);
             const requested = Number(parsed.searchParams.get('maxWidth'));
-            const maxWidth = Number.isFinite(requested) && requested > 0
-              ? Math.min(requested, framePollingMaxWidth)
-              : framePollingMaxWidth;
+            const measured = typeof displayedWidth === 'number' && displayedWidth > 0;
+            const maxWidth = measured
+              ? Math.min(displayedWidth, framePollingCeilingWidth)
+              : Number.isFinite(requested) && requested > 0
+                ? Math.min(requested, framePollingMaxWidth)
+                : framePollingMaxWidth;
             parsed.searchParams.set('maxWidth', String(Math.max(1, Math.round(maxWidth))));
             return parsed.toString();
           } catch {
@@ -5884,11 +5923,18 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           }
         }
 
-        function frameRequestUrl(url, poller) {
-          const profiled = profiledFrameUrl(url);
+        function frameRequestUrl(url, poller, displayedWidth) {
+          const profiled = profiledFrameUrl(url, displayedWidth);
           try {
             const parsed = new URL(profiled);
+            // A new width needs the current frame resent even when the source
+            // has not advanced (a still screen sends no PipeWire frames), so a
+            // resized Preview never keeps the old size's pixels.
+            const maxWidth = parsed.searchParams.get('maxWidth');
+            const widthChanged = poller.requestedMaxWidth !== maxWidth;
+            poller.requestedMaxWidth = maxWidth;
             if (
+              !widthChanged &&
               typeof poller.generation === 'string' &&
               poller.generation.length > 0 &&
               Number.isSafeInteger(poller.sequence) &&
@@ -6056,6 +6102,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (Number.isFinite(maxWidth) && maxWidth >= 1) {
             framePollingMaxWidth = Math.round(maxWidth);
           }
+          const ceilingWidth = Number(profile?.ceilingWidth);
+          framePollingCeilingWidth = Number.isFinite(ceilingWidth) && ceilingWidth >= 1
+            ? Math.round(ceilingWidth)
+            : framePollingMaxWidth;
         }
 
         function startFramePolling(id, kind, image, url) {
@@ -6101,10 +6151,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             poller.abortController = abortController;
             try {
               markProofPollerRequestStarted(poller);
-              const response = await fetch(frameRequestUrl(url, poller), {
-                cache: 'no-store',
-                signal: abortController.signal
-              });
+              const response = await fetch(
+                frameRequestUrl(url, poller, displayedFramePixelWidth(poller.image)),
+                {
+                  cache: 'no-store',
+                  signal: abortController.signal
+                }
+              );
               if (poller.cancelled) {
                 return;
               }
