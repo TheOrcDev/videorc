@@ -166,6 +166,38 @@ pub struct LiveLayoutApplyStatus {
     pub message: Option<String>,
 }
 
+/// A switch that adds a source gave up waiting for its first frame (plan 216
+/// A3). `ServerResponse::error` carries a code and a message, nothing else, so
+/// the source kind rides in the code and the toast can name it.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct LayoutSourceNotReady {
+    /// "camera" or "screen".
+    pub kind: &'static str,
+    pub message: String,
+}
+
+pub const LAYOUT_CAMERA_NOT_READY_CODE: &str = "layout-camera-not-ready";
+pub const LAYOUT_SCREEN_NOT_READY_CODE: &str = "layout-screen-not-ready";
+
+impl LayoutSourceNotReady {
+    pub fn code(&self) -> &'static str {
+        match self.kind {
+            "screen" => LAYOUT_SCREEN_NOT_READY_CODE,
+            _ => LAYOUT_CAMERA_NOT_READY_CODE,
+        }
+    }
+}
+
+/// The response code for a failed layout apply: the typed not-ready refusal
+/// names its source kind, anything else keeps the route's own code.
+pub fn layout_failure_code(error: &anyhow::Error, fallback: &'static str) -> &'static str {
+    error
+        .downcast_ref::<LayoutSourceNotReady>()
+        .map(LayoutSourceNotReady::code)
+        .unwrap_or(fallback)
+}
+
 pub fn required_scene_sources(scene: &Scene) -> SceneSourceNeeds {
     let mut needs = SceneSourceNeeds::default();
     for source in scene
@@ -1934,6 +1966,7 @@ async fn wait_for_sources_ready(
         }
         let now = Instant::now();
         let mut expired = Vec::new();
+        let mut expired_kinds: Vec<&'static str> = Vec::new();
         if needs.camera
             && !readiness.live.camera
             && deadlines.camera.is_some_and(|deadline| now >= deadline)
@@ -1942,6 +1975,7 @@ async fn wait_for_sources_ready(
                 "camera ({}s)",
                 warm_source_start_timeout("camera").as_secs()
             ));
+            expired_kinds.push("camera");
         }
         if needs.screen
             && !readiness.live.screen
@@ -1951,6 +1985,7 @@ async fn wait_for_sources_ready(
                 "screen ({}s)",
                 warm_source_start_timeout("screen").as_secs()
             ));
+            expired_kinds.push("screen");
         }
         if !expired.is_empty() {
             // A native source may publish Live after the sample above but
@@ -1970,12 +2005,25 @@ async fn wait_for_sources_ready(
             if missing_sources(needs, readiness.live).is_empty() {
                 return Ok(());
             }
+            let still_missing_kinds = missing_sources(needs, readiness.live);
             let still_missing =
                 missing_readiness_messages(needs, &readiness, Some(target_sources)).join("; ");
-            bail!(
-                "Live {action_label} blocked after {} exceeded its source-start/readiness budget: {still_missing}.",
-                expired.join(" + ")
-            );
+            // Name the source that ran out its budget and is still missing;
+            // with both gone, the first expired one.
+            let kind = expired_kinds
+                .iter()
+                .find(|kind| still_missing_kinds.contains(kind))
+                .or(still_missing_kinds.first())
+                .copied()
+                .unwrap_or("camera");
+            return Err(LayoutSourceNotReady {
+                kind,
+                message: format!(
+                    "Live {action_label} blocked after {} exceeded its source-start/readiness budget: {still_missing}.",
+                    expired.join(" + ")
+                ),
+            }
+            .into());
         }
         sleep(WARM_SOURCE_POLL).await;
     }
@@ -6020,6 +6068,104 @@ mod tests {
                 camera: true,
                 screen: false
             }
+        );
+    }
+
+    /// Plan 216 A3 (D5): when a switch gives up on a source, the refusal
+    /// names the source's kind in its code, on the idle and the live route.
+    #[tokio::test(start_paused = true)]
+    async fn a_source_that_never_arrives_names_its_kind_in_the_error_code() {
+        let state = test_state();
+        let screen_only = config(LayoutPreset::ScreenOnly, false, true);
+        let video = screen_only.video.clone().unwrap();
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            screen_only.sources.screen_id.as_deref().unwrap(),
+            1,
+            1,
+            &video,
+        )
+        .await;
+        apply_layout_preview(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(1),
+                simulcast_leg: false,
+                config: screen_only,
+            },
+        )
+        .await
+        .expect("the screen-only scene installs");
+        let mut with_camera = config(LayoutPreset::ScreenCamera, true, true);
+        with_camera.sources.camera_id = Some(FRAMELESS_TEST_CAMERA.to_string());
+        crate::preview_camera::test_install_frameless_live_camera_for_layout(
+            &state,
+            FRAMELESS_TEST_CAMERA,
+            &with_camera.layout,
+            &video,
+        )
+        .await;
+
+        let preview_error = apply_layout_preview(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(2),
+                simulcast_leg: false,
+                config: with_camera.clone(),
+            },
+        )
+        .await
+        .expect_err("adding a frameless camera must not commit");
+        let not_ready = preview_error
+            .downcast_ref::<LayoutSourceNotReady>()
+            .expect("the readiness refusal is typed");
+        assert_eq!(not_ready.kind, "camera");
+        assert_eq!(
+            layout_failure_code(&preview_error, "layout-preview-failed"),
+            LAYOUT_CAMERA_NOT_READY_CODE
+        );
+        assert!(
+            preview_error
+                .to_string()
+                .contains("exceeded its source-start/readiness budget"),
+            "the message keeps the diagnostic detail: {preview_error}"
+        );
+
+        // The live route (a session running) answers the same way.
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("not-ready"));
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .start("not-ready".into(), with_camera.sources.clone());
+        let live_error = apply_layout_live(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(3),
+                simulcast_leg: false,
+                config: with_camera,
+            },
+        )
+        .await
+        .expect_err("the live switch must not commit either");
+        assert_eq!(
+            layout_failure_code(&live_error, "layout-live-failed"),
+            LAYOUT_CAMERA_NOT_READY_CODE
+        );
+
+        // Any other failure keeps the route's own code.
+        assert_eq!(
+            layout_failure_code(&anyhow::anyhow!("superseded"), "layout-live-failed"),
+            "layout-live-failed"
+        );
+        assert_eq!(
+            LayoutSourceNotReady {
+                kind: "screen",
+                message: String::new()
+            }
+            .code(),
+            LAYOUT_SCREEN_NOT_READY_CODE
         );
     }
 }
