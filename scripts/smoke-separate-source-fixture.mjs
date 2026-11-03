@@ -34,6 +34,7 @@ import { existsSync, mkdtempSync, readFileSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { fixtureH264EncoderArgs } from './lib/ffmpeg-available.mjs'
 import { runSmokeCargoTest } from './lib/smoke-cargo-test.mjs'
 import { spawnProcessGroup } from './lib/process-group.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
@@ -51,6 +52,12 @@ import {
 const root = resolve(import.meta.dirname, '..')
 const directory = mkdtempSync(join(tmpdir(), 'videorc-separate-source-fixture-'))
 const ffmpeg = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+// The H.264 encoder this FFmpeg actually has: libx264 at CRF 12 where it
+// exists, else OpenH264 (the vendored LGPL Linux build has no libx264).
+const FIXTURE_VIDEO_CODEC_ARGS = (() => {
+  const args = fixtureH264EncoderArgs(ffmpeg)
+  return args.includes('libx264') ? [...args, '-crf', '12'] : args
+})()
 const ffprobe = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const WIDTH = 64
 const HEIGHT = 36
@@ -292,12 +299,7 @@ function encodeRole(mode, videoRole, audioRole, output) {
     '0:v',
     '-map',
     '1:a',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
-    '-crf',
-    '12',
+    ...FIXTURE_VIDEO_CODEC_ARGS,
     '-pix_fmt',
     'yuv420p',
     '-color_range',
