@@ -394,10 +394,12 @@ import {
   composeDockedScreenRect,
   decideDockVisibility,
   initialPreviewWindowMode,
+  inWindowDockedRect,
   parseDockSlotReport,
   parsePreviewWindowMode,
   previewWindowClosePrefs,
   previewWindowExternalResizePolicy,
+  usableDockSlotSize,
   type DockHiddenReason,
   type DockSlot,
   type DockSlotReport,
@@ -2761,6 +2763,9 @@ let previewWindowModeLoaded = false
 // close-while-docked never persists the slot rect as the floating frame.
 let previewWindowFloatingFrame: Electron.Rectangle | null = null
 let previewDockSlot: DockSlotReport | null = null
+// The last size a slot report measured: the in-window dock keeps the idle
+// program at this size while no slot shows (inWindowDockedRect).
+let previewDockLastSlotSize: { width: number; height: number } | null = null
 // Bumped on every dock engage; slot reports answering an older epoch are stale
 // (measured before the redock) and are dropped.
 let previewDockEpoch = 0
@@ -4529,17 +4534,23 @@ function previewWindowPresentedVisible(window: BrowserWindow): boolean {
   return window.isVisible() && !window.isMinimized()
 }
 
-// The Studio/Scene slot in main-window content terms. Before the first report
-// (and after every epoch bump) there is no slot: a 1x1 rect at the content
-// origin keeps the placement push flowing so visible:false reaches the surface.
+// The Studio/Scene slot in main-window content terms. With no slot rect (no
+// report yet, after an epoch bump, or another tab) a rect at the content origin
+// keeps the placement push flowing so visible:false reaches the surface. It
+// keeps the last slot's size (else the hidden lifecycle window's): the backend
+// sizes the idle program from these bounds, and a 1x1 rect made the program a
+// single pixel off Studio, which is what an agent's get_picture read.
 function inWindowDockedVideoBounds(): Electron.Rectangle | null {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return null
   }
-  const content = mainWindow.getContentBounds()
-  return previewDockSlot
-    ? composeDockedScreenRect(previewDockSlot, content)
-    : { x: content.x, y: content.y, width: 1, height: 1 }
+  const lifecycleWindow =
+    previewWindow && !previewWindow.isDestroyed() ? previewWindow.getContentBounds() : null
+  return inWindowDockedRect(
+    previewDockSlot,
+    mainWindow.getContentBounds(),
+    previewDockLastSlotSize ?? lifecycleWindow
+  )
 }
 
 // The docked placement hot path: recompute the docked window frame from the
@@ -5137,6 +5148,7 @@ function reportPreviewDockSlot(raw: unknown): PreviewWindowState {
   // the exact race that made the 2026-06-09 glue attempt resurface bounds.
   if (report && report.epoch === previewDockEpoch) {
     previewDockSlot = report
+    previewDockLastSlotSize = usableDockSlotSize(report) ?? previewDockLastSlotSize
     queueDockedPreviewPlacement()
   }
   return previewWindowState()

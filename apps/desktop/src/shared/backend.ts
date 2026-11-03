@@ -1812,6 +1812,8 @@ export interface ReplayStateEvent {
   bufferedSeconds: number
   /** The session exists only for the buffer (no file, no stream). */
   replayOnly?: boolean
+  /** Why the ring is `error`, or `off` when it did not start: a session that
+   * failed, or the software encoder guard's refusal. */
   reason?: string
   /** Segment files in the ring after the last prune pass: never above ceil(N/2) + 3. */
   segmentFiles?: number
