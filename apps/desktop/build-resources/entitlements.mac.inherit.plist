@@ -3,15 +3,17 @@
 <plist version="1.0">
 <dict>
   <!-- Plan 214 B2: the entitlements of every binary that is NOT the app
-       itself: Electron's helpers and framework, and the bare binaries in
-       Contents/Resources (videorc-backend, native_preview_host_helper,
-       videorc-mcp, the .node addon, ffmpeg, ffprobe). Exactly the five keys
-       the app had before the Videorc Camera, and never the restricted
-       com.apple.developer.system-extension.install or the app group: a bare
-       binary cannot carry a provisioning profile, so AMFI would kill it at
-       launch. The app's own plist is entitlements.mac.plist (plus the camera
-       keys when both profiles are configured; see
-       scripts/lib/camera-extension-packaging.mjs). -->
+       itself: Electron's helpers, frameworks, dylibs, crashpad and ShipIt,
+       and the bare binaries in Contents/Resources (videorc-backend,
+       native_preview_host_helper, videorc-mcp, the .node addon, ffmpeg,
+       ffprobe). Exactly the five keys the app had before the Videorc Camera,
+       and never com.apple.developer.system-extension.install, the app group,
+       com.apple.application-identifier or com.apple.developer.team-identifier:
+       a binary without an embedded profile that carries any of them dies at
+       exec with SIGKILL, silently (spike P0a). The app's own plist is
+       entitlements.mac.plist (plus the camera keys when the app profile is
+       configured; see scripts/lib/camera-extension-packaging.mjs). The
+       extension has its own two-key plist and no profile. -->
   <key>com.apple.security.cs.allow-jit</key>
   <true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>

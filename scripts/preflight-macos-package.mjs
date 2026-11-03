@@ -16,7 +16,7 @@ import {
   CAMERA_EXTENSION_BUILD_DIR,
   loadCameraExtensionIdentifiers
 } from './lib/camera-extension-identifiers.mjs'
-import { cameraProfilesDecision, cameraSkippedLogLine } from './lib/camera-extension-packaging.mjs'
+import { cameraProfileDecision, cameraSkippedLogLine } from './lib/camera-extension-packaging.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -48,10 +48,10 @@ const inputs = [
   }
 ]
 
-// Plan 214 B2: with both provisioning profiles configured the packaging hook
-// embeds the Videorc Camera extension, so it must have been built. Without
-// them the build skips the camera and says so once, here and in the hook.
-const cameraDecision = cameraProfilesDecision(process.env)
+// Plan 214 B2: with the app provisioning profile configured the packaging hook
+// embeds the Videorc Camera extension, so it must have been built. Without it
+// the build skips the camera and says so once, here and in the hook.
+const cameraDecision = cameraProfileDecision(process.env)
 if (cameraDecision.mode === 'error') {
   console.error(`preflight-macos-package: ${cameraDecision.reason}`)
   process.exit(1)
@@ -62,7 +62,7 @@ if (cameraDecision.mode === 'embed') {
     path: join(
       repoRoot,
       CAMERA_EXTENSION_BUILD_DIR,
-      `${identifiers.extensionBundleName}.systemextension`
+      `${identifiers.extensionBundleId}.systemextension`
     ),
     remedy: 'pnpm build:camera-extension'
   })

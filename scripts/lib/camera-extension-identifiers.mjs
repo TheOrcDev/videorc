@@ -204,9 +204,18 @@ export function swiftIdentifierDrift(swiftSource, identifiers) {
   return problems
 }
 
-/** `Contents/Library/SystemExtensions/VideorcCamera.systemextension` */
+/**
+ * `Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension`.
+ * The bundle and its executable are named after the bundle identifier, the
+ * shape Xcode produces and the one plan 214 P0a activated on macOS 26.
+ */
 export function cameraExtensionBundleRelativePath(identifiers) {
-  return `Contents/Library/SystemExtensions/${identifiers.extensionBundleName}.systemextension`
+  return `Contents/Library/SystemExtensions/${identifiers.extensionBundleId}.systemextension`
+}
+
+/** `Contents/MacOS/<executable>` inside the extension bundle. */
+export function cameraExtensionExecutableName(identifiers) {
+  return identifiers.extensionBundleId
 }
 
 /** Pure. The extension's Info.plist as a plain object (see plistXml). */
@@ -217,7 +226,7 @@ export function cameraExtensionInfoPlist(identifiers, { version, buildVersion = 
   return {
     CFBundleDevelopmentRegion: 'en',
     CFBundleDisplayName: identifiers.cameraName,
-    CFBundleExecutable: identifiers.extensionBundleName,
+    CFBundleExecutable: cameraExtensionExecutableName(identifiers),
     CFBundleIdentifier: identifiers.extensionBundleId,
     CFBundleInfoDictionaryVersion: '6.0',
     CFBundleName: identifiers.cameraName,
@@ -235,23 +244,39 @@ export function cameraExtensionInfoPlist(identifiers, { version, buildVersion = 
 }
 
 /**
- * Pure. The extension's own entitlements: sandboxed, in the app group, with
- * the application and team identifiers its Developer ID profile grants.
+ * Pure. The extension's own entitlements, exactly two keys: the app sandbox
+ * and the app group (plan 214 P0a). The extension embeds NO provisioning
+ * profile, so it must not claim `com.apple.application-identifier` or
+ * `com.apple.developer.team-identifier`: without a profile those are
+ * restricted keys and the binary is killed at exec, silently.
  */
 export function cameraExtensionEntitlements(identifiers) {
   return {
     [identifiers.entitlements.appSandbox]: true,
-    [identifiers.entitlements.applicationGroups]: [identifiers.appGroup],
-    [identifiers.entitlements.applicationIdentifier]:
-      `${identifiers.teamId}.${identifiers.extensionBundleId}`,
-    [identifiers.entitlements.teamIdentifier]: identifiers.teamId
+    [identifiers.entitlements.applicationGroups]: [identifiers.appGroup]
   }
+}
+
+/** Pure. The exact key set a signed extension must show. */
+export function cameraExtensionEntitlementKeys(identifiers) {
+  return Object.keys(cameraExtensionEntitlements(identifiers)).sort()
+}
+
+/** Pure. The keys the extension must never carry (it has no profile to back them). */
+export function cameraExtensionForbiddenEntitlementKeys(identifiers) {
+  return [
+    identifiers.entitlements.systemExtensionInstall,
+    identifiers.entitlements.applicationIdentifier,
+    identifiers.entitlements.teamIdentifier
+  ]
 }
 
 /**
  * Pure. The app's entitlements with the camera keys added: the restricted
- * system-extension key, the app group, and the identifiers the app profile
- * grants. Only written when both profiles are configured.
+ * system-extension key and the app group, plus the application and team
+ * identifiers the app profile carries (optional for launch, kept because they
+ * match the profile by construction; profileSummaryProblems checks that).
+ * Only written when the app profile is configured.
  */
 export function appEntitlementsWithCamera(baseEntitlements, identifiers) {
   return {
@@ -264,7 +289,11 @@ export function appEntitlementsWithCamera(baseEntitlements, identifiers) {
   }
 }
 
-/** The keys a bare binary (backend, helpers, ffmpeg, the addon) must never carry. */
+/**
+ * The keys only the main executable may carry. Every other binary (Electron's
+ * helpers, frameworks, crashpad, ShipIt, and the bare tools in Resources)
+ * cannot hold a profile: with any of these it dies at exec with SIGKILL.
+ */
 export function restrictedCameraEntitlementKeys(identifiers) {
   return [
     identifiers.entitlements.systemExtensionInstall,
@@ -272,6 +301,50 @@ export function restrictedCameraEntitlementKeys(identifiers) {
     identifiers.entitlements.applicationIdentifier,
     identifiers.entitlements.teamIdentifier
   ]
+}
+
+/**
+ * Pure. The entitlement keys in a plist as `codesign -d --entitlements :-`
+ * prints it (XML; an unsigned or entitlement-less binary prints none).
+ */
+export function entitlementKeysFromPlistXml(xml) {
+  const text = String(xml ?? '').replace(/<!--[\s\S]*?-->/g, '')
+  const keys = []
+  for (const match of text.matchAll(/<key>([\s\S]*?)<\/key>/g)) {
+    const key = unescapeXml(match[1])
+    if (!keys.includes(key)) keys.push(key)
+  }
+  return keys.sort()
+}
+
+/**
+ * Pure. One line per problem with a signed extension's entitlement keys:
+ * anything missing from the exact two, anything beyond them, and the keys it
+ * must never carry named explicitly.
+ */
+export function cameraExtensionEntitlementProblems(keys, identifiers) {
+  const actual = [...new Set(keys)].sort()
+  const expected = cameraExtensionEntitlementKeys(identifiers)
+  const problems = []
+  for (const key of cameraExtensionForbiddenEntitlementKeys(identifiers)) {
+    if (actual.includes(key)) {
+      problems.push(
+        `the extension carries ${key}; without an embedded profile that key gets it killed at exec. Its entitlements are exactly ${expected.join(' and ')}.`
+      )
+    }
+  }
+  for (const key of expected) {
+    if (!actual.includes(key)) problems.push(`the extension is missing ${key}`)
+  }
+  for (const key of actual) {
+    if (
+      !expected.includes(key) &&
+      !cameraExtensionForbiddenEntitlementKeys(identifiers).includes(key)
+    ) {
+      problems.push(`the extension carries an unexpected entitlement ${key}`)
+    }
+  }
+  return problems
 }
 
 function escapeXml(text) {

@@ -8,8 +8,13 @@ import {
   CAMERA_EXTENSION_SWIFT_IDENTIFIERS_PATH,
   appEntitlementsWithCamera,
   cameraExtensionBundleRelativePath,
+  cameraExtensionEntitlementKeys,
+  cameraExtensionEntitlementProblems,
   cameraExtensionEntitlements,
+  cameraExtensionExecutableName,
+  cameraExtensionForbiddenEntitlementKeys,
   cameraExtensionInfoPlist,
+  entitlementKeysFromPlistXml,
   loadCameraExtensionIdentifiers,
   parsePlistXml,
   parseSwiftLiteral,
@@ -101,11 +106,12 @@ describe('Swift mirror drift check', () => {
 })
 
 describe('bundle plists', () => {
-  it('places the extension where OSSystemExtensionRequest looks', () => {
+  it('places the extension where OSSystemExtensionRequest looks, named by its bundle id (P0a)', () => {
     assert.equal(
       cameraExtensionBundleRelativePath(identifiers),
-      'Contents/Library/SystemExtensions/VideorcCamera.systemextension'
+      'Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension'
     )
+    assert.equal(cameraExtensionExecutableName(identifiers), 'dev.theorcdev.videorc.camera')
   })
 
   it('writes the CMIOExtension keys and the usage description into Info.plist', () => {
@@ -114,7 +120,7 @@ describe('bundle plists', () => {
       buildVersion: '0.18.0'
     })
     assert.equal(plist.CFBundleIdentifier, 'dev.theorcdev.videorc.camera')
-    assert.equal(plist.CFBundleExecutable, 'VideorcCamera')
+    assert.equal(plist.CFBundleExecutable, 'dev.theorcdev.videorc.camera')
     assert.equal(plist.CFBundlePackageType, 'SYSX')
     assert.equal(
       plist.CMIOExtension.CMIOExtensionMachServiceName,
@@ -129,13 +135,75 @@ describe('bundle plists', () => {
     )
   })
 
-  it('gives the extension the sandbox, the app group and its profile identifiers', () => {
+  it('gives the extension exactly the sandbox and the app group, never the identifiers (P0a)', () => {
     assert.deepEqual(cameraExtensionEntitlements(identifiers), {
       'com.apple.security.app-sandbox': true,
-      'com.apple.security.application-groups': ['C2PA37RB58.dev.theorcdev.videorc'],
-      'com.apple.application-identifier': 'C2PA37RB58.dev.theorcdev.videorc.camera',
-      'com.apple.developer.team-identifier': 'C2PA37RB58'
+      'com.apple.security.application-groups': ['C2PA37RB58.dev.theorcdev.videorc']
     })
+    assert.deepEqual(cameraExtensionEntitlementKeys(identifiers), [
+      'com.apple.security.app-sandbox',
+      'com.apple.security.application-groups'
+    ])
+    assert.deepEqual(cameraExtensionForbiddenEntitlementKeys(identifiers), [
+      'com.apple.developer.system-extension.install',
+      'com.apple.application-identifier',
+      'com.apple.developer.team-identifier'
+    ])
+  })
+
+  it('reads entitlement keys out of codesign output and judges the extension set', () => {
+    const shown = [
+      'Executable=/x',
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0"><dict>',
+      '  <key>com.apple.security.app-sandbox</key><true/>',
+      '  <key>com.apple.security.application-groups</key>',
+      '  <array><string>C2PA37RB58.dev.theorcdev.videorc</string></array>',
+      '</dict></plist>'
+    ].join('\n')
+    assert.deepEqual(entitlementKeysFromPlistXml(shown), [
+      'com.apple.security.app-sandbox',
+      'com.apple.security.application-groups'
+    ])
+    assert.deepEqual(entitlementKeysFromPlistXml('Executable=/x\n'), [])
+    assert.deepEqual(
+      cameraExtensionEntitlementProblems(entitlementKeysFromPlistXml(shown), identifiers),
+      []
+    )
+    const b0Shape = cameraExtensionEntitlementProblems(
+      [
+        'com.apple.security.app-sandbox',
+        'com.apple.security.application-groups',
+        'com.apple.application-identifier',
+        'com.apple.developer.team-identifier'
+      ],
+      identifiers
+    )
+    assert.equal(b0Shape.length, 2)
+    assert.match(
+      b0Shape[0],
+      /carries com\.apple\.application-identifier; without an embedded profile/
+    )
+    assert.match(b0Shape[1], /carries com\.apple\.developer\.team-identifier/)
+    const restricted = cameraExtensionEntitlementProblems(
+      ['com.apple.security.app-sandbox', 'com.apple.developer.system-extension.install'],
+      identifiers
+    )
+    assert.ok(restricted.some((line) => line.includes('system-extension.install')))
+    assert.ok(
+      restricted.some((line) => line.includes('missing com.apple.security.application-groups'))
+    )
+    assert.deepEqual(
+      cameraExtensionEntitlementProblems(
+        [
+          'com.apple.security.app-sandbox',
+          'com.apple.security.application-groups',
+          'com.apple.security.network.client'
+        ],
+        identifiers
+      ),
+      ['the extension carries an unexpected entitlement com.apple.security.network.client']
+    )
   })
 
   it('adds the restricted keys to the app entitlements without dropping the base ones', () => {

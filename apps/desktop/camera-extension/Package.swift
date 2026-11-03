@@ -2,7 +2,8 @@
 // Plan 214 B1: the Videorc Camera system extension. `VideorcCameraCore` is the
 // pure half (format table, client counting, still selection, sink access) and
 // has XCTest coverage; `VideorcCamera` is the CMIOExtension executable that
-// scripts/build-camera-extension.mjs wraps into VideorcCamera.systemextension.
+// scripts/build-camera-extension.mjs wraps into
+// dev.theorcdev.videorc.camera.systemextension (named after the bundle id).
 // The deployment target is pinned here (macOS 13, the app's floor).
 import PackageDescription
 

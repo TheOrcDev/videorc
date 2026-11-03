@@ -17,8 +17,11 @@ import {
 import {
   artifactKindFromPath,
   buildMacosReleaseArtifactChecks,
+  entitlementKeyFailures,
   evaluateBinaryContainsEnvSecretCheck,
   evaluateFileExcludesEnvSecretCheck,
+  evaluatePathAbsentCheck,
+  evaluateSingleEmbeddedProfileCheck,
   formatArtifactPath,
   formatReleaseArtifactValidationReport,
   outputExclusionFailures,
@@ -196,6 +199,23 @@ function runCheck(check) {
       output: sanitizeReleaseValidationOutput(result.output, context())
     }
   }
+  // Plan 214 (P0a): the extension embeds no profile, and the app's is the only one.
+  if (check.type === 'path-absent') {
+    const result = evaluatePathAbsentCheck(check)
+    return {
+      label: check.label,
+      ok: result.ok,
+      output: sanitizeReleaseValidationOutput(result.output, context())
+    }
+  }
+  if (check.type === 'single-embedded-profile') {
+    const result = evaluateSingleEmbeddedProfileCheck(check)
+    return {
+      label: check.label,
+      ok: result.ok,
+      output: sanitizeReleaseValidationOutput(result.output, context())
+    }
+  }
 
   const result = spawnSync(check.command, check.args, {
     encoding: 'utf8'
@@ -205,15 +225,19 @@ function runCheck(check) {
   // e.g. the capture-entitlement gate requires the device entitlements to appear
   // in `codesign -d --entitlements` output (a signed binary without them exits 0).
   const missing = (check.expectOutputIncludes ?? []).filter((needle) => !rawOutput.includes(needle))
-  // Plan 214 B5: a bare binary that claims the restricted system-extension
-  // key or the app group cannot carry a profile, so AMFI kills it at launch.
+  // Plan 214 B5 (P0a): a binary without a profile that claims the restricted
+  // system-extension key, the app group or the application/team identifier is
+  // killed at exec, so every nested binary must show exactly the inherit keys
+  // and the extension exactly its two.
   const forbidden = outputExclusionFailures(check, rawOutput)
+  const keyFailures = entitlementKeyFailures(check, rawOutput)
   const stdoutFailures = stdoutExpectationFailures(check, result.stdout)
   const output = sanitizeReleaseValidationOutput(
     [
       rawOutput,
       ...missing.map((needle) => `missing required entitlement: ${needle}`),
       ...forbidden,
+      ...keyFailures,
       ...stdoutFailures
     ]
       .filter(Boolean)
@@ -227,6 +251,7 @@ function runCheck(check) {
       result.status === 0 &&
       missing.length === 0 &&
       forbidden.length === 0 &&
+      keyFailures.length === 0 &&
       stdoutFailures.length === 0,
     output
   }

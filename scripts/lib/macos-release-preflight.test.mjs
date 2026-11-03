@@ -4,6 +4,7 @@ import { describe, it } from 'node:test'
 import {
   REQUIRED_CAMERA_PROFILE_ENV_VARS,
   REQUIRED_RELEASE_ENV_VARS,
+  RETIRED_CAMERA_PROFILE_ENV_VARS,
   evaluateMacosReleasePreflight,
   formatMacosReleasePreflightReport
 } from './macos-release-preflight.mjs'
@@ -13,7 +14,6 @@ function completeEnv(overrides = {}) {
     APPLE_ID: 'creator@example.test',
     APPLE_APP_SPECIFIC_PASSWORD: 'secret-apple-password',
     VIDEORC_MACOS_PROFILE_APP: 'base64-app-profile-never-printed',
-    VIDEORC_MACOS_PROFILE_CAMERA: 'base64-camera-profile-never-printed',
     ...overrides
   }
 }
@@ -109,28 +109,36 @@ describe('evaluateMacosReleasePreflight', () => {
     }
   })
 
-  it('requires both Videorc Camera provisioning profiles and points at B0 (plan 214)', () => {
-    assert.deepEqual(REQUIRED_CAMERA_PROFILE_ENV_VARS, [
-      'VIDEORC_MACOS_PROFILE_APP',
-      'VIDEORC_MACOS_PROFILE_CAMERA'
-    ])
-    for (const name of REQUIRED_CAMERA_PROFILE_ENV_VARS) {
-      const result = evaluateMacosReleasePreflight({
-        env: completeEnv({ [name]: '' }),
-        tools: completeTools,
-        paths: completePaths,
-        signing: keychainSigning
-      })
-      const report = formatMacosReleasePreflightReport(result)
-      assert.equal(result.ok, false, `${name} should be required`)
-      assert.match(
-        report,
-        new RegExp(
-          `env: ${name} \\(missing: the Videorc Camera provisioning profile \\(plan 214 B0`
-        )
-      )
-      assert.doesNotMatch(report, /never-printed/)
-    }
+  it('requires the one Videorc Camera app profile and names it (plan 214)', () => {
+    assert.deepEqual(REQUIRED_CAMERA_PROFILE_ENV_VARS, ['VIDEORC_MACOS_PROFILE_APP'])
+    assert.deepEqual(RETIRED_CAMERA_PROFILE_ENV_VARS, ['VIDEORC_MACOS_PROFILE_CAMERA'])
+    const result = evaluateMacosReleasePreflight({
+      env: completeEnv({ VIDEORC_MACOS_PROFILE_APP: '' }),
+      tools: completeTools,
+      paths: completePaths,
+      signing: keychainSigning
+    })
+    const report = formatMacosReleasePreflightReport(result)
+    assert.equal(result.ok, false)
+    assert.match(
+      report,
+      /env: VIDEORC_MACOS_PROFILE_APP \(missing: the Videorc Camera app provisioning profile \(plan 214/
+    )
+    assert.doesNotMatch(report, /never-printed/)
+    assert.doesNotMatch(report, /VIDEORC_MACOS_PROFILE_CAMERA/)
+  })
+
+  it('fails on the retired camera profile variable without printing its value (P0a)', () => {
+    const result = evaluateMacosReleasePreflight({
+      env: completeEnv({ VIDEORC_MACOS_PROFILE_CAMERA: 'stale-never-printed' }),
+      tools: completeTools,
+      paths: completePaths,
+      signing: keychainSigning
+    })
+    const report = formatMacosReleasePreflightReport(result)
+    assert.equal(result.ok, false)
+    assert.match(report, /env: VIDEORC_MACOS_PROFILE_CAMERA \(set but no longer used/)
+    assert.doesNotMatch(report, /stale-never-printed/)
   })
 
   it('requires the inherit entitlements plist beside the app plist', () => {

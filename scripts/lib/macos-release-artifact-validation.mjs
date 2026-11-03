@@ -1,10 +1,15 @@
-import { readFileSync } from 'node:fs'
-import { basename, dirname, relative, resolve } from 'node:path'
+import { existsSync, readdirSync, readFileSync, lstatSync } from 'node:fs'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   cameraExtensionBundleRelativePath,
-  loadCameraExtensionIdentifiers
+  cameraExtensionEntitlementKeys,
+  cameraExtensionForbiddenEntitlementKeys,
+  entitlementKeysFromPlistXml,
+  loadCameraExtensionIdentifiers,
+  parsePlistXml,
+  restrictedCameraEntitlementKeys
 } from './camera-extension-identifiers.mjs'
 
 export function artifactKindFromPath(path) {
@@ -28,27 +33,45 @@ export const REQUIRED_CAPTURE_ENTITLEMENTS = [
 
 export const EXPECTED_MACOS_BUNDLE_IDENTIFIER = 'dev.theorcdev.videorc'
 
-// Plan 214 B5: the Videorc Camera extension. A release must embed it, signed
-// with its own profile and entitlements; the app must carry the restricted
-// system-extension key and the app group; no bare binary may carry either (it
-// cannot hold a profile, so AMFI would kill it). A release built without the
-// B0 profiles fails these checks by design: it must never ship.
-export const CAMERA_EXTENSION_IDENTIFIERS = loadCameraExtensionIdentifiers(
-  resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-)
+// Plan 214 B5, shape fixed by spike P0a: the Videorc Camera extension. A
+// release must embed it at Contents/Library/SystemExtensions, signed with
+// exactly two entitlements (app sandbox, app group) and NO profile; the app
+// must embed the one Developer ID profile and carry the restricted
+// system-extension key and the app group; every other binary (Electron's
+// helpers, crashpad, ShipIt, the bare tools) keeps exactly the five inherit
+// keys, because a binary without a profile dies at exec with any restricted
+// key. A release built without the profile fails these checks by design: it
+// must never ship.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+export const CAMERA_EXTENSION_IDENTIFIERS = loadCameraExtensionIdentifiers(REPO_ROOT)
 export const CAMERA_EXTENSION_RELATIVE_PATH = cameraExtensionBundleRelativePath(
   CAMERA_EXTENSION_IDENTIFIERS
 )
-export const RESTRICTED_CAMERA_ENTITLEMENTS = [
-  CAMERA_EXTENSION_IDENTIFIERS.entitlements.systemExtensionInstall,
-  CAMERA_EXTENSION_IDENTIFIERS.entitlements.applicationGroups
-]
+/** The keys only the main executable may carry. */
+export const RESTRICTED_CAMERA_ENTITLEMENTS = restrictedCameraEntitlementKeys(
+  CAMERA_EXTENSION_IDENTIFIERS
+)
+/** Exactly what the extension's signature must show. */
+export const CAMERA_EXTENSION_ENTITLEMENT_KEYS = cameraExtensionEntitlementKeys(
+  CAMERA_EXTENSION_IDENTIFIERS
+)
+export const CAMERA_EXTENSION_FORBIDDEN_ENTITLEMENTS = cameraExtensionForbiddenEntitlementKeys(
+  CAMERA_EXTENSION_IDENTIFIERS
+)
 export const CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS = [
-  CAMERA_EXTENSION_IDENTIFIERS.entitlements.appSandbox,
-  CAMERA_EXTENSION_IDENTIFIERS.entitlements.applicationGroups,
-  CAMERA_EXTENSION_IDENTIFIERS.appGroup,
-  `${CAMERA_EXTENSION_IDENTIFIERS.teamId}.${CAMERA_EXTENSION_IDENTIFIERS.extensionBundleId}`
+  ...CAMERA_EXTENSION_ENTITLEMENT_KEYS,
+  CAMERA_EXTENSION_IDENTIFIERS.appGroup
 ]
+/** The five keys of entitlements.mac.inherit.plist: every nested binary, exactly. */
+export const INHERIT_ENTITLEMENT_KEYS = Object.keys(
+  parsePlistXml(
+    readFileSync(
+      join(REPO_ROOT, 'apps', 'desktop', 'build-resources', 'entitlements.mac.inherit.plist'),
+      'utf8'
+    )
+  )
+).sort()
+export const APP_EMBEDDED_PROFILE_RELATIVE_PATH = 'Contents/embedded.provisionprofile'
 
 /** The bare binaries that must never claim the restricted keys. */
 export function bareBinaryCheckTargets(appPath) {
@@ -58,6 +81,41 @@ export function bareBinaryCheckTargets(appPath) {
       id: 'native-preview-addon',
       label: 'videorc_native_preview.node',
       path: `${appPath}/Contents/Resources/videorc_native_preview.node`
+    }
+  ]
+}
+
+/**
+ * Electron's nested executables. They run as their own processes without a
+ * profile, so they keep the inherit keys exactly like the bare tools.
+ */
+export function nestedExecutableCheckTargets(appPath) {
+  const frameworks = `${appPath}/Contents/Frameworks`
+  return [
+    ...[
+      'Videorc Helper',
+      'Videorc Helper (GPU)',
+      'Videorc Helper (Plugin)',
+      'Videorc Helper (Renderer)'
+    ].map((name) => ({
+      id: `helper-${
+        name
+          .replace(/^Videorc Helper ?/, '')
+          .replace(/[()]/g, '')
+          .toLowerCase() || 'main'
+      }`,
+      label: `${name}.app`,
+      path: `${frameworks}/${name}.app`
+    })),
+    {
+      id: 'crashpad-handler',
+      label: 'chrome_crashpad_handler',
+      path: `${frameworks}/Electron Framework.framework/Versions/A/Helpers/chrome_crashpad_handler`
+    },
+    {
+      id: 'shipit',
+      label: 'ShipIt',
+      path: `${frameworks}/Squirrel.framework/Versions/A/Resources/ShipIt`
     }
   ]
 }
@@ -76,6 +134,11 @@ export function cameraExtensionCheckTargets(appPath) {
       id: 'camera-extension-bundle-identifier',
       label: 'Videorc Camera extension Info.plist bundle identifier',
       ...plutil('CFBundleIdentifier', { expectStdoutEquals: identifiers.extensionBundleId })
+    },
+    {
+      id: 'camera-extension-package-type',
+      label: 'Videorc Camera extension package type (SYSX)',
+      ...plutil('CFBundlePackageType', { expectStdoutEquals: 'SYSX' })
     },
     {
       id: 'camera-extension-mach-service',
@@ -97,45 +160,68 @@ export function cameraExtensionCheckTargets(appPath) {
     },
     {
       id: 'camera-extension-entitlements',
-      label: 'Videorc Camera extension entitlements',
+      label: 'Videorc Camera extension entitlements (exactly sandbox + app group)',
       command: 'codesign',
       args: ['-d', '--entitlements', ':-', extension],
-      expectOutputIncludes: CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS
+      expectOutputIncludes: CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS,
+      expectEntitlementKeys: CAMERA_EXTENSION_ENTITLEMENT_KEYS,
+      expectOutputExcludes: CAMERA_EXTENSION_FORBIDDEN_ENTITLEMENTS
     },
     {
-      id: 'camera-extension-profile',
-      label: 'Videorc Camera extension embedded profile',
-      command: 'security',
-      args: ['cms', '-D', '-i', `${extension}/Contents/embedded.provisionprofile`],
-      expectOutputIncludes: [
-        identifiers.teamId,
-        `${identifiers.teamId}.${identifiers.extensionBundleId}`
-      ]
+      id: 'camera-extension-no-profile',
+      label: 'Videorc Camera extension embeds no profile',
+      type: 'path-absent',
+      path: `${extension}/Contents/embedded.provisionprofile`
     },
     {
       id: 'app-profile',
       label: 'app embedded profile (Videorc Camera)',
       command: 'security',
-      args: ['cms', '-D', '-i', `${appPath}/Contents/embedded.provisionprofile`],
+      args: ['cms', '-D', '-i', `${appPath}/${APP_EMBEDDED_PROFILE_RELATIVE_PATH}`],
       expectOutputIncludes: [
         `${identifiers.teamId}.${identifiers.appBundleId}`,
         identifiers.entitlements.systemExtensionInstall
       ]
     },
     {
+      id: 'single-embedded-profile',
+      label: 'one embedded profile, in the app only',
+      type: 'single-embedded-profile',
+      path: appPath
+    },
+    {
       id: 'restricted-entitlements-app',
       label: 'system extension entitlements (app)',
       command: 'codesign',
       args: ['-d', '--entitlements', ':-', appPath],
-      expectOutputIncludes: [...RESTRICTED_CAMERA_ENTITLEMENTS, identifiers.appGroup]
+      expectOutputIncludes: [
+        identifiers.entitlements.systemExtensionInstall,
+        identifiers.entitlements.applicationGroups,
+        identifiers.appGroup
+      ]
     },
-    ...bareBinaryCheckTargets(appPath).map((target) => ({
-      id: `no-restricted-entitlements-${target.id}`,
-      label: `no system extension entitlement (${target.label})`,
-      command: 'codesign',
-      args: ['-d', '--entitlements', ':-', target.path],
-      expectOutputExcludes: RESTRICTED_CAMERA_ENTITLEMENTS
-    }))
+    // Executables show exactly the inherit keys. The .node addon is a Mach-O
+    // bundle, not an executable: codesign embeds no entitlements into it at
+    // all, so it is only checked for the restricted keys (none may appear).
+    ...[...bareBinaryCheckTargets(appPath), ...nestedExecutableCheckTargets(appPath)].map(
+      (target) =>
+        target.id === 'native-preview-addon'
+          ? {
+              id: `no-restricted-entitlements-${target.id}`,
+              label: `no restricted entitlement (${target.label})`,
+              command: 'codesign',
+              args: ['-d', '--entitlements', ':-', target.path],
+              expectOutputExcludes: RESTRICTED_CAMERA_ENTITLEMENTS
+            }
+          : {
+              id: `no-restricted-entitlements-${target.id}`,
+              label: `inherit entitlements only (${target.label})`,
+              command: 'codesign',
+              args: ['-d', '--entitlements', ':-', target.path],
+              expectEntitlementKeys: INHERIT_ENTITLEMENT_KEYS,
+              expectOutputExcludes: RESTRICTED_CAMERA_ENTITLEMENTS
+            }
+    )
   ]
 }
 
@@ -145,6 +231,75 @@ export function outputExclusionFailures(check, output) {
   return (check.expectOutputExcludes ?? [])
     .filter((needle) => text.includes(needle))
     .map((needle) => `forbidden entitlement present: ${needle}`)
+}
+
+/**
+ * Pure. Lines when the entitlement keys a `codesign -d --entitlements :-`
+ * printed are not exactly the expected set.
+ */
+export function entitlementKeyFailures(check, output) {
+  if (!Array.isArray(check.expectEntitlementKeys)) {
+    return []
+  }
+  const expected = [...check.expectEntitlementKeys].sort()
+  const actual = entitlementKeysFromPlistXml(output)
+  const missing = expected.filter((key) => !actual.includes(key))
+  const extra = actual.filter((key) => !expected.includes(key))
+  return [
+    ...missing.map((key) => `missing entitlement: ${key}`),
+    ...extra.map((key) => `unexpected entitlement: ${key}`)
+  ]
+}
+
+/** Pure (IO injected). A file that must not exist. */
+export function evaluatePathAbsentCheck(check, { exists = existsSync } = {}) {
+  if (check.type !== 'path-absent') {
+    throw new Error(`Unsupported release validation check type: ${check.type}`)
+  }
+  return exists(check.path)
+    ? { ok: false, output: `${check.path} exists; it must not` }
+    : { ok: true, output: '' }
+}
+
+/** Every embedded.provisionprofile inside a bundle, relative to it (symlinks skipped). */
+export function findEmbeddedProfiles(
+  bundlePath,
+  { readdir = readdirSync, lstat = lstatSync } = {}
+) {
+  const found = []
+  const walk = (dir) => {
+    for (const name of readdir(dir)) {
+      const path = join(dir, name)
+      const stat = lstat(path)
+      if (stat.isSymbolicLink()) continue
+      if (stat.isDirectory()) walk(path)
+      else if (name === 'embedded.provisionprofile') found.push(relative(bundlePath, path))
+    }
+  }
+  walk(bundlePath)
+  return found.sort()
+}
+
+/**
+ * Pure (IO injected). Exactly one embedded profile in the whole bundle, the
+ * app's own. One in the extension or a helper would be a stale B0 shape.
+ */
+export function evaluateSingleEmbeddedProfileCheck(
+  check,
+  { profiles = findEmbeddedProfiles } = {}
+) {
+  if (check.type !== 'single-embedded-profile') {
+    throw new Error(`Unsupported release validation check type: ${check.type}`)
+  }
+  const found = profiles(check.path)
+  const expected = [APP_EMBEDDED_PROFILE_RELATIVE_PATH]
+  if (found.length === 1 && found[0] === expected[0]) {
+    return { ok: true, output: '' }
+  }
+  return {
+    ok: false,
+    output: `expected exactly one embedded profile at ${expected[0]}, found ${found.length === 0 ? 'none' : found.join(', ')}`
+  }
 }
 
 // One shared entitlements plist signs the app and every bundled tool, so all of

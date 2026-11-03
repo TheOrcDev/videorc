@@ -150,9 +150,9 @@ check (default in packaged builds since 0.9.10; opt out via
   keychain (or `CSC_LINK`). See [macos-signing.md](macos-signing.md).
   **Auto-update requires a signed build** — electron-updater refuses to apply an
   unsigned/ad-hoc update.
-- **Videorc Camera profiles** (plan 214) — `VIDEORC_MACOS_PROFILE_APP` and
-  `VIDEORC_MACOS_PROFILE_CAMERA` in `~/.videorc-release.env` (base64 or a
-  path to each Developer ID provisioning profile). See
+- **Videorc Camera profile** (plan 214) — `VIDEORC_MACOS_PROFILE_APP` in
+  `~/.videorc-release.env` (base64 or a path to the one Developer ID
+  provisioning profile, for the app; the extension needs none). See
   [Videorc Camera](#videorc-camera-plan-214) below.
 - **Storage write creds** — the Neon uploader key
   (`VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `storage:read` + `storage:write`) in
@@ -178,30 +178,37 @@ check (default in packaged builds since 0.9.10; opt out via
 ## Videorc Camera (plan 214)
 
 The signed build embeds the Videorc Camera system extension
-(`apps/desktop/camera-extension/`) when both `VIDEORC_MACOS_PROFILE_APP` and
-`VIDEORC_MACOS_PROFILE_CAMERA` are set; the secrets, how to create and renew
-the profiles, and what the signed app looks like are in
+(`apps/desktop/camera-extension/`) when `VIDEORC_MACOS_PROFILE_APP` is set:
+the one Developer ID profile, for the app (the extension embeds none, spike
+P0a). The secret, how to renew the profile when the Developer ID certificate
+is renewed (next: 2027-02-01), the macOS approval path and what the signed app
+looks like are in
 [macos-signing.md, "Videorc Camera"](macos-signing.md#videorc-camera-plan-214).
 What the release path checks:
 
-- `release:preflight:macos` requires both profile variables (named with a
-  pointer at plan 214 B0 when missing).
+- `release:preflight:macos` requires `VIDEORC_MACOS_PROFILE_APP` and fails on
+  the retired `VIDEORC_MACOS_PROFILE_CAMERA` when it is still set.
 - `package:preflight:macos` requires the built extension
   (`pnpm build:camera-extension`, part of `package:backend:macos`) when
-  the profiles are set, and prints `Videorc Camera skipped: ...` when not.
-- The packaging hook logs `Videorc Camera embedded at
-  Contents/Library/SystemExtensions/VideorcCamera.systemextension (<version>)`.
+  the profile is set, and prints `Videorc Camera skipped: ...` when not.
+- The packaging hook checks the profile (team, App ID, the restricted key,
+  expiry, and that it embeds the certificate signing the build) and logs
+  `Videorc Camera embedded at
+  Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension (<version>)`.
   A release log that says `Videorc Camera skipped` is not a release.
 - `release:validate:macos` fails a release that lacks the extension, its
-  signature and entitlements, either embedded profile, or the restricted keys
-  on the app, and fails if any bare binary claims them (the lines are listed
-  in macos-signing.md). `check:packaged-app` fails a Developer ID build that
-  lacks any part of it.
+  signature, its exact two entitlements, `SYSX`, the app's embedded profile or
+  the restricted keys on the app, and fails if the extension embeds a profile,
+  if the bundle holds more than the app's one profile, or if any other binary
+  (bare tools, helpers, crashpad, ShipIt) shows anything but the five inherit
+  keys (the lines are listed in macos-signing.md). `check:packaged-app` fails a
+  Developer ID build that lacks any part of it and repeats the shape checks.
 - The acceptance gate for the camera is plan 214 F2 on the lab Mac: the
-  approval flow in System Settings, Meet, Zoom, FaceTime, an update that
-  replaces the extension, and delete-the-app uninstalling it.
+  approval flow in System Settings (General → Login Items & Extensions →
+  Camera Extensions), Meet, Zoom, FaceTime, an update that replaces the
+  extension without re-approval or a reboot, and delete-the-app uninstalling it.
 
-Rollback: a build without the profiles never passes validation; a shipped
+Rollback: a build without the profile never passes validation; a shipped
 camera problem rolls forward with a higher version like any other. Shipping
 without the camera is a reviewed PR that removes the hook, the entitlements
 split and the validator checks together, never an unset secret.
