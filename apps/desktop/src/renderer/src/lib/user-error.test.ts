@@ -163,6 +163,35 @@ describe('userErrorMessage', () => {
     ).toBe('known')
   })
 
+  // Plan 216 A3 (D5): a switch that adds a source gave up on its first frame.
+  it('names the source that never sent video when a scene switch gives up', () => {
+    const SWITCH = { action: 'switch', object: 'the scene' }
+    expect(
+      userErrorMessage(
+        backendError(
+          'layout-camera-not-ready',
+          'Live preview layout switch blocked after camera (15s) exceeded its source-start/readiness budget: camera session never delivered a frame.'
+        ),
+        SWITCH
+      )
+    ).toMatchObject({
+      kind: 'known',
+      title: "Couldn't switch the scene",
+      description: "Your camera isn't sending video. Check it in Sources, then try again.",
+      tone: 'error'
+    })
+    expect(
+      userErrorMessage(backendError('layout-screen-not-ready', 'screen never delivered'), SWITCH)
+        .description
+    ).toBe("Your screen isn't sending video. Check it in Sources, then try again.")
+    // The route's own code stays generic: that is the toast the streamer got
+    // on 0.18.0, which named no cause.
+    expect(
+      userErrorMessage(backendError('layout-preview-failed', 'camera budget exceeded'), SWITCH)
+        .description
+    ).toBe(UNKNOWN_REASON)
+  })
+
   it('keeps a renderer-written reason, and an unmapped code stays generic', () => {
     expect(
       userErrorMessage(new UserFacingError('The selected output folder is unavailable.'), IMPORT)

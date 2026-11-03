@@ -91,7 +91,13 @@ const KNOWN_CODES: Readonly<Record<string, string>> = {
   'noise-cleanup-mutation-blocked':
     'Noise cleanup is still working on this recording. Try again when it finishes.',
   'session-rename-invalid': 'A title needs 1 to 120 characters.',
-  'youtube-quota-paused': "Videorc's daily YouTube API limit is used up. Try again after it resets."
+  'youtube-quota-paused':
+    "Videorc's daily YouTube API limit is used up. Try again after it resets.",
+  // Plan 216 A3 (D5): a scene switch that adds a source gave up waiting for
+  // its first frame. The backend's code names the source, so the copy can.
+  'layout-camera-not-ready':
+    "Your camera isn't sending video. Check it in Sources, then try again.",
+  'layout-screen-not-ready': "Your screen isn't sending video. Check it in Sources, then try again."
 }
 const WARNING_CODES = new Set([
   'command-expired-before-dispatch',
