@@ -449,6 +449,21 @@ describe('the backend report for an extension state (plan 214 B3, last step)', (
     }
   })
 
+  it('activates only on an off-to-on edge, so a failed activation never retries on its own report', () => {
+    // The loop this rules out: activate, fail, report `failed`, the backend
+    // publishes the change, main sees on + failed, activates again, ...
+    expect(cameraExtensionShouldActivateForSwitch({ on: true }, 'failed', true)).toBe(false)
+    expect(cameraExtensionShouldActivateForSwitch({ on: true }, 'idle', true)).toBe(false)
+    expect(cameraExtensionShouldActivateForSwitch({ on: true }, 'removed', true)).toBe(false)
+    // Off then on again retries; so does the first status main ever sees,
+    // and the saved switch read at every backend READY (null).
+    expect(cameraExtensionShouldActivateForSwitch({ on: true }, 'failed', false)).toBe(true)
+    expect(cameraExtensionShouldActivateForSwitch({ on: true }, 'failed', null)).toBe(true)
+    expect(cameraExtensionShouldActivateForSwitch({ on: true }, 'idle', null)).toBe(true)
+    expect(cameraExtensionShouldActivateForSwitch({ on: false }, 'idle', true)).toBe(false)
+    expect(cameraExtensionShouldActivateForSwitch({ on: false }, 'idle', false)).toBe(false)
+  })
+
   it('wires onState to the report, including the dev build at creation', () => {
     const reports: unknown[] = []
     const { controller: dev } = controller(null, {

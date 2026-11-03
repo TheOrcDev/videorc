@@ -1475,6 +1475,13 @@ async function cameraExtensionSwitchOnAtLaunch(): Promise<boolean> {
   }
 }
 /**
+ * The switch as main last saw it (null until the backend answered once).
+ * Only an off-to-on edge activates: `virtualCamera.changed` also fires for
+ * the extension's own reports and the sink's health, and a failed
+ * activation must not retry itself on its own `failed` report.
+ */
+let lastVirtualCameraSwitchOn: boolean | null = null
+/**
  * At every backend READY (a launch or a backend restart): the backend learns
  * where the extension is, and a switch saved on activates the extension when
  * no request is live (Apple: as early as possible, so an update replaces the
@@ -1490,12 +1497,20 @@ async function reconcileCameraExtensionWithBackend(): Promise<void> {
     return
   }
   const switchOn = await cameraExtensionSwitchOnAtLaunch()
-  if (cameraExtensionShouldActivateForSwitch({ on: switchOn }, controller.state().phase)) {
+  // A fresh backend is a fresh read of the switch: whatever main saw before
+  // its restart no longer counts as "already on".
+  const shouldActivate = cameraExtensionShouldActivateForSwitch(
+    { on: switchOn },
+    controller.state().phase,
+    null
+  )
+  lastVirtualCameraSwitchOn = switchOn
+  if (shouldActivate) {
     logBackend('info', 'Videorc Camera is on in the saved settings; activating its extension.')
     void controller.activate()
   }
 }
-/** `virtualCamera.changed`: the switch turned on at runtime activates the extension. */
+/** `virtualCamera.changed`: the switch turning on at runtime activates the extension. */
 function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
   let status: VirtualCameraStatus
   try {
@@ -1508,10 +1523,15 @@ function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
     return
   }
   const controller = cameraExtension()
-  if (
+  const shouldActivate =
     controller.availability().available &&
-    cameraExtensionShouldActivateForSwitch(status, controller.state().phase)
-  ) {
+    cameraExtensionShouldActivateForSwitch(
+      status,
+      controller.state().phase,
+      lastVirtualCameraSwitchOn
+    )
+  lastVirtualCameraSwitchOn = status.on
+  if (shouldActivate) {
     logBackend('info', 'Videorc Camera switched on; activating its extension.')
     void controller.activate()
   }

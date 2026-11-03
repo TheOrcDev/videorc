@@ -307,15 +307,21 @@ export function platformReportForCameraExtension(
 
 /**
  * Pure. Whether the camera switch (`virtualCamera.changed`, or the saved
- * switch read at launch) should activate the extension now: on, and no
- * request live or finished. Off never deactivates (D12: the extension draws
- * the "off" still); deactivation is Health's "Remove Videorc Camera" alone.
+ * switch read at launch) should activate the extension now: on where main
+ * last saw it off (`previousOn`; null at launch and at every backend READY),
+ * and no request live or finished. A status that changed for another reason
+ * while the switch stays on (the extension's own report, the sink's health)
+ * never retries: a failed activation is reported to the backend as `failed`,
+ * which the backend publishes as a change, and retrying on that would loop
+ * forever. Off never deactivates (D12: the extension draws the "off" still);
+ * deactivation is Health's "Remove Videorc Camera" alone.
  */
 export function cameraExtensionShouldActivateForSwitch(
   status: Pick<VirtualCameraStatus, 'on'>,
-  phase: CameraExtensionPhase
+  phase: CameraExtensionPhase,
+  previousOn: boolean | null = null
 ): boolean {
-  if (!status.on) return false
+  if (!status.on || previousOn === true) return false
   return phase === 'idle' || phase === 'failed' || phase === 'removed'
 }
 
