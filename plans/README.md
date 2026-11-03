@@ -1,5 +1,21 @@
 # Implementation Plans
 
+- 2026-11-03: [Plan 215](215-streamer-list-2026-11-02.md), a streamer's
+  list from 2026-11-02. Seven workstreams, one PR each:
+  - A: X chat names the missing Videorc sign-in, warns before Go Live, and
+    attaches when you sign in. A silent sign-out on a 401 was the likely
+    cause; X itself was fine.
+  - B: Edit scene on the Scene page and in ⌘K, as well as in Studio.
+  - C: Hide from stream for the Stream Manager, next to Keep on top.
+  - D: move and resize while recording or live. This was locked since
+    2026-07-03, not a regression; outputs move on release.
+  - E: sources up to 400% and cut off at the canvas edge, never squashed;
+    a screen Zoom slider.
+  - F: rounded corners for the screen on all four render paths.
+  - G: chat on stream, the last 5 messages, off by default.
+
+  **PLANNED** 2026-11-03; the owner took D1 to D7 as recommended.
+
 - 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
   feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,
   Continuity Camera). Ten workstreams, one PR each:
