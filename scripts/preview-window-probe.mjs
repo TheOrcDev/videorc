@@ -1118,90 +1118,147 @@ async function runProofFallbackPassThroughScenario() {
       x: main.contentBounds.x + point.x,
       y: main.contentBounds.y + point.y
     })
-    const centerOf = (rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
-
-    // (a) A real HID click reaches the stage source through the fallback.
-    const start = toScreen(centerOf(target.bounds))
-    const clicked = osMouse([start])
-    if (!osMouseDelivered(clicked, start)) {
-      assertProbe(
-        true,
-        `${label}: skipped — this process may not post HID events (cursor did not move)`,
-        JSON.stringify({ clicked, start })
-      )
-      return
+    // Surface-local points for input delivered to the fallback surface
+    // itself; the surface rect is re-read, since Freeform re-laid the page out.
+    const toSurface = async (points) => {
+      const current = (await smokeCommand('preview-window-state')).surface.bounds
+      return points.map((point) => ({
+        x: Math.round(toScreen(point).x - current.x),
+        y: Math.round(toScreen(point).y - current.y)
+      }))
     }
-    const pressed = await waitFor(
-      stageState,
-      (s) =>
-        (s.result?.downs ?? []).some(
-          (down) => down.sourceId === target.sourceId && down.onBounds && down.isTrusted
-        ),
-      5000
-    )
-    assertProbe(
-      pressed.ok,
-      `${label}: a real HID click reached the stage source through the fallback surface`,
-      JSON.stringify({ target, state: pressed.last?.result })
-    )
-
-    // (b) A real drag moves the source and the stage commits the new rect
-    // (what it draws once idle again is the committed transform); then the
-    // same drag back, so the box ends where it started.
-    for (const [index, delta] of [
-      { x: 64, y: 36 },
-      { x: -64, y: -36 }
-    ].entries()) {
-      const idle = await waitFor(stageState, (s) => s.result?.phase === 'idle' && s.result?.bounds, 5000)
-      const before = idle.last?.result?.bounds
-      assertProbe(
-        idle.ok,
-        `${label}: the stage is idle before drag ${index}`,
-        JSON.stringify(idle.last?.result)
-      )
-      if (!idle.ok) return
-      const from = centerOf(before)
-      const path = [1 / 4, 1 / 2, 3 / 4, 1].map((t) =>
-        toScreen({ x: from.x + delta.x * t, y: from.y + delta.y * t })
-      )
-      const dragged = osMouse([toScreen(from), ...path])
-      assertProbe(
-        osMouseDelivered(dragged, path[path.length - 1]),
-        `${label}: drag ${index} was posted (cursor read back at the release point)`,
-        JSON.stringify({ dragged, end: path[path.length - 1] })
-      )
-      const moved = await waitFor(
-        stageState,
-        (s) =>
-          s.result?.phase === 'idle' &&
-          Boolean(s.result?.bounds) &&
-          Math.abs(s.result.bounds.x - before.x - delta.x) <= 8 &&
-          Math.abs(s.result.bounds.y - before.y - delta.y) <= 8,
-        8000
-      )
-      assertProbe(
-        moved.ok,
-        `${label}: a real drag ${index === 0 ? 'moved the source' : 'moved it back'} (the stage shows the committed rect)`,
-        JSON.stringify({
-          before,
-          delta,
-          after: moved.last?.result?.bounds,
-          phase: moved.last?.result?.phase,
-          downs: moved.last?.result?.downs,
-          ups: moved.last?.result?.ups
-        })
-      )
-      if (!moved.ok) return
+    const surfaceInput = (events) => smokeCommand('send-input-to-proof-surface', { events })
+    const press = (point) => ({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 })
+    const release = (point) => ({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 })
+    // Two ways in. 'surface': the input enters the fallback surface's own
+    // web contents, as real mouse input enters a view, and must come out on
+    // the stage (the forwarding is what is under test; once the surface is a
+    // view in the window no AppKit hit-testing sits in the path). 'os': a
+    // real HID event through every layer, when the host lets this process
+    // post one (an Accessibility grant); otherwise recorded as skipped.
+    const ways = [
+      {
+        kind: 'surface',
+        click: async (point) => {
+          const [local] = await toSurface([point])
+          await surfaceInput([{ type: 'mouseMove', ...local }, press(local), release(local)])
+          return true
+        },
+        drag: async (points) => {
+          const local = await toSurface(points)
+          await surfaceInput([
+            { type: 'mouseMove', ...local[0] },
+            press(local[0]),
+            ...local
+              .slice(1)
+              .map((point) => ({ type: 'mouseMove', ...point, modifiers: ['leftbuttondown'] })),
+            release(local[local.length - 1])
+          ])
+          return true
+        }
+      },
+      {
+        kind: 'os',
+        click: async (point) => osMouseDelivered(osMouse([toScreen(point)]), toScreen(point)),
+        drag: async (points) =>
+          osMouseDelivered(osMouse(points.map(toScreen)), toScreen(points[points.length - 1]))
+      }
+    ]
+    for (const way of ways) {
+      const done = await driveFallbackInput(`${label} [${way.kind}]`, way, target.sourceId, stageState)
+      if (!done) return
     }
     const focus = await smokeCommand('focused-window')
     assertProbe(
       focus.previewFocused === false && focus.role !== 'preview',
-      `${label}: preview window not focused after real input`,
+      `${label}: preview window not focused after the input`,
       JSON.stringify(focus)
     )
   } finally {
     await restoreNativePresenterAfterProofFallback(label)
   }
+}
+
+/**
+ * One way into the fallback (see runProofFallbackPassThroughScenario): a
+ * click on the source, then a drag that moves it and the same drag back, so
+ * the box ends where it started. Returns false when the scenario should
+ * stop (a failed step); a way the host cannot post is recorded as skipped.
+ */
+async function driveFallbackInput(label, way, sourceId, stageState) {
+  const centerOf = (rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
+  const idleStage = async (step) => {
+    const idle = await waitFor(stageState, (s) => s.result?.phase === 'idle' && s.result?.bounds, 5000)
+    assertProbe(
+      idle.ok,
+      `${label}: the stage is idle before the ${step}`,
+      JSON.stringify(idle.last?.result)
+    )
+    return idle.ok ? idle.last.result : null
+  }
+  const before = await idleStage('click')
+  if (!before) return false
+  const downsBefore = before.downs.length
+  const start = centerOf(before.bounds)
+  if (!(await way.click(start))) {
+    assertProbe(
+      true,
+      `${label}: skipped — this process may not post HID events (cursor did not move)`,
+      JSON.stringify({ start })
+    )
+    return true
+  }
+  const onSource = (down) => down.sourceId === sourceId && down.onBounds
+  const pressed = await waitFor(
+    stageState,
+    (s) => (s.result?.downs ?? []).slice(downsBefore).some(onSource),
+    5000
+  )
+  const down = (pressed.last?.result?.downs ?? []).slice(downsBefore).find(onSource)
+  assertProbe(
+    pressed.ok,
+    `${label}: the click reached the stage source through the fallback surface (trusted: ${down?.isTrusted ?? 'n/a'})`,
+    JSON.stringify({ sourceId, state: pressed.last?.result })
+  )
+  if (!pressed.ok) return false
+  for (const [index, delta] of [
+    { x: 64, y: 36 },
+    { x: -64, y: -36 }
+  ].entries()) {
+    const state = await idleStage(`drag ${index}`)
+    if (!state) return false
+    const from = centerOf(state.bounds)
+    const points = [0, 1 / 4, 1 / 2, 3 / 4, 1].map((t) => ({
+      x: from.x + delta.x * t,
+      y: from.y + delta.y * t
+    }))
+    const posted = await way.drag(points)
+    assertProbe(posted, `${label}: drag ${index} was posted`, JSON.stringify({ points }))
+    if (!posted) return false
+    const moved = await waitFor(
+      stageState,
+      (s) =>
+        s.result?.phase === 'idle' &&
+        Boolean(s.result?.bounds) &&
+        Math.abs(s.result.bounds.x - state.bounds.x - delta.x) <= 8 &&
+        Math.abs(s.result.bounds.y - state.bounds.y - delta.y) <= 8,
+      8000
+    )
+    assertProbe(
+      moved.ok,
+      `${label}: the drag ${index === 0 ? 'moved the source' : 'moved it back'} (the stage shows the committed rect)`,
+      JSON.stringify({
+        before: state.bounds,
+        delta,
+        after: moved.last?.result?.bounds,
+        phase: moved.last?.result?.phase,
+        downs: moved.last?.result?.downs?.length,
+        ups: moved.last?.result?.ups?.length
+      })
+    )
+    if (!moved.ok) return false
+  }
+  return true
 }
 
 /**

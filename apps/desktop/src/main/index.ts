@@ -305,6 +305,7 @@ import {
   validateSmokeBackendRpcRequest,
   validateSmokeCommentsSnapshotParams,
   validateSmokeCommentsDeltaParams,
+  validateSmokeProofSurfaceInputEvents,
   validateSmokeResourceAuthorization
 } from './smoke-command-security'
 import { runTimedBoundsStorm, timeSmokeAction } from './smoke-window-bounds-storm'
@@ -12257,6 +12258,30 @@ async function runSmokePreviewMotionCommand(
       realDriverKind: nativePreviewRealSurfaceDriverKind,
       nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
       transport: nativePreviewSurfaceStatus.transport
+    }
+  }
+
+  // Plan 216 C: drive the fallback surface through its own web contents, the
+  // way real mouse input reaches a view (Chromium input pipeline, then
+  // `before-mouse-event`), on a host that refuses HID posting (no
+  // Accessibility grant for the probe terminal). Points are surface-local.
+  if (command === 'send-input-to-proof-surface') {
+    const surface = nativePreviewSurfaceWindow
+    if (!surface || surface.isDestroyed() || surface.webContents.isDestroyed()) {
+      throw new Error('Proof surface is not open.')
+    }
+    const events = validateSmokeProofSurfaceInputEvents(params.events)
+    if (!events) {
+      throw new Error('Invalid proof-surface input events.')
+    }
+    for (const event of events) {
+      surface.webContents.sendInputEvent(event)
+      await delay(30)
+    }
+    return {
+      sent: events.length,
+      hostedInWindow: surface instanceof InWindowProofSurface,
+      bounds: surface.getBounds()
     }
   }
 
