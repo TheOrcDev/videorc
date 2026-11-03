@@ -2278,6 +2278,17 @@ pub struct ActiveRecording {
     /// recording draws nothing over the screen. `banners.show` refuses a new
     /// banner while this is false.
     accepts_banners: bool,
+    /// Plan 215 D1: whether a scene edit (a source's position, size or crop)
+    /// committed after the start reaches this session's picture. The
+    /// compositor paths (Metal, CPU, the Windows D3D11 media session) read
+    /// the installed scene every tick; the legacy FFmpeg graph is static and
+    /// the direct D3D11 recording composes nothing. `scene.source.transform.update`,
+    /// `.nudge` and `.reset` refuse while this is false on a session the user
+    /// is recording or streaming, and `recording.status` carries it so the
+    /// Scene page unlocks only when the edit would land. A replay-only Clips
+    /// ring (plan 181) reports it too but never refuses: the page is idle,
+    /// the edit lands in the Preview, and the ring keeps what it started with.
+    accepts_live_scene_edits: bool,
     pub _capture_permit: Option<CapturePermit>,
     /// Signals the process monitor at the exact user-stop edge. The monitor
     /// orders this against FFmpeg exit readiness before it touches the shared
@@ -2408,6 +2419,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         comment_highlight_vertical_canvas: None,
         overlay_session_shape: None,
         accepts_banners: true,
+        accepts_live_scene_edits: true,
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
@@ -3013,6 +3025,7 @@ impl ActiveRecording {
             duration_ms: None,
             message,
             replay_only: self.replay_only,
+            accepts_live_scene_edits: Some(self.accepts_live_scene_edits),
         }
     }
 
@@ -3095,6 +3108,18 @@ impl ActiveRecording {
     pub(crate) fn set_accepts_banners_for_test(&mut self, accepts: bool) {
         self.accepts_banners = accepts;
     }
+
+    /// See the `accepts_live_scene_edits` field (plan 215 D1).
+    pub(crate) fn accepts_live_scene_edits(&self) -> bool {
+        self.accepts_live_scene_edits
+    }
+
+    /// A stub session on the legacy FFmpeg graph (a fixed picture), for the
+    /// RPC tests of the scene edit refusal.
+    #[cfg(test)]
+    pub(crate) fn set_accepts_live_scene_edits_for_test(&mut self, accepts: bool) {
+        self.accepts_live_scene_edits = accepts;
+    }
 }
 
 /// Whether a session can take a banner shown after it started (plan 186 S4).
@@ -3120,6 +3145,46 @@ fn session_accepts_banners(
 pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
     let recording = state.recording.lock().await;
     recording.as_ref().map(ActiveRecording::accepts_banners)
+}
+
+/// Plan 215 D1: whether a session takes a scene edit (a source's position,
+/// size or crop) committed after its start. Every compositor path reads the
+/// installed scene on its next tick, so a transform commit lands "hot" there
+/// (`live_layout::commit_scene_with_current_layout`); the legacy FFmpeg graph
+/// builds its filter graph once and the direct D3D11 recording composes
+/// nothing, so neither can move a source until the session ends.
+fn session_accepts_live_scene_edits(
+    use_encoder_bridge: bool,
+    direct_d3d11_recording: bool,
+) -> bool {
+    use_encoder_bridge && !direct_d3d11_recording
+}
+
+/// The error code `scene.source.transform.update`, `scene.source.nudge` and
+/// `scene.source.transform.reset` answer while the running session cannot
+/// take the edit (plan 215 D1). The renderer never sends one: the Scene page
+/// keeps its lock while `recording.status.acceptsLiveSceneEdits` is false.
+pub const LIVE_SCENE_EDIT_REFUSED_CODE: &str = "scene-edit-refused";
+
+/// The one sentence for that refusal, on the wire and under the locked
+/// controls (the Hide screen precedent, plan 210 S7.5).
+pub const LIVE_SCENE_EDIT_REFUSED_MESSAGE: &str =
+    "Moving and resizing isn't available on this recording. Stop and record again.";
+
+/// `Some(reason)` while a recording or livestream that cannot take a scene
+/// edit runs: the edit is refused before it touches the scene, so the
+/// committed scene, the session and its picture all stay as they were.
+/// `None` while nothing runs, the session composes live, or the only session
+/// is the replay-only Clips ring (plan 181): the user is idle then, the Scene
+/// page is unlocked, and an idle edit must keep landing in the Preview even
+/// when the ring itself runs on the legacy graph (a profile outside the
+/// bridge envelope) and keeps the picture it started with.
+pub async fn live_scene_edit_refusal(state: &AppState) -> Option<&'static str> {
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| !active.replay_only && !active.accepts_live_scene_edits())
+        .map(|_| LIVE_SCENE_EDIT_REFUSED_MESSAGE)
 }
 
 /// Plan 210 S7.5: whether this session's screen reaches its output through
@@ -3676,6 +3741,7 @@ pub fn idle_status() -> RecordingStatus {
         duration_ms: None,
         message: Some("Ready to start a capture session.".to_string()),
         replay_only: false,
+        accepts_live_scene_edits: None,
     }
 }
 
@@ -3700,6 +3766,7 @@ fn recording_start_rejected_status(
         duration_ms: None,
         message: Some(message.to_string()),
         replay_only: false,
+        accepts_live_scene_edits: None,
     }
 }
 
@@ -6022,6 +6089,7 @@ async fn start_session_with_timeline(
             duration_ms: None,
             message: Some(format!("Starting {mode} session.")),
             replay_only,
+            accepts_live_scene_edits: None,
         },
         &session_start_publication_permit,
     );
@@ -6866,6 +6934,23 @@ async fn start_session_with_timeline(
         direct_d3d11_recording,
         screen_overlay.is_some(),
     );
+    // Plan 215 D1: whether a source moved from now on reaches this picture.
+    let accepts_live_scene_edits =
+        session_accepts_live_scene_edits(use_encoder_bridge, direct_d3d11_recording);
+    if !accepts_live_scene_edits {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Info,
+            "recording-scene-fixed-at-start",
+            if direct_d3d11_recording {
+                "Direct D3D11 screen recording composes no scene; a source moved now is refused until the session ends."
+            } else {
+                "This FFmpeg session composes a fixed scene; a source moved now is refused until the session ends."
+            },
+            None,
+        );
+    }
     if !accepts_banners {
         let _ = emit_session_log(
             &state,
@@ -6935,6 +7020,7 @@ async fn start_session_with_timeline(
         comment_highlight_vertical_canvas,
         overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
         accepts_banners,
+        accepts_live_scene_edits,
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
@@ -11771,6 +11857,7 @@ async fn monitor_session(
                             duration_ms,
                             message: Some(message),
                             replay_only: monitored_recording.replay_only,
+                            accepts_live_scene_edits: None,
                         }
                     }
                     Ok(()) => {
@@ -11831,6 +11918,7 @@ async fn monitor_session(
                                 "Recording saved; exporting the MP4 in the background.".to_string(),
                             ),
                             replay_only: monitored_recording.replay_only,
+                            accepts_live_scene_edits: None,
                         }
                     }
                 }
@@ -12038,6 +12126,7 @@ async fn monitor_session(
                             .unwrap_or_else(|| "Capture session finalized.".to_string()),
                     ),
                     replay_only: monitored_recording.replay_only,
+                    accepts_live_scene_edits: None,
                 };
                 // Slice 8: check (and, if needed, repair in place) the finalized file off
                 // the hot path. The recording is already marked complete; the gate only ever
@@ -12131,6 +12220,7 @@ async fn monitor_session(
                 duration_ms,
                 message: Some(message),
                 replay_only: monitored_recording.replay_only,
+                accepts_live_scene_edits: None,
             };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
@@ -12176,6 +12266,7 @@ async fn monitor_session(
                 duration_ms,
                 message: Some(message),
                 replay_only: monitored_recording.replay_only,
+                accepts_live_scene_edits: None,
             };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
@@ -23219,16 +23310,27 @@ fn camera_circle_mask_applies(layout: &LayoutSettings) -> bool {
     matches!(camera_mask(layout), SceneMask::Circle)
 }
 
+/// The legacy FFmpeg leg of plan 213 I's camera look. Every FFmpeg Videorc
+/// ships is an LGPL build, so the chain may only name the filters every
+/// bundle policy requires (`ffmpegFilters` in protocol-fixtures/camera-look.json,
+/// mirrored by scripts/lib/camera-look-ffmpeg-filters.mjs): `format`,
+/// `scale` and `lutyuv`. 0.18.0 graded with FFmpeg's `eq`, which is
+/// GPL-only, and a take on this path with a non-neutral look failed to start
+/// with `No such filter: 'eq'`.
 fn camera_look_filter(layout: &LayoutSettings) -> String {
     let look = layout.camera_look;
     if look.is_neutral() {
         return String::new();
     }
-    // Zero gamma weight preserves unit gamma while selecting eq's float LUT.
-    // Its integer shortcut quantizes negative brightness too coarsely.
+    // The float law in full-range BT.709 YUV: brightness and contrast move
+    // luma only (the 0.5 pivot is 127.5), saturation scales chroma about
+    // neutral, which is the RGB mix toward BT.709 luma the CPU and Metal
+    // paths compute. `lutyuv` builds one 8-bit lookup table per plane (the
+    // cost of the `eq` it replaces) and rounds every entry.
+    let luma_offset = 127.5 + look.brightness * 255.0;
     format!(
-        "format=rgba,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva444p,eq=brightness={}:contrast={}:saturation={}:gamma=1.000001:gamma_r=1.000001:gamma_b=1.000001:gamma_weight=0,scale=in_range=full:out_range=full:in_color_matrix=bt709,format=rgba,",
-        look.brightness, look.contrast, look.saturation
+        "format=rgba,scale=in_range=full:out_range=full:out_color_matrix=bt709,format=yuva444p,lutyuv=y='clip(round((val-127.5)*{}+({:.4})),0,255)':u='clip(round((val-128)*{}+128),0,255)':v='clip(round((val-128)*{}+128),0,255)',scale=in_range=full:out_range=full:in_color_matrix=bt709,format=rgba,",
+        look.contrast, luma_offset, look.saturation, look.saturation
     )
 }
 
@@ -27485,6 +27587,7 @@ mod tests {
             duration_ms: None,
             message: Some("Starting stream session.".to_string()),
             replay_only: false,
+            accepts_live_scene_edits: None,
         }
     }
 
@@ -28347,6 +28450,18 @@ mod tests {
         // The legacy FFmpeg graph: only with its overlay FIFO.
         assert!(session_accepts_banners(false, false, true));
         assert!(!session_accepts_banners(false, false, false));
+    }
+
+    /// Plan 215 D1: which sessions take a source moved after their start.
+    #[test]
+    fn session_accepts_live_scene_edits_follows_the_render_path() {
+        // The compositor bridge (Metal, CPU, the Windows D3D11 media session)
+        // reads the installed scene every tick.
+        assert!(session_accepts_live_scene_edits(true, false));
+        // The direct D3D11 recording composes nothing.
+        assert!(!session_accepts_live_scene_edits(true, true));
+        // The legacy FFmpeg graph is built once, overlay FIFO or not.
+        assert!(!session_accepts_live_scene_edits(false, false));
     }
 
     #[derive(Debug)]
@@ -32609,6 +32724,7 @@ mod tests {
             comment_highlight_vertical_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
+            accepts_live_scene_edits: true,
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
@@ -38656,30 +38772,25 @@ mod tests {
             params.layout.layout_preset = preset.clone();
             let filter = video_filter(Some(1), &params, false);
             assert!(
-                filter.contains("eq=brightness=0.05:contrast=1.1:saturation=0.8"),
+                filter.contains(
+                    "lutyuv=y='clip(round((val-127.5)*1.1+(140.2500)),0,255)':u='clip(round((val-128)*0.8+128),0,255)':v='clip(round((val-128)*0.8+128),0,255)'"
+                ),
                 "{preset:?}: camera grade missing from {filter}"
             );
+            assert!(!filter.contains(",eq="), "{preset:?}: GPL eq in {filter}");
         }
     }
 
-    /// Runs the look filter in a real FFmpeg; it skips with a line where
-    /// FFmpeg is not on PATH (the Rust CI jobs).
+    /// Spawns the FFmpeg `default_ffmpeg_path()` resolves (CI has none), so
+    /// it is ignored. `smoke:recording-studio` runs it with
+    /// `VIDEORC_BUNDLED_FFMPEG_PATH` pinned to the bundled LGPL binary: a
+    /// PATH ffmpeg with GPL `eq` is how 0.18.0 shipped a chain the bundle
+    /// refused (`No such filter: 'eq'`).
     #[test]
-    fn camera_look_ffmpeg_eq_agrees_with_float_law() {
+    #[ignore = "spawns ffmpeg; run on recording-studio hosts"]
+    fn camera_look_ffmpeg_lut_agrees_with_float_law() {
         use std::io::Write;
         use std::process::{Command, Stdio};
-        let ffmpeg_runs = Command::new(crate::ffmpeg::default_ffmpeg_path())
-            .arg("-version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if !ffmpeg_runs {
-            eprintln!(
-                "camera_look_ffmpeg_eq_agrees_with_float_law: skipped, ffmpeg is not on PATH"
-            );
-            return;
-        }
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
                 .unwrap();
@@ -38758,11 +38869,89 @@ mod tests {
                 maximum = maximum.max(expected.abs_diff(output.stdout[index * 4 + channel]));
             }
         }
-        // Orchestrator call, plan 213 I, 2026-11-01: legacy eq gets 8/255.
-        // The measured swscale RGB -> YUV -> RGB identity baseline is 2/255;
-        // eq adds about 4/255. CPU/Metal keep the strict 2/255 bound.
-        assert!(maximum <= 8, "FFmpeg eq vs float law: {maximum}/255");
-        eprintln!("camera look FFmpeg eq vs float law: {maximum}/255 (limit 8)");
+        // Orchestrator call, plan 213 I, 2026-11-01: the legacy FFmpeg leg
+        // gets 8/255; the swscale RGB -> YUV -> RGB identity baseline alone
+        // is 2/255. CPU/Metal keep the strict 2/255 bound. Measured against
+        // the bundled FFmpeg 8.1.1, the lutyuv chain is 2/255 on this palette.
+        assert!(maximum <= 8, "FFmpeg lutyuv vs float law: {maximum}/255");
+        eprintln!("camera look FFmpeg lutyuv vs float law: {maximum}/255 (limit 8)");
+    }
+
+    /// The filter names of one FFmpeg chain fragment: each comma-separated
+    /// segment up to its first `=`, with the commas inside single quotes
+    /// (the lutyuv expressions) left alone.
+    fn ffmpeg_chain_filter_names(chain: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut segment = String::new();
+        let mut quoted = false;
+        for ch in chain.chars() {
+            match ch {
+                '\'' => {
+                    quoted = !quoted;
+                    segment.push(ch);
+                }
+                ',' if !quoted => names.push(std::mem::take(&mut segment)),
+                _ => segment.push(ch),
+            }
+        }
+        names.push(segment);
+        names
+            .into_iter()
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.split('=').next().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// Every shipped FFmpeg is an LGPL build: the chain may only name the
+    /// filters every bundle policy requires (`ffmpegFilters` in the fixture,
+    /// mirrored by scripts/lib/camera-look-ffmpeg-filters.mjs), so a GPL
+    /// filter such as `eq` (0.18.0: `No such filter: 'eq'`) cannot return.
+    #[test]
+    fn camera_look_chain_names_only_bundle_policy_filters() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol-fixtures/camera-look.json"))
+                .unwrap();
+        let policy: Vec<String> = serde_json::from_value(fixture["ffmpegFilters"].clone()).unwrap();
+        assert_eq!(policy, ["format", "scale", "lutyuv"]);
+        assert!(!policy.iter().any(|name| name == "eq"), "eq is GPL-only");
+        let fixture_look: crate::protocol::CameraLook =
+            serde_json::from_value(fixture["look"].clone()).unwrap();
+        for look in [
+            fixture_look,
+            crate::protocol::CameraLook {
+                brightness: -0.25,
+                contrast: 0.5,
+                saturation: 0.0,
+            },
+            crate::protocol::CameraLook {
+                brightness: 0.25,
+                contrast: 1.5,
+                saturation: 2.0,
+            },
+        ] {
+            let mut layout = crate::protocol::default_layout_settings();
+            layout.camera_look = look;
+            let chain = camera_look_filter(&layout);
+            let names = ffmpeg_chain_filter_names(&chain);
+            assert_eq!(
+                names,
+                ["format", "scale", "format", "lutyuv", "scale", "format"],
+                "{chain}"
+            );
+            for name in &names {
+                assert!(
+                    policy.contains(name),
+                    "{name} is outside the bundle policy: {chain}"
+                );
+            }
+            assert!(!chain.contains("eq="), "{chain}");
+        }
+        assert!(
+            ffmpeg_chain_filter_names(&camera_look_filter(
+                &crate::protocol::default_layout_settings()
+            ))
+            .is_empty()
+        );
     }
 
     /// The FFmpeg-leg twin of scene_geometry's realistic-palette pin: under
@@ -38851,7 +39040,7 @@ mod tests {
         let key_at = layer.find("chromakey=").expect("scene layer keys");
         let scale_at = layer.find("scale=").expect("scene layer scales");
         assert!(key_at < scale_at, "key must run before scaling: {layer}");
-        let look_at = layer.find("eq=").expect("camera look");
+        let look_at = layer.find("lutyuv=").expect("camera look");
         assert!(
             key_at < look_at && look_at < layer.rfind("scale=").unwrap(),
             "key, look, then frame scale: {layer}"
@@ -38865,7 +39054,7 @@ mod tests {
         let key_at = chain.find("chromakey=").expect("camera chain keys");
         let scale_at = chain.find("scale=").expect("camera chain scales");
         assert!(key_at < scale_at, "key must run before scaling: {chain}");
-        let look_at = chain.find("eq=").expect("camera look");
+        let look_at = chain.find("lutyuv=").expect("camera look");
         assert!(
             key_at < look_at && look_at < chain.rfind("scale=").unwrap(),
             "key, look, then frame scale: {chain}"
@@ -41580,6 +41769,7 @@ mod tests {
             comment_highlight_vertical_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
+            accepts_live_scene_edits: true,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,
@@ -42204,6 +42394,7 @@ mod tests {
                     duration_ms: None,
                     message: Some("Stopping.".to_string()),
                     replay_only: false,
+                    accepts_live_scene_edits: None,
                 },
             ))
             .unwrap();
@@ -42221,6 +42412,7 @@ mod tests {
                     duration_ms: None,
                     message: Some("Capture session finalized.".to_string()),
                     replay_only: false,
+                    accepts_live_scene_edits: None,
                 },
             ))
             .unwrap();

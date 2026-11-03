@@ -50,6 +50,8 @@ vi.mock('@/lib/user-error', () => ({ toastUserError: vi.fn() }))
 vi.mock('next-themes', () => ({
   useTheme: () => ({ theme: mocked.theme, setTheme: mocked.setTheme })
 }))
+const editScene = vi.hoisted(() => vi.fn())
+vi.mock('@/hooks/use-edit-scene', () => ({ useEditScene: () => editScene }))
 
 let root: Root
 let container: HTMLDivElement
@@ -289,6 +291,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Open Buddy',
       'Open Sources',
       'Open Scene',
+      'Edit scene',
       'Open Assets',
       'Open Livestream',
       'Open Captions',
@@ -319,6 +322,20 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await search('support bundle')
     expect(values()).toContain('Open Health')
     expect(values()).not.toContain('Open Library')
+  })
+
+  // Plan 215 D4 (B3): Edit scene after Open Scene, found by what people want
+  // to do on the canvas.
+  it('edits the scene from ⌘K, found by "move camera"', async () => {
+    editScene.mockClear()
+    await render()
+    await search('move camera')
+    expect(values()).toContain('Edit scene')
+    await act(async () => item('Edit scene').click())
+    expect(editScene).toHaveBeenCalledOnce()
+    await render()
+    await search('scene editor')
+    expect(values()).toContain('Open Scene')
   })
 
   it('names the selected action in the footer, with the Return chip', async () => {
@@ -371,16 +388,58 @@ describe('CommandPalette windows (plan 174 S2.3a, A-11)', () => {
     }
     mocked.core.captionsWindow = { open: false, enabled: true }
     mocked.core.notesWindow = { open: true }
+    mocked.core.commentsWindow = {
+      open: false,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'capture-filter'
+    }
     await render()
     expect(groupValues('Windows')).toEqual([
       'Open Preview',
       'Close Notes',
       'Open Stream Manager',
+      'Hide Stream Manager from stream',
       'Open Captions reader'
     ])
     await act(async () => item('Close Notes').click())
     expect(mocked.core.closeNotesWindow).toHaveBeenCalledOnce()
     expect(mocked.core.openNotesWindow).not.toHaveBeenCalled()
+  })
+
+  // Plan 215 D6: Hide from stream, reachable with the window closed; on a
+  // platform that cannot hide a window the row stays, disabled, with the
+  // reason.
+  it('flips Hide from stream for the Stream Manager, and says why Linux cannot', async () => {
+    mocked.core.runtimeInfo = { platform: 'darwin', commentsWindowEnabled: true }
+    mocked.core.setCommentsWindowHiddenFromStream = vi.fn(async () => undefined)
+    mocked.core.commentsWindow = {
+      open: false,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'capture-filter'
+    }
+    await render()
+    await act(async () => item('Hide Stream Manager from stream').click())
+    expect(mocked.core.setCommentsWindowHiddenFromStream).toHaveBeenCalledWith(true)
+
+    mocked.core.commentsWindow = {
+      open: true,
+      hiddenFromStream: true,
+      hideFromStreamMethod: 'content-protection'
+    }
+    await render()
+    await act(async () => item('Show Stream Manager on stream').click())
+    expect(mocked.core.setCommentsWindowHiddenFromStream).toHaveBeenLastCalledWith(false)
+
+    mocked.core.runtimeInfo = { platform: 'linux', commentsWindowEnabled: true }
+    mocked.core.commentsWindow = {
+      open: true,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'unsupported'
+    }
+    await render()
+    const row = item('Hide Stream Manager from stream')
+    expect(row.getAttribute('aria-disabled')).toBe('true')
+    expect(row.textContent).toContain('This system cannot hide a window from screen capture.')
   })
 })
 

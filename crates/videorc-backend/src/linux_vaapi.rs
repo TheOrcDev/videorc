@@ -188,6 +188,16 @@ impl QuarantineEntry {
             self.probe_started_at_unix_secs, QUARANTINED_FILE, DEVICE_PIN_ENV
         )
     }
+
+    /// Whether this entry quarantines `node` (`renderD129`). The backend writes
+    /// the bare name, but an entry planted by hand after a host hang may name
+    /// the node by path (`/dev/dri/renderD129`, the form the pin takes);
+    /// ignoring it probed the node that hung the host again.
+    pub(crate) fn names(&self, node: &str) -> bool {
+        Path::new(&self.node)
+            .file_name()
+            .is_some_and(|name| name == node)
+    }
 }
 
 /// Write via a sibling temp file and rename so a crash mid-write never leaves
@@ -355,7 +365,7 @@ pub(crate) fn plan_probe_order(
     }
     for candidate in candidates {
         let node = candidate.node_name();
-        if let Some(entry) = quarantined.iter().find(|entry| entry.node == node) {
+        if let Some(entry) = quarantined.iter().find(|entry| entry.names(&node)) {
             reports.push(candidate.report(LinuxRenderNodeState::Quarantined, Some(entry.detail())));
             continue;
         }
@@ -617,6 +627,30 @@ mod tests {
             .expect_err("a pin must name a real node");
         assert!(error.contains("renderD130"));
         assert!(error.contains("renderD128 (i915)"));
+    }
+
+    #[test]
+    fn a_quarantine_planted_by_hand_with_the_node_path_is_never_probed() {
+        // docs/linux-dev-loop.md: after a host hang, plant the entry by hand.
+        // This is the file an operator wrote on the Arch T2 box; the AMD node
+        // was probed anyway and hung the GPU again (retest 153, 2026-11-02).
+        let directory = fixture_directory("planted");
+        std::fs::write(
+            directory.join(QUARANTINED_FILE),
+            r#"[{"node": "/dev/dri/renderD129", "driver": "amdgpu", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#,
+        )
+        .expect("plant the entry");
+        let quarantined = ProbeQuarantine::new(directory.clone()).quarantined();
+        std::fs::remove_dir_all(directory).ok();
+        let intel = candidate("renderD128", Some("i915"));
+        let amd = candidate("renderD129", Some("amdgpu"));
+
+        let (to_probe, reports) =
+            plan_probe_order(&[intel.clone(), amd], None, &quarantined).expect("plan");
+        assert_eq!(to_probe, vec![intel]);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].node, "renderD129");
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Quarantined);
     }
 
     #[test]

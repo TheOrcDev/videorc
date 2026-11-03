@@ -56,6 +56,7 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 - `VIDEORC_SMOKE_LOCK_PORT` selects the lock port; `VIDEORC_SMOKE_BUILD_SLOTS` sets capacity (0 disables).
 - `VIDEORC_SMOKE_HOST_LOCK=0` and `VIDEORC_SMOKE_MEMORY_CHECK=0` disable their respective checks.
 - Wait limits: `VIDEORC_SMOKE_HOST_LOCK_WAIT_MS`, `VIDEORC_SMOKE_BUILD_SLOT_WAIT_MS`, `VIDEORC_SMOKE_MEMORY_WAIT_MS`.
+- Cargo-backed fixture smokes precompile their exact test invocation with `--no-run` in a build slot (20 min by default, `VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS` to override), then give the test run its own 600 s. `VIDEORC_SMOKE_SKIP_PREBUILD=1` skips dev-app builds only; test-target precompilation still runs. The separate-source runtime smoke uses the same build step and keeps its existing deadlines when launching the compiled executable directly.
 
 ## Recording Studio Regression Rules
 

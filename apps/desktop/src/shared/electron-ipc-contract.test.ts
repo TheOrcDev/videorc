@@ -77,8 +77,10 @@ describe('Electron IPC contract', () => {
     // 156: plan 210 S5 adds app icons for New scene… (S4 fills main's side).
     // 157: plan 213 J1 adds comments-window:open-destination ("Use Sign in"
     // opens the destination in the main window).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(157)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(157)
+    // 158: plan 215 C1 adds comments-window:set-hidden-from-stream (the
+    // Stream Manager's Hide from stream switch).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(158)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(158)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

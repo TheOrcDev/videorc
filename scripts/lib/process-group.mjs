@@ -10,6 +10,7 @@ export function spawnProcessGroup(
   const child = spawn(command, args, { ...options, detached: grouped })
   let timedOut = false
   let interrupted = false
+  let error
   let escalation
   let timer
   const signal = (name) => {
@@ -18,7 +19,10 @@ export function spawnProcessGroup(
       if (grouped) process.kill(-child.pid, name)
       else child.kill(name)
     } catch (error) {
-      if (error.code !== 'ESRCH') throw error
+      if (error.code === 'ESRCH') return
+      // Darwin reports EPERM for process groups containing only unreaped zombies.
+      if (grouped && process.platform === 'darwin' && error.code === 'EPERM') return
+      throw error
     }
   }
   const stop = (name) => {
@@ -28,7 +32,11 @@ export function spawnProcessGroup(
     // may still be alive, including children that ignored SIGTERM.
     escalation ??= new Promise((resolve) => {
       setTimeout(() => {
-        signal('SIGKILL')
+        try {
+          signal('SIGKILL')
+        } catch (failure) {
+          error = failure
+        }
         resolve()
       }, graceMs)
     })
@@ -56,7 +64,6 @@ export function spawnProcessGroup(
     }, timeoutMs)
   }
   const result = new Promise((resolve) => {
-    let error
     child.once('error', (failure) => {
       error = failure
       cleanup()

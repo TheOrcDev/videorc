@@ -23,7 +23,10 @@ import {
   remoteRequest as remoteRequestClient,
   waitForRemoteEvent as waitForRemoteEventClient
 } from './lib/remote-control-client.mjs'
-import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
+import {
+  defaultRingVerdict,
+  syntheticCompositorReady
+} from './lib/remote-control-smoke-gates.mjs'
 import {
   CAPTURE_CONFIG_STORAGE_KEY,
   RELOAD_KEEPING_SEED_JS
@@ -235,14 +238,39 @@ try {
   // recording the press is admitted and saves a clip (the file is proven by
   // pnpm smoke:replay-buffer); with the switch off the renderer refuses it
   // with the reason, so the round trip proves admission + relay + ack both
-  // ways.
-  const ringOn = await waitForBackendState(
+  // ways. On a software encoder path (OpenH264 on Linux, a software Media
+  // Foundation encoder) the guard keeps the default ring off by design and
+  // replay.status names why: the default leg SKIPs with that reason, and the
+  // ring is turned on the way the Output switch does, so the clip relay is
+  // still proven with the ring on.
+  const defaultRing = await waitForBackendState(
     renderer,
     'replay.status',
-    (ring) => ring?.state === 'on',
+    (ring) => defaultRingVerdict(ring) !== null,
     'the default ring'
   )
-  console.log(`remote-control smoke: ring on by default (${ringOn.seconds} s)`)
+  const defaultVerdict = defaultRingVerdict(defaultRing)
+  if (defaultVerdict.kind === 'on') {
+    console.log(`remote-control smoke: ring on by default (${defaultRing.seconds} s)`)
+  } else {
+    console.log(
+      `remote-control smoke: SKIP ring on by default (software encoder guard): ${defaultVerdict.reason}`
+    )
+    const armed = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      { code: 'return window.__videorcSmokeSetReplayBuffer?.(true) ?? null' },
+      { timeoutMs }
+    )
+    if (armed?.result !== true) fail('the renderer has no clip buffer smoke hook')
+    const ringOn = await waitForBackendState(
+      renderer,
+      'replay.status',
+      (ring) => ring?.state === 'on',
+      'the ring turned on with the switch'
+    )
+    console.log(`remote-control smoke: ring on with the switch (${ringOn.seconds} s)`)
+  }
   const clipOnAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const clipOnTicket = await remoteRequest(remote, 'remote.intent', { kind: 'clipMark' })
   if (!clipOnTicket.payload?.accepted) fail('clipMark intent was not accepted')
