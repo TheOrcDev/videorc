@@ -9537,8 +9537,7 @@ async fn handle_text_message_with_role(
                             // sessions the chat rows hear the new truth.
                             let chat_state = state.clone();
                             tokio::spawn(async move {
-                                if live_chat::reattach_after_videorc_sign_in(&chat_state).await
-                                    == 0
+                                if live_chat::reattach_after_videorc_sign_in(&chat_state).await == 0
                                 {
                                     live_chat::publish_chat_snapshot_after_account_change(
                                         &chat_state,
@@ -20592,9 +20591,7 @@ mod tests {
         );
 
         assert!(!crate::remote_lan::LAN_EVENTS.contains(&"account.changed"));
-        assert!(
-            ConnectionEventFilter::for_role(BackendRole::Renderer).allows("account.changed")
-        );
+        assert!(ConnectionEventFilter::for_role(BackendRole::Renderer).allows("account.changed"));
         assert!(ConnectionEventFilter::for_role(BackendRole::Admin).allows("account.changed"));
     }
 

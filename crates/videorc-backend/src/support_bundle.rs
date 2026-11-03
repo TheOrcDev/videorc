@@ -1355,7 +1355,10 @@ mod tests {
             }
             assert_eq!(bundle.account, expected, "{session:?}");
             let text = serde_json::to_string(&bundle).unwrap();
-            assert!(!text.contains("orc@videorc.com"), "no identity in the bundle");
+            assert!(
+                !text.contains("orc@videorc.com"),
+                "no identity in the bundle"
+            );
             assert!(!text.contains("orc_dev"));
         }
         assert!(included_sections().contains(&"account".to_string()));
@@ -1411,12 +1414,9 @@ mod tests {
         );
         assert!(bundle.live_chat.get("messages").is_none());
         // Between sessions: no session, the capability rows.
-        let between = serde_json::to_value(
-            build_support_bundle(minimal_input(None))
-                .unwrap()
-                .live_chat,
-        )
-        .unwrap();
+        let between =
+            serde_json::to_value(build_support_bundle(minimal_input(None)).unwrap().live_chat)
+                .unwrap();
         assert!(between.get("sessionId").is_none());
         assert_eq!(between["providers"], json!([]));
         assert!(included_sections().contains(&"liveChat".to_string()));

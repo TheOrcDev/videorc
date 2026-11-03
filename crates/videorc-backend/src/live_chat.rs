@@ -2470,7 +2470,8 @@ where
             session_generation,
             kick.clone(),
         ));
-        let destination_id = comments_destination_id(StreamPlatform::Kick, kick.target_id.as_deref());
+        let destination_id =
+            comments_destination_id(StreamPlatform::Kick, kick.target_id.as_deref());
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(handle);
         // Plan 215 A4: the Videorc sign-in re-spawns this connector as is.

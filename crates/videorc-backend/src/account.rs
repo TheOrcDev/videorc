@@ -160,8 +160,8 @@ pub async fn complete_sign_in(
     // A replay binding that cannot be read is not a replay: the exchange goes
     // ahead, and the server refuses a code it already used. Said in the log,
     // never swallowed (plan 215 A5).
-    let completed_binding = secrets::try_get_secret(LAST_SIGN_IN_BINDING_SECRET)
-        .unwrap_or_else(|error| {
+    let completed_binding =
+        secrets::try_get_secret(LAST_SIGN_IN_BINDING_SECRET).unwrap_or_else(|error| {
             tracing::warn!("Could not read the last sign-in binding: {error:#}");
             None
         });
