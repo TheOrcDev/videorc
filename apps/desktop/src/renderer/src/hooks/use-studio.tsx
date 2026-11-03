@@ -327,6 +327,7 @@ import {
   UserFacingError,
   type UserErrorContext
 } from '@/lib/user-error'
+import { recentUserErrors } from '@/lib/user-error-log'
 import {
   layoutSwitchTarget,
   pendingLayoutEvidence,
@@ -12487,7 +12488,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
 
     try {
-      setLastError(null)
+      // Plan 216 A5: the last error stays; the bundle is meant to explain it.
       setSupportBundleExportPending(true)
       // Re-read runtime info at export time: backend crash records are
       // appended by main while the app runs, and the startup snapshot would
@@ -12510,7 +12511,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Plan 214 E3: the camera's state, never its words.
           virtualCamera: (await import('@/lib/virtual-camera-view')).virtualCameraBundleLine(
             virtualCamera.status
-          )
+          ),
+          // Plan 216 A5: the toasts this session showed, raw text included;
+          // the backend redacts them with the rest of the bundle.
+          recentUserErrors: recentUserErrors()
         }
       }
       const result = await client.request<SupportBundleExportResult>(

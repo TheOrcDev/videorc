@@ -1,13 +1,16 @@
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { toast } from '@/lib/toast'
+import { recordUserError } from '@/lib/user-error-log'
 
 // Plan 174 S2.4 (J2-7, J2-14): raw error text never reaches a toast or a line.
 // A caller names what it tried ("import", "the image") and this module turns
 // any failure into copy the streamer can act on: a known cause gets its own
 // sentence, Videorc offline says so, and anything else gets the one generic
-// next step. The raw text goes to the console, which the support bundle
-// collects. It duck-types errors (`code`, `name`) so a window without the
-// backend client (Stream Manager) can use it without loading that client.
+// next step. The raw text goes to the console and to the ring of the last
+// user-facing errors (`user-error-log`), which the support bundle ships as
+// rendererDiagnostics.recentUserErrors (plan 216 A5). It duck-types errors
+// (`code`, `name`) so a window without the backend client (Stream Manager)
+// can use it without loading that client.
 
 /** The one sentence for Videorc's own connection being down. */
 export const OFFLINE_REASON = 'Videorc is reconnecting. Try again in a moment.'
@@ -206,6 +209,7 @@ export function toastUserError(
   const copy = userErrorMessage(error, context)
   if (copy.kind === 'canceled') return copy
   console.warn(`[user-error] ${copy.title}:`, copy.raw || error)
+  recordUserError(copy, error, context)
   const show = copy.tone === 'warning' ? toast.warning : toast.error
   show(copy.title, { ...options, description: copy.description })
   return copy
@@ -224,6 +228,7 @@ export function inlineUserError(
   const copy = userErrorMessage(error, context)
   if (copy.kind !== 'canceled') {
     console.warn(`[${tag}] ${copy.title}:`, copy.raw || error)
+    recordUserError(copy, error, context)
   }
   return copy.text
 }

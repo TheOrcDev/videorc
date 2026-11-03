@@ -453,7 +453,11 @@ class StudioBackend {
   // the active output revision, so live layout commits settle instead of
   // waiting out the proof timeout.
   reportsActiveSceneRevision = false
-  layoutApplyFailure: 'definite' | 'request-outcome-unknown-after-commit' | null = null
+  layoutApplyFailure:
+    | 'definite'
+    | 'camera-not-ready'
+    | 'request-outcome-unknown-after-commit'
+    | null = null
   screenActivateFailure: 'definite' | null = null
   screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
@@ -986,6 +990,15 @@ class StudioBackend {
           throw Object.assign(new Error('The test backend rejected the layout change.'), {
             code: 'layout-preview-failed'
           })
+        }
+        if (this.layoutApplyFailure === 'camera-not-ready') {
+          // Plan 216 A3: the backend names the source that never sent a frame.
+          throw Object.assign(
+            new Error(
+              'Live preview layout switch blocked after camera (15s) exceeded its source-start/readiness budget: camera session never delivered a frame (frames captured: 0, /Users/streamer/Library/Logs/camera.log).'
+            ),
+            { code: 'layout-camera-not-ready' }
+          )
         }
         this.currentLayout = params.layout as LayoutSettings
         this.currentScene = sceneForLayout(this.currentLayout)
@@ -4240,6 +4253,61 @@ describe('real StudioProvider lifecycle', () => {
     expect(revealSupportBundle).toHaveBeenCalledExactlyOnceWith(
       'C:\\Videorc\\support-bundles\\videorc-support-bundle-20261011-093000Z.json'
     )
+  })
+
+  // Plan 216 A3 + A5: a switch that gave up on a camera says so, and the next
+  // support bundle carries the raw refusal in the renderer's error ring.
+  it('names the camera that never sent video, and the bundle keeps the raw refusal', async () => {
+    const backend = new StudioBackend()
+    backend.layoutApplyFailure = 'camera-not-ready'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    const latest = (): StudioObservation => observations.at(-1)!
+    await waitForObservation(() => latest().core.wsStatus === 'connected')
+
+    await act(async () => latest().core.applyCameraPreset({ layoutPreset: 'camera-only' }))
+    await waitForObservation(() =>
+      toastSpies.error.mock.calls.some(([title]) => title === "Couldn't switch the scene")
+    )
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      "Couldn't switch the scene",
+      expect.objectContaining({
+        description: "Your camera isn't sending video. Check it in Sources, then try again."
+      })
+    )
+
+    backend.layoutApplyFailure = null
+    await act(async () => {
+      await latest().core.exportSupportBundle()
+    })
+    const exported = backend.commands.find(
+      (command) => command.method === 'diagnostics.supportBundle.export'
+    )
+    const ring = (
+      exported?.params as {
+        rendererDiagnostics?: { recentUserErrors?: Array<Record<string, unknown>> }
+      }
+    ).rendererDiagnostics?.recentUserErrors
+    expect(ring?.at(-1)).toMatchObject({
+      action: 'switch',
+      object: 'the scene',
+      code: 'layout-camera-not-ready',
+      kind: 'known',
+      title: "Couldn't switch the scene",
+      raw: expect.stringContaining('camera session never delivered a frame')
+    })
   })
 
   it('shows one persistent recovery error when an active recording fails', async () => {

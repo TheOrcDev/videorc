@@ -8,6 +8,7 @@ vi.mock('@/lib/toast', () => ({ toast }))
 
 import { bannerActionContext } from './banners'
 import { soundActionContext } from './sounds'
+import { recentUserErrors, resetUserErrorLogForTests } from './user-error-log'
 import {
   OFFLINE_REASON,
   OFFLINE_TOAST_ID,
@@ -224,6 +225,31 @@ describe('userErrorMessage', () => {
     expect(couldNotTitle(undefined)).toBe('Videorc hit a problem')
     expect(couldNotTitle({ action: 'sign out' })).toBe("Couldn't sign out")
     expect(userErrorMessage('a thrown string').raw).toBe('a thrown string')
+  })
+})
+
+// Plan 216 A5: every shown error leaves a record for the support bundle.
+describe('the support bundle ring', () => {
+  beforeEach(() => resetUserErrorLogForTests())
+
+  it('records a toast and an inline line with the raw text, never a cancel', () => {
+    toastUserError(backendError('layout-camera-not-ready', 'camera never sent (0 frames)'), {
+      action: 'switch',
+      object: 'the scene'
+    })
+    inlineUserError(new Error('EACCES /Users/me/x.png'), { action: 'import', object: 'the image' })
+    toastUserError(Object.assign(new Error('gone'), { name: 'AbortError' }), IMPORT)
+    expect(recentUserErrors()).toMatchObject([
+      {
+        action: 'switch',
+        object: 'the scene',
+        code: 'layout-camera-not-ready',
+        kind: 'known',
+        title: "Couldn't switch the scene",
+        raw: 'camera never sent (0 frames)'
+      },
+      { action: 'import', object: 'the image', kind: 'unknown', raw: 'EACCES /Users/me/x.png' }
+    ])
   })
 })
 

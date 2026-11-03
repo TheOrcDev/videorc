@@ -23,6 +23,7 @@ import { requestSystemAudioResume, SYSTEM_AUDIO_ECHO_TOAST_ID } from '@/lib/syst
 import { shouldToastBackendError } from '@/lib/backend-transport'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { OFFLINE_TOAST_ID, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
+import { recordUserError } from '@/lib/user-error-log'
 import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifyOnce } from '@/lib/notify-once'
@@ -303,6 +304,7 @@ export function showBackendError(
   const copy = userErrorMessage(error, context)
   if (copy.kind === 'canceled') return
   console.warn(`[backend-error] ${copy.title}:`, message)
+  recordUserError(copy, error, context)
   if (copy.kind === 'offline') {
     const show = copy.tone === 'warning' ? toast.warning : toast.error
     show(copy.title, { id: OFFLINE_TOAST_ID, description: copy.description })
