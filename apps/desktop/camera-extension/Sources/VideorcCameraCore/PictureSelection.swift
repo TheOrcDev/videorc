@@ -17,11 +17,15 @@ public enum ProducerWord: String, Equatable {
 public enum Still: Hashable {
     case notRunning
     case off
+    /// The producer said on but no frame has arrived yet: the moment between
+    /// an app picking the camera and the program's first frame.
+    case starting
 
     public var title: String {
         switch self {
         case .notRunning: return VideorcCameraIdentifiers.stillNotRunningTitle
         case .off: return VideorcCameraIdentifiers.stillOffTitle
+        case .starting: return VideorcCameraIdentifiers.stillStartingTitle
         }
     }
 
@@ -29,6 +33,7 @@ public enum Still: Hashable {
         switch self {
         case .notRunning: return nil
         case .off: return VideorcCameraIdentifiers.stillOffSubtitle
+        case .starting: return nil
         }
     }
 }
@@ -41,8 +46,10 @@ public enum Picture: Equatable {
 }
 
 public enum PictureSelection {
-    /// Live while the newest push is younger than `staleAfter`; otherwise the
-    /// off still when the producer said off, else "isn't running".
+    /// Live while the newest push is younger than `staleAfter`. Otherwise the
+    /// off still when the producer said off, "Starting…" when it said on (an
+    /// app just picked the camera and the first frame is on its way), else
+    /// "isn't running".
     public static func picture(
         producerWord: ProducerWord,
         lastPushAt: Double?,
@@ -52,7 +59,11 @@ public enum PictureSelection {
         if let lastPushAt, now - lastPushAt < staleAfter {
             return .live
         }
-        return .still(producerWord == .off ? .off : .notRunning)
+        switch producerWord {
+        case .off: return .still(.off)
+        case .on: return .still(.starting)
+        case .unknown: return .still(.notRunning)
+        }
     }
 }
 

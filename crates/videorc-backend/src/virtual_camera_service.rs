@@ -309,6 +309,7 @@ pub fn report_platform(
 fn camera_arm_params(state: &AppState, canvas: (u32, u32)) -> CompositorArmParams {
     let overlays = crate::compositor::idle_overlay_flags(state);
     CompositorArmParams {
+        // Ignored for the camera's lease: the arm keeps the preview's fps.
         target_fps: VIRTUAL_CAMERA_FPS,
         width: canvas.0,
         height: canvas.1,
@@ -383,14 +384,33 @@ fn ensure_supervisor(state: &AppState) {
 async fn run_supervisor(state: AppState) {
     #[cfg(target_os = "linux")]
     let mut linux_probe = LinuxProbe::default();
+    // Plan 214 review: a viewer can hold the camera while no compositor run
+    // exists (Clips off and no Preview surface yet), so nothing reaches it.
+    // Say so once per episode instead of every tick.
+    let mut waiting_for_run = false;
     loop {
         tokio::time::sleep(SUPERVISOR_INTERVAL).await;
         let on = state.virtual_camera.lock().on;
         if on {
             let outcome = reconcile_lease(&state).await;
-            if let LeaseReconcile::Armed = outcome {
-                tracing::info!("Videorc Camera armed the preview run at its canvas");
+            match &outcome {
+                LeaseReconcile::Armed => {
+                    tracing::info!("Videorc Camera armed the preview run at its canvas");
+                }
+                LeaseReconcile::NoRun(refusal) if !waiting_for_run => {
+                    tracing::warn!(
+                        "Videorc Camera is wanted but has no compositor run to read ({refusal:?}); the camera shows its still until a Preview or Clips run exists"
+                    );
+                }
+                _ => {}
             }
+            let now_waiting = matches!(outcome, LeaseReconcile::NoRun(_));
+            if waiting_for_run && !now_waiting {
+                tracing::info!("Videorc Camera has a compositor run again");
+            }
+            waiting_for_run = now_waiting;
+        } else {
+            waiting_for_run = false;
         }
         #[cfg(target_os = "linux")]
         linux_probe_pass(&state, &mut linux_probe).await;

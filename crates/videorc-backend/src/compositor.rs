@@ -4211,8 +4211,17 @@ pub async fn arm_compositor_for_capture(
         // The camera's lease is idle for drafts and the program shape: a
         // buffer, never a recording or a stream (plan 181's rule).
         let replay_only = params.replay_only || params.lease == CompositorLeaseKind::VirtualCamera;
+        // Plan 214: the camera's lease keeps the preview's own fps, as the
+        // handoff after a capture does. The camera repeats or drops frames
+        // on its own 30 fps clock, so a viewer never changes what the Studio
+        // Preview renders at.
+        let target_fps = if params.lease == CompositorLeaseKind::VirtualCamera {
+            current_config.target_fps
+        } else {
+            params.target_fps
+        };
         let next = CompositorLoopConfig {
-            target_fps: params.target_fps.clamp(30, 120),
+            target_fps: target_fps.clamp(30, 120),
             frame_consumer: params.frame_consumer,
             caption_overlay_on_primary: params.caption_overlay_on_primary,
             caption_overlay_on_aux: params.caption_overlay_on_aux,

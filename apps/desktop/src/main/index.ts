@@ -16710,7 +16710,10 @@ app.whenReady().then(async () => {
       platform: process.platform,
       openExternal: (url) => shell.openExternal(url),
       deactivateCameraExtension: () => cameraExtension().deactivate(),
-      loadModule: () => loadVideorcCameraModule()
+      loadModule: () => loadVideorcCameraModule(),
+      platformHidden: async () =>
+        (await requestBackendAdmin<VirtualCameraStatus>('virtualCamera.status')).platformStep ===
+        'unsupported'
     })
   )
   secureIpcHandle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>

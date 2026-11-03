@@ -106,7 +106,7 @@ export function validateCameraExtensionIdentifiers(identifiers) {
     }
   }
   const stills = identifiers.stills ?? {}
-  for (const key of ['notRunningTitle', 'offTitle', 'offSubtitle']) {
+  for (const key of ['notRunningTitle', 'offTitle', 'offSubtitle', 'startingTitle']) {
     if (typeof stills[key] !== 'string' || stills[key].trim() === '') {
       problems.push(`stills.${key} must be a non-empty string`)
     }
@@ -145,7 +145,8 @@ export const SWIFT_CONSTANT_BINDINGS = [
   { swift: 'staleAfterSeconds', path: ['staleAfterSeconds'] },
   { swift: 'stillNotRunningTitle', path: ['stills', 'notRunningTitle'] },
   { swift: 'stillOffTitle', path: ['stills', 'offTitle'] },
-  { swift: 'stillOffSubtitle', path: ['stills', 'offSubtitle'] }
+  { swift: 'stillOffSubtitle', path: ['stills', 'offSubtitle'] },
+  { swift: 'stillStartingTitle', path: ['stills', 'startingTitle'] }
 ]
 
 function valueAt(object, path) {

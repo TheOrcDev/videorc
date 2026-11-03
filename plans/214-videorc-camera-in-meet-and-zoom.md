@@ -19,7 +19,12 @@
 
 ## Status
 
-- **Status:** EXECUTING 2026-11-03. The owner, before the plan was
+- **Status:** MERGED 2026-11-03 as
+  [#1091](https://github.com/TheOrcDev/videorc/pull/1091) (`bc84c35ec`)
+  for macOS and the shared parts, with Linux hidden. The owner said "merge
+  it" before CI and the review had finished. Windows (C) follows as its own
+  PR. The owed smokes and on-device checks are in "As built".
+- **Was:** EXECUTING 2026-11-03. The owner, before the plan was
   finished: "when plan is ready, execute the entire plan and create a
   pr". So D1 is **go**, D2 to D14 are taken as recommended, and the whole
   plan ships as **one PR** (not one per workstream).
@@ -883,6 +888,59 @@ itself on each box.
   - **What changed in Workstream B:** one profile secret
     (`VIDEORC_MACOS_PROFILE_APP`), not two. Fixed in a follow-up
     (`feat/214-b-fixes`).
+- **PR #1091 (2026-11-03):** A, B (with the P0a fixes), B4, D, E, F1 and
+  F5, merged into main as `bc84c35ec`.
+  - The secret `VIDEORC_MACOS_PROFILE_APP` was set with `gh secret set` as
+    a GitHub Actions secret, which is what the workflows read.
+  - Verified without app runs (the owner's rule):
+    - targeted `virtual_camera` Rust tests (A 68, D 50, B4 57), clippy,
+      fmt and the release check;
+    - 22 Swift tests and 85 addon tests;
+    - `test:scripts` 2952/0, the desktop suite on E, typecheck, lint and
+      format.
+  - Lanes: Codex was out, so D and F ran on `fable-5.1`. The Claude
+    accounts hit rate limits, so C restarted three times; F1 died on a
+    network blip and the orchestrator finished it.
+- **Review follow-up** (`fix/214-review-followups`). A code-only Fable
+  review found no blockers. Fixed:
+  - **The first viewer.** It sees "Starting Videorc Camera…", not "Videorc
+    isn't running", and the viewer count is re-read every 250 ms (it was
+    1 s).
+  - **The camera's own arm** keeps the Preview's fps; it was forced to 30.
+  - **Main refuses Windows Set up and Linux Load module** unless the
+    backend says the platform isn't hidden. That keeps the hide rule in
+    main too.
+  - **modprobe's error line** is capped, so the message fits the 512
+    character IPC field.
+  - **A no-profile `build:camera-extension`** skips with the one line
+    (`--force` and `--test` still build), so packaging on a Mac without
+    Swift works as before.
+  - **CI** runs `pnpm test:camera-extension` on macOS.
+  - **The runbook's** two-profile wording is fixed.
+  - **A wanted camera with no compositor run** is logged once.
+- **Open:**
+  - **A camera with no run.** A viewer can hold the camera while no
+    compositor run exists (Clips off and no Preview surface). The Output
+    row still says "In use by 1 app" while the meeting shows the
+    "Starting…" still. It needs a status signal and copy.
+  - **Missing tests:**
+    - the supervisor loop against a real arm and release;
+    - the camera → record → off → stop path;
+    - the release validator's runner wiring;
+    - the afterPack hook itself;
+    - main's camera wiring.
+  - **Owed on main (no smokes or app runs before main, owner rule):**
+    - `smoke:virtual-camera`, `smoke:recording-studio`,
+      `smoke:record-latency:gate` and `probe:preview-lifecycle`;
+    - a signed, notarized build in /Applications, which replaces the spike
+      camera;
+    - by eye: Meet, Zoom and FaceTime, the off and "isn't running"
+      stills, a fresh-Mac approval, Health → Remove, and light and dark;
+    - B4's on-device list;
+    - Linux P0c;
+    - Windows C (its own PR, from `feat/214-c-windows-3`).
+  - **Local release builds** need `VIDEORC_MACOS_PROFILE_APP` in
+    `~/.videorc-release.env` (a path works).
 
 ## Sources
 

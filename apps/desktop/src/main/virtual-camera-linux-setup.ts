@@ -83,13 +83,22 @@ export type LoadModuleExec = (
   options: { timeout: number }
 ) => Promise<LoadModuleRun>
 
-/** The last non-empty stderr line: what modprobe or pkexec said. */
+/**
+ * The longest stderr line a message carries. The `virtual-camera:action`
+ * contract caps `message` at 512 characters, and a longer one fails the
+ * strict IPC check, so the Output page would show a generic error instead of
+ * modprobe's words.
+ */
+export const STDERR_DETAIL_MAX = 300
+
+/** The last non-empty stderr line (what modprobe or pkexec said), capped. */
 function lastLine(stderr: string): string {
   const lines = stderr
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '')
-  return lines.at(-1) ?? ''
+  const line = lines.at(-1) ?? ''
+  return line.length > STDERR_DETAIL_MAX ? `${line.slice(0, STDERR_DETAIL_MAX - 1)}…` : line
 }
 
 /** Pure. One run's outcome and the words for it. */

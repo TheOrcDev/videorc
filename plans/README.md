@@ -38,15 +38,17 @@
 
   No audio (a virtual microphone is a separate, harder project).
 
-  **EXECUTING** 2026-11-03: the owner said "execute the entire plan and
-  create a pr", so D1 to D14 are as recommended.
+  **MERGED** 2026-11-03 as #1091 (`bc84c35ec`): A, B, D, E and F, with
+  D1 to D14 as recommended.
   - P0a is a go on macOS 26: Xcode issued the one profile, a notarized test
     camera showed a pushed picture in Chrome, and a re-signed app launched
     with no AMFI kill.
-  - PR 1 carries A, B, D, E and F. Linux is hidden until P0c. Windows (C)
-    follows in its own PR, hidden until P0b.
-  - Owner rule: no smokes or app runs before main. The PR lists them as
-    owed.
+  - Linux is hidden until P0c. Windows (C) follows in its own PR, hidden
+    until P0b. The review's fixes are in a follow-up PR.
+  - Owed on main (the owner's rule: no smokes or app runs before main):
+    `smoke:virtual-camera`, the recording-studio and record-latency
+    smokes, a signed build in /Applications, and Meet, Zoom and FaceTime by
+    eye.
 
 - 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
   feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,
