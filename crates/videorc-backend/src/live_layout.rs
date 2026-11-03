@@ -4007,6 +4007,7 @@ mod tests {
             sequence,
             updated_at: "t".to_string(),
             message: None,
+            no_video: None,
         }
     }
 
@@ -4419,6 +4420,7 @@ mod tests {
             sequence: None,
             updated_at: "t".to_string(),
             message: None,
+            no_video: None,
         };
         assert!(camera_status_is_live(&camera));
         camera.frame_age_ms = Some(SOURCE_FRESH_FRAME_MAX_AGE_MS + 1);
@@ -4486,6 +4488,7 @@ mod tests {
             sequence: None,
             updated_at: "t".to_string(),
             message: None,
+            no_video: None,
         };
         let mut target = sources(true, true);
         target.camera_id = Some("camera:b".to_string());
@@ -5506,6 +5509,7 @@ mod tests {
             sequence: None,
             updated_at: "t".to_string(),
             message: None,
+            no_video: None,
         };
         let mut target = sources(true, true);
         target.camera_id = Some("camera:a".to_string());

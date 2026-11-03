@@ -24,6 +24,22 @@ export interface SourceStatus {
 export const CAMERA_STALE_WARN_MS = 3000
 
 /**
+ * Plan 216 D2: the camera is on (macOS acked it Live) but has sent no
+ * frame past the backend's first-frame grace. Only the backend's `noVideo`
+ * says so, by the rule capture recovery uses.
+ */
+export function cameraSendsNoVideo(
+  status: { state?: PreviewCameraState | PreviewScreenState; noVideo?: boolean } | undefined
+): boolean {
+  return status?.state === 'live' && status.noVideo === true
+}
+
+/** "MacBook Pro Camera isn't sending video.", by name where Videorc knows it. */
+export function cameraNoVideoLine(name: string | undefined): string {
+  return `${name?.trim() || 'Your camera'} isn't sending video.`
+}
+
+/**
  * How the selected device appears in the device list: its status, or
  * `missing` when the saved id is not listed at all (unplugged, window closed).
  * Undefined when nothing is selected.
@@ -93,7 +109,10 @@ export function videoSourceStatus(input: {
     state?: PreviewScreenState | PreviewCameraState
     frameAgeMs?: number
     message?: string
+    noVideo?: boolean
   }
+  /** The source's name as the picker shows it, for a line that names it. */
+  name?: string
   /** Plan 213 E1: another source stands in for the pick this session. */
   standIn?: SourceStandIn
 }): SourceStatus | null {
@@ -116,6 +135,13 @@ function pipelineSourceStatus(
     return { label: 'Disconnected', tone: 'warn', hint: input.preview?.message }
   }
   if (state === 'live') {
+    if (input.kind === 'camera' && cameraSendsNoVideo(input.preview)) {
+      return {
+        label: 'No video',
+        tone: 'warn',
+        hint: `${cameraNoVideoLine(input.name)} Close other apps that use it, or choose another camera.`
+      }
+    }
     if (
       input.kind === 'camera' &&
       typeof frameAgeMs === 'number' &&

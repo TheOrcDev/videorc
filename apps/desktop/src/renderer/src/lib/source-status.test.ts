@@ -47,6 +47,37 @@ describe('videoSourceStatus', () => {
     })
   })
 
+  it('names a camera that is on but sends no video (plan 216 D2)', () => {
+    const silent = { state: 'live' as const, noVideo: true }
+    expect(videoSourceStatus({ ...base, preview: silent, name: 'MacBook Pro Camera' })).toEqual({
+      label: 'No video',
+      tone: 'warn',
+      hint: "MacBook Pro Camera isn't sending video. Close other apps that use it, or choose another camera."
+    })
+    // A stand-in that sends nothing keeps the line with the fix.
+    expect(
+      videoSourceStatus({
+        ...base,
+        preview: silent,
+        name: 'MacBook Pro Camera',
+        standIn: {
+          kind: 'camera',
+          wantedName: 'iPhone',
+          usingName: 'MacBook Pro Camera',
+          available: false
+        }
+      })?.hint
+    ).toMatch(/^MacBook Pro Camera isn't sending video\./)
+    expect(videoSourceStatus({ ...base, preview: silent })?.hint).toMatch(
+      /^Your camera isn't sending video\./
+    )
+    // Starting up is not silence, and only a camera can be silent this way.
+    expect(videoSourceStatus({ ...base, preview: { state: 'live' } })?.label).toBe('Receiving')
+    expect(videoSourceStatus({ ...base, kind: 'screen', preview: silent })?.label).toBe(
+      'Receiving'
+    )
+  })
+
   it('reports a stale camera, never a stale screen', () => {
     expect(videoSourceStatus({ ...base, preview: { state: 'live', frameAgeMs: 4200 } })).toEqual({
       label: 'Stale 4s',

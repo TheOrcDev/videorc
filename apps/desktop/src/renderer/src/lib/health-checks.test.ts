@@ -4,6 +4,8 @@ import type { DiagnosticStats, StreamTargetRuntime } from '@/lib/backend'
 
 import {
   RECORDING_AT_RISK_ADVICE,
+  cameraCheck,
+  cameraNoVideoAdvice,
   checkNeedsAttention,
   destinationsCheck,
   encoderCheck,
@@ -121,6 +123,27 @@ describe('Health check words', () => {
     expect(pipelineStateWords('starting')).toEqual({ value: 'Starting…', tone: 'neutral' })
     expect(pipelineStateWords('finalizing')).toEqual({ value: 'Finishing…', tone: 'neutral' })
     expect(pipelineStateWords('failed')).toEqual({ value: 'Failed', tone: 'error' })
+  })
+
+  it('names a camera that is on but sends no video (plan 216 D2)', () => {
+    // The streamer's bundle: Live, no frame ever, past the grace.
+    const silent = { state: 'live' as const, noVideo: true }
+    expect(cameraCheck(silent)).toEqual({ value: 'No video', tone: 'warn' })
+    expect(cameraCheck({ state: 'live' })).toEqual(previewSourceCheck('live'))
+    expect(cameraCheck({ state: 'starting', noVideo: true })).toEqual(
+      previewSourceCheck('starting')
+    )
+    expect(cameraNoVideoAdvice(silent, 'MacBook Pro Camera')).toBe(
+      "MacBook Pro Camera isn't sending video. Close other apps that use it, or choose another camera in Sources."
+    )
+    expect(cameraNoVideoAdvice(silent, undefined)).toMatch(/^Your camera isn't sending video\./)
+    expect(cameraNoVideoAdvice({ state: 'live' }, 'MacBook Pro Camera')).toBeNull()
+    const verdict = healthVerdict({
+      checks: [{ id: 'camera', label: 'Camera', ...cameraCheck(silent) }],
+      advice: cameraNoVideoAdvice(silent, 'MacBook Pro Camera')
+    })
+    expect(verdict.title).toBe('1 thing needs attention: Camera')
+    expect(verdict.description).toContain("MacBook Pro Camera isn't sending video.")
   })
 
   it('counts destinations in glossary words', () => {

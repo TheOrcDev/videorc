@@ -4329,6 +4329,12 @@ pub struct PreviewCameraStatus {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Plan 216 D2: `Some(true)` while the session has acked Live but has sent
+    /// no frame for longer than `CAMERA_FIRST_FRAME_REUSE_GRACE` (the
+    /// frameless-zombie rule capture recovery uses). Absent otherwise, so
+    /// Sources and Health can name a camera that is on but sends no video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_video: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

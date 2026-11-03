@@ -2983,6 +2983,11 @@ export interface PreviewCameraStatus {
   sequence?: number
   updatedAt: string
   message?: string
+  /**
+   * Plan 216 D2: true while the camera is Live but has sent no frame past
+   * the backend's first-frame grace. Absent otherwise.
+   */
+  noVideo?: boolean
 }
 
 export interface CameraCapabilityFormat {

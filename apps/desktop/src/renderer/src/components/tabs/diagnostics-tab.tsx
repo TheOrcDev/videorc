@@ -31,6 +31,7 @@ import { NO_VALUE, compactTime, formatDroppedFrames, formatMetric, plural } from
 import { formatBitrate, formatFrameRate } from '@/lib/format-video'
 import {
   RECORDING_AT_RISK_ADVICE,
+  cameraNoVideoAdvice,
   checkNeedsAttention,
   formatBytes,
   healthChecks,
@@ -163,6 +164,7 @@ export function DiagnosticsTab(): ReactElement {
       return name ? `${name} permission` : 'A permission'
     }),
     advice:
+      cameraNoVideoAdvice(previewCameraStatus, captureConfig.sources.cameraName) ??
       slowdownAdvice(diagnosticStats.bottleneck) ??
       (diagnosticStats.recordingAtRisk ? RECORDING_AT_RISK_ADVICE : null)
   })

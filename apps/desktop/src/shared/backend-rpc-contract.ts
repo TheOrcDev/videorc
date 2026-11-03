@@ -2168,6 +2168,7 @@ const previewCameraStatusSchema = boundedSemanticValue(
       framesCaptured: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
       frameAgeMs: optionalSchema(nonNegativeInteger),
+      noVideo: optionalSchema(booleanSchema),
       updatedAt: timestamp
     },
     { allowUnknown: true }
