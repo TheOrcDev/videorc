@@ -383,6 +383,22 @@ try {
   const smoke = launch.connections['preview-motion-ready']
   const evalRenderer = async (code, params = {}) =>
     (await requestSmokeCommand(smoke, 'eval-js', { code, ...params }, { timeoutMs })).result
+
+  // A scene transaction answers its caller at the backend's commit; the
+  // Studio then holds "The scene is changing." until the preview proves the
+  // new revision (about half a second idle with the preview open). An
+  // Arrange call made inside that window is refused, as a second click would
+  // be, so after switch_scene or a camera corner this waits for the Studio to
+  // settle, as smoke:scene-presets does, before the next Arrange call.
+  const waitForSceneSettled = async (label) =>
+    waitUntil(`the Studio to settle after ${label}`, async () => {
+      const state = await evalRenderer('return window.__videorcSmokeScenePresets?.state() ?? null')
+      const value = {
+        pendingId: state?.pendingId ?? null,
+        pendingLayout: state?.pendingLayout ?? null
+      }
+      return { done: value.pendingId === null && value.pendingLayout === null, value }
+    })
   // What the backend tells every window: the D11 notices (`agents.activity`)
   // and the destinations' runtime states (`stream.targets`).
   const activity = []
@@ -1258,6 +1274,7 @@ try {
       },
       AGENT_POLL
     )
+    await waitForSceneSettled(`switch_scene to ${active.name}`)
     const cameraItem =
       (await callOk(bridge, 'get_scene_layout')).structuredContent?.items?.find(
         (entry) => entry.kind === 'camera'
@@ -1285,10 +1302,13 @@ try {
           corner === 'top-left' ? centreX < 0.5 && centreY < 0.5 : centreX > 0.5 && centreY > 0.5
         return { done: wanted, value: camera?.transform }
       })
+      await waitForSceneSettled(`move_on_scene camera ${corner}`)
       await callOk(bridge, 'move_on_scene', { item: 'camera', place: cameraItem.corner })
+      await waitForSceneSettled(`move_on_scene camera ${cameraItem.corner}`)
       cornerNote = `the camera went ${corner} and back (preset kept), idle`
     }
     await callOk(bridge, 'switch_scene', { sceneId: 'screen-only' })
+    await waitForSceneSettled('switch_scene to Screen only')
   }
   skip(
     'step B5 (the camera corner during a recording)',
