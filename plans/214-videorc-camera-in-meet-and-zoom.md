@@ -824,7 +824,56 @@ itself on each box.
 
 ## As built
 
-(empty)
+- **P0a (2026-11-03): GO**, on macOS 26.5.1 with SIP on. The scratch code
+  is in `~/videorc-vcam-spike/`, outside the tree.
+  - **B0, done through Xcode automatic signing** (owner's choice).
+    - The owner first had to accept Apple's updated Program License
+      Agreement. Until then the portal answered "PLA Update available".
+    - Xcode registered the App IDs `dev.theorcdev.videorc` and
+      `dev.theorcdev.videorc.camera`, the app group
+      `C2PA37RB58.dev.theorcdev.videorc` and this Mac as a device (owner
+      approved). Then it issued a development profile and **one**
+      Developer ID profile, "Mac Team Direct Provisioning Profile:
+      dev.theorcdev.videorc", expiring 2044.
+    - **The extension needs no profile.** Its sandbox and team-prefixed
+      app group aren't restricted.
+    - The app profile carries `system-extension.install`, the application
+      identifier and the team identifier, but **not** the app group. The
+      app group rides on the signature alone.
+    - The profile embeds the Developer ID certificate, so it must be
+      regenerated when that certificate is renewed on 2027-02-01.
+    - xcodebuild's archive must be development-signed, which is why the
+      device was needed. Only `-exportArchive` (developer-id, automatic)
+      creates the Developer ID profile.
+  - **Step 2.** A notarized test camera in
+    `/Applications/Videorc Camera Spike.app`. Approval is at General →
+    Login Items & Extensions → Camera Extensions on macOS 26.
+    - `ffmpeg -f avfoundation -i "Videorc Camera"` reads 30 fps.
+    - The owner saw the **pushed** picture in Chrome (webcamtests.com).
+    - Replacing it with v0.0.2 took 1 s, with no re-approval and no
+      reboot.
+  - **Step 3, AMFI.** A 0.18.0 copy with the extension nested, re-signed
+    inside out (no `--deep`), launched and notarized.
+    - The main executable has today's five keys, plus
+      `system-extension.install` and the app group.
+    - Every other binary keeps the five.
+    - The extension has app-sandbox and the app group only.
+    - A bare binary carrying the restricted key dies with SIGKILL at exec,
+      silently.
+  - **Step 4, the pusher.** A bare Developer ID binary with today's plist
+    (the backend's shape) sees the sink and pushes with 0 drops and no TCC
+    prompt. The sink stays in the backend.
+    - `kCMIOStreamPropertyDirection` is 0 on the sink and 1 on the camera
+      stream (the plan's "no direction" was wrong).
+    - The extension passes the producer's IOSurface to every client
+      untouched. The sink queue capacity is 10.
+    - CMIO caches custom properties until the extension calls
+      `notifyPropertiesChanged`.
+    - Measured: pusher 6 to 13% of one core, extension about 7%, readers
+      at 29.0 to 29.7 fps.
+  - **What changed in Workstream B:** one profile secret
+    (`VIDEORC_MACOS_PROFILE_APP`), not two. Fixed in a follow-up
+    (`feat/214-b-fixes`).
 
 ## Sources
 
