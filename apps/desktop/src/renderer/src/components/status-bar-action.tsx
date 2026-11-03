@@ -52,7 +52,9 @@ function StatusBarAction({
       aria-description={hint}
       aria-label={label}
       aria-pressed={pressed}
-      className={cn(STATUS_BAR_ACTION_CLASS, className)}
+      // An icon alone needs no side bearing for a word: a 22 px chip, so a
+      // full bar of them still fits (the Stream Manager's, plan 215 C).
+      className={cn(STATUS_BAR_ACTION_CLASS, icon && !text && 'px-1', className)}
       type="button"
       {...props}
       // After the spread: a menu or tooltip trigger rendering it keeps the slot.
