@@ -398,6 +398,123 @@ export async function analyzeCommentHighlightArtifact(
   }
 }
 
+// --- Chat on stream (plan 215 G, D5) ------------------------------------------
+
+/** The chat box's thresholds: one message is a short box at the top of a tall
+ * rect, so its glass is a fifth or so of the rect; the fake message's emote is
+ * ~0.7% of it at 640x360. The mirrored rect on the other side of the frame
+ * carries neither. */
+export const CHAT_BOX_ARTIFACT_DEFAULTS = Object.freeze({
+  minEmotePixelRatio: COMMENT_HIGHLIGHT_MIN_IMAGE_PIXEL_RATIO,
+  minDarkAsymmetry: 0.03,
+  minFrames: 2
+})
+
+/** A normalized overlay rect (`overlayLayout.chat.horizontal`) as sampled
+ * pixels, and the same rect mirrored across the frame's vertical centre. */
+export function chatBoxRegions(rect, { width, height }) {
+  const toPixels = (x) => {
+    const xStart = Math.max(0, Math.min(width - 1, Math.round(x * width)))
+    const xEnd = Math.max(xStart + 1, Math.min(width, Math.round((x + rect.w) * width)))
+    return { xStart, xEnd }
+  }
+  const yStart = Math.max(0, Math.min(height - 1, Math.round(rect.y * height)))
+  const yEnd = Math.max(yStart + 1, Math.min(height, Math.round((rect.y + rect.h) * height)))
+  return {
+    box: { ...toPixels(rect.x), yStart, yEnd },
+    mirrored: { ...toPixels(1 - rect.x - rect.w), yStart, yEnd }
+  }
+}
+
+/** Per frame: the emote's colour and the dark glass inside the chat rect,
+ * and the dark glass in the mirrored rect. */
+export function measureChatBoxArtifactRgb(
+  rgb,
+  {
+    width = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleWidth,
+    height = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleHeight,
+    rect
+  }
+) {
+  const frameBytes = width * height * 3
+  const sampledFrames = frameBytes > 0 ? Math.floor((rgb?.length ?? 0) / frameBytes) : 0
+  const regions = chatBoxRegions(rect, { width, height })
+  const pixels = (region) => (region.xEnd - region.xStart) * (region.yEnd - region.yStart)
+  const count = (frameStart, region, test) => {
+    let hits = 0
+    for (let y = region.yStart; y < region.yEnd; y += 1) {
+      const rowStart = frameStart + y * width * 3
+      for (let x = region.xStart; x < region.xEnd; x += 1) {
+        const offset = rowStart + x * 3
+        if (test(rgb[offset], rgb[offset + 1], rgb[offset + 2])) hits += 1
+      }
+    }
+    return hits
+  }
+  const frames = []
+  for (let frame = 0; frame < sampledFrames; frame += 1) {
+    const frameStart = frame * frameBytes
+    frames.push({
+      index: frame,
+      chatEmotePixelRatio:
+        count(frameStart, regions.box, isHighlightEmotePixel) / pixels(regions.box),
+      chatDarkPixelRatio:
+        count(frameStart, regions.box, isHighlightCardDarkPixel) / pixels(regions.box),
+      mirroredDarkPixelRatio:
+        count(frameStart, regions.mirrored, isHighlightCardDarkPixel) / pixels(regions.mirrored)
+    })
+  }
+  return { sampleWidth: width, sampleHeight: height, rect, regions, sampledFrames, frames }
+}
+
+/** The box is on stream: in enough frames the emote shows inside the chat
+ * rect and its glass tips the dark balance toward it. */
+export function evaluateChatBoxArtifactMetrics(
+  metrics,
+  {
+    minEmotePixelRatio = CHAT_BOX_ARTIFACT_DEFAULTS.minEmotePixelRatio,
+    minDarkAsymmetry = CHAT_BOX_ARTIFACT_DEFAULTS.minDarkAsymmetry,
+    minFrames = CHAT_BOX_ARTIFACT_DEFAULTS.minFrames
+  } = {}
+) {
+  const boxFrames = (metrics?.frames ?? []).filter(
+    (frame) =>
+      frame.chatEmotePixelRatio >= minEmotePixelRatio &&
+      frame.chatDarkPixelRatio - frame.mirroredDarkPixelRatio >= minDarkAsymmetry
+  ).length
+  const failures = []
+  if ((metrics?.sampledFrames ?? 0) === 0) failures.push('chat box: no frames were sampled')
+  else if (boxFrames < minFrames) {
+    failures.push(
+      `chat box: the box (emote and glass inside the chat rect) showed in ${boxFrames} frame(s), expected at least ${minFrames}`
+    )
+  }
+  return {
+    pass: failures.length === 0,
+    failures,
+    observations: {
+      boxFrames,
+      maxChatEmotePixelRatio: maxFrameRatio(metrics?.frames ?? [], 'chatEmotePixelRatio'),
+      maxChatDarkPixelRatio: maxFrameRatio(metrics?.frames ?? [], 'chatDarkPixelRatio')
+    }
+  }
+}
+
+export async function analyzeChatBoxArtifact(
+  filePath,
+  {
+    ffmpegPath = 'ffmpeg',
+    rect,
+    sampleWidth = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleWidth,
+    sampleHeight = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleHeight,
+    sampleFps = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleFps
+  }
+) {
+  const rgb = await decodeRgbSamples(filePath, { ffmpegPath, sampleWidth, sampleHeight, sampleFps })
+  const metrics = measureChatBoxArtifactRgb(rgb, { width: sampleWidth, height: sampleHeight, rect })
+  return { file: filePath, rect, ...evaluateChatBoxArtifactMetrics(metrics) }
+}
+
 export function formatCommentHighlightArtifactSummary(report) {
   const observations = report?.observations ?? {}
   const metrics = report?.metrics ?? {}

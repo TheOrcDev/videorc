@@ -6,6 +6,7 @@ import {
   sourceReturnAction
 } from '@/lib/source-return'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
+import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 import {
@@ -719,6 +720,21 @@ function loadBannerRules() {
 
 function loadCaptionOverlay() {
   return import('@/lib/caption-overlay')
+}
+
+// Chat on stream (plan 215 G): the box's driver and painter, lazy, loaded the
+// first time a chat switch is on while live.
+async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlayDriver> {
+  const [{ createChatOverlayDriver }, { renderChatOverlayCards }] = await Promise.all([
+    import('@/lib/chat-overlay'),
+    loadCaptionOverlay()
+  ])
+  return createChatOverlayDriver({
+    set: (params) => client.requestTyped('chat.overlay.set', params),
+    clear: () => client.requestTyped('chat.overlay.clear'),
+    canvases: () => client.requestTyped('chat.overlay.canvases'),
+    paint: renderChatOverlayCards
+  })
 }
 
 // The Buddy's bubble rasterizer: lazy, never in the eager shell.
@@ -7018,6 +7034,51 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Live records too, and the backend calls that `recording` (plan 095 S5).
   const xProducerReminderShownRef = useRef(false)
   const recordingLive = sessionIsLive(recording)
+
+  // Chat on stream (plan 215 G, D5): while a livestream is on air and one of
+  // the chat box's switches is on, the box follows chat (repainted at most
+  // twice a second); it clears when chat empties, both switches go off or the
+  // livestream ends. Nothing loads until the box is first switched on.
+  const chatOverlayLayout = overlayLayout.chat
+  const chatOverlayOn =
+    recordingLive && (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
+  const chatOverlayDriverRef = useRef<{
+    client: BackendClient
+    driver: Promise<ChatOverlayDriver | null>
+  } | null>(null)
+  useEffect(() => {
+    const held = chatOverlayDriverRef.current
+    if (held && held.client !== client) {
+      void held.driver.then((driver) => driver?.dispose())
+      chatOverlayDriverRef.current = null
+    }
+    if (!client || (!chatOverlayDriverRef.current && !chatOverlayOn)) return
+    chatOverlayDriverRef.current ??= {
+      client,
+      driver: loadChatOverlayDriver(client).catch(() => null)
+    }
+    const streamVideo = streamOutputVideoSettings(
+      captureConfig.video,
+      captureConfig.streamEnabled ? captureConfig.streaming : undefined
+    )
+    const input = {
+      on: chatOverlayOn,
+      sessionId: liveChatSnapshot.sessionId,
+      messages: liveChatSnapshot.messages,
+      layout: chatOverlayLayout,
+      canvas: { width: streamVideo.width, height: streamVideo.height }
+    }
+    void chatOverlayDriverRef.current.driver.then((driver) => driver?.update(input))
+  }, [
+    captureConfig.streamEnabled,
+    captureConfig.streaming,
+    captureConfig.video,
+    chatOverlayLayout,
+    chatOverlayOn,
+    client,
+    liveChatSnapshot.messages,
+    liveChatSnapshot.sessionId
+  ])
   useEffect(() => {
     if (!recordingLive) {
       if (recording.state === 'idle' || recording.state === 'failed') {
