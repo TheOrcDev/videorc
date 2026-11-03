@@ -3360,3 +3360,43 @@ the host's separator, so on a Windows runner the darwin case returned
 paths do not change. On Ogre, `pnpm test:scripts` passes 3,081 of 3,082
 tests with zero failed; the one skip is the videorc-web prompt copy check.
 The Windows run of the fix is still to come.
+
+### macOS benchmark-arm test hang, 2026-11-03
+
+macOS Rust CI at `3a75c934` (job 125663103301) hit its 15-minute step
+timeout: 4,428 of the backend binary's 4,429 tests finished, and main's
+`compositor::tests::a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths`
+never did. Main's #1012 merged stderr markers to locate this macOS hang
+("revert before ready"); the 13 earlier macOS runs checked (six on main,
+seven here) all finished it. This log is the first to catch it: the markers
+stop after "benchmark frame" and before "released". That span holds the
+compositor lock while reading the frame store's mutex, then
+`release_compositor_capture_lease` takes the lifecycle and compositor locks
+with no deadline before its 2 s bounded worker stop. Which blocked is
+unproven. The Linux gates passed the test at the same commit; Ogre cannot
+exercise the Metal path. The rerun (job 125676747108) passed: the backend's
+main binary ran 4,406 passed, 0 failed, 23 ignored, the benchmark-arm test
+among them, and the other binaries passed 111 more. One hang in 15 runs, and
+it stays open on main.
+
+### Windows CI at `3a75c934`, 2026-11-03
+
+"Windows startup incident diagnostics" (job 125663116320): 48 of 48
+controlled cases pass; the FFmpeg-tone control passes 12 and fails 36 on the
+packet-tail limit (117 to 234 ms), six also on frame count. Same as main.
+
+"Windows release source gates" (job 125663116573) failed in its Rust test
+step before reaching Node logic tests, so the `bundledFfmpegPath` fix above
+is still unverified on Windows. Stability passes 1 and 2 ran 4,283 passed,
+0 failed, 21 ignored; pass 3 ran 4,282 passed and failed main's
+`live_chat::tests::concurrent_fanout_isolates_timeout_and_persists_every_terminal_destination`:
+the destination faked to time out landed on Sent. Main's last fifteen CI
+runs have no gates failure, so it is rare, but the race is real. tokio
+1.53.3's `timeout` polls the send before checking its deadline, and the
+test-only probe answered 25 ms after the 50 ms test deadline, so a runtime
+woken late past both took the late receipt as Sent. The probe's timeout now
+never answers, which leaves the deadline as the only way out. On Ogre the
+72 `live_chat::` tests pass and the fanout test passed 30 of 30 runs; it
+never failed on Ogre, so that shows the change breaks nothing, not that the
+Windows race is gone. The fix holds by construction, and the next Windows
+run is the check.
