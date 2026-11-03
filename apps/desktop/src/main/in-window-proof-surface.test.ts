@@ -6,8 +6,10 @@ import { describe, expect, it } from 'vitest'
 import {
   InWindowProofSurface,
   forwardedMouseEvent,
+  heldButtonsAfter,
   proofSurfaceHostNote,
   viewRectInParent,
+  withHeldButtons,
   type ObservedInputEvent
 } from './in-window-proof-surface'
 import type { Rect } from './preview-dock'
@@ -262,9 +264,11 @@ describe('InWindowProofSurface', () => {
     view.webContents.emit('focus')
 
     expect(prevented).toEqual(['mouseDown', 'mouseMove', 'mouseUp', 'mouseWheel'])
+    // The press puts the left button down for the host; the move carries it
+    // (Blink reads buttons from the move itself); the release lifts it.
     expect(main.webContents.sent).toEqual([
-      { type: 'mouseDown', x: 445, y: 174, button: 'left', modifiers: [] },
-      { type: 'mouseMove', x: 452, y: 182, modifiers: [] },
+      { type: 'mouseDown', x: 445, y: 174, button: 'left', modifiers: ['leftbuttondown'] },
+      { type: 'mouseMove', x: 452, y: 182, modifiers: ['leftbuttondown'] },
       { type: 'mouseUp', x: 452, y: 182, button: 'left', modifiers: [] },
       { type: 'mouseWheel', x: 452, y: 182, modifiers: [], deltaY: -120 }
     ])
@@ -377,16 +381,89 @@ describe('InWindowProofSurface on a macOS host (plan 216 C)', () => {
     emitMouse({ type: 'mouseUp', x: 164, y: 116, button: 'left', clickCount: 1 })
 
     expect(main.webContents.sent).toEqual([
-      { type: 'mouseDown', x: 400, y: 192, button: 'left', clickCount: 1, modifiers: [] },
+      {
+        type: 'mouseDown',
+        x: 400,
+        y: 192,
+        button: 'left',
+        clickCount: 1,
+        modifiers: ['leftbuttondown']
+      },
       { type: 'mouseMove', x: 416, y: 201, modifiers: ['leftbuttondown'] },
       { type: 'mouseMove', x: 464, y: 228, modifiers: ['leftbuttondown'] },
       { type: 'mouseUp', x: 464, y: 228, button: 'left', clickCount: 1, modifiers: [] }
     ])
+    expect(surface.forwardedInputCounts()).toEqual({
+      mouseDown: 1,
+      mouseMove: 2,
+      mouseUp: 1,
+      mouseWheel: 0,
+      contextMenu: 0
+    })
   })
 
   it('names the host in the surface message on macOS and Linux, never on Windows', () => {
     expect(proofSurfaceHostNote('darwin')).toContain('Hosted inside the app window')
     expect(proofSurfaceHostNote('linux')).toContain('Hosted inside the app window')
     expect(proofSurfaceHostNote('win32')).toBe('')
+  })
+})
+
+describe('held mouse buttons (plan 216 C)', () => {
+  const none = { left: false, middle: false, right: false }
+
+  it('follows presses and releases per button, and ignores moves', () => {
+    const afterPress = heldButtonsAfter({ type: 'mouseDown', x: 1, y: 1, button: 'left' }, none)
+    expect(afterPress).toEqual({ left: true, middle: false, right: false })
+    expect(heldButtonsAfter({ type: 'mouseMove', x: 2, y: 2 }, afterPress)).toEqual(afterPress)
+    expect(
+      heldButtonsAfter({ type: 'mouseDown', x: 2, y: 2, button: 'right' }, afterPress)
+    ).toEqual({ left: true, middle: false, right: true })
+    expect(heldButtonsAfter({ type: 'mouseUp', x: 3, y: 3, button: 'left' }, afterPress)).toEqual(
+      none
+    )
+    expect(heldButtonsAfter({ type: 'mouseDown', x: 1, y: 1 }, none)).toEqual(none)
+  })
+
+  it('marks a move with the buttons the host still has down, keeping its own modifiers lowercased', () => {
+    expect(
+      withHeldButtons(
+        { type: 'mouseMove', x: 5, y: 6, modifiers: ['Shift', 'leftButtonDown'] },
+        { left: true, middle: false, right: true }
+      ).modifiers
+    ).toEqual(['shift', 'leftbuttondown', 'rightbuttondown'])
+    expect(withHeldButtons({ type: 'mouseMove', x: 5, y: 6 }, none).modifiers).toEqual([])
+  })
+
+  it('drags on the host from a press and bare moves, as the view reports them', () => {
+    // What the drag on the fallback canvas needs: moves with no modifiers of
+    // their own reach the stage with the left button down, and a move after
+    // the release does not.
+    const view = new FakeView()
+    const main = new FakeWindow({ x: 0, y: 0, width: 1000, height: 800 })
+    const surface = new InWindowProofSurface({
+      createView: () => view as unknown as WebContentsView,
+      resolveParent: () => main as unknown as BrowserWindow,
+      cornerRadius: () => 0
+    })
+    surface.setBounds({ x: 100, y: 100, width: 400, height: 300 })
+    const emit = (input: ObservedInputEvent): void => {
+      view.webContents.emit('before-mouse-event', { preventDefault: () => {} }, input)
+    }
+    const modifiersSent = (): string[][] =>
+      main.webContents.sent.map((event) => (event as { modifiers: string[] }).modifiers)
+    emit({ type: 'mouseDown', x: 10, y: 10, button: 'left', clickCount: 1 })
+    emit({ type: 'mouseMove', x: 30, y: 20 })
+    emit({ type: 'mouseUp', x: 30, y: 20, button: 'left', clickCount: 1 })
+    emit({ type: 'mouseMove', x: 40, y: 25 })
+    expect(modifiersSent()).toEqual([['leftbuttondown'], ['leftbuttondown'], [], []])
+    expect(surface.lastObservedInput()).toEqual({ type: 'mouseMove', x: 40, y: 25 })
+    // A surface hidden mid-press forgets the button: the host never sees that
+    // release, and a later move must not read as a drag.
+    emit({ type: 'mouseDown', x: 10, y: 10, button: 'left' })
+    surface.hide()
+    surface.showInactive()
+    emit({ type: 'mouseMove', x: 12, y: 12 })
+    expect(modifiersSent().at(-1)).toEqual([])
   })
 })

@@ -12281,6 +12281,9 @@ async function runSmokePreviewMotionCommand(
     return {
       sent: events.length,
       hostedInWindow: surface instanceof InWindowProofSurface,
+      forwardedInput:
+        surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
+      lastObserved: surface instanceof InWindowProofSurface ? surface.lastObservedInput() : null,
       bounds: surface.getBounds()
     }
   }
@@ -12522,6 +12525,8 @@ async function runSmokePreviewMotionCommand(
                 ? 'preview'
                 : 'detached'
             : null,
+        forwardedInput:
+          surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
         ...smokeNativeWindowIdentity(surface instanceof BrowserWindow ? surface : null),
         captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(
           surface instanceof BrowserWindow ? surface : null

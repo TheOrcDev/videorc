@@ -41,6 +41,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   windowsPreviewLifecycleDiagnosticFailures,
   windowsPreviewLifecycleOpenFailures,
@@ -1165,7 +1166,12 @@ async function runProofFallbackPassThroughScenario() {
       }
     ]
     for (const way of ways) {
-      const done = await driveFallbackInput(`${label} [${way.kind}]`, way, target.sourceId, stageState)
+      const done = await driveFallbackInput(
+        `${label} [${way.kind}]`,
+        way,
+        target.sourceId,
+        stageState
+      )
       if (!done) return
     }
     const focus = await smokeCommand('focused-window')
@@ -1188,7 +1194,11 @@ async function runProofFallbackPassThroughScenario() {
 async function driveFallbackInput(label, way, sourceId, stageState) {
   const centerOf = (rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
   const idleStage = async (step) => {
-    const idle = await waitFor(stageState, (s) => s.result?.phase === 'idle' && s.result?.bounds, 5000)
+    const idle = await waitFor(
+      stageState,
+      (s) => s.result?.phase === 'idle' && s.result?.bounds,
+      5000
+    )
     assertProbe(
       idle.ok,
       `${label}: the stage is idle before the ${step}`,
@@ -1349,7 +1359,11 @@ async function prepareFreeformDragTarget(label) {
       `
     })
     if (focused.result?.focused !== true) {
-      assertProbe(false, `${label}: the inspector's ${field} field is editable`, JSON.stringify(focused))
+      assertProbe(
+        false,
+        `${label}: the inspector's ${field} field is editable`,
+        JSON.stringify(focused)
+      )
       return null
     }
     await cdp.send('Input.insertText', { text: String(value) })
@@ -2167,20 +2181,14 @@ async function waitFor(fetchState, predicate, timeoutMsLocal) {
   return { ok: false, last }
 }
 
-async function smokeCommand(command, params = {}) {
-  const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${smoke.capability}`
-    },
-    body: JSON.stringify({ command, params })
-  })
-  const payload = await response.json()
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload?.error ?? `${command} smoke command failed`)
-  }
-  return payload.result
+// One dedicated connection per command (smoke-command-client.mjs): the
+// pooled keep-alive socket a bare fetch reuses is closed by the app after 5 s
+// idle, and this probe spends seconds at a time inside synchronous `swift`
+// spawns (CGWindowList, CGEvent), so on a loaded host the next command rode a
+// socket the app had already closed and failed with "fetch failed" (plan 216
+// C gate runs, 2026-11-03).
+function smokeCommand(command, params = {}) {
+  return requestSmokeCommand(smoke, command, params, { timeoutMs })
 }
 
 // The app answers smoke commands before the renderer has drawn its shell
