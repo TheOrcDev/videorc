@@ -729,7 +729,10 @@ export function SceneStage({
       stageSnapTargets(sources.filter((other) => other.id !== source.id).map(displayed)),
       effectiveSnap,
       aspectLocked,
-      source.kind === 'camera' && cameraAspectLocked,
+      // The aspect is law for a shaped camera (the mask), and for a Freeform
+      // screen whose box is its picture (plan 216 D2): the key never
+      // stretches it, and the crop changes its shape instead.
+      (source.kind === 'camera' && cameraAspectLocked) || boxIsPicture(source),
       crop
     )
     // Initial modifiers establish ownership without changing the grabbed point.
