@@ -9,6 +9,7 @@ import {
   LightModeIcon,
   LivestreamIcon,
   BuddyIcon,
+  CameraIcon,
   NoteIcon,
   PreviewIcon,
   RecordIcon,
@@ -57,6 +58,8 @@ import {
 } from '@/components/workspace-nav'
 import { useAgents, useAgentsActions } from '@/hooks/use-agents'
 import { useSoundboard } from '@/hooks/use-soundboard'
+import { useVirtualCamera } from '@/hooks/use-virtual-camera'
+import { VIDEORC_CAMERA_COPY, virtualCameraView } from '@/lib/virtual-camera-view'
 import { CONNECT_AGENT_COMMAND, STOP_AGENTS_COMMAND } from '@/lib/agents-view'
 import {
   useStudioBanners,
@@ -152,6 +155,9 @@ export function CommandPalette({
   const replayBuffer = useStudioReplay()
   const { banners, showBanner, hideBanner } = useStudioBanners()
   const soundboard = useSoundboard()
+  const camera = useVirtualCamera()
+  const cameraView = virtualCameraView(camera)
+  const cameraLabel = cameraView.checked ? VIDEORC_CAMERA_COPY.turnOff : VIDEORC_CAMERA_COPY.turnOn
   const agents = useAgents()
   const agentsActions = useAgentsActions()
   const platform = runtimeInfo?.platform
@@ -250,6 +256,32 @@ export function CommandPalette({
             {screenPrivacy.hidden ? 'Show screen' : 'Hide screen'}
             {shortcut(settings.globalShortcuts?.screenHideToggle ?? DEFAULT_SCREEN_HIDE_SHORTCUT)}
           </CommandItem>
+          {/* Plan 214 E2: a mirror of Output → Videorc Camera, never where the
+              camera is hidden (the hide rule), off while it can't run. */}
+          {cameraView.hidden ? null : (
+            <CommandItem
+              value={cameraLabel}
+              keywords={[
+                'camera',
+                'virtual camera',
+                'webcam',
+                'meet',
+                'zoom',
+                'teams',
+                'discord',
+                'facetime',
+                'other apps'
+              ]}
+              disabled={cameraView.disabled}
+              onSelect={() =>
+                run(() => void camera.setOn(!cameraView.checked, { toastFailure: true }))
+              }
+            >
+              <CameraIcon className="size-4" />
+              {cameraLabel}
+              <Context>Output</Context>
+            </CommandItem>
+          )}
           <CommandItem
             value={muteLabel}
             keywords={['mic', 'microphone', 'audio', 'mute', 'silence']}

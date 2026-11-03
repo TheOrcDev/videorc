@@ -17914,6 +17914,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchVideo,
       setSettings,
       setReplayEnabled,
+      virtualCamera,
       sessions,
       deleteSessions,
       refreshSessions,

@@ -2021,7 +2021,7 @@
     {
       "name": "get_settings",
       "title": "Read the settings",
-      "description": "The settings an agent may change, as they stand: recording resolution and frame rate, Keep original recording, the recordings folder, separate source recordings, Clips, the captions language, Chat in Studio and the theme. Nothing about accounts, keys, permissions, Remote, Agents, updates, diagnostics or billing.",
+      "description": "The settings an agent may change, as they stand: recording resolution and frame rate, Keep original recording, the recordings folder, separate source recordings, Clips, the captions language, Chat in Studio, the theme and Videorc Camera. Nothing about accounts, keys, permissions, Remote, Agents, updates, diagnostics or billing.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -2057,6 +2057,9 @@
           "theme": {
             "type": "string",
             "enum": ["light", "dark", "system"]
+          },
+          "videorcCamera": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -2068,7 +2071,8 @@
           "clips",
           "captionsLanguage",
           "chatInStudio",
-          "theme"
+          "theme",
+          "videorcCamera"
         ],
         "additionalProperties": false
       },
@@ -2087,7 +2091,7 @@
     {
       "name": "update_settings",
       "title": "Change settings",
-      "description": "Change one or more of the curated settings get_settings lists, through their own controls with the same locks: resolution and frame rate wait while a session runs and need Save a local recording on. The recordings folder can only go back to default; another folder is chosen in Videorc. Any other setting is refused.",
+      "description": "Change one or more of the curated settings get_settings lists, through their own controls with the same locks: resolution and frame rate wait while a session runs and need Save a local recording on. The recordings folder can only go back to default; another folder is chosen in Videorc. Videorc Camera is refused where this computer can't have it. Any other setting is refused.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2131,6 +2135,10 @@
           "theme": {
             "type": "string",
             "enum": ["light", "dark", "system"]
+          },
+          "videorcCamera": {
+            "type": "boolean",
+            "description": "Show the program as Videorc Camera, the camera Meet, Zoom and other apps can choose."
           }
         },
         "additionalProperties": false
@@ -2167,6 +2175,9 @@
               },
               "theme": {
                 "type": "string"
+              },
+              "videorcCamera": {
+                "type": "boolean"
               }
             },
             "additionalProperties": false
