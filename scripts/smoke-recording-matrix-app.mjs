@@ -32,6 +32,11 @@ import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { selectRecordingMatrixProfiles } from './lib/recording-matrix-profiles.mjs'
 import {
+  hardContentStressReason,
+  OPENH264_ENCODE_BACKEND,
+  softwareSkipWarning
+} from './lib/recording-matrix-software-skip.mjs'
+import {
   countTransientFifoPauseMarkers,
   evaluateSharedRecordStreamPressure,
   evaluateTransientFifoPressure,
@@ -173,6 +178,7 @@ async function recordCombo({
   streamTarget = null,
   assertPreviewLiveness = false,
   stress = false,
+  hardContent = false,
   requireTransientFifoPressure = false,
   getTransientFifoPauseFiredCount = () => 0
 }) {
@@ -307,18 +313,34 @@ async function recordCombo({
     throw new Error('recording produced no output file')
   }
 
+  // Hard content on OpenH264 is held to the stress contract: the software
+  // encoder skips frames on overshoot by design (recording-matrix-software-skip.mjs).
+  const stressReason = hardContentStressReason({
+    stress,
+    hardContent,
+    encodeBackend: bridgeDiagnostics.encodeBackend
+  })
+  const underStress = stressReason !== null
   const quality = await analyzeRecording(outputPath, {
     ffmpegPath,
     ffprobePath,
     intendedFps: combo.fps,
     expectAudio: true,
-    gates: stress
+    gates: underStress
       ? STRESS_GATES
       : requireTransientFifoPressure
         ? TRANSIENT_FIFO_GATES
         : MATRIX_GATES
   })
   writeReports(quality)
+  const softwareSkip =
+    !stress && underStress && bridgeDiagnostics.encodeBackend === OPENH264_ENCODE_BACKEND
+      ? softwareSkipWarning({
+          label: `${combo.label}:hard`,
+          requestedFps: combo.fps,
+          observedFps: quality.metrics.observedFps
+        })
+      : null
 
   const failures = [...quality.verdict.failures]
   if (livenessFailure) {
@@ -343,7 +365,7 @@ async function recordCombo({
   }
   const observedFps = quality.metrics.observedFps
   if (
-    !stress &&
+    !underStress &&
     !requireTransientFifoPressure &&
     observedFps != null &&
     Math.abs(observedFps - combo.fps) > combo.fps * 0.02
@@ -355,7 +377,8 @@ async function recordCombo({
     outputPath,
     sizeBytes: statSync(outputPath).size,
     failures,
-    warnings: quality.verdict.warnings,
+    warnings: softwareSkip ? [...quality.verdict.warnings, softwareSkip] : quality.verdict.warnings,
+    softwareSkipWarning: softwareSkip,
     metrics: quality.metrics,
     bridgeDiagnostics,
     transientFifoPauseFiredCount,
@@ -437,6 +460,7 @@ async function runPass({
           streamTarget,
           assertPreviewLiveness,
           stress: combo.stress ?? false,
+          hardContent: passLabel === 'hard',
           requireTransientFifoPressure,
           getTransientFifoPauseFiredCount: () => transientFifoPauseFiredCount
         })
@@ -473,6 +497,9 @@ async function runPass({
         )
         for (const failure of result.failures) {
           console.error(`  ❌ ${failure}`)
+        }
+        if (result.softwareSkipWarning) {
+          console.log(`  WARN ${result.softwareSkipWarning}`)
         }
       } catch (error) {
         passResults.push({ combo: label, failures: [String(error?.message ?? error)] })
