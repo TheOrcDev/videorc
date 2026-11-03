@@ -157,6 +157,7 @@ import type { AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentStudioLink } from '@/lib/agent-studio-link'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
 import { useScreenPrivacy } from './use-screen-privacy'
+import { VirtualCameraContext, useVirtualCameraController } from './use-virtual-camera'
 import type { FollowFrontAppHost, FollowSceneApply } from './use-follow-front-app'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
 import type {
@@ -3922,6 +3923,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
+  // Plan 214 E: Videorc Camera's status, switch and actions, in its own context.
+  const virtualCamera = useVirtualCameraController(client, wsStatus, runtimeInfo)
   // Linux can't caption at all (no native microphone path): every session
   // skips captions there, as if "Continue without captions" were chosen.
   const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
@@ -12449,7 +12452,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ),
           automaticSourceFallbacks: automaticSourceFallbacks.current,
           nativePreviewSurfaceStatus: previewSurfaceStatus,
-          runtimeInfo: freshRuntimeInfo ?? undefined
+          runtimeInfo: freshRuntimeInfo ?? undefined,
+          // Plan 214 E3: the camera's state, never its words.
+          virtualCamera: (await import('@/lib/virtual-camera-view')).virtualCameraBundleLine(
+            virtualCamera.status
+          )
         }
       }
       const result = await client.request<SupportBundleExportResult>(
@@ -12481,7 +12488,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  }, [
+    client,
+    previewSurfaceStatus,
+    reportError,
+    runtimeInfo,
+    supportBundleExportPending,
+    virtualCamera.status
+  ])
   // Plan 174 A-20: a toast whose raw details were withheld offers this export
   // (latest-value hand-off, like the ref mirrors above; idempotent per render).
   registerSupportBundleExport(() => void exportSupportBundle())
@@ -17963,6 +17977,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchVideo,
       setSettings,
       setReplayEnabled,
+      virtualCamera,
       sessions,
       deleteSessions,
       refreshSessions,
@@ -19029,20 +19044,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   return (
     <StudioShellContext.Provider value={shellValue}>
       <StudioBannersContext.Provider value={bannersValue}>
-        <StudioContextProviders
-          audio={audioValue}
-          captions={captionsValue}
-          chat={chatValue}
-          core={value}
-          diagnostics={diagnosticsValue}
-          preview={previewValue}
-          recording={recordingValue}
-          recordingState={recordingStateValue}
-          replay={replayBufferControls}
-        >
-          {children}
-          {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
-        </StudioContextProviders>
+        <VirtualCameraContext.Provider value={virtualCamera}>
+          <StudioContextProviders
+            audio={audioValue}
+            captions={captionsValue}
+            chat={chatValue}
+            core={value}
+            diagnostics={diagnosticsValue}
+            preview={previewValue}
+            recording={recordingValue}
+            recordingState={recordingStateValue}
+            replay={replayBufferControls}
+          >
+            {children}
+            {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
+          </StudioContextProviders>
+        </VirtualCameraContext.Provider>
       </StudioBannersContext.Provider>
     </StudioShellContext.Provider>
   )

@@ -5588,6 +5588,9 @@ async fn start_session_with_timeline(
                         width: params.output.video.width,
                         height: params.output.video.height,
                         frame_consumer: compositor_frame_consumer,
+                        // Plan 214 A3: a session's lease is strong; it arms
+                        // over Videorc Camera's weak one in place.
+                        lease: crate::compositor::CompositorLeaseKind::Capture,
                         replay_only,
                         caption_overlay_on_primary: session_caption_plan.primary,
                         caption_overlay_on_aux: session_caption_plan.aux,

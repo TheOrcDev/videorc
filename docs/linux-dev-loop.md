@@ -226,6 +226,84 @@ Any named physical Linux x64 box qualifies. The evidence records the
 distribution, kernel, render nodes with their drivers, and the VAAPI pin.
 Virtual machines and CI runners still do not count.
 
+## Videorc Camera (plan 214 D: spike P0c and the F4 acceptance)
+
+Videorc Camera on Linux is a v4l2loopback device the app writes YUYV
+1920×1080 at 30 fps into. It is hidden in every build until this spike
+passes on a named box (`PROVEN` in
+`crates/videorc-backend/src/virtual_camera_linux.rs`); a tester flips it to
+`true` locally for the run and reports.
+
+1. Install the module (DKMS builds it for the running kernel; the app's
+   Output page shows this same line for the detected distribution):
+
+   ```bash
+   sudo apt install v4l2loopback-dkms      # Ubuntu, Debian, Pop!_OS, Mint
+   sudo dnf install v4l2loopback           # Fedora (RPM Fusion free)
+   sudo pacman -S v4l2loopback-dkms        # Arch, Omarchy (ogre), Manjaro
+   ```
+
+2. Load it with Videorc's parameters (the app's Load module button runs
+   exactly this through `pkexec`; `exclusive_caps=1` keeps the device out
+   of Chrome's list until a writer holds it, `card_label` is how the app
+   finds the device in `/sys/class/video4linux/*/name`):
+
+   ```bash
+   sudo modprobe v4l2loopback exclusive_caps=1 card_label="Videorc Camera" video_nr=42
+   cat /sys/class/video4linux/video42/name   # Videorc Camera
+   ```
+
+   **Secure Boot:** a DKMS module is unsigned, so a box with Secure Boot on
+   refuses it: modprobe says `Key was rejected by service` or
+   `Required key not available`. Either enroll a Machine Owner Key and sign
+   the module (`mokutil`, the distribution's DKMS signing hook), or turn
+   Secure Boot off in firmware. Record which the box needed. If the
+   baseline box cannot load it at all, that is the plan's STOP condition:
+   Linux ships guidance only.
+
+3. P0c, the spike: a scratch writer outside the tree (or the app with
+   `PROVEN` flipped and the switch on) sets YUYV 1920×1080 on
+   `/dev/video42` and writes a pattern at 30 fps. Read it back for 10 s:
+
+   ```bash
+   ffmpeg -f v4l2 -framerate 30 -video_size 1920x1080 -i /dev/video42 -t 10 -f null - 2>&1 | tail -3
+   ```
+
+   Pass: `fps=30` (±1) in FFmpeg's progress line, no "Device or resource
+   busy", and `v4l2-ctl --list-devices` (package `v4l-utils`) names the
+   device `Videorc Camera`. Then Chrome Meet (chrome://settings/content/camera
+   or a meet.google.com preview) and Zoom list "Videorc Camera" and show
+   the picture.
+
+4. The app (P0c with the app, and F4): with `PROVEN = true`, build the
+   backend and launch the dev app. Output → Camera for other apps shows
+   `ready`; turn Videorc Camera on. Check, in this order: the FFmpeg read
+   above gets 30 fps for 10 s; Chrome lists the camera only while the
+   switch is on (off closes the device, and `exclusive_caps` hides it);
+   Record → Stop during the read keeps the camera at 30 fps; Hide screen
+   shows the frost in Meet within a second. Then
+   `pnpm smoke:virtual-camera` (plan 214 F1) once it lands.
+
+5. The states, by eye: with the module uninstalled the page shows the
+   distribution's install command as one copyable line (with an unknown
+   distribution, the page's own "with your package manager" line) and
+   "Load module"; installed but not loaded, the same line and the button
+   (one polkit prompt; cancelling says so); a load Secure Boot refuses, a
+   failed status with the Machine Owner Key words that stays until the
+   module is loaded or removed; loaded by another app under its own label
+   (OBS's `card_label="OBS Virtual Camera"`), a failed status with the
+   unload and reload lines; loaded, `ready` within a second without a
+   relaunch. The backend re-probes every second until the device exists
+   and every ten seconds after; `sudo modprobe -r v4l2loopback` while on
+   must turn the status to unavailable with the lost device named, and a
+   reload must bring it back on its own.
+
+Report: the distribution and kernel, Secure Boot state and what it
+needed, the FFmpeg fps line, which apps listed the camera, and the
+`framePipeline` counters (`virtualCameraPushed`, `virtualCameraRepeated`,
+`virtualCameraConvertMsMax`: the convert must stay under 4 ms p95 on the
+box). Never bundle, build or sign the module into the app.
+
 ## Never do this
 
 - Never run an encode probe, by hand or through the app, against a node the

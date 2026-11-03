@@ -4,6 +4,10 @@ mod app_icons;
 #[cfg(target_os = "macos")]
 mod front_app;
 
+// Plan 214 B3: OSSystemExtensionRequest for the Videorc Camera extension.
+#[cfg(target_os = "macos")]
+mod camera_extension;
+
 #[cfg(target_os = "macos")]
 #[path = "../../videorc-backend/src/color.rs"]
 mod color;
@@ -1266,5 +1270,61 @@ pub fn set_window_glass_style(
     WindowGlassStyleResult {
         restyled: false,
         reason: Some("platform".to_owned()),
+    }
+}
+
+/// One step of a camera extension request; macOS only, mirrored for typegen.
+#[cfg(not(target_os = "macos"))]
+#[napi_derive::napi(object)]
+pub struct CameraExtensionUpdate {
+    pub kind: String,
+    pub action: String,
+    pub identifier: String,
+    pub code: Option<i64>,
+    pub code_name: Option<String>,
+    pub reason: Option<String>,
+    pub detail: Option<String>,
+    pub existing_version: Option<String>,
+    pub new_version: Option<String>,
+}
+
+#[cfg(not(target_os = "macos"))]
+#[napi_derive::napi(object)]
+pub struct CameraExtensionFailure {
+    pub code: i64,
+    pub code_name: String,
+    pub reason: String,
+}
+
+/// System extensions are a macOS mechanism; elsewhere the request is refused.
+#[cfg(not(target_os = "macos"))]
+#[napi_derive::napi]
+pub fn activate_camera_extension(
+    _identifier: String,
+    _callback: napi::bindgen_prelude::Function<CameraExtensionUpdate, ()>,
+) -> napi::Result<()> {
+    Err(napi::Error::from_reason(
+        "Videorc Camera activation is macOS only.",
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[napi_derive::napi]
+pub fn deactivate_camera_extension(
+    _identifier: String,
+    _callback: napi::bindgen_prelude::Function<CameraExtensionUpdate, ()>,
+) -> napi::Result<()> {
+    Err(napi::Error::from_reason(
+        "Videorc Camera deactivation is macOS only.",
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[napi_derive::napi]
+pub fn camera_extension_failure_reason(code: i64) -> CameraExtensionFailure {
+    CameraExtensionFailure {
+        code,
+        code_name: "platform".to_owned(),
+        reason: "Videorc Camera's extension exists on macOS only.".to_owned(),
     }
 }

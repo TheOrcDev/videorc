@@ -84,6 +84,18 @@ One verb pair on every surface (plan 174 S2.2). The strings live in
   ("Stop following" in its ⋯ menu), the control is "Hide screen" and then
   "Show screen", and the chip while it holds is "Screen hidden". Never
   "blur", "privacy mode" or "censor".
+- Videorc Camera (plan 214) is the camera other apps see, one name
+  everywhere: "Videorc Camera", never "virtual cam", "vcam" or "webcam".
+  Its home is Output → Camera for other apps; ⌘K reads "Turn Videorc
+  Camera on" and "Turn Videorc Camera off". The words live in
+  `lib/virtual-camera-view.ts`, and its test pins every state's line.
+  macOS asks for approval in a place that moved, so the line names the path
+  for the Mac's version, quoted exactly as System Settings reads it, with
+  one "Open System Settings" button:
+  - macOS 13 and 14: "Allow Videorc Camera in System Settings → Privacy &
+    Security."
+  - macOS 15 and later: "Allow Videorc Camera in System Settings → General
+    → Login Items & Extensions → Camera Extensions."
 - Premium, always the same sentence and action: "{Feature} is part of
   Videorc Premium." with one "View Premium" button.
 - Platform-true words come from the platform helpers, never a literal:
