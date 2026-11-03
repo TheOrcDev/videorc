@@ -791,4 +791,27 @@ Windows CI for D3D11.
 
 ## As built
 
-_Empty until a workstream lands._
+- **G (chat on stream), BUILT 2026-11-03, draft PR, not merged.**
+  - G1 (backend, `3e5f25e3`): `OverlayItem::Chat`, `chat` in
+    `OverlayLayout` under `#[serde(default)]`, its slot per orientation,
+    and `chat.overlay.set` / `clear` / `canvases`.
+  - G2 (`lib/chat-overlay.ts`, the painter `renderChatOverlayCards` in
+    `lib/caption-overlay.ts`, both lazy): the newest five chat or paid
+    messages of the livestream, never a tombstone, a system, membership,
+    moderation or activity-only row. Each row is the platform icon, the
+    name, and words and emotes (at most three lines). The box is the rect's
+    width, and the oldest rows leave first when the rect is short. It
+    repaints at most twice a second, never resends the same box, and clears
+    when chat empties, both switches go off or the livestream ends. The
+    vertical leg gets its own box, its canvas read once per livestream.
+  - The TS contract now defaults a missing `chat` (it refused one), so an
+    old layout validates with its placement intact.
+  - G3: the Scene page's Chat item (generic from G1, now tested), and a
+    Chat on stream switch in the chat pane's filter bar (its own chunk).
+    It rides the Buddy's relay as `chat-show-on-stream`, and Studio relays
+    `chatOnStream`.
+  - The smoke's chat-box assertion is written but not run. It skips the
+    top-right split scenario, where the box would sit in the highlight
+    gate's mirrored corner.
+  - Owed: Rust tests and clippy (CI), the smokes (G2, G4), and checking it
+    by eye in both themes and both orientations.

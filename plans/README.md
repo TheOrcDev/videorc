@@ -14,7 +14,8 @@
   - F: rounded corners for the screen on all four render paths.
   - G: chat on stream, the last 5 messages, off by default.
 
-  **PLANNED** 2026-11-03; the owner took D1 to D7 as recommended.
+  **PLANNED** 2026-11-03; the owner took D1 to D7 as recommended. G
+  **BUILT** 2026-11-03 (draft PR; CI, the smokes and the by-eye check owed).
 
 - 2026-11-02: [Plan 214](214-videorc-camera-in-meet-and-zoom.md), Videorc
   Camera in Meet and Zoom. Owner ask: a virtual camera like OBS's, so the
