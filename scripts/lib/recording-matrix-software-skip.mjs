@@ -4,22 +4,32 @@
 // (recording.rs, the #149 skip-on-overshoot posture; only the performance
 // check turns it off), and OpenH264's bitrate rate control answers
 // incompressible noise by skipping most frames. On that backend the hard
-// combo is held to the stress contract instead (survival, preview liveness,
-// colorimetry, level), with a WARN that names the skipped cadence, so the
-// gate never demands a cadence the product deliberately does not promise.
+// combo relaxes only what frame skipping changes (frame count, cadence, and a
+// container longer than its frames at the requested rate) and prints a WARN
+// that names the cadence it held. Forced keyframes are never skipped, so the
+// 2 s keyframe cadence and the A/V stop tail stay gated.
 
 export const OPENH264_ENCODE_BACKEND = 'software-open-h264'
 
 /**
- * Whether a combo runs under the stress contract: a declared stress combo,
- * or hard content encoded by OpenH264 with frame skipping on.
+ * The contract a combo is held to: 'stress' for a declared stress combo,
+ * 'software-skip' for hard content encoded by OpenH264 with frame skipping
+ * on, 'full' otherwise.
  */
-export function hardContentStressReason({ stress, hardContent, encodeBackend }) {
-  if (stress) return 'stress combo'
-  if (hardContent && encodeBackend === OPENH264_ENCODE_BACKEND) {
-    return 'OpenH264 skips frames on incompressible noise by design (allow_skip_frames, #149)'
-  }
-  return null
+export function hardContentContract({ stress, hardContent, encodeBackend }) {
+  if (stress) return 'stress'
+  if (hardContent && encodeBackend === OPENH264_ENCODE_BACKEND) return 'software-skip'
+  return 'full'
+}
+
+/** The matrix gates with only the frame-skipping laws relaxed. */
+export function softwareSkipGates(matrixGates) {
+  return Object.freeze({
+    ...matrixGates,
+    frameCountTolerance: Number.POSITIVE_INFINITY,
+    cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY,
+    maxDurationStretchRatio: Number.POSITIVE_INFINITY
+  })
 }
 
 /** The WARN a software-skip combo carries instead of a cadence failure. */

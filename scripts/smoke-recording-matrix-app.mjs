@@ -32,8 +32,8 @@ import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { selectRecordingMatrixProfiles } from './lib/recording-matrix-profiles.mjs'
 import {
-  hardContentStressReason,
-  OPENH264_ENCODE_BACKEND,
+  hardContentContract,
+  softwareSkipGates,
   softwareSkipWarning
 } from './lib/recording-matrix-software-skip.mjs'
 import {
@@ -158,6 +158,11 @@ const TRANSIENT_FIFO_GATES = Object.freeze({
   frameCountTolerance: Number.POSITIVE_INFINITY,
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
+
+// Hard content on OpenH264 skips frames on overshoot by design
+// (recording-matrix-software-skip.mjs). Only the frame-skipping laws relax;
+// the 2 s keyframe cadence and the A/V stop tail stay gated.
+const SOFTWARE_SKIP_GATES = softwareSkipGates(MATRIX_GATES)
 
 /** The renderer's default ring, on and buffer-only, or off by its switch. */
 async function waitForStableRing(ws, label) {
@@ -313,28 +318,28 @@ async function recordCombo({
     throw new Error('recording produced no output file')
   }
 
-  // Hard content on OpenH264 is held to the stress contract: the software
-  // encoder skips frames on overshoot by design (recording-matrix-software-skip.mjs).
-  const stressReason = hardContentStressReason({
+  const contract = hardContentContract({
     stress,
     hardContent,
     encodeBackend: bridgeDiagnostics.encodeBackend
   })
-  const underStress = stressReason !== null
   const quality = await analyzeRecording(outputPath, {
     ffmpegPath,
     ffprobePath,
     intendedFps: combo.fps,
     expectAudio: true,
-    gates: underStress
-      ? STRESS_GATES
-      : requireTransientFifoPressure
-        ? TRANSIENT_FIFO_GATES
-        : MATRIX_GATES
+    gates:
+      contract === 'stress'
+        ? STRESS_GATES
+        : contract === 'software-skip'
+          ? SOFTWARE_SKIP_GATES
+          : requireTransientFifoPressure
+            ? TRANSIENT_FIFO_GATES
+            : MATRIX_GATES
   })
   writeReports(quality)
   const softwareSkip =
-    !stress && underStress && bridgeDiagnostics.encodeBackend === OPENH264_ENCODE_BACKEND
+    contract === 'software-skip'
       ? softwareSkipWarning({
           label: `${combo.label}:hard`,
           requestedFps: combo.fps,
@@ -365,7 +370,7 @@ async function recordCombo({
   }
   const observedFps = quality.metrics.observedFps
   if (
-    !underStress &&
+    contract === 'full' &&
     !requireTransientFifoPressure &&
     observedFps != null &&
     Math.abs(observedFps - combo.fps) > combo.fps * 0.02
@@ -673,8 +678,10 @@ try {
   // starvation, latency-contract kills) that the easy 64x64 pattern hides —
   // 0.9.44 shipped its mid-recording-crash regression through green gates
   // exactly that way. Preview must stay live THROUGH the recording.
-  // 1080p60 must hold FULL cadence under noise (proven headroom); 4K noise is
-  // beyond any real content, so 4K30 runs as a survival stress combo.
+  // 1080p60 must hold FULL cadence under noise on the hardware encoders
+  // (proven headroom); OpenH264 skips frames there by design and is held to
+  // SOFTWARE_SKIP_GATES. 4K noise is beyond any real content, so 4K30 runs as
+  // a survival stress combo.
   if (HARD_COMBOS.length > 0) {
     results.push(
       ...(await runPass({
