@@ -333,6 +333,23 @@ current `ffmpeg-n8.x-*-win64-lgpl-8.x.zip` from
 https://github.com/BtbN/FFmpeg-Builds/releases, downloading it, and recording
 its sha256 in the pin (LGPL-only assets — repo policy).
 
+## Protected Windows stream performance gate
+
+`pnpm smoke:windows-stream-performance` without `--incident` is a physical
+Windows 11 x64 gate. It requires an **installed NSIS** `Videorc.exe` candidate
+(`VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE` or `VIDEORC_PERF_APP_EXECUTABLE`), not an
+unsigned `win-unpacked` tree. When you run it outside
+`pnpm smoke:local-gates:windows`, also set:
+
+- `VIDEORC_WINDOWS_ACCEPTANCE_DIR` — absolute hardware-class evidence root
+- `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256` — lowercase 64-hex digest of
+  the installed `Videorc.exe` (names the immutable evidence directory for
+  `--gate` / protected calibration runs)
+
+The parent gate supplies those values (and related release identity env) after
+verifying the packaged payload. Missing host, candidate, or digest env remains
+`BLOCKED` (exit `2`), not a script crash.
+
 ## Startup incident diagnostics (Plan 067)
 
 These commands collect diagnostic evidence. They do not qualify an installed
