@@ -1,11 +1,16 @@
-// In-window Electron proof surface (Linux). Wayland lets no client place its
-// own toplevel: Hyprland, GNOME and KDE ignore the absolute frame the docked
-// preview window and its child proof-surface window ask for, so the preview
-// landed centred over the app instead of in the Studio slot (and a tiling
-// compositor re-tiles it on top of that). On Linux the proof surface therefore
-// lives INSIDE its host window as a WebContentsView — the main window while
-// docked, the preview window while floating — at a content-relative rect,
-// which every compositor honours.
+// In-window Electron proof surface (Linux and macOS). Wayland lets no client
+// place its own toplevel: Hyprland, GNOME and KDE ignore the absolute frame
+// the docked preview window and its child proof-surface window ask for, so the
+// preview landed centred over the app instead of in the Studio slot (and a
+// tiling compositor re-tiles it on top of that). On Linux the proof surface
+// therefore lives INSIDE its host window as a WebContentsView — the main
+// window while docked, the preview window while floating — at a
+// content-relative rect, which every compositor honours. macOS joined it in
+// plan 216 (D4): docked over the Scene canvas, the fallback was two borderless
+// windows asked to ignore the mouse, and on a streamer's macOS the mouse never
+// reached the canvas through them (the arrow keys moved the source). The view
+// forwards its mouse to the host window itself, so no AppKit hit-testing sits
+// between the pointer and the stage.
 //
 // The host implements the slice of BrowserWindow the proof-surface code drives
 // (bounds, visibility, lifecycle events), so the surface lifecycle, frame
@@ -343,5 +348,21 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
     if (forwarded) {
       parent.webContents.sendInputEvent(forwarded)
     }
+  }
+}
+
+/**
+ * The surface status message's note on where the surface lives, so Health
+ * and the support bundle say which host a fallback preview had (never a
+ * silent change of host). Empty where the surface is its own window.
+ */
+export function proofSurfaceHostNote(platform: NodeJS.Platform): string {
+  switch (platform) {
+    case 'linux':
+      return ' Hosted inside the app window (Wayland cannot place a separate surface window).'
+    case 'darwin':
+      return ' Hosted inside the app window (the Scene canvas keeps the mouse).'
+    default:
+      return ''
   }
 }
