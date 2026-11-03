@@ -5,6 +5,7 @@ import {
   ClipIcon,
   DarkModeIcon,
   DesktopIcon,
+  EditIcon,
   ImageIcon,
   LightModeIcon,
   LivestreamIcon,
@@ -20,7 +21,7 @@ import {
   TerminalIcon
 } from '@/components/icons'
 import { useTheme } from 'next-themes'
-import { useState, type ReactElement, type ReactNode } from 'react'
+import { Fragment, useState, type ReactElement, type ReactNode } from 'react'
 
 import {
   CommandDialog,
@@ -56,8 +57,10 @@ import {
   type WorkspaceTabGroup
 } from '@/components/workspace-nav'
 import { useAgents, useAgentsActions } from '@/hooks/use-agents'
+import { useEditScene } from '@/hooks/use-edit-scene'
 import { useSoundboard } from '@/hooks/use-soundboard'
 import { CONNECT_AGENT_COMMAND, STOP_AGENTS_COMMAND } from '@/lib/agents-view'
+import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import {
   useStudioBanners,
   useStudioCore,
@@ -77,7 +80,16 @@ export const PAGE_KEYWORDS: Readonly<Record<WorkspaceTab, readonly string[]>> = 
   studio: ['record', 'go live', 'stage', 'transport'],
   ai: ['companion', 'ai', 'chat', 'voice', 'reports', 'clean cut'],
   sources: ['camera', 'microphone', 'screen', 'window', 'devices', 'audio', 'mixer'],
-  layouts: ['layout', 'layouts', 'composition', 'background', 'takeover', 'presets'],
+  layouts: [
+    'layout',
+    'layouts',
+    'composition',
+    'background',
+    'takeover',
+    'presets',
+    'edit scene',
+    'scene editor'
+  ],
   assets: ['backgrounds', 'overlays', 'images', 'takeovers', 'banners', 'sounds', 'soundboard'],
   live: ['destinations', 'stream key', 'youtube', 'twitch', 'kick', 'schedule', 'go live'],
   captions: ['subtitles', 'transcription'],
@@ -124,6 +136,7 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void
 }): ReactElement {
   const { active, setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
+  const editScene = useEditScene()
   const {
     screenPrivacy,
     toggleScreenHidden,
@@ -320,16 +333,30 @@ export function CommandPalette({
           {PAGES.map((page) => {
             const digit = shortcutDigitFor(page.id)
             return (
-              <CommandItem
-                key={page.id}
-                value={`Open ${page.label}`}
-                keywords={[...PAGE_KEYWORDS[page.id]]}
-                onSelect={() => run(() => openPage(page.id))}
-              >
-                <page.icon className="size-4" />
-                {page.label}
-                {shortcut(digit ? `CmdOrCtrl+${digit}` : undefined)}
-              </CommandItem>
+              <Fragment key={page.id}>
+                <CommandItem
+                  value={`Open ${page.label}`}
+                  keywords={[...PAGE_KEYWORDS[page.id]]}
+                  onSelect={() => run(() => openPage(page.id))}
+                >
+                  <page.icon className="size-4" />
+                  {page.label}
+                  {shortcut(digit ? `CmdOrCtrl+${digit}` : undefined)}
+                </CommandItem>
+                {/* Plan 215 D4: the Scene page with the editor on and the
+                    camera selected, the same Edit scene as the page's own. */}
+                {page.id === 'layouts' ? (
+                  <CommandItem
+                    value={EDIT_SCENE_LABEL}
+                    keywords={['edit', 'move camera', 'resize', 'freeform', 'position']}
+                    onSelect={() => run(editScene)}
+                  >
+                    <EditIcon className="size-4" />
+                    {EDIT_SCENE_LABEL}
+                    <Context>Scene</Context>
+                  </CommandItem>
+                ) : null}
+              </Fragment>
             )
           })}
           <CommandItem
