@@ -3831,6 +3831,7 @@ mod tests {
                 sequence: Some(120),
                 updated_at: "2026-06-08T00:00:00Z".to_string(),
                 message: Some("Live".to_string()),
+                no_video: None,
             },
         );
 

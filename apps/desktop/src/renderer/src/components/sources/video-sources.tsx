@@ -272,6 +272,8 @@ export function VideoSources(): ReactElement {
             ? 'permission-required'
             : selectedDeviceStatus(deviceList.devices, selectedCameraId),
           preview: previewCameraStatus,
+          // The camera in use: a stand-in is the one that may send nothing.
+          name: sources.cameraName,
           standIn: cameraStandIn
         }),
         // Facts describe the selected source only (the synthetic screen and a

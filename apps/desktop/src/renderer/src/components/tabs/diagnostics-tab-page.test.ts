@@ -13,6 +13,8 @@ const mocked = vi.hoisted(() => ({
   stats: {} as Record<string, unknown>,
   healthEvents: [] as unknown[],
   devices: [] as unknown[],
+  camera: {} as Record<string, unknown>,
+  sources: {} as Record<string, unknown>,
   handleSystemPermission: vi.fn(async () => undefined)
 }))
 
@@ -26,7 +28,7 @@ vi.mock('@/hooks/use-studio', () => ({
     loadSessionDetails: vi.fn(async () => undefined),
     streamTargets: [],
     nativePreviewSurfaceEnabled: true,
-    captureConfig: { sources: {} },
+    captureConfig: { sources: mocked.sources },
     deviceList: { devices: mocked.devices },
     mediaAccess: null,
     runtimeInfo: { platform: 'darwin', backendCrashes: [] },
@@ -37,7 +39,7 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioRecording: () => ({ recording: { state: 'idle' } }),
   useStudioPreview: () => ({
     previewLiveStatus: { state: 'live' },
-    previewCameraStatus: { state: 'source-missing', droppedFrames: 0 },
+    previewCameraStatus: mocked.camera,
     previewScreenStatus: { state: 'live', droppedFrames: 0, sourceFps: 30 }
   }),
   useStudioDiagnostics: () => ({
@@ -118,6 +120,8 @@ beforeEach(() => {
   mocked.stats = healthyStats()
   mocked.healthEvents = []
   mocked.devices = []
+  mocked.camera = { state: 'source-missing', droppedFrames: 0 }
+  mocked.sources = {}
   mocked.handleSystemPermission.mockClear()
   videorcCamera.controls = { status: null, connected: true, platform: 'darwin' }
   for (const fn of Object.values(videorcCamera.toast)) fn.mockClear()
@@ -161,6 +165,23 @@ describe('Health page', () => {
     expect(verdict().textContent).toContain('Lower the bitrate or the resolution')
     expect(chips()).toEqual(['slowdown', 'encoder'])
     expect(container.textContent).toContain('12 dropped frames')
+  })
+
+  it('names a camera that is on but sends no video (plan 216 D2)', async () => {
+    mocked.sources = { cameraId: 'camera:builtin', cameraName: 'MacBook Pro Camera' }
+    mocked.camera = {
+      state: 'live',
+      droppedFrames: 0,
+      framesCaptured: 0,
+      sourceFps: 30,
+      noVideo: true
+    }
+    await render()
+    expect(verdict().getAttribute('data-variant')).toBe('warning')
+    expect(verdict().textContent).toContain('1 thing needs attention: Camera')
+    expect(verdict().textContent).toContain("MacBook Pro Camera isn't sending video.")
+    expect(chips()).toEqual(['camera'])
+    expect(container.querySelector('[data-check="camera"]')?.textContent).toContain('No video')
   })
 
   it('keeps the support bundle on top and the numbers in one closed Technical details', async () => {

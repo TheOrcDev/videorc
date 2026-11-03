@@ -3715,6 +3715,22 @@ it('accepts the support bundle account section and refuses a token in it', () =>
   )
 })
 
+it('keeps a live camera that sends no video (plan 216 D2)', () => {
+  const status = {
+    state: 'live',
+    cameraId: 'camera:builtin',
+    targetFps: 30,
+    framesCaptured: 0,
+    droppedFrames: 0,
+    updatedAt: '2026-11-03T14:51:46Z',
+    noVideo: true
+  }
+  expect(validateBackendEventPayload('preview.camera.status', status)).toEqual(status)
+  expect(() =>
+    validateBackendEventPayload('preview.camera.status', { ...status, noVideo: 'yes' })
+  ).toThrow()
+})
+
 describe('Videorc Camera wire contract (plan 214 A4)', () => {
   const fixture = JSON.parse(
     readFileSync(
