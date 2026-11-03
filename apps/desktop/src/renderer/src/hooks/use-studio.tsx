@@ -164,6 +164,8 @@ import type { AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentStudioLink } from '@/lib/agent-studio-link'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
 import { useScreenPrivacy } from './use-screen-privacy'
+import { useMarkerContextPublisher } from './use-marker-context-publisher'
+import type { MarkerContext } from '../../../shared/session-markers'
 import { VirtualCameraContext, useVirtualCameraController } from './use-virtual-camera'
 import type { FollowFrontAppHost, FollowSceneApply } from './use-follow-front-app'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
@@ -4545,7 +4547,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const screenHidden = privacy.screenPrivacy.hidden
   const screenHideRefusal = privacy.screenPrivacy.unavailable
   const screenHideKey = screenHideAccelerator(settings.globalShortcuts?.screenHideToggle)
-  useEffect(() => {
+  const markerContextForWindow = useMemo<MarkerContext>(() => {
     // A buffer-only session (plan 181) has no Library row to hold a marker,
     // so the voice marker waits for a recording or a livestream.
     const available = Boolean(
@@ -4568,7 +4570,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           : replayState.state === 'starting'
             ? ('starting' as const)
             : ('idle' as const)
-    void window.videorc?.pushMarkerContext?.({
+    return {
       sessionId: recording.sessionId,
       available,
       reason: available ? undefined : 'Start a recording or livestream to make a marker.',
@@ -4596,9 +4598,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ...(screenHideRefusal ? { unavailable: screenHideRefusal } : {}),
         ...(screenHideKey ? { accelerator: screenHideKey } : {})
       }
-    })
-    return () => {
-      void window.videorc?.pushMarkerContext?.(null)
     }
   }, [
     captureConfig.replayBuffer.enabled,
@@ -4617,6 +4616,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     screenHideRefusal,
     screenHideKey
   ])
+  // One push per change, never a null between two contexts: the window's
+  // composer mounts on the context and keeps Buddy's answer in that mount.
+  useMarkerContextPublisher(markerContextForWindow, window.videorc?.pushMarkerContext)
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const previewSurfaceStatusRef = useRef<PreviewSurfaceStatus>(idlePreviewSurfaceStatus())
