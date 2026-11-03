@@ -831,9 +831,11 @@ export function LayoutTab(): ReactElement {
                   ...bannerStageItems(banners, selectedBannerId, overlayOrientation, stageAspect),
                   ...overlayStageItems(overlayLayout, overlayOrientation, buddyPicture)
                 ],
+                // A source selected from elsewhere (Edit scene, plan 215 D4)
+                // wins over an overlay item, as it does in the inspector.
                 selectedId: selectedBanner
                   ? bannerStageId(selectedBanner.id)
-                  : selectedOverlayItem
+                  : selectedOverlayItem && !selectedSource
                     ? overlayStageId(selectedOverlayItem)
                     : null,
                 drafts: stageDrafts,
