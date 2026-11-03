@@ -874,6 +874,6 @@ cut a `-beta.N+1` rather than overwriting. For the feed, publish a corrected bui
 with a **higher** version; the bad one stops being offered once a higher version
 exists. (The flat `updates/macos/` prefix is overwritten each release, so the
 feed always reflects the latest upload.) Videorc Camera (plan 214): a build that
-lacks the provisioning profiles fails the validator and never ships; a camera
+lacks the app's provisioning profile fails the validator and never ships; a camera
 that misbehaves in a shipped Beta rolls forward the same way, and the next
 activation replaces the installed extension.
