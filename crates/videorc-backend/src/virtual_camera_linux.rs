@@ -37,10 +37,12 @@
 //! until the device is there, then every ten seconds). Electron main only
 //! runs the load (`pkexec modprobe …`, see
 //! `apps/desktop/src/main/virtual-camera-linux-setup.ts`: polkit's dialog
-//! belongs to the app), reports `setting-up` while it runs and `failed` with
-//! the refusal's words when the kernel or polkit refuses. Main's word stands
-//! until the box changes ([`ProbeMemory`]): the device appears and the
-//! probe says `ready`, or the module goes. No kernel module is bundled,
+//! belongs to the app), reports `setting-up` while it runs. When the kernel
+//! or polkit refuses, it hands the step back with `needs-setup`, so the next
+//! probe takes over and the Load module button stays. The refusal's words
+//! show from the action's own result. A `setting-up` or `failed` report from
+//! main stands until the box changes ([`ProbeMemory`]): the device appears
+//! and the probe says `ready`, or the module goes. No kernel module is bundled,
 //! built or signed (D9). Linux has no reader count, so the sink's `viewers`
 //! is `None` and the camera writes whenever the switch is on (D13).
 // The pure half runs everywhere (its tests run on a Mac); only the writer

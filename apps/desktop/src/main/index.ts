@@ -10,6 +10,7 @@ import {
   type CameraExtensionState
 } from './camera-extension'
 import { runVirtualCameraAction } from './virtual-camera-action'
+import { runLinuxLoadModule } from './virtual-camera-linux-setup'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
@@ -42,6 +43,7 @@ import type {
   GlobalShortcutsResult,
   SessionMediaGrantResult,
   ShortcutRecorderArmResult,
+  VirtualCameraActionResult,
   VirtualCameraStatus
 } from '../shared/backend'
 import {
@@ -1458,6 +1460,37 @@ async function reportCameraExtensionToBackend(state: CameraExtensionState): Prom
     logBackend(
       'warn',
       `Videorc Camera's extension state did not reach the backend: ${errorMessage(error)}`
+    )
+  }
+}
+/**
+ * Plan 214 D1: Linux's Load module. Main says `setting-up` while polkit's
+ * dialog and modprobe run. On a refusal it hands the step back to the
+ * backend's probe (`needs-setup`), so the button stays and the Output page
+ * shows the refusal's words from this result. A `failed` report here would
+ * stand until the box changed (`ProbeMemory`): after a cancelled password
+ * prompt, the switch would lock with no way to retry. Once the device is
+ * there, the probe settles `ready` on its own.
+ */
+async function loadVideorcCameraModule(): Promise<VirtualCameraActionResult> {
+  await reportVirtualCameraPlatformStep('setting-up')
+  const result = await runLinuxLoadModule()
+  if (!result.ok) {
+    await reportVirtualCameraPlatformStep('needs-setup')
+  }
+  return result.message === undefined
+    ? { ok: result.ok }
+    : { ok: result.ok, message: result.message }
+}
+async function reportVirtualCameraPlatformStep(
+  platformStep: 'setting-up' | 'needs-setup'
+): Promise<void> {
+  try {
+    await requestBackendAdmin('virtualCamera.platform.report', { platformStep })
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Videorc Camera's setup step did not reach the backend: ${errorMessage(error)}`
     )
   }
 }
@@ -16507,13 +16540,15 @@ app.whenReady().then(async () => {
   secureIpcHandle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
   )
-  // Plan 214 E: Videorc Camera's actions. Windows' setup (C2) and Linux's
-  // module load (D1) plug in here as `setUp` and `loadModule`.
+  // Plan 214 E: Videorc Camera's actions. Linux's module load (D1) is
+  // `loadModule`; Windows' setup (C2) plugs in as `setUp` with the Windows
+  // follow-up PR, and until then answers "Not available on this computer."
   secureIpcHandle('virtual-camera:action', (_event, action: unknown) =>
     runVirtualCameraAction(action, {
       platform: process.platform,
       openExternal: (url) => shell.openExternal(url),
-      deactivateCameraExtension: () => cameraExtension().deactivate()
+      deactivateCameraExtension: () => cameraExtension().deactivate(),
+      loadModule: () => loadVideorcCameraModule()
     })
   )
   secureIpcHandle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>
