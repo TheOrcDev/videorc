@@ -31,6 +31,7 @@ import {
   parseBackendWireMessage,
   cameraSelectionDiagnosticsSchema,
   cameraConnectionHistoryEntrySchema,
+  supportBundleAccountSchema,
   runtimeValidatedBackendRpcMethods,
   validateMainOwnedPreviewSurfaceBoundsParams,
   validateBackendEventPayload,
@@ -3690,4 +3691,24 @@ it('accepts disconnected camera status and the support camera story', () => {
   }
   expect(cameraConnectionHistoryEntrySchema.parse(edge)).toEqual(edge)
   expect(() => cameraConnectionHistoryEntrySchema.parse({ ...edge, timestamp: null })).toThrow()
+})
+
+// Plan 215 A6: the bundle tells a shown sign-in from a stored token, as
+// booleans; an unreadable store carries its error and nothing else.
+it('accepts the support bundle account section and refuses a token in it', () => {
+  const shownButNoToken = { signedIn: true, tokenPresent: false, storeReadable: true }
+  expect(supportBundleAccountSchema.parse(shownButNoToken)).toEqual(shownButNoToken)
+  const unreadable = {
+    signedIn: false,
+    tokenPresent: false,
+    storeReadable: false,
+    storeError: 'secrets store: permission denied'
+  }
+  expect(supportBundleAccountSchema.parse(unreadable)).toEqual(unreadable)
+  expect(() =>
+    supportBundleAccountSchema.parse({ ...shownButNoToken, token: 'never' })
+  ).toThrow('token must be a known field')
+  expect(() =>
+    supportBundleAccountSchema.parse({ signedIn: true, tokenPresent: false })
+  ).toThrow('storeReadable')
 })

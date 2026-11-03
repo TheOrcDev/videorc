@@ -5701,3 +5701,16 @@ export const cameraConnectionHistoryEntrySchema = objectSchema({
   connected: booleanSchema,
   timestamp
 })
+
+// Support bundle account section (plan 215 A6): the account the app shows,
+// the session token on disk, and whether the secrets store read at all.
+// Booleans only, never the token or the identity; bundle-only, never an event.
+export const supportBundleAccountSchema = objectSchema(
+  {
+    signedIn: booleanSchema,
+    tokenPresent: booleanSchema,
+    storeReadable: booleanSchema,
+    storeError: optionalText
+  },
+  { allowUnknown: false }
+)
