@@ -59,7 +59,9 @@ export async function configureWindowsD3d11RendererSourcesWhenListed(
       return await configureWindowsD3d11RendererSources(smokeCommand, screenId)
     } catch (error) {
       if (!windowsD3d11HarnessScreenNotListed(error) || Date.now() >= deadline) throw error
-      await new Promise((resolve) => setTimeout(resolve, retryMs))
+      // No attempt starts past the deadline: each one opens its own timeout.
+      await new Promise((resolve) => setTimeout(resolve, Math.min(retryMs, deadline - Date.now())))
+      if (Date.now() >= deadline) throw error
     }
   }
 }
