@@ -558,9 +558,12 @@ test('start: installing past the wait, off and nonsense states FAIL', () => {
 })
 
 test("red first: today's base, where nothing pushes frames, FAILS and never passes", () => {
-  // The backend has no sink yet (B4 unshipped) and says so.
+  // The backend can't feed the camera and says so. Its words changed when
+  // the macOS sink shipped (B4), so pin the state, not the sentence.
   const status = fixtures.unavailableNoSink
-  assert.match(status.message, /hasn't shipped/)
+  assert.equal(status.available, false)
+  assert.equal(status.state, 'unavailable')
+  assert.equal(typeof status.message, 'string')
 
   // With an approved extension (or the same-name P0a spike) the platform
   // lists Videorc Camera, so the read goes on instead of skipping.
@@ -603,7 +606,7 @@ test("red first: today's base, where nothing pushes frames, FAILS and never pass
   const unlisted = classifyCameraStart({ status, listed: false, platform: 'darwin' })
   assert.equal(unlisted.action, 'skip')
   assert.match(unlisted.reason, /unavailable and no app lists it/)
-  assert.match(unlisted.reason, /plan 214 B4, hasn't shipped/)
+  assert.ok(unlisted.reason.includes(status.message), 'the SKIP quotes the backend sentence')
   assert.equal(smokeVerdict({ skip: unlisted.reason }).result, 'SKIP')
 })
 

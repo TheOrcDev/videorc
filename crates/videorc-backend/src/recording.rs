@@ -117,10 +117,10 @@ use crate::repair::{
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
 use crate::scene_geometry::{
-    PixelRect, SceneFit, SceneMask, background_stage_margin, camera_chroma_key, camera_mask,
-    circle_geometry, resolved_camera_transform, rounded_rect_geometry, scaled_camera_box_size,
-    scaled_camera_margin, scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
-    scene_source_render_transform, side_by_side_widths,
+    PixelRect, SceneFit, SceneMask, SignedPixelRect, background_stage_margin, camera_chroma_key,
+    camera_mask, circle_geometry, resolved_camera_transform, rounded_rect_geometry,
+    scaled_camera_box_size, scaled_camera_margin, scene_crop_from_transform, scene_source_fit,
+    scene_source_rect_pixels, scene_source_render_transform, side_by_side_widths,
 };
 use crate::screen_capture::{
     is_windows_gdigrab_desktop_screen_id, parse_screencapturekit_display_id,
@@ -5477,11 +5477,17 @@ async fn start_session_with_timeline(
                 .and_then(|source| {
                     let transform =
                         scene_source_render_transform(&source.transform, &source.kind, 0.0);
+                    // The video processor's destination rect is on-canvas
+                    // only; a camera box that hangs off the canvas (plan
+                    // 215 E2) keeps the D3D11 scene compositor, which clips.
                     scene_source_rect_pixels(
                         &transform,
                         params.output.video.width,
                         params.output.video.height,
                     )
+                    .and_then(|rect| {
+                        rect.whole_on_canvas(params.output.video.width, params.output.video.height)
+                    })
                     .map(|destination| (destination, scene_crop_from_transform(&transform)))
                 });
             match (preview_camera_frame_source(&state).await, destination) {
@@ -23250,7 +23256,11 @@ fn scene_video_filter(
         let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
             continue;
         };
-        let PixelRect {
+        // Plan 215 E2 (D2): the layer is the UNCUT box at its true size, and
+        // the overlay places it at its true (signed) origin; `overlay` clips
+        // what hangs off the canvas. A mask runs over the whole layer, so a
+        // bigger-than-canvas camera keeps its true circle or corners.
+        let SignedPixelRect {
             x,
             y,
             width: layer_width,
@@ -42861,8 +42871,38 @@ mod tests {
     /// skips with a line where FFmpeg is not on PATH (the Rust CI job).
     #[test]
     fn ffmpeg_legacy_graph_draws_the_screen_crop_fixture() {
+        use crate::scene_geometry::screen_crop_fixture::{expected_samples, transform};
+        ffmpeg_draws_the_screen_fixture(
+            "ffmpeg_legacy_graph_draws_the_screen_crop_fixture",
+            transform(),
+            &expected_samples(),
+        );
+    }
+
+    /// Plan 215 E2 (D2): the legacy FFmpeg graph places the uncut layer at
+    /// its signed origin (`overlay=x=-32:y=-18`) and FFmpeg clips what hangs
+    /// off the canvas: cut, never squashed, like the compositor.
+    #[test]
+    fn ffmpeg_legacy_graph_cuts_the_screen_beyond_the_canvas() {
+        use crate::scene_geometry::screen_beyond_canvas_fixture::{expected_samples, transform};
+        ffmpeg_draws_the_screen_fixture(
+            "ffmpeg_legacy_graph_cuts_the_screen_beyond_the_canvas",
+            transform(),
+            &expected_samples(),
+        );
+    }
+
+    /// The scene graph for one screen source at `transform` on a 128x72
+    /// canvas, run on the fixture picture in a real FFmpeg, and the samples
+    /// read back; skips with a line where FFmpeg is not on PATH (the Rust CI
+    /// job).
+    fn ffmpeg_draws_the_screen_fixture(
+        name: &str,
+        transform: crate::protocol::SceneTransform,
+        samples: &[((f64, f64), [u8; 3])],
+    ) {
         use crate::scene_geometry::screen_crop_fixture::{
-            SOURCE_HEIGHT, SOURCE_WIDTH, expected_samples, sample_pixel, source_bgra, transform,
+            SOURCE_HEIGHT, SOURCE_WIDTH, sample_pixel, source_bgra,
         };
         use std::io::Write as _;
         let ffmpeg_runs = std::process::Command::new("ffmpeg")
@@ -42872,9 +42912,7 @@ mod tests {
             .status()
             .is_ok_and(|status| status.success());
         if !ffmpeg_runs {
-            eprintln!(
-                "ffmpeg_legacy_graph_draws_the_screen_crop_fixture: skipped, ffmpeg is not on PATH"
-            );
+            eprintln!("{name}: skipped, ffmpeg is not on PATH");
             return;
         }
         let (width, height) = (128_u32, 72_u32);
@@ -42886,7 +42924,7 @@ mod tests {
         let scene = scene_with_sources(vec![scene_source(
             "source:base",
             SceneSourceKind::Screen,
-            transform(),
+            transform,
             true,
         )]);
         let graph = scene_video_filter(
@@ -42932,7 +42970,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(output.stdout.len(), (width * height * 3) as usize);
-        for (point, expected) in expected_samples() {
+        for &(point, expected) in samples {
             let (x, y) = sample_pixel(point, width, height);
             let offset = (y * width as usize + x) * 3;
             let actual = &output.stdout[offset..offset + 3];
@@ -42943,9 +42981,46 @@ mod tests {
                     .all(
                         |(actual, expected)| (i16::from(*actual) - i16::from(expected)).abs() <= 12
                     ),
-                "ffmpeg: at {point:?} ({x}, {y}) expected {expected:?}, got {actual:?}"
+                "{name}: at {point:?} ({x}, {y}) expected {expected:?}, got {actual:?}"
             );
         }
+    }
+
+    /// Plan 215 E2: the graph itself, without FFmpeg: the layer keeps its
+    /// true size and the overlay's x and y go negative.
+    #[test]
+    fn scene_filter_places_an_oversized_layer_at_its_signed_origin() {
+        use crate::scene_geometry::screen_beyond_canvas_fixture::transform;
+        let mut params = base_params(true, false);
+        params.output.video.width = 128;
+        params.output.video.height = 72;
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        let scene = scene_with_sources(vec![scene_source(
+            "source:base",
+            SceneSourceKind::Screen,
+            transform(),
+            true,
+        )]);
+        let graph = scene_video_filter(
+            &scene,
+            &CaptureInputs {
+                video: VideoInput::MacScreen { index: 3 },
+                camera_index: None,
+                microphone: None,
+            },
+            &InputLayout {
+                video_input_index: 0,
+                camera_input_index: None,
+                screen_overlay_input_index: None,
+                audio_inputs: Vec::new(),
+                microphone_graph_gain: false,
+                microphone_is_linux_pulse: false,
+            },
+            &params,
+        );
+        assert!(graph.contains("scale=192:108"), "{graph}");
+        assert!(graph.contains("overlay=x=-32:y=-18:"), "{graph}");
     }
 
     #[test]

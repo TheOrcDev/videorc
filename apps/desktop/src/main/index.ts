@@ -305,6 +305,7 @@ import {
   validateSmokeBackendRpcRequest,
   validateSmokeCommentsSnapshotParams,
   validateSmokeCommentsDeltaParams,
+  validateSmokeProofSurfaceInputEvents,
   validateSmokeResourceAuthorization
 } from './smoke-command-security'
 import { runTimedBoundsStorm, timeSmokeAction } from './smoke-window-bounds-storm'
@@ -419,7 +420,11 @@ import {
   type DockSlotReport,
   type PreviewWindowMode
 } from './preview-dock'
-import { InWindowProofSurface, type ProofSurfaceHost } from './in-window-proof-surface'
+import {
+  InWindowProofSurface,
+  proofSurfaceHostNote,
+  type ProofSurfaceHost
+} from './in-window-proof-surface'
 import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_FETCH_TIMEOUT_MS,
@@ -534,6 +539,7 @@ import {
   type PresentingWatchState,
   type WatchdogRunToken
 } from './native-preview-first-frame'
+import { FirstFrameDecisionLog, firstFrameSnapshotEvidence } from './first-frame-decisions'
 import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
 import { PREVIEW_SURFACE_STAGE_RUNTIME_SCRIPT } from './preview-surface-stage'
 import {
@@ -616,8 +622,11 @@ import {
   sanitizeRendererPreviewSurfaceStatus
 } from '../shared/native-preview-bounds'
 import {
+  previewDockedInsideMainWindow,
+  proofSurfaceHostedInWindowOn,
   proofSurfaceParentWindow,
-  withTrustedPreviewWindowStacking
+  withTrustedPreviewWindowStacking,
+  type NativePreviewRealSurfaceDriverKind
 } from './native-preview-window-stacking'
 import {
   accountCoalescedPreviewFrame,
@@ -1593,7 +1602,6 @@ function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
     void controller.activate()
   }
 }
-type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
 const nativePreviewRealSurfaceDriverLoad = loadNativePreviewPrimaryDriver()
 const NATIVE_PREVIEW_HANDOFF_SAMPLE_LIMIT = 900
 const NATIVE_PREVIEW_MAIN_SCENE_MISMATCH_MESSAGE_MS = 250
@@ -1674,6 +1682,9 @@ let firstFrameWatchdogMode: 'first-frame' | 'presenting-watch' = 'first-frame'
 let presentingWatch: PresentingWatchState = emptyPresentingWatch()
 let presentingWatchLastKind: PresentingAssessment['kind'] = 'presenting'
 let nativePreviewProofPendingStartedAtMs: number | null = null
+// Plan 216 D3: the watchdog's last decisions and what it saw, for the support
+// bundle (runtimeInfo.firstFrameDecisions); its log lines never reach it.
+const firstFrameDecisions = new FirstFrameDecisionLog()
 
 function startFirstFrameWatchdog(): void {
   stopFirstFrameWatchdog()
@@ -1960,6 +1971,7 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
         setFirstFrameStatus('met', reason)
         updatePreviewWindowWaitDetail(null)
         logBackend('info', '[proof-preview] presentation watchdog is live')
+        firstFrameDecisions.record({ watch: 'proof-preview', decision: 'met', reason })
       }
     } else if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
       const pendingElapsedMs = Math.max(0, nowMs - pendingStartedAtMs)
@@ -1971,6 +1983,16 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'fallback',
+        reason,
+        evidence: {
+          sourceFrameHistoryComplete,
+          sourceFrameAgeMs: sourceFrameAgeMs ?? null,
+          pendingElapsedMs
+        }
+      })
     }
 
     syncPreviewSupervisorSurface(
@@ -2074,6 +2096,11 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       case 'met':
         setFirstFrameStatus('met')
         updatePreviewWindowWaitDetail(null)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'met',
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         // Contract met ≠ done: keep ticking as the presenting watch so a
         // mid-session stall (dead pump, suspended helper, lost surface)
         // self-heals instead of showing the placeholder until relaunch.
@@ -2089,12 +2116,25 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
         setFirstFrameStatus('healing', assessment.reason)
         updatePreviewWindowWaitDetail(assessment.reason)
         logBackend('info', `[first-frame] healing: ${assessment.action}: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'heal',
+          action: assessment.action,
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         runFirstFrameHealingAction(assessment.action, compositor)
         return
       case 'fallback':
         setFirstFrameStatus('fallback', assessment.reason)
         updatePreviewWindowWaitDetail(`Preview could not start natively: ${assessment.reason}`)
         logBackend('warn', `[first-frame] contract failed: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'fallback',
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         stopFirstFrameWatchdog(watchdogRun)
         return
     }
@@ -2127,6 +2167,11 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
         setFirstFrameStatus('met')
         updatePreviewWindowWaitDetail(null)
         logBackend('info', '[preview-watch] presenting recovered')
+        firstFrameDecisions.record({
+          watch: 'presenting-watch',
+          decision: 'recovered',
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
       }
       return
     case 'observing':
@@ -2137,6 +2182,16 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
       setFirstFrameStatus('healing', assessment.reason)
       updatePreviewWindowWaitDetail(assessment.reason)
       logBackend('info', `[preview-watch] healing: ${assessment.action}: ${assessment.reason}`)
+      firstFrameDecisions.record({
+        watch: 'presenting-watch',
+        decision: 'heal',
+        action: assessment.action,
+        reason: assessment.reason,
+        evidence: firstFrameSnapshotEvidence(snapshot, {
+          brokenTicks: watch.brokenTicks,
+          stallElapsedMs: watch.stallElapsedMs
+        })
+      })
       runFirstFrameHealingAction(assessment.action, null)
       return
     case 'stalled':
@@ -2144,6 +2199,15 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
         setFirstFrameStatus('fallback', assessment.reason)
         updatePreviewWindowWaitDetail(`Preview stalled: ${assessment.reason}`)
         logBackend('warn', `[preview-watch] stalled after healing exhausted: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'presenting-watch',
+          decision: 'stalled',
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot, {
+            brokenTicks: watch.brokenTicks,
+            stallElapsedMs: watch.stallElapsedMs
+          })
+        })
       }
       return
   }
@@ -4735,17 +4799,20 @@ function dockVisibilityDecision(): ReturnType<typeof decideDockVisibility> {
 }
 
 // The docked surface lives INSIDE the main window, and the preview
-// BrowserWindow stays hidden and only owns the lifecycle: on Linux the proof
-// surface is a view in the window (in-window-proof-surface.ts); on macOS the
-// in-process CAMetalLayer is a sublayer of the main window's own view at the
-// slot (plan 213 D3), so there is one window, as in OBS, and nothing a tiling
-// window manager can move on its own. The helper-process and external drivers
-// still need the child window they order above.
+// BrowserWindow stays hidden and only owns the lifecycle: on Linux and macOS
+// the proof surface is a view in the window (in-window-proof-surface.ts); on
+// macOS the in-process CAMetalLayer is a sublayer of the main window's own
+// view at the slot (plan 213 D3), so there is one window, as in OBS, nothing a
+// tiling window manager can move on its own, and no window hit-testing between
+// the mouse and the Scene canvas (plan 216 D4). The helper-process and
+// external drivers still need the child window they order above
+// (native-preview-window-stacking.ts has the rule and its tests).
 function previewDockedInWindow(): boolean {
-  return (
-    currentPreviewWindowMode() === 'docked' &&
-    (proofSurfaceHostedInWindow || nativePreviewLayerHostedInMainWindow())
-  )
+  return previewDockedInsideMainWindow({
+    mode: currentPreviewWindowMode(),
+    platform: process.platform,
+    driverKind: nativePreviewRealSurfaceDriverKind
+  })
 }
 
 function nativePreviewLayerHostedInMainWindow(): boolean {
@@ -7093,11 +7160,16 @@ function syncProofSurfaceParent(surface: ProofSurfaceHost): void {
   }
 }
 
-// Linux hosts the proof surface inside its window (in-window-proof-surface.ts):
-// Wayland compositors ignore the absolute frames a separate surface window and
-// the docked preview window ask for, so both landed wherever the compositor
-// chose — centred over the app, or re-tiled under Hyprland.
-const proofSurfaceHostedInWindow = process.platform === 'linux'
+// Linux and macOS host the proof surface inside its window
+// (in-window-proof-surface.ts). Linux: Wayland compositors ignore the absolute
+// frames a separate surface window and the docked preview window ask for, so
+// both landed wherever the compositor chose — centred over the app, or
+// re-tiled under Hyprland. macOS (plan 216 D4): the separate fallback windows
+// over the Scene canvas were asked to ignore the mouse, and on a streamer's
+// macOS no press or drag crossed them while the arrow keys moved the source;
+// the in-window view forwards its mouse to the canvas instead. Windows keeps
+// the separate opaque window (native-preview-window-stacking.ts says why).
+const proofSurfaceHostedInWindow = proofSurfaceHostedInWindowOn(process.platform)
 
 function proofSurfaceWebPreferences(): Electron.WebPreferences {
   return {
@@ -7118,8 +7190,9 @@ function createProofSurfaceBrowserWindow(): BrowserWindow {
     // GPU process (Windows Insider builds) a transparent window composites
     // NOTHING and the preview reads as a blank canvas even though the <img>
     // polling underneath is fully software-safe. Off macOS the surface is
-    // opaque over a solid dark base; macOS keeps transparency (its real
-    // preview path is the CAMetalLayer helper anyway).
+    // opaque over a solid dark base; macOS kept transparency while it used
+    // this window (its docked fallback is an in-window view since plan 216
+    // D4; the branches stay for the helper-process diagnostic path).
     transparent: isMac,
     focusable: false,
     skipTaskbar: true,
@@ -7143,7 +7216,10 @@ function createProofSurfaceBrowserWindow(): BrowserWindow {
 
 // The docked surface sits in the main window over the Studio slot or Scene
 // canvas; the floating one sits in the preview window under its drag strip.
-// Content protection is a no-op on Linux, and the host window carries its own.
+// The proof-surface role never asks for content protection (the separate
+// window's call was a no-op for it on every platform, window-capture-
+// protection.ts), and the host window carries its own. The opaque base is
+// what the hidden lifecycle window's dark body gave the transparent window.
 function createInWindowProofSurface(): InWindowProofSurface {
   return new InWindowProofSurface({
     createView: () => {
@@ -7336,7 +7412,7 @@ async function createNativePreviewSurface(
     nativePreviewSurfaceScene
       ? 'Electron proof scene preview surface.'
       : 'Synthetic Electron proof preview surface.'
-  }${proofSurfaceHostedInWindow ? ' Hosted inside the app window (Wayland cannot place a separate surface window).' : ''}`
+  }${proofSurfaceHostedInWindow ? proofSurfaceHostNote(process.platform) : ''}`
   nativePreviewSurfaceStatus = {
     ...(preserveNativeSurface ? nativePreviewSurfaceStatus : {}),
     state: 'live',
@@ -7637,6 +7713,7 @@ async function setNativePreviewSurfacesVisible(visible: boolean): Promise<void> 
 // considered only when its explicit diagnostic fallback flag is enabled.
 async function disableNativePreviewRealSurfaceDriver(reason: string): Promise<void> {
   const driver = nativePreviewRealSurfaceDriver
+  const driverKind = nativePreviewRealSurfaceDriverKind
   nativePreviewRealSurfaceDriver = null
   nativePreviewRealSurfaceDriverKind = null
   nativePreviewRealSurfaceInvalidActivationCount = 0
@@ -7647,6 +7724,16 @@ async function disableNativePreviewRealSurfaceDriver(reason: string): Promise<vo
   nativePreviewHelperDriverRetryAtMs = retryAtMs
   nativePreviewNativeOwnsProofPollingSuppression = false
   nativePreviewNativeFailureFallbackActive = previewWindowIsOpenForSurface()
+  firstFrameDecisions.record({
+    watch: 'presenter',
+    decision: 'presenter-retired',
+    reason,
+    evidence: {
+      driverKind,
+      hadDriver: driver != null,
+      fallbackWindowShown: nativePreviewNativeFailureFallbackActive
+    }
+  })
   clearNativePreviewNativePlacementAuthority()
   try {
     driver?.stop?.()
@@ -8198,6 +8285,11 @@ async function presentNativePreviewSurfaceCompositor(
       setFirstFrameStatus('met', proofSourceLiveReason(process.platform))
       updatePreviewWindowWaitDetail(null)
       logBackend('info', '[proof-preview] source frame delivery is live')
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'met',
+        reason: proofSourceLiveReason(process.platform)
+      })
     }
   } else if (proofSourceAssessment === 'stalled') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
@@ -8205,6 +8297,12 @@ async function presentNativePreviewSurfaceCompositor(
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'stalled',
+        reason,
+        evidence: { sourceFrameAgeMs: sourceFrameAgeMs ?? null }
+      })
     }
   }
   syncPreviewSupervisorSurface(
@@ -12204,6 +12302,15 @@ async function runSmokePreviewMotionCommand(
       throw new Error('Preview window must be open before exercising proof fallback.')
     }
     await disableNativePreviewRealSurfaceDriver('Smoke requested explicit proof fallback.')
+    // Plan 216 C: a probe that drives a real mouse over the fallback needs it
+    // to outlast the retry cooldown, or the next host command brings the
+    // native presenter back mid-drag. `restore-native-preview-driver` ends
+    // the hold.
+    if (typeof params.holdMs === 'number' && Number.isFinite(params.holdMs) && params.holdMs > 0) {
+      const retryAtMs = Date.now() + Math.min(params.holdMs, 10 * 60_000)
+      nativePreviewPrimaryDriverRetryAtMs = retryAtMs
+      nativePreviewHelperDriverRetryAtMs = retryAtMs
+    }
     const window = nativePreviewSurfaceWindow
     return {
       exists: Boolean(window && !window.isDestroyed()),
@@ -12214,6 +12321,50 @@ async function runSmokePreviewMotionCommand(
         ? surfaceWindowPlacement(nativePreviewSurfaceStatus.bounds)
         : null,
       status: nativePreviewSurfaceStatus
+    }
+  }
+
+  // Plan 216 C: the presenting watchdog's `reset-native-path`, run on request.
+  // The retry cooldowns clear and the presenter is resolved again, so a probe
+  // that forced the proof fallback leaves the app back on its native path.
+  if (command === 'restore-native-preview-driver') {
+    if (!previewWindowIsOpenForSurface()) {
+      throw new Error('Preview window must be open before restoring the native presenter.')
+    }
+    await resetNativePreviewRealSurfaceDriver('Smoke restored the native presenter.')
+    return {
+      ...previewWindowState(),
+      realDriverActive: Boolean(nativePreviewRealSurfaceDriver),
+      realDriverKind: nativePreviewRealSurfaceDriverKind,
+      nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
+      transport: nativePreviewSurfaceStatus.transport
+    }
+  }
+
+  // Plan 216 C: drive the fallback surface through its own web contents, the
+  // way real mouse input reaches a view (Chromium input pipeline, then
+  // `before-mouse-event`), on a host that refuses HID posting (no
+  // Accessibility grant for the probe terminal). Points are surface-local.
+  if (command === 'send-input-to-proof-surface') {
+    const surface = nativePreviewSurfaceWindow
+    if (!surface || surface.isDestroyed() || surface.webContents.isDestroyed()) {
+      throw new Error('Proof surface is not open.')
+    }
+    const events = validateSmokeProofSurfaceInputEvents(params.events)
+    if (!events) {
+      throw new Error('Invalid proof-surface input events.')
+    }
+    for (const event of events) {
+      surface.webContents.sendInputEvent(event)
+      await delay(30)
+    }
+    return {
+      sent: events.length,
+      hostedInWindow: surface instanceof InWindowProofSurface,
+      forwardedInput:
+        surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
+      lastObserved: surface instanceof InWindowProofSurface ? surface.lastObservedInput() : null,
+      bounds: surface.getBounds()
     }
   }
 
@@ -12444,7 +12595,8 @@ async function runSmokePreviewMotionCommand(
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
         bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null,
-        // Linux: the surface is a view inside this window, not a window of its own.
+        // Linux and macOS: the surface is a view inside this window, not a
+        // window of its own (plan 216 C asserts 'main' on the proof fallback).
         hostedInWindow:
           surface instanceof InWindowProofSurface
             ? surface.hostWindow() === mainWindow
@@ -12453,6 +12605,8 @@ async function runSmokePreviewMotionCommand(
                 ? 'preview'
                 : 'detached'
             : null,
+        forwardedInput:
+          surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
         ...smokeNativeWindowIdentity(surface instanceof BrowserWindow ? surface : null),
         captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(
           surface instanceof BrowserWindow ? surface : null
@@ -15143,6 +15297,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
       retryAttempts: gpuFallbackState?.retryAttempts ?? gpuFallbackLaunchState?.retryAttempts ?? 0
     },
     backendCrashes: backendCrashRecords,
+    firstFrameDecisions: firstFrameDecisions.snapshot(),
     windowGlass: mainWindowGlassInfo(),
     env: process.env
   })
@@ -16711,7 +16866,10 @@ app.whenReady().then(async () => {
       platform: process.platform,
       openExternal: (url) => shell.openExternal(url),
       deactivateCameraExtension: () => cameraExtension().deactivate(),
-      loadModule: () => loadVideorcCameraModule()
+      loadModule: () => loadVideorcCameraModule(),
+      platformHidden: async () =>
+        (await requestBackendAdmin<VirtualCameraStatus>('virtualCamera.status')).platformStep ===
+        'unsupported'
     })
   )
   secureIpcHandle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>
@@ -17234,6 +17392,27 @@ app.whenReady().then(async () => {
       mainWindow.show()
       mainWindow.focus()
       sendElectronEvent(mainWindow.webContents, 'livestream:open-destination', { targetId })
+      return true
+    }
+  )
+  // Plan 215 A3: "Sign in to Videorc" on a chat row that waits on it. Main
+  // shows the main window and asks it to start the sign-in it owns (the same
+  // door as the sidebar's Sign in); the Chat window never sees the authorize
+  // URL or the intent.
+  secureIpcHandle(
+    'comments-window:sign-in-videorc',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can ask for the Videorc sign-in.')
+      }
+      commentsCommandRequestId(value)
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        return false
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'account:sign-in-request', undefined)
       return true
     }
   )

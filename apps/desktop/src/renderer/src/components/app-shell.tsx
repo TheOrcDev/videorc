@@ -42,6 +42,7 @@ import { pageChunk, useRenderPageWhenLoaded, type PageLoad } from '@/lib/page-ch
 import { PAGE_CONTAINER } from '@/lib/page-layout'
 import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
 import { shortcutAccelerator } from '@/lib/shortcuts'
+import { beginVideorcSignIn } from '@/lib/videorc-web-links'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
   isBuddyTabId,
@@ -203,6 +204,7 @@ function AppShellContent(): ReactElement {
     wsStatus,
     runtimeInfo,
     entitlementTier,
+    accountNeedsSignIn,
     previewWindowOpen,
     togglePreviewWindow,
     notesWindowOpen,
@@ -517,6 +519,14 @@ function AppShellContent(): ReactElement {
     return off
   }, [openLivestream])
 
+  // Plan 215 A3: "Sign in to Videorc" in the Stream Manager starts the
+  // account sign-in this window owns (main has shown the window), the same
+  // door as the sidebar's Sign in.
+  useEffect(() => {
+    const off = window.videorc?.onAccountSignInRequest?.(() => beginVideorcSignIn())
+    return off
+  }, [])
+
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
       const request = readCleanCutOpenRequest((event as CustomEvent<unknown>).detail)
@@ -575,6 +585,7 @@ function AppShellContent(): ReactElement {
             active={active}
             activeStudioPanel={isStudioPanel(active) ? active : null}
             accountTier={entitlementTier}
+            accountNeedsSignIn={accountNeedsSignIn}
             // A click on a row keeps the focus on the row; every other way to
             // a page moves it to the page title.
             onSelect={(tab) => setActive(tab, { focusTitle: false })}

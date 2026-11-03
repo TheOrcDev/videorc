@@ -5907,8 +5907,9 @@ mod tests {
     }
 
     /// D7: the pet hanging off the canvas edge is clipped by the rasterizer
-    /// (its square stays whole), where an ordinary layer is squashed into
-    /// the canvas by the planner.
+    /// (its square stays whole). Since plan 215 E an ordinary layer is cut
+    /// the same way: the planner keeps its uncut box and never squashes it
+    /// into the canvas.
     #[test]
     fn windows_d3d11_buddy_sprite_clips_at_the_canvas_edge_instead_of_squashing() {
         use crate::windows_d3d11_compositor::{
@@ -5939,12 +5940,15 @@ mod tests {
             x + w > 1.0,
             "it hangs off the right edge; the rasterizer clips it"
         );
-        let mut squashed = layer;
-        squashed.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
-        squashed.effects.sprite = None;
-        let ordinary = plan_one_layer(squashed, (1280, 720));
+        let mut plain = layer;
+        plain.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
+        plain.effects.sprite = None;
+        let ordinary = plan_one_layer(plain, (1280, 720));
+        let [ordinary_x, _, ordinary_w, _] = ordinary.destination_normalized;
+        assert!((ordinary_x - 1200.0 / 1280.0).abs() < 1e-6);
         assert!(
-            ordinary.destination_normalized[0] + ordinary.destination_normalized[2] <= 1.0 + 1e-6
+            (ordinary_w - 120.0 / 1280.0).abs() < 1e-6,
+            "an ordinary layer is cut at the edge, never squashed (plan 215 E)"
         );
         // A sprite transform on any other kind is refused.
         let mut stray = layer;

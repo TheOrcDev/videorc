@@ -1,5 +1,18 @@
 # Implementation Plans
 
+- 2026-11-03: [Plan 216](216-freeform-screen-box-and-drag.md), a streamer's
+  bug report with a video and a support bundle (0.18.0, all three bugs still
+  on main). EXECUTING; the owner took D1 to D5 as recommended:
+  - A: a rearrangement (Freeform, a move, Fill/Fit) never waits for a source
+    already in the scene; their camera said "live" but sent no frames, so
+    Freeform failed after 15 s. One "Switching…" label, a named failure,
+    and the bundle keeps recent errors.
+  - B: in Freeform the screen's box is its picture (one picture-rect rule in
+    Rust and TypeScript), on top of plan 215 E and before 215 F.
+  - C: on macOS the fallback preview lives inside the main window, as on
+    Linux, so the canvas drags; a real-mouse probe gates it.
+  - D: why their Mac had a silent camera and a fallback preview (needs the
+    streamer).
 - 2026-11-03: [Plan 215](215-streamer-list-2026-11-02.md), a streamer's
   list from 2026-11-02. Seven workstreams, one PR each:
   - A: X chat names the missing Videorc sign-in, warns before Go Live, and
@@ -39,15 +52,17 @@
 
   No audio (a virtual microphone is a separate, harder project).
 
-  **EXECUTING** 2026-11-03: the owner said "execute the entire plan and
-  create a pr", so D1 to D14 are as recommended.
+  **MERGED** 2026-11-03 as #1091 (`bc84c35ec`): A, B, D, E and F, with
+  D1 to D14 as recommended.
   - P0a is a go on macOS 26: Xcode issued the one profile, a notarized test
     camera showed a pushed picture in Chrome, and a re-signed app launched
     with no AMFI kill.
-  - PR 1 carries A, B, D, E and F. Linux is hidden until P0c. Windows (C)
-    follows in its own PR, hidden until P0b.
-  - Owner rule: no smokes or app runs before main. The PR lists them as
-    owed.
+  - Linux is hidden until P0c. Windows (C) follows in its own PR, hidden
+    until P0b. The review's fixes are in a follow-up PR.
+  - Owed on main (the owner's rule: no smokes or app runs before main):
+    `smoke:virtual-camera`, the recording-studio and record-latency
+    smokes, a signed build in /Applications, and Meet, Zoom and FaceTime by
+    eye.
 
 - 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
   feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,

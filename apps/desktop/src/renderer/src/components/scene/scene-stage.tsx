@@ -305,6 +305,7 @@ export function SceneStage({
     STAGE_W / (Number.isFinite(outputAspect) && outputAspect > 0 ? outputAspect : 16 / 9)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const clipId = useId()
+  const gutterClipId = useId()
   const [failedBackgroundAssetId, setFailedBackgroundAssetId] = useState<string | null>(null)
   const backgroundUrl =
     background && background.assetId !== failedBackgroundAssetId
@@ -972,6 +973,17 @@ export function SceneStage({
               <clipPath id={clipId}>
                 <rect x={0} y={0} width={STAGE_W} height={stageH} rx={canvasRadius} />
               </clipPath>
+              {/* Plan 215 E3 (D2): a box may hang off the canvas by up to
+                  three canvases; its selection frame and handles stop at the
+                  handle gutter, where the hit targets live anyway. */}
+              <clipPath id={gutterClipId}>
+                <rect
+                  x={-gutter}
+                  y={-gutter}
+                  width={STAGE_W + gutter * 2}
+                  height={stageH + gutter * 2}
+                />
+              </clipPath>
             </defs>
             <rect
               data-videorc-stage-canvas
@@ -1283,27 +1295,29 @@ export function SceneStage({
                 />
               ))}
             </g>
-            {selectedSource ? (
-              <StageSelection
-                rect={displayed(selectedSource)}
-                activeHandle={activeHandle}
-                stageH={stageH}
-                scale={pixelScale}
-                enabled={resizeEnabled && editable(selectedSource)}
-                hitOnly={chromeHidden}
-                onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
-              />
-            ) : selectedOverlay ? (
-              <StageSelection
-                rect={displayedOverlay(selectedOverlay)}
-                activeHandle={activeHandle}
-                stageH={stageH}
-                scale={pixelScale}
-                enabled={Boolean(overlays?.editable)}
-                hitOnly={chromeHidden}
-                onHandle={(handle, event) => beginOverlayGesture(selectedOverlay, handle, event)}
-              />
-            ) : null}
+            <g clipPath={`url(#${gutterClipId})`}>
+              {selectedSource ? (
+                <StageSelection
+                  rect={displayed(selectedSource)}
+                  activeHandle={activeHandle}
+                  stageH={stageH}
+                  scale={pixelScale}
+                  enabled={resizeEnabled && editable(selectedSource)}
+                  hitOnly={chromeHidden}
+                  onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
+                />
+              ) : selectedOverlay ? (
+                <StageSelection
+                  rect={displayedOverlay(selectedOverlay)}
+                  activeHandle={activeHandle}
+                  stageH={stageH}
+                  scale={pixelScale}
+                  enabled={Boolean(overlays?.editable)}
+                  hitOnly={chromeHidden}
+                  onHandle={(handle, event) => beginOverlayGesture(selectedOverlay, handle, event)}
+                />
+              ) : null}
+            </g>
             {/* Keep the edge hit targets within a reserved, unobstructed gutter. */}
             <rect
               x={-gutter}

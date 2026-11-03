@@ -192,6 +192,9 @@ export const IPC_INVOKE_ROLES = {
   // "Use Sign in" on an X stream-key destination (plan 213 J1): the Chat
   // window asks, main shows the main window on that destination.
   'comments-window:open-destination': MAIN_AND_COMMENTS,
+  // "Sign in to Videorc" on a chat row that waits on it (plan 215 A3): the
+  // Chat window asks, main shows the main window, which starts the sign-in.
+  'comments-window:sign-in-videorc': MAIN_AND_COMMENTS,
   // Remove from chat and the removal card's answers (plan 140, S6): the Chat
   // window asks (its handler refuses any other sender), Studio replies.
   'comments-window:moderation': MAIN_AND_COMMENTS,

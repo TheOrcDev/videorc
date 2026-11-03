@@ -66,8 +66,11 @@ pub const VIRTUAL_CAMERA_SETTING_KEY: &str = "virtualCamera";
 /// The lease id the camera arms the preview run under (A3).
 pub const VIRTUAL_CAMERA_LEASE_SESSION_ID: &str = "virtual-camera";
 
-/// How often the output re-reads the sink's viewer count (D13).
-pub const VIEWER_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// How often the output re-reads the sink's viewer count (D13). Short, so
+/// the first app to pick the camera gets the program within a moment and not
+/// a still (plan 214 review). Connect retries keep their own second
+/// (`CONNECT_RETRY_INTERVAL`, gated in `ensure_connected`).
+pub const VIEWER_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// How often a failed sink connect is retried.
 pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -1054,8 +1057,8 @@ impl OutputEngine {
         Duration::from_secs(1) / self.fps.max(1)
     }
 
-    /// Re-read the viewer count about once a second (D13) and hold or
-    /// release the pixel demand with it.
+    /// Re-read the viewer count every `VIEWER_CHECK_INTERVAL` (D13) and hold
+    /// or release the pixel demand with it.
     fn refresh_demand(&mut self, now: Instant) {
         let due = self
             .last_viewer_check
@@ -2094,7 +2097,7 @@ mod tests {
     }
 
     #[test]
-    fn demand_is_held_only_while_a_viewer_holds_the_camera_rechecked_each_second() {
+    fn demand_is_held_only_while_a_viewer_holds_the_camera_rechecked_every_check_interval() {
         let (sink, seen) = FakeSink::new(Some(0));
         let store = cpu_store();
         publish_cpu_frame(&store, 1, 16, 8, 100);
@@ -2108,15 +2111,16 @@ mod tests {
         );
         assert!(!demand.demanded());
         assert_eq!(engine.shared().viewers(), Some(0));
-        // A viewer arrives; the count is re-read only after a second.
+        // A viewer arrives; the count is re-read only after the check
+        // interval (250 ms).
         seen.lock().unwrap().viewers = Some(1);
         assert_eq!(
-            engine.tick(t0 + Duration::from_millis(500)),
+            engine.tick(t0 + Duration::from_millis(200)),
             TickOutcome::Skipped
         );
         assert!(!demand.demanded());
         assert_eq!(
-            engine.tick(t0 + Duration::from_millis(1001)),
+            engine.tick(t0 + VIEWER_CHECK_INTERVAL + Duration::from_millis(1)),
             TickOutcome::Pushed
         );
         assert!(demand.demanded());

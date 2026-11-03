@@ -9501,6 +9501,13 @@ async fn handle_text_message_with_role(
             let signed_out = account::signed_out_account();
             *state.account_session.lock().await = Some(signed_out.clone());
             drop(account_transition);
+            // Plan 215 A5: the account changed; the chat rows between
+            // sessions read the new truth.
+            publish_account_changed(state, &signed_out, protocol::AccountChangeReason::SignedOut);
+            let chat_state = state.clone();
+            tokio::spawn(async move {
+                live_chat::publish_chat_snapshot_after_account_change(&chat_state).await
+            });
             ServerResponse::ok(command.id, signed_out)
         }
         "account.complete_sign_in" => {
@@ -9519,6 +9526,17 @@ async fn handle_text_message_with_role(
                         Ok(resolved) => {
                             *state.account_session.lock().await = Some(resolved.clone());
                             drop(account_transition);
+                            // Plan 215 A5: the account changed. (A dev build
+                            // whose exchange failed resolves signed out.)
+                            publish_account_changed(
+                                state,
+                                &resolved,
+                                if resolved.status == protocol::AccountStatus::SignedIn {
+                                    protocol::AccountChangeReason::SignedIn
+                                } else {
+                                    protocol::AccountChangeReason::SignedOut
+                                },
+                            );
                             let entitlement_state = state.clone();
                             tokio::spawn(async move {
                                 refresh_account_entitlements(&entitlement_state).await
@@ -9528,6 +9546,20 @@ async fn handle_text_message_with_role(
                             let listen_state = state.clone();
                             tokio::spawn(async move {
                                 cohost::resume_listen_after_sign_in(&listen_state).await
+                            });
+                            // Plan 215 A4: X and Kick chat parked on the
+                            // Videorc sign-in attach again, in the running
+                            // session; the stream never restarts. Between
+                            // sessions the chat rows hear the new truth.
+                            let chat_state = state.clone();
+                            tokio::spawn(async move {
+                                if live_chat::reattach_after_videorc_sign_in(&chat_state).await == 0
+                                {
+                                    live_chat::publish_chat_snapshot_after_account_change(
+                                        &chat_state,
+                                    )
+                                    .await;
+                                }
                             });
                             ServerResponse::ok(command.id, resolved)
                         }
@@ -9607,7 +9639,7 @@ async fn handle_text_message_with_role(
                 let session = state.account_session.lock().await;
                 account::current_account(session.as_ref())
             };
-            let (resolved, committed) = match prepared {
+            let (resolved, committed, change) = match prepared {
                 Some(Ok(prepared)) => match account::commit_account_refresh(
                     prepared,
                     state
@@ -9624,20 +9656,30 @@ async fn handle_text_message_with_role(
                         }
                     },
                 ) {
-                    Some(resolved) => (resolved, true),
-                    None => (current, false),
+                    Some(outcome) => (outcome.account, true, outcome.change),
+                    None => (current, false, None),
                 },
                 Some(Err(_)) => {
                     tracing::warn!("Account refresh exceeded its bounded network deadline.");
-                    (current, false)
+                    (current, false, None)
                 }
-                None => (current, false),
+                None => (current, false, None),
             };
             *state.account_session.lock().await = Some(resolved.clone());
             drop(account_transition);
             if committed {
                 let entitlement_state = state.clone();
                 tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
+            }
+            // Plan 215 A5 (D7): the sign-out the server made is news. The
+            // in-memory account is already signed out, so a renderer that
+            // asks account.get on hearing it sees the same.
+            if let Some(reason) = change {
+                publish_account_changed(state, &resolved, reason);
+                let chat_state = state.clone();
+                tokio::spawn(async move {
+                    live_chat::publish_chat_snapshot_after_account_change(&chat_state).await
+                });
             }
             ServerResponse::ok(command.id, resolved)
         }
@@ -12108,6 +12150,7 @@ async fn handle_text_message_with_role(
                 live_chat::chat_capabilities_with_quota(
                     &accounts,
                     crate::youtube_quota::paused_until(state).is_some(),
+                    &account::session_state(),
                 ),
             ),
             Err(error) => {
@@ -12732,7 +12775,12 @@ async fn handle_text_message_with_role(
                         {
                             Ok(()) => ServerResponse::ok(
                                 command.id,
-                                preflight::validate_go_live_preflight(params, &metadata, &accounts),
+                                preflight::validate_go_live_preflight(
+                                    params,
+                                    &metadata,
+                                    &accounts,
+                                    &account::session_state(),
+                                ),
                             ),
                             Err(error) => ServerResponse::error(
                                 command.id,
@@ -14468,6 +14516,26 @@ fn publish_entitlements_updated(state: &AppState) {
     });
 }
 
+/// Every `account.changed` goes out through here (plan 215 A5): the account as
+/// the backend now holds it, and why it changed. The renderer applies the
+/// snapshot and, for the sign-out the server made (`SessionExpired`), says so
+/// (D7). Renderer and main sockets only: remote and phone sockets are locked
+/// to their own lanes, and agents have no socket.
+fn publish_account_changed(
+    state: &AppState,
+    account: &protocol::VideorcAccountSnapshot,
+    reason: protocol::AccountChangeReason,
+) {
+    tracing::info!(?reason, status = ?account.status, "Videorc account changed");
+    state.emit_event(
+        "account.changed",
+        protocol::AccountChangedEvent {
+            account: account.clone(),
+            reason,
+        },
+    );
+}
+
 async fn get_ai_quota() -> Result<protocol::AiQuotaStatus> {
     let token = stored_ai_session_token()?;
     let client = videorc_api::VideorcApiClient::new()?;
@@ -14551,6 +14619,17 @@ async fn export_support_bundle_for_state(
     ffmpeg_path: &str,
 ) -> Result<support_bundle::SupportBundleExportResult> {
     let sessions = state.database.list_sessions(20)?;
+    // Plan 215 A6: the account the app shows, against the store it reads.
+    let account = {
+        let session = state.account_session.lock().await;
+        support_bundle::SupportBundleAccount::from_state(
+            &account::current_account(session.as_ref()),
+            &account::session_state(),
+        )
+    };
+    let live_chat = support_bundle::SupportBundleLiveChat::from_snapshot(
+        &live_chat::current_status(state).await,
+    );
     support_bundle::export_support_bundle(support_bundle::SupportBundleExportInput {
         output_directory: params.output_directory.map(PathBuf::from),
         app_version: params.app_version,
@@ -14575,6 +14654,8 @@ async fn export_support_bundle_for_state(
         sessions,
         performance_check: performance_check::current_state(state).await.result,
         metrics_journal: metrics_journal::support_bundle_lines(),
+        account,
+        live_chat,
     })
 }
 
@@ -20824,6 +20905,52 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    /// Plan 215 A5 (D7): the account change goes out as one event the
+    /// renderer's strict contract accepts, with the reason; the sign-out the
+    /// server made is `session-expired`. Desktop sockets only: it is not a
+    /// LAN projection, and the remote lane's include-list never names it.
+    #[test]
+    fn account_changed_is_one_desktop_event_with_its_reason() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+
+        publish_account_changed(
+            &state,
+            &account::signed_out_account(),
+            protocol::AccountChangeReason::SessionExpired,
+        );
+        let event = events.try_recv().expect("the account change is published");
+        assert_eq!(event.event, "account.changed");
+        assert_eq!(
+            event.payload,
+            json!({ "account": { "status": "signed-out" }, "reason": "session-expired" })
+        );
+
+        publish_account_changed(
+            &state,
+            &protocol::VideorcAccountSnapshot {
+                status: protocol::AccountStatus::SignedIn,
+                username: Some("orc_dev".to_string()),
+                display_name: Some("Orc Dev".to_string()),
+                email: Some("orc@videorc.com".to_string()),
+                avatar_url: None,
+            },
+            protocol::AccountChangeReason::SignedIn,
+        );
+        let event = events.try_recv().expect("the sign-in is published");
+        assert_eq!(event.event, "account.changed");
+        assert_eq!(event.payload["reason"], json!("signed-in"));
+        assert_eq!(event.payload["account"]["username"], json!("orc_dev"));
+        assert!(
+            event.payload["account"].get("avatarUrl").is_none(),
+            "an absent avatar sends no key"
+        );
+
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&"account.changed"));
+        assert!(ConnectionEventFilter::for_role(BackendRole::Renderer).allows("account.changed"));
+        assert!(ConnectionEventFilter::for_role(BackendRole::Admin).allows("account.changed"));
     }
 
     #[cfg(all(unix, debug_assertions))]

@@ -323,6 +323,9 @@ export interface StreamManagerProps {
   /** "Use Sign in" on a stream-key destination's chat row (plan 213 J1):
    * the main window opens that destination in Livestream → Setup. */
   onUseSignIn?: (targetId: string) => void
+  /** "Sign in to Videorc" on a chat row the relay parked (plan 215 A3): the
+   * main window starts the account sign-in. */
+  onSignInToVideorc?: () => void
   /** Auto-show Activity celebrations on stream (plan 156): the one switch,
    * owned by Electron main; the Studio renderer runs the engine. */
   autoShowActivity?: boolean
@@ -446,6 +449,7 @@ export function StreamManager({
   onOpenPreview,
   onShowFollowNames,
   onUseSignIn,
+  onSignInToVideorc,
   autoShowActivity = false,
   onAutoShowActivityChange,
   onReconnectScopes,
@@ -1287,6 +1291,7 @@ export function StreamManager({
             onUseSignIn={inHistory ? undefined : onUseSignIn}
             chatOnStream={inHistory ? undefined : chatOnStream}
             onChatOnStreamChange={inHistory ? undefined : onChatOnStream}
+            onSignInToVideorc={inHistory ? undefined : onSignInToVideorc}
             onSend={onSend}
           />
         </div>

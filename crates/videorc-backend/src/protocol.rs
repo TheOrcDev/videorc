@@ -205,6 +205,27 @@ pub struct VideorcAccountSnapshot {
     pub avatar_url: Option<String>,
 }
 
+/// Why the desktop's Videorc account changed (plan 215 A5). `SessionExpired`
+/// is the sign-out the server made: a refresh answered 401, so the stored
+/// session was dropped. Mirrored in `shared/backend.ts` (`AccountChangeReason`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountChangeReason {
+    SignedIn,
+    SignedOut,
+    SessionExpired,
+}
+
+/// The `account.changed` event (plan 215 A5): the account as the backend now
+/// holds it, and why it changed. Mirrored in `shared/backend.ts`
+/// (`AccountChangedEvent`) and the `backend-rpc-contract.ts` event schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountChangedEvent {
+    pub account: VideorcAccountSnapshot,
+    pub reason: AccountChangeReason,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendLogEvent {
@@ -4308,6 +4329,12 @@ pub struct PreviewCameraStatus {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Plan 216 D2: `Some(true)` while the session has acked Live but has sent
+    /// no frame for longer than `CAMERA_FIRST_FRAME_REUSE_GRACE` (the
+    /// frameless-zombie rule capture recovery uses). Absent otherwise, so
+    /// Sources and Health can name a camera that is on but sends no video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_video: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
