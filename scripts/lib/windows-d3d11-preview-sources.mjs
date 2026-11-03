@@ -54,6 +54,10 @@ export async function configureWindowsD3d11RendererSourcesWhenListed(
   deadline,
   retryMs = 250
 ) {
+  // A NaN deadline (an unparseable VIDEORC_SMOKE_TIMEOUT_MS) never passes.
+  if (!Number.isFinite(deadline)) {
+    throw new TypeError(`Windows D3D11 source configure deadline is not a finite time: ${deadline}`)
+  }
   for (;;) {
     try {
       return await configureWindowsD3d11RendererSources(smokeCommand, screenId)

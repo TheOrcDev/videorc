@@ -113,6 +113,25 @@ test('configuring waits for the renderer to list the screen, and only for that',
   )
 })
 
+test('configuring refuses a deadline that is not a finite time', async () => {
+  let calls = 0
+  for (const deadline of [Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      configureWindowsD3d11RendererSourcesWhenListed(
+        async () => {
+          calls += 1
+          return configuredState()
+        },
+        SCREEN,
+        deadline,
+        1
+      ),
+      /not a finite time/
+    )
+  }
+  assert.equal(calls, 0)
+})
+
 test('a retry wait longer than the time left still ends at the deadline', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
   const notListed = new Error(
