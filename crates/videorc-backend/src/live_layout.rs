@@ -259,8 +259,31 @@ fn already_composed_sources(installed: Option<&Scene>, target: &Scene) -> SceneS
     composed
 }
 
+/// The composed sources whose capture runs now (starting or live, frames or
+/// not). A composed source that is stopped, failed or missing is started and
+/// waited for as before: a rearrangement may be the only thing that starts
+/// it, and the recovery driver only restarts a capture that runs.
+fn composed_and_running(
+    composed: SceneSourceNeeds,
+    camera: &PreviewCameraStatus,
+    screen: &PreviewScreenStatus,
+) -> SceneSourceNeeds {
+    SceneSourceNeeds {
+        camera: composed.camera
+            && matches!(
+                camera.state,
+                PreviewCameraState::Starting | PreviewCameraState::Live
+            ),
+        screen: composed.screen
+            && matches!(
+                screen.state,
+                PreviewScreenState::Starting | PreviewScreenState::Live
+            ),
+    }
+}
+
 /// What a transaction must see a fresh frame from before it commits: `needs`
-/// minus what the program already composes (plan 216 D1). A source the
+/// minus what the program already composes and captures (plan 216 D1). A source the
 /// change ADDS waits for its first frame as always; one the program already
 /// shows is the recovery driver's problem when it stalls, so a rearrangement
 /// of the same sources (Freeform, a preset that keeps them, Fit/Fill) commits
@@ -1098,10 +1121,16 @@ async fn apply_scene_transaction(
     // Plan 216 D1: readiness covers only what this change adds. The full
     // `needs` still owns the intent, retirement and the geometry resync below.
     let readiness = {
+        let camera = preview_camera_status(state).await;
+        let screen = preview_screen_status(state).await;
         let compositor = state.compositor.lock().await;
         readiness_needs(
             needs,
-            already_composed_sources(compositor.composed_program_scene(), &scene),
+            composed_and_running(
+                already_composed_sources(compositor.composed_program_scene(), &scene),
+                &camera,
+                &screen,
+            ),
         )
     };
 
@@ -6068,6 +6097,56 @@ mod tests {
                 camera: true,
                 screen: false
             }
+        );
+    }
+
+    /// Plan 216 A2: a composed source is skipped only while its capture runs.
+    /// A frameless Live camera (the streamer's) is skipped; a failed or
+    /// stopped one is started and waited for, since nothing else starts it.
+    #[test]
+    fn readiness_skips_a_composed_source_only_while_it_captures() {
+        let composed = SceneSourceNeeds {
+            camera: true,
+            screen: true,
+        };
+        let frameless = live_camera_status("camera:a", None, 0, None);
+        let screen = live_screen_status("screen:screencapturekit:1", Some(10), 30, Some(30));
+        assert_eq!(
+            composed_and_running(composed, &frameless, &screen),
+            composed
+        );
+
+        let mut starting = frameless.clone();
+        starting.state = PreviewCameraState::Starting;
+        assert!(composed_and_running(composed, &starting, &screen).camera);
+
+        for stopped in [
+            PreviewCameraState::Disconnected,
+            PreviewCameraState::Failed,
+            PreviewCameraState::DeviceMissing,
+            PreviewCameraState::PermissionNeeded,
+        ] {
+            let mut camera = frameless.clone();
+            camera.state = stopped.clone();
+            assert!(
+                !composed_and_running(composed, &camera, &screen).camera,
+                "{stopped:?} must be started and waited for"
+            );
+        }
+
+        let mut failed_screen = screen.clone();
+        failed_screen.state = PreviewScreenState::Failed;
+        assert_eq!(
+            composed_and_running(composed, &frameless, &failed_screen),
+            SceneSourceNeeds {
+                camera: true,
+                screen: false
+            }
+        );
+        // Nothing composed: nothing skipped, whatever runs.
+        assert_eq!(
+            composed_and_running(SceneSourceNeeds::default(), &frameless, &screen),
+            SceneSourceNeeds::default()
         );
     }
 
