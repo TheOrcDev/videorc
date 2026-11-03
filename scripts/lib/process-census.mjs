@@ -98,21 +98,27 @@ export function processTreeRows(processTable, rootPid) {
 }
 
 /**
- * Every member of POSIX process group `pgid` plus all of their descendants.
- * pnpm 11 starts each script it runs in a process group of its own, so in
- * `pnpm dev` the launched group holds only the outer pnpm while Electron,
- * its renderers and the backend sit in a nested group. Following ancestry
- * from the launched group keeps them in the census (a pgid-only filter
- * counted no Electron main or renderer on Linux).
+ * Every member of POSIX process group `pgid`, plus the nested groups the
+ * package manager made. pnpm 11 starts each script it runs in a process group
+ * of its own, so in `pnpm dev` the launched group can hold only the outer pnpm
+ * while Electron, its renderers and the backend sit in a nested group (Linux,
+ * 2026-11-03: the lifecycle gate counted no Electron main or renderer). The
+ * walk crosses into a child's new group only when its parent is tooling
+ * (pnpm, a node script runner); a group the app makes itself, such as the
+ * backend's bounded jobs (`process_group(0)` in process_job.rs), stays out of
+ * the census exactly as with a plain pgid filter.
  */
 export function processGroupTreeRows(processTable, pgid) {
   const rootPids = (processTable ?? [])
     .filter((row) => Number.isInteger(row?.pid) && row.pid > 1 && row.pgid === pgid)
     .map((row) => row.pid)
-  return descendantRows(processTable, rootPids)
+  return descendantRows(processTable, rootPids, (child, parent) => {
+    if (child.pgid === parent?.pgid) return true
+    return parent !== undefined && classifyProcess(parent) === 'tooling'
+  })
 }
 
-function descendantRows(processTable, rootPids) {
+function descendantRows(processTable, rootPids, canEnter = () => true) {
   const childrenByParent = new Map()
   for (const row of processTable ?? []) {
     if (!Number.isInteger(row?.pid) || !Number.isInteger(row?.ppid)) {
@@ -130,6 +136,7 @@ function descendantRows(processTable, rootPids) {
     const parentPid = queue.shift()
     for (const child of childrenByParent.get(parentPid) ?? []) {
       if (seen.has(child.pid)) continue
+      if (!canEnter(child, rowsByPid.get(parentPid))) continue
       seen.add(child.pid)
       queue.push(child.pid)
     }

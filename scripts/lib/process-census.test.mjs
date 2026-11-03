@@ -342,9 +342,12 @@ test('a pgid census follows pnpm 11 scripts into their own process groups', asyn
   533   532 520  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
   534   533 520 70000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
   540   530 520 50000 videorc-backend target/debug/videorc-backend
+  550   540 550  8000 ffprobe /repo/vendor/ffmpeg/linux-x64/bin/ffprobe -v error probe.mp4
   600     1 600  9999 electron /opt/other-app/electron .
 `)
 
+  // 550 is a bounded backend job in a group of its own (process_job.rs): the
+  // app made that group, so it stays out exactly as with a plain pgid filter.
   assert.deepEqual(
     processGroupTreeRows(table, 500).map((row) => row.pid),
     [500, 510, 511, 520, 530, 531, 532, 533, 534, 540]
@@ -358,6 +361,23 @@ test('a pgid census follows pnpm 11 scripts into their own process groups', asyn
   assert.equal(census.summary['electron-renderer']?.count, 1)
   assert.equal(census.summary.backend?.count, 1)
   assert.ok(!census.processRows.some((row) => row.pid === 600))
+})
+
+test('a pgid census is unchanged when the app tree already shares the launched group', async () => {
+  // macOS-shaped: Electron and the backend sit in the launched group; the
+  // backend's bounded FFmpeg job made its own group and was never counted.
+  const table = parseProcessTable(`
+  700     1 700 20000 pnpm /opt/homebrew/bin/pnpm dev
+  710   700 700 90000 Electron /repo/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron .
+  711   710 700 70000 Electron Helper (Renderer) /repo/node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer) --type=renderer
+  720   710 700 50000 videorc-backend target/debug/videorc-backend
+  730   720 730 30000 ffmpeg /repo/vendor/ffmpeg/macos/bin/ffmpeg -i in.mov out.mp4
+`)
+
+  assert.deepEqual(
+    processGroupTreeRows(table, 700).map((row) => row.pid),
+    table.filter((row) => row.pgid === 700).map((row) => row.pid)
+  )
 })
 
 test('processTreeRows and rootPid census include the complete Windows app tree', async () => {
