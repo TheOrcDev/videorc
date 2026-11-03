@@ -26,7 +26,11 @@ const REQUIRED_FILES = [
   // signing job's recursive *.exe Authenticode pass provably covers it.
   'resources/videorc-mcp.exe',
   // The WER module the backend registers so fail-fast crashes leave a dump.
-  'resources/videorc_wer_helper.dll'
+  'resources/videorc_wer_helper.dll',
+  // Plan 214 C4: Videorc Camera's media source (the Frame Server loads it)
+  // and the elevated setup exe. Both are signed by the signing job.
+  'resources/videorc_virtual_camera_windows.dll',
+  'resources/videorc-camera-setup.exe'
 ]
 
 export async function createWindowsUnsignedStagingManifest({

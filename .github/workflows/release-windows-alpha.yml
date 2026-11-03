@@ -762,20 +762,23 @@ jobs:
           Import-Module TrustedSigning -RequiredVersion '0.5.0' -Force -ErrorAction Stop
           $unpackedRoot = (Resolve-Path 'apps/desktop/release/win-unpacked').Path
           $executables = @(Get-ChildItem -LiteralPath $unpackedRoot -File -Recurse -Filter '*.exe')
-          if ($executables.Count -lt 4) {
-            throw "Expected at least four packaged executables, found $($executables.Count)."
+          if ($executables.Count -lt 5) {
+            throw "Expected at least five packaged executables, found $($executables.Count)."
           }
           # WerFault.exe loads the WER crash-dump helper into its own process
-          # when the backend crashes, so it is signed too. It is the one DLL
+          # when the backend crashes, so it is signed too. The Windows Frame
+          # Server loads Videorc Camera's media source the same way (plan 214
+          # C4), and its setup exe is in the *.exe pass. These are the DLLs
           # Videorc builds; Electron's own DLLs stay outside this pass.
-          # Get-Item throws if packaging dropped it.
+          # Get-Item throws if packaging dropped one.
           $werHelper = Get-Item -LiteralPath (Join-Path $unpackedRoot 'resources\videorc_wer_helper.dll')
-          $signedFiles = @($executables) + @($werHelper)
+          $cameraSource = Get-Item -LiteralPath (Join-Path $unpackedRoot 'resources\videorc_virtual_camera_windows.dll')
+          $signedFiles = @($executables) + @($werHelper) + @($cameraSource)
           $signingParams = @{
             Endpoint = $env:VIDEORC_WINDOWS_SIGNING_ENDPOINT
             CodeSigningAccountName = $env:VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME
             CertificateProfileName = $env:VIDEORC_WINDOWS_CERTIFICATE_PROFILE_NAME
-            Files = $werHelper.FullName
+            Files = @($werHelper.FullName, $cameraSource.FullName)
             FilesFolder = $unpackedRoot
             FilesFolderFilter = 'exe'
             FilesFolderRecurse = $true

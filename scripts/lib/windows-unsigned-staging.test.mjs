@@ -28,7 +28,9 @@ const requiredFiles = {
   'resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch': 'patch',
   'resources/videorc-backend.exe': 'backend',
   'resources/videorc-mcp.exe': 'bridge',
-  'resources/videorc_wer_helper.dll': 'wer helper'
+  'resources/videorc_wer_helper.dll': 'wer helper',
+  'resources/videorc_virtual_camera_windows.dll': 'camera media source',
+  'resources/videorc-camera-setup.exe': 'camera setup'
 }
 
 const temporaryDirectories = []

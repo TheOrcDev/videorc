@@ -1,0 +1,25 @@
+[package]
+name = "videorc-virtual-camera-windows"
+# The camera module's own version (plan 214 C2): `videorc-camera-setup.exe`
+# installs the DLL under %ProgramData%\Videorc\camera\<version>\ and records
+# it in HKLM; the backend asks for setup again when this differs from what is
+# registered. Bump it when the DLL's behaviour changes.
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+description = "Videorc Camera on Windows 11 (plan 214 C): the Media Foundation media source the Frame Server loads, the shared NV12 frame ring, and the elevated one-time setup."
+
+[lib]
+# cdylib: `videorc_virtual_camera_windows.dll`, the media source the Frame
+# Server loads. rlib: the ring, the section name, the setup layout and the
+# registration the backend and the setup exe share.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "videorc-camera-setup"
+path = "src/bin/videorc_camera_setup.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Variant"] }
+windows-core = "0.62.2"

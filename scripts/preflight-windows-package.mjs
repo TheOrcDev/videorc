@@ -49,6 +49,15 @@ const inputs = [
     remedy: 'pnpm package:backend'
   },
   {
+    // Plan 214 C4: Videorc Camera's media source and its elevated setup exe.
+    path: join(repoRoot, 'target', 'release', 'videorc_virtual_camera_windows.dll'),
+    remedy: 'pnpm package:camera:windows'
+  },
+  {
+    path: join(repoRoot, 'target', 'release', 'videorc-camera-setup.exe'),
+    remedy: 'pnpm package:camera:windows'
+  },
+  {
     path: ffmpegExe,
     remedy: 'pnpm ffmpeg:fetch:windows'
   },

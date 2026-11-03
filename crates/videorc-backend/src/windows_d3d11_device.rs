@@ -2438,6 +2438,15 @@ mod runtime {
         /// Encoder ownership counters survive successful shutdown/removal so
         /// the final authority snapshot includes drain/flush timeout evidence.
         retired_encoder_counters: WindowsD3d11MediaRuntimeCounters,
+        /// Plan 214 C3: the one staging texture readbacks copy through,
+        /// recreated when the size or format changes.
+        readback_staging: Option<ReadbackStaging>,
+    }
+
+    struct ReadbackStaging {
+        dimensions: WindowsD3d11TextureDimensions,
+        format: WindowsD3d11TextureFormat,
+        texture: ID3D11Texture2D,
     }
 
     impl WindowsD3d11MediaRuntimeState {
@@ -2456,6 +2465,7 @@ mod runtime {
                 presenter: None,
                 presenter_last_error: None,
                 retired_encoder_counters: WindowsD3d11MediaRuntimeCounters::default(),
+                readback_staging: None,
             })
         }
     }
@@ -2698,6 +2708,23 @@ mod runtime {
         DestroyPreview {
             reply: SyncSender<Result<bool, WindowsD3d11Error>>,
         },
+        /// Plan 214 C3: copy a published texture into CPU memory through a
+        /// staging texture (Videorc Camera's NV12 writer runs on the CPU).
+        ReadbackTexture {
+            ticket: WindowsD3d11TextureLeaseTicket,
+            reply: SyncSender<Result<WindowsD3d11TextureReadback, WindowsD3d11Error>>,
+        },
+    }
+
+    /// A texture's pixels in system memory, rows tightly packed: BGRA rows
+    /// of `width × 4` bytes, or NV12 rows of `width` bytes (`height` luma
+    /// rows then `height / 2` chroma rows).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct WindowsD3d11TextureReadback {
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        pub(crate) format: WindowsD3d11TextureFormat,
+        pub(crate) bytes: Vec<u8>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3124,6 +3151,17 @@ mod runtime {
         pub(crate) fn destroy_preview(&self) -> Result<bool, WindowsD3d11Error> {
             let (reply, response) = mpsc::sync_channel(1);
             self.enqueue(WindowsD3d11MediaCommand::DestroyPreview { reply })?;
+            receive_response(response)
+        }
+
+        /// Plan 214 C3: the pixels behind a published ticket, copied out on
+        /// the media thread. Waits for the reply (one frame's worth of work).
+        pub(crate) fn readback_texture(
+            &self,
+            ticket: WindowsD3d11TextureLeaseTicket,
+        ) -> Result<WindowsD3d11TextureReadback, WindowsD3d11Error> {
+            let (reply, response) = mpsc::sync_channel(1);
+            self.enqueue(WindowsD3d11MediaCommand::ReadbackTexture { ticket, reply })?;
             receive_response(response)
         }
 
@@ -4084,7 +4122,165 @@ mod runtime {
                 let _ = reply.try_send(Ok(destroyed));
                 false
             }
+            WindowsD3d11MediaCommand::ReadbackTexture { ticket, reply } => {
+                let response = readback_texture_runtime(
+                    generation,
+                    &ticket,
+                    device,
+                    texture_pool,
+                    media_runtime,
+                );
+                // The ticket drops here: its role release follows the copy.
+                drop(ticket);
+                let _ = reply.try_send(response);
+                false
+            }
         }
+    }
+
+    /// Plan 214 C3: copy the ticket's texture into system memory. The copy is
+    /// issued on the immediate context after the composition that produced
+    /// the texture, so it reads the finished frame; `Map` with read access
+    /// waits for the GPU. One staging texture is kept per size and format.
+    fn readback_texture_runtime(
+        generation: u64,
+        ticket: &WindowsD3d11TextureLeaseTicket,
+        device: &mut WindowsD3d11Device,
+        texture_pool: &WindowsD3d11TexturePoolOwner,
+        media_runtime: &mut WindowsD3d11MediaRuntimeState,
+    ) -> Result<WindowsD3d11TextureReadback, WindowsD3d11Error> {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_USAGE_STAGING,
+        };
+
+        let metadata = ticket.metadata();
+        if metadata.generation != generation || metadata.synchronization.generation != generation {
+            return Err(WindowsD3d11Error::new(
+                WindowsD3d11ErrorCode::StaleGeneration,
+                "readback ticket belongs to another media-thread generation",
+            ));
+        }
+        let source = texture_pool.texture_for_ticket(ticket)?;
+        let dimensions = WindowsD3d11TextureDimensions {
+            width: metadata.width,
+            height: metadata.height,
+        };
+        let format = metadata.format;
+        let staging_stale = media_runtime
+            .readback_staging
+            .as_ref()
+            .is_none_or(|staging| staging.dimensions != dimensions || staging.format != format);
+        if staging_stale {
+            let dxgi_format = match format {
+                WindowsD3d11TextureFormat::Bgra8Unorm => DXGI_FORMAT_B8G8R8A8_UNORM,
+                WindowsD3d11TextureFormat::Nv12 => DXGI_FORMAT_NV12,
+            };
+            let descriptor = D3D11_TEXTURE2D_DESC {
+                Width: dimensions.width,
+                Height: dimensions.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: dxgi_format,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut texture = None;
+            // SAFETY: a valid descriptor; the out pointer receives the texture.
+            unsafe {
+                device
+                    .raw_device()
+                    .CreateTexture2D(&descriptor, None, Some(&mut texture))
+            }
+            .map_err(|error| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::TextureCreationFailed,
+                    format!("readback staging texture creation failed: {error}"),
+                )
+            })?;
+            let texture = texture.ok_or_else(|| {
+                WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::TextureCreationFailed,
+                    "readback staging texture creation returned no texture",
+                )
+            })?;
+            media_runtime.readback_staging = Some(ReadbackStaging {
+                dimensions,
+                format,
+                texture,
+            });
+        }
+        let staging = &media_runtime
+            .readback_staging
+            .as_ref()
+            .expect("created above")
+            .texture;
+        let (row_bytes, rows) = match format {
+            WindowsD3d11TextureFormat::Bgra8Unorm => {
+                (dimensions.width as usize * 4, dimensions.height as usize)
+            }
+            WindowsD3d11TextureFormat::Nv12 => (
+                dimensions.width as usize,
+                dimensions.height as usize + dimensions.height as usize / 2,
+            ),
+        };
+        let mut bytes = vec![0u8; row_bytes * rows];
+        // A counted reference: a device-loss record below needs the device
+        // mutably while the copy's context is still in hand.
+        let context = device.immediate_context().clone();
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: both textures belong to this device and outlive the calls;
+        // the mapped rows are read within their pitch and the texture's
+        // height, then unmapped before the staging texture is reused.
+        let mapped_result = unsafe {
+            context.CopyResource(staging, source);
+            context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+        };
+        if let Err(error) = mapped_result {
+            if error.code() == windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_REMOVED
+                || error.code() == windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_RESET
+            {
+                device.record_device_loss();
+            }
+            return Err(WindowsD3d11Error::new(
+                WindowsD3d11ErrorCode::DeviceLost,
+                format!("readback map failed: {error}"),
+            ));
+        }
+        let pitch = mapped.RowPitch as usize;
+        if mapped.pData.is_null() || pitch < row_bytes {
+            // SAFETY: the map succeeded above and is undone exactly once.
+            unsafe { context.Unmap(staging, 0) };
+            return Err(WindowsD3d11Error::new(
+                WindowsD3d11ErrorCode::InvalidTextureDescriptor,
+                format!("readback map returned pitch {pitch} for {row_bytes}-byte rows"),
+            ));
+        }
+        for row in 0..rows {
+            // SAFETY: `row < rows` keeps the source inside the mapped
+            // subresource (`rows × pitch` bytes) and the destination inside
+            // `bytes`.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (mapped.pData as *const u8).add(row * pitch),
+                    bytes.as_mut_ptr().add(row * row_bytes),
+                    row_bytes,
+                );
+            }
+        }
+        // SAFETY: as above.
+        unsafe { context.Unmap(staging, 0) };
+        Ok(WindowsD3d11TextureReadback {
+            width: dimensions.width,
+            height: dimensions.height,
+            format,
+            bytes,
+        })
     }
 
     fn configure_preview_runtime(
@@ -5215,7 +5411,8 @@ pub(crate) use runtime::{
     WindowsD3d11CompositionSource, WindowsD3d11CompositionSubmission, WindowsD3d11Device,
     WindowsD3d11EncoderProgress, WindowsD3d11EncoderStatus, WindowsD3d11EncoderSubmissionFailure,
     WindowsD3d11MediaClient, WindowsD3d11MediaThread, WindowsD3d11PreviewOffer,
-    WindowsD3d11TestPatternSubmission, WindowsD3d11TicketedTexture, WindowsD3d11UploadPixels,
+    WindowsD3d11TestPatternSubmission, WindowsD3d11TextureReadback, WindowsD3d11TicketedTexture,
+    WindowsD3d11UploadPixels,
 };
 
 #[cfg(test)]

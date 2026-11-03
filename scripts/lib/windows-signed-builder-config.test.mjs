@@ -252,8 +252,9 @@ describe('signed Windows electron-builder config', () => {
     assert.match(cleanupStep, /throw "Azure CLI cleanup failed:/)
     assert.doesNotMatch(cleanupStep, /SilentlyContinue|exit 0/)
 
-    // WerFault.exe loads the WER crash-dump helper on a backend crash, so both
-    // signing paths sign it beside the executables and verify its signature.
+    // WerFault.exe loads the WER crash-dump helper on a backend crash, and the
+    // Frame Server loads Videorc Camera's media source (plan 214 C4), so both
+    // signing paths sign them beside the executables and verify the signatures.
     const candidateSigningWorkflow = await readFile(
       new URL('../../.github/workflows/sign-windows-alpha.yml', import.meta.url),
       'utf8'
@@ -263,7 +264,18 @@ describe('signed Windows electron-builder config', () => {
         job,
         /\$werHelper = Get-Item -LiteralPath \(Join-Path \$unpackedRoot 'resources\\videorc_wer_helper\.dll'\)/
       )
-      assert.match(job, /Files = \$werHelper\.FullName\n\s+FilesFolder = \$unpackedRoot/)
+      assert.match(
+        job,
+        /\$cameraSource = Get-Item -LiteralPath \(Join-Path \$unpackedRoot 'resources\\videorc_virtual_camera_windows\.dll'\)/
+      )
+      assert.match(
+        job,
+        /Files = @\(\$werHelper\.FullName, \$cameraSource\.FullName\)\n\s+FilesFolder = \$unpackedRoot/
+      )
+      assert.match(
+        job,
+        /\$signedFiles = @\(\$executables\) \+ @\(\$werHelper\) \+ @\(\$cameraSource\)/
+      )
       assert.match(job, /foreach \(\$executable in \$signedFiles\)/)
     }
 

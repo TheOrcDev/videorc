@@ -99,6 +99,13 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-nasm
 
+      - name: Build and test the Videorc Camera media source
+        # Plan 214 C4: the crate's ring, still and setup tests, plus the
+        # in-process harness that activates the media source and pulls NV12
+        # frames through a source reader. Hosting a virtual camera is the
+        # Windows box's job (P0b), not this runner's.
+        run: cargo test -p videorc-virtual-camera-windows
+
       - name: Build Windows installer
         # Backend release build + pinned LGPL ffmpeg fetch + fail-closed
         # preflight (runs the ffmpeg rtmps/tls/h264_mf capability probe on a

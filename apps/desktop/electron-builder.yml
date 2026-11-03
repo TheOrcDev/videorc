@@ -187,6 +187,15 @@ win:
     # (fail-fast) crashes still leave a minidump; see crates/videorc-wer-helper.
     - from: ../../target/release/videorc_wer_helper.dll
       to: videorc_wer_helper.dll
+    # Plan 214 C4: Videorc Camera. The Media Foundation media source the
+    # Windows Frame Server loads (registered in HKLM by the setup exe, which
+    # copies it under %ProgramData%; `pnpm package:camera:windows` builds
+    # both). Signed by the release signing job with the WER helper; hidden in
+    # the app until a Windows box passes plan 214 P0b.
+    - from: ../../target/release/videorc_virtual_camera_windows.dll
+      to: videorc_virtual_camera_windows.dll
+    - from: ../../target/release/videorc-camera-setup.exe
+      to: videorc-camera-setup.exe
     - from: ../../vendor/ffmpeg/windows-x64
       to: ffmpeg
       filter:

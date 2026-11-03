@@ -13,6 +13,10 @@
 // extension with both provisioning profiles; a half-embedded extension, or one
 // inside an unsigned build, fails too. An unsigned or ad hoc build without it
 // is only described (the dev packaging path keeps working until B0).
+//
+// Plan 214 C4 (Windows): the package must carry the Videorc Camera media
+// source DLL and the setup exe in resources/ (signed by the release job; the
+// release validator checks the signatures).
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -34,6 +38,12 @@ import {
   describeCameraExtensionLayout
 } from './lib/camera-extension-bundle-check.mjs'
 import { loadCameraExtensionIdentifiers } from './lib/camera-extension-identifiers.mjs'
+import {
+  describeWindowsCameraLayout,
+  windowsCameraLayout,
+  windowsCameraLayoutProblems,
+  windowsResourcesDirForApp
+} from './lib/windows-camera-bundle-check.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const args = process.argv.slice(2)
@@ -54,6 +64,12 @@ const problems = [
 ]
 
 let cameraExtension = 'not checked (macOS only)'
+let windowsCamera = 'not checked (Windows only)'
+if (process.platform === 'win32') {
+  const layout = windowsCameraLayout(windowsResourcesDirForApp(appPath), { exists: existsSync })
+  windowsCamera = describeWindowsCameraLayout(layout)
+  problems.push(...windowsCameraLayoutProblems(layout))
+}
 if (process.platform === 'darwin') {
   const identifiers = loadCameraExtensionIdentifiers(repoRoot)
   const appRoot = appBundleRootForApp(appPath)
@@ -73,7 +89,8 @@ console.log(
       app: appPath,
       fuses: describeFuseWire(wire, FuseV1Options),
       buildFlags: flags,
-      cameraExtension
+      cameraExtension,
+      windowsCamera
     },
     null,
     2
@@ -83,4 +100,8 @@ if (problems.length > 0) {
   for (const problem of problems) console.error(`check:packaged-app: ${problem}`)
   process.exit(1)
 }
-console.log(`check:packaged-app: fuses and build flags OK; Videorc Camera ${cameraExtension}`)
+console.log(
+  `check:packaged-app: fuses and build flags OK; Videorc Camera ${
+    process.platform === 'win32' ? windowsCamera : cameraExtension
+  }`
+)

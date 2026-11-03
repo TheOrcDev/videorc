@@ -82,6 +82,9 @@ windows = { version = "0.62.2", features = ["Foundation", "Graphics_Capture", "G
 windows-core = "0.62.2"
 # Registered at startup so WER dumps crashes the in-process filter never sees.
 videorc-wer-helper = { path = "../videorc-wer-helper" }
+# Plan 214 C3: the frame ring, section name and setup layout Videorc Camera's
+# media source shares with the backend's sink.
+videorc-virtual-camera-windows = { path = "../videorc-virtual-camera-windows" }
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["test-util"] }

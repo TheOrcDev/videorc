@@ -221,6 +221,13 @@ impl WindowsD3d11MediaCoordinator {
         self.finish_release_action(action)
     }
 
+    /// Plan 214 C3: the live media thread's client, while one runs. The
+    /// client's generation is checked by every command it carries.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn media_client(&self) -> Option<WindowsD3d11MediaClient> {
+        self.client.clone()
+    }
+
     #[cfg(target_os = "windows")]
     fn retire_device_loss_once(&mut self, generation: u64) -> Result<bool, WindowsD3d11Error> {
         let Some(action) = self.state.retire_for_device_loss_once(generation)? else {
@@ -1309,6 +1316,10 @@ impl AppState {
     ) -> Self {
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
+        // Plan 214 C3: Videorc Camera's Windows sink reads session textures
+        // back through this coordinator's media client.
+        let windows_d3d11_media: WindowsD3d11MediaCoordinatorSlot =
+            Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new()));
         // Plan 172 D5: the default Buddy wears its bundled pack when it ships.
         let cohost_settings = crate::cohost_library::alive::default_buddy_alive(
             &database,
@@ -1355,11 +1366,13 @@ impl AppState {
             preview_screen: Arc::new(tokio::sync::Mutex::new(initial_preview_screen_state())),
             screen_privacy: Arc::new(crate::screen_privacy::ScreenPrivacyGate::default()),
             virtual_camera: Arc::new(
-                crate::virtual_camera_service::VirtualCameraService::default(),
+                crate::virtual_camera_service::VirtualCameraService::for_process(
+                    &windows_d3d11_media,
+                ),
             ),
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
             preview_surface_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
-            windows_d3d11_media: Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new())),
+            windows_d3d11_media,
             compositor: Arc::new(tokio::sync::Mutex::new(initial_compositor_state())),
             compositor_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),

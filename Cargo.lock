@@ -3120,6 +3120,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-segmentation",
  "uuid",
+ "videorc-virtual-camera-windows",
  "videorc-wer-helper",
  "windows",
  "windows-core",
@@ -3143,6 +3144,14 @@ dependencies = [
  "objc2-metal",
  "objc2-quartz-core",
  "objc2-system-extensions",
+]
+
+[[package]]
+name = "videorc-virtual-camera-windows"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

@@ -505,7 +505,9 @@ impl CpuFit {
         }
     }
 
-    #[cfg(test)]
+    /// The canvas as last fitted (C3 converts it to NV12 after a D3D11
+    /// readback; tests read it back).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn planes(&self) -> &I420Planes {
         &self.planes
     }
@@ -709,33 +711,62 @@ pub trait VirtualCameraSink: Send {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualCameraUnavailable {
     pub reason: String,
+    /// The camera exists in the code but is kept out of the UI until the
+    /// platform's spike passes on a real box (plan 214 C, D): the status maps
+    /// it to `platformStep: unsupported` and the Output section stays hidden.
+    pub hidden: bool,
+}
+
+impl VirtualCameraUnavailable {
+    /// A plain refusal the UI shows with its reason.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            hidden: false,
+        }
+    }
+
+    /// The platform's camera is written but not yet proven on a box
+    /// (`PROVEN` in its platform module is false): hidden, with a reason
+    /// for the logs and Health.
+    #[allow(dead_code)] // Only the platforms still hidden call it (Windows, C).
+    pub fn hidden_until_proven(platform: &str) -> Self {
+        Self {
+            reason: format!(
+                "Videorc Camera on {platform} is hidden until a {platform} box passes its spike (plan 214)."
+            ),
+            hidden: true,
+        }
+    }
 }
 
 /// The sink for this platform, or why there is none. Never a silent stub.
 pub fn platform_sink() -> Result<Box<dyn VirtualCameraSink>, VirtualCameraUnavailable> {
     #[cfg(target_os = "macos")]
     {
-        Err(VirtualCameraUnavailable {
-            reason: "Videorc Camera isn't available on macOS yet (the Camera Extension sink, plan 214 B4, hasn't shipped).".to_string(),
-        })
+        Err(VirtualCameraUnavailable::new(
+            "Videorc Camera isn't available on macOS yet (the Camera Extension sink, plan 214 B4, hasn't shipped).",
+        ))
     }
     #[cfg(target_os = "windows")]
     {
-        Err(VirtualCameraUnavailable {
-            reason: "Videorc Camera isn't available on Windows yet (the Media Foundation camera, plan 214 C3, hasn't shipped).".to_string(),
-        })
+        if crate::virtual_camera_windows::PROVEN {
+            crate::virtual_camera_windows::sink()
+        } else {
+            Err(VirtualCameraUnavailable::hidden_until_proven("Windows"))
+        }
     }
     #[cfg(target_os = "linux")]
     {
-        Err(VirtualCameraUnavailable {
-            reason: "Videorc Camera isn't available on Linux yet (the v4l2loopback writer, plan 214 D2, hasn't shipped).".to_string(),
-        })
+        Err(VirtualCameraUnavailable::new(
+            "Videorc Camera isn't available on Linux yet (the v4l2loopback writer, plan 214 D2, hasn't shipped).",
+        ))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(VirtualCameraUnavailable {
-            reason: "Videorc Camera isn't available on this platform.".to_string(),
-        })
+        Err(VirtualCameraUnavailable::new(
+            "Videorc Camera isn't available on this platform.",
+        ))
     }
 }
 

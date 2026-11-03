@@ -512,3 +512,131 @@ assumed.
 Open items that stay with the owner: which Windows box/GPUs to buy (one
 discrete + one iGPU machine ideal), and when to pay for code signing
 (Azure Trusted Signing vs unsigned internal builds).
+
+## Videorc Camera (plan 214 C, hidden until P0b passes)
+
+The Windows camera is written in full and ships in the installer, but the app
+hides it: `crates/videorc-backend/src/virtual_camera_windows.rs` has
+`pub const PROVEN: bool = false;`, and while it is false `platform_sink()`
+answers `VirtualCameraUnavailable::hidden_until_proven("Windows")`, which the
+status maps to `platformStep: unsupported` and the Output section does not
+render. Flipping that one line is the whole switch, after a Windows box
+passes the P0b spike below. The orchestrator's decision (2026-11-03): land
+the code, prove it on a box, then show it.
+
+### What ships
+
+- `resources\videorc_virtual_camera_windows.dll`: the Media Foundation media
+  source (`crates/videorc-virtual-camera-windows`, Rust, the `windows`
+  crate's `implement`; no C++ shim). `IMFMediaSourceEx`, `IMFMediaStream2`,
+  `IMFGetService`, `IKsControl`, `IMFSampleAllocatorControl`, an
+  `IMFActivate` and a class factory, after Microsoft's
+  `Samples/VirtualCamera` SimpleMediaSource. One stream, NV12 1920×1080 at
+  30 fps, BT.709 video range. The Windows Frame Server loads it as Local
+  Service in session 0, never Videorc's process.
+- `resources\videorc-camera-setup.exe`: the one elevated step (D8). It
+  copies the DLL to `%ProgramData%\Videorc\camera\<version>\` and writes
+  HKLM; `/remove` undoes both. Command line:
+  `videorc-camera-setup.exe [/install] [/dll <path>] | /remove` (no verb
+  means `/install` with the DLL beside the exe). Exit 0 on success, 1 on
+  failure, 2 on a bad command line. The app runs it through one UAC prompt
+  (PowerShell `Start-Process -Verb RunAs -Wait`,
+  `apps/desktop/src/main/virtual-camera-windows-setup.ts`,
+  `runWindowsCameraSetup(): Promise<{ ok: boolean; message?: string }>`).
+- Registry, all under `HKLM` (64-bit view):
+  `SOFTWARE\Classes\CLSID\{B629EEBB-4B8E-4CAB-A549-EB17570B1382}` (default:
+  "Videorc Camera media source"), its `InProcServer32` (default: the DLL
+  path, `ThreadingModel` = `Both`), and `SOFTWARE\Videorc\Camera`
+  (`Version`, `DllPath`). The backend reads these itself every two seconds:
+  the version equal to the bundled crate version and the DLL present is
+  `ready`, anything else is `needs-setup` with the reason.
+- Both files are signed by `sign-windows-alpha.yml` beside the WER helper
+  and the executables; `pnpm check:packaged-app` on Windows fails when
+  either is missing from `resources\`.
+
+### The frame ring
+
+Videorc writes frames into a named section the media source creates:
+`Global\VideorcCamera.1920x1080` (the geometry is part of the name, so a
+size change is a new section). A 4 KiB header page then three page-aligned
+NV12 slots (`3 112 960` bytes each, `9 342 976` in all). The header carries
+the magic `VCAM`, layout version 1, width, height, fourcc `NV12`, frame
+bytes, slot count, slot stride, the producer heartbeat (`GetTickCount64`
+milliseconds at the last write), the latest frame sequence and slot, the
+viewer count (how many started streams hold the camera, D13), and one
+32-byte seqlock descriptor per slot. The writer makes a slot's word odd,
+writes, makes it even, then publishes; a reader retries a torn copy and
+keeps its previous frame. A heartbeat older than one second, or none, shows
+the "Videorc isn't running" still. Layout and tests:
+`crates/videorc-virtual-camera-windows/src/ring.rs` (pure, run on any OS).
+
+DACL (SDDL), set by the media source on creation; a NULL DACL is never
+acceptable:
+
+```text
+D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)(A;;GRGW;;;IU)(A;;GR;;;WD)S:(ML;;NW;;;ME)
+```
+
+System, administrators and Local Service own it; the interactively logged
+on user (Videorc) reads and writes; everyone reads; a medium mandatory
+label with no-write-up so the app's medium-integrity process may write
+whatever the service's integrity level is.
+
+### The sink
+
+`virtual_camera_windows.rs` creates the camera off the main thread with
+`MFCreateVirtualCamera(SoftwareCameraSource, Session, CurrentUser,
+"Videorc Camera", "{B629EEBB-4B8E-4CAB-A549-EB17570B1382}")`, resolved from
+`mfsensorgroup.dll` at run time so the backend loads on any Windows, and
+`Start`s it; off or exit `Stop`s and `Shutdown`s it. CPU frames go through
+A1's `i420_to_nv12`; a D3D11 session's texture is read back on the media
+thread through a staging texture (`WindowsD3d11MediaClient::
+readback_texture`), converted to I420 here, fitted with A1's `CpuFit`, then
+packed. `viewers()` reads the ring header; until the media source has
+created the ring no app holds the camera and the output pushes nothing.
+
+### P0b on the Windows box (the tester's steps)
+
+Needs a Windows 11 x64 box (build 22000 or later), a signed Alpha or a
+local `pnpm package:desktop:windows` build, Chrome, and the Camera app. Keep
+the Frame Server scripts from Microsoft's sample handy
+(`Scripts/Debug-FrameServer.ps1`) for a debugger.
+
+1. Flip `PROVEN` to `true` in `virtual_camera_windows.rs` on a branch,
+   build and install the package.
+2. Output → Videorc Camera → "Set up Videorc Camera". Expect exactly one
+   UAC prompt. Check `%ProgramData%\Videorc\camera\<version>\
+   videorc_virtual_camera_windows.dll` exists and `reg query
+   "HKLM\SOFTWARE\Videorc\Camera"` shows `Version` and `DllPath`. The
+   status line must say ready; a declined prompt must say so and offer the
+   button again.
+3. Turn the switch on. The Camera app lists "Videorc Camera Windows Virtual
+   Camera" and shows the "Videorc isn't running" still only until the first
+   frame, then the program (the Preview's picture, 1920×1080, a vertical
+   canvas pillarboxed). Record the time from switch to first frame.
+4. Chrome: meet.google.com, pick the camera; also Edge, Zoom, the new Teams
+   and Discord. Each lists and shows it. Note any app that lists it but
+   shows black.
+5. `ffmpeg-capture.exe -f dshow -i video="Videorc Camera Windows Virtual
+   Camera" -t 10 -f null -` from `resources\ffmpeg\bin`: 30 fps for 10 s at
+   idle and again while recording 1080p30; the recording's A/V must be
+   unchanged (analyzer).
+6. Close every viewer: Health shows 0 viewers within a second and the
+   compositor stops composing at idle (CPU drops). Open one again: frames
+   resume within a second.
+7. Quit Videorc with a viewer open: the viewer shows the still within a
+   second (no stall). Relaunch with the switch saved on: frames resume.
+8. Turn the switch off: the camera leaves every app's list.
+9. Setup again on the same version (expect "already set up", no copy), then
+   with a bumped crate version (expect one prompt and a new folder).
+   `videorc-camera-setup.exe /remove` (elevated) clears the keys and the
+   folder; the app shows "needs setup".
+10. The non-elevated case: `MFCreateVirtualCamera` with Session and
+    CurrentUser from a standard user must succeed; the `Global\` section
+    must open from the user session with the DACL above (never a NULL
+    DACL); the Frame Server must load the DLL from `%ProgramData%`.
+
+Go when 3, 4, 5 and 10 pass. No-go, and a STOP for workstream C, when the
+Frame Server will not load the DLL from `%ProgramData%`, the user session
+cannot open the section with that DACL, or Chrome does not list the camera.
+Record the run in `docs/acceptance/<date>-videorc-camera-windows.md`.

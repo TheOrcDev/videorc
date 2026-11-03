@@ -37,6 +37,9 @@ use crate::virtual_camera::{
 pub const VIRTUAL_CAMERA_CHANGED_EVENT: &str = "virtualCamera.changed";
 /// How often the supervisor reconciles the lease and the status.
 const SUPERVISOR_INTERVAL: Duration = Duration::from_millis(500);
+/// Plan 214 C2: how often the backend re-reads the Windows setup state.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const PLATFORM_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The saved switch (D4), as stored under `virtualCamera`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -59,6 +62,9 @@ struct ServiceState {
     output: Option<VirtualCameraOutput>,
     last_published: Option<VirtualCameraStatus>,
     supervisor_started: bool,
+    /// When the Windows setup state was last read (plan 214 C2).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    last_platform_probe: Option<std::time::Instant>,
 }
 
 /// One per process, on `AppState`.
@@ -91,6 +97,56 @@ impl Default for VirtualCameraService {
 }
 
 impl VirtualCameraService {
+    /// The process's service: the platform sink, bound on Windows to the
+    /// D3D11 media coordinator so C3's sink can read a session's texture
+    /// back (`WindowsD3d11MediaClient::readback_texture`). Elsewhere it is
+    /// [`Default`].
+    pub(crate) fn for_process(
+        windows_d3d11_media: &crate::state::WindowsD3d11MediaCoordinatorSlot,
+    ) -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            let coordinator = Arc::downgrade(windows_d3d11_media);
+            let service = Self::with_sink_factory(
+                Box::new(move || {
+                    if crate::virtual_camera_windows::PROVEN {
+                        crate::virtual_camera_windows::sink_bound(coordinator.clone())
+                    } else {
+                        Err(VirtualCameraUnavailable::hidden_until_proven("Windows"))
+                    }
+                }),
+                (VIRTUAL_CAMERA_WIDTH, VIRTUAL_CAMERA_HEIGHT),
+            );
+            if crate::virtual_camera_windows::PROVEN {
+                service
+            } else {
+                service.hidden(VirtualCameraUnavailable::hidden_until_proven("Windows"))
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = windows_d3d11_media;
+            Self::default()
+        }
+    }
+
+    /// Plan 214 C, D: a camera that is written but unproven stays hidden from
+    /// the first status on, not only once the switch is tried: the status
+    /// says `unavailable` with `platformStep: unsupported` and the Output
+    /// section does not render.
+    #[cfg_attr(not(test), allow(dead_code))] // The hidden platforms' `for_process` calls it.
+    pub(crate) fn hidden(self, unavailable: VirtualCameraUnavailable) -> Self {
+        {
+            let mut state = self.lock();
+            state.platform = Some((
+                VirtualCameraPlatformStep::Unsupported,
+                Some(unavailable.reason.clone()),
+            ));
+            state.sink_unavailable = Some(unavailable.reason);
+        }
+        self
+    }
+
     /// A service with its own sink and canvas (tests; the dev smokes later).
     pub fn with_sink_factory(sink_factory: SinkFactory, canvas: (u32, u32)) -> Self {
         Self {
@@ -132,8 +188,37 @@ impl VirtualCameraService {
 
     /// The status as of now, without publishing it.
     pub fn status(&self) -> VirtualCameraStatus {
-        let state = self.lock();
+        let mut state = self.lock();
+        self.probe_platform(&mut state);
         derive_status(&self.status_inputs(&state))
+    }
+
+    /// Plan 214 C2: on Windows the backend reads the setup state itself
+    /// (HKLM and the installed DLL's version) at most every
+    /// `PLATFORM_PROBE_INTERVAL`, and merges it with what main reported
+    /// (`merge_platform_probe`). Nothing happens elsewhere, or while the
+    /// Windows camera is hidden.
+    fn probe_platform(&self, state: &mut ServiceState) {
+        #[cfg(target_os = "windows")]
+        {
+            if !crate::virtual_camera_windows::PROVEN {
+                return;
+            }
+            let due = state
+                .last_platform_probe
+                .is_none_or(|at| at.elapsed() >= PLATFORM_PROBE_INTERVAL);
+            if !due {
+                return;
+            }
+            state.last_platform_probe = Some(std::time::Instant::now());
+            let probe = crate::virtual_camera_windows::platform_report();
+            state.platform =
+                crate::virtual_camera_windows::merge_platform_probe(state.platform.take(), probe);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = state;
+        }
     }
 
     /// Whether the camera wants the preview run right now: on, a sink
@@ -172,6 +257,7 @@ fn publish_if_changed(state: &AppState) -> VirtualCameraStatus {
     let service = &state.virtual_camera;
     let (status, changed) = {
         let mut inner = service.lock();
+        service.probe_platform(&mut inner);
         let status = derive_status(&service.status_inputs(&inner));
         let changed = inner.last_published.as_ref() != Some(&status);
         if changed {
@@ -257,8 +343,14 @@ async fn set_on_without_saving(state: &AppState, on: bool) -> VirtualCameraStatu
                         }
                     }
                 }
-                Err(VirtualCameraUnavailable { reason }) => {
+                Err(VirtualCameraUnavailable { reason, hidden }) => {
                     tracing::warn!("Videorc Camera is unavailable here: {reason}");
+                    if hidden {
+                        // Plan 214 C, D: written but unproven on a box. The
+                        // UI hides the section on `unsupported`.
+                        inner.platform =
+                            Some((VirtualCameraPlatformStep::Unsupported, Some(reason.clone())));
+                    }
                     inner.sink_unavailable = Some(reason);
                 }
             }
@@ -524,13 +616,34 @@ mod tests {
         assert!(state.virtual_camera.lock().output.is_none());
     }
 
+    #[test]
+    fn a_hidden_camera_is_unsupported_before_anyone_touches_the_switch() {
+        let (service, _) = fake_service(Some(0));
+        let service = service.hidden(VirtualCameraUnavailable::hidden_until_proven("Test"));
+        let status = service.status();
+        assert!(!status.on && !status.available);
+        assert_eq!(status.state, VirtualCameraState::Unavailable);
+        assert_eq!(
+            status.platform_step,
+            Some(VirtualCameraPlatformStep::Unsupported)
+        );
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("hidden until a Test box")),
+            "{:?}",
+            status.message
+        );
+    }
+
     #[tokio::test]
     async fn a_build_without_a_sink_says_unavailable_and_never_claims_success() {
         let service = VirtualCameraService::with_sink_factory(
             Box::new(|| {
-                Err(VirtualCameraUnavailable {
-                    reason: "No sink on this platform yet.".to_string(),
-                })
+                Err(VirtualCameraUnavailable::new(
+                    "No sink on this platform yet.",
+                ))
             }),
             (192, 108),
         )

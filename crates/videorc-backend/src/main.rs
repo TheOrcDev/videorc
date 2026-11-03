@@ -169,6 +169,7 @@ mod videorc_api;
 mod viewer_stats;
 mod virtual_camera;
 mod virtual_camera_service;
+mod virtual_camera_windows;
 mod warm_microphone;
 #[allow(dead_code)]
 mod windows_capture_owner;

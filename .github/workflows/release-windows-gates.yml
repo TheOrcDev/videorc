@@ -56,6 +56,14 @@ jobs:
         # so new dead code under cfg(windows) still fails this gate.
         run: cargo clippy -p videorc-backend -- -D warnings
 
+      - name: Clippy (Videorc Camera media source)
+        run: cargo clippy -p videorc-virtual-camera-windows --all-targets -- -D warnings
+
+      - name: Videorc Camera media source tests
+        # Plan 214 C4: the ring, the still, the setup layout and the
+        # in-process source reader harness.
+        run: cargo test -p videorc-virtual-camera-windows
+
       - name: Preview bounds concurrency (25 stability passes)
         shell: pwsh
         run: |
