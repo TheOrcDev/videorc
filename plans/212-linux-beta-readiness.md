@@ -3333,3 +3333,30 @@ Apple GPU. The strict bound still applies there and has not been run for
 this branch. Ogre's GLES Beams miss (mean 20.405, max 193) falls in the
 same range; that it has the same cause is unproven and that failure stays
 open.
+
+macOS Rust CI at `94c7cc22` (job 125634889336) then passed: the backend's
+main test binary ran 4,406 passed, zero failed and 23 ignored, with
+`golden_grids_match_the_glsl_reference` and
+`light_formats_both_match_the_goldens` both passing, and the other binaries
+passed 111 more.
+
+### Windows CI at `94c7cc22`, 2026-11-03
+
+Two Windows jobs failed at `94c7cc22`, and both fail the same way on main
+at `b7e68a2c`.
+
+"Windows startup incident diagnostics" (job 125634947155; main 125591158721)
+passes all 48 controlled-audio cases. The independent FFmpeg-tone control
+passes 12 and fails 36 on the 100 ms packet-tail limit (114 to 267 ms), seven
+of them on frame count as well. This branch did not introduce it, and it
+stays open.
+
+"Windows release source gates" (job 125634947351; main 125591159022) failed
+in Node logic tests on one assertion, the one #1047 added for the camera look
+parity pin. `bundledFfmpegPath` took a `platform` argument but joined with
+the host's separator, so on a Windows runner the darwin case returned
+`\repo\vendor\ffmpeg\current\bin\ffmpeg`. It now joins with `win32` or
+`posix` by that argument; real callers pass the host platform, so their
+paths do not change. On Ogre, `pnpm test:scripts` passes 3,081 of 3,082
+tests with zero failed; the one skip is the videorc-web prompt copy check.
+The Windows run of the fix is still to come.
