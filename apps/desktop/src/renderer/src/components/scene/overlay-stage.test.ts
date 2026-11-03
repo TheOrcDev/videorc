@@ -277,7 +277,9 @@ describe('banners on the stage (plan 186)', () => {
       ['logo-color-600', 'Hidden'],
       ['Highlight', null],
       ['Captions', 'Recording only'],
-      ['Buddy', 'Stream only']
+      ['Buddy', 'Stream only'],
+      // Plan 215 D5: the chat box ships off for both outputs.
+      ['Chat', 'Off']
     ])
     const off = overlayStageItems(
       { ...layout, buddy: { ...layout.buddy, showOnStream: false, showInRecording: false } },
@@ -344,7 +346,8 @@ describe('banners on the stage (plan 186)', () => {
       'banner:sponsor',
       'banner:logo',
       'overlay:captions',
-      'overlay:buddy'
+      'overlay:buddy',
+      'overlay:chat'
     ])
   })
 
@@ -514,7 +517,7 @@ describe('pictures on the schematic canvas', () => {
 
   it("draws the Buddy's still in its pet's square, and no picture for the empty zones", () => {
     const items = overlayStageItems(DEFAULT_OVERLAY_LAYOUT, 'horizontal', 'idle.webp')
-    expect(items.map((item) => item.picture?.fit ?? null)).toEqual([null, null, 'buddy'])
+    expect(items.map((item) => item.picture?.fit ?? null)).toEqual([null, null, 'buddy', null])
     expect(items[2]!.picture).toStrictEqual({ href: 'idle.webp', fit: 'buddy', opacity: 1 })
     expect(
       overlayStageItems(DEFAULT_OVERLAY_LAYOUT, 'horizontal').every((item) => !item.picture)
