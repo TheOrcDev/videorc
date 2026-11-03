@@ -19,11 +19,14 @@ describe('nativePreviewProofPollingProfile', () => {
     })
   })
 
-  it('contains proof-BMP work while recording without blanking the Windows preview', () => {
-    expect(nativePreviewProofPollingProfile(true)).toEqual({
-      intervalMs: 125,
-      maxWidth: 960,
-      ceilingWidth: 960
+  it('keeps the full-quality Preview while recording', () => {
+    // The proof surface is the production Preview on Linux and Windows: a
+    // recording must not drop it to a stretched 960 px at 8 fps.
+    expect(nativePreviewProofPollingProfile(true)).toEqual(nativePreviewProofPollingProfile(false))
+    expect(nativePreviewProofPollingProfile(true, 1320)).toEqual({
+      intervalMs: 40,
+      maxWidth: 1440,
+      ceilingWidth: 1920
     })
   })
 
@@ -51,14 +54,14 @@ describe('nativePreviewProofPollingProfile', () => {
 
   it('never exceeds the profile ceiling for oversized surfaces', () => {
     expect(nativePreviewProofPollingProfile(false, 5120).maxWidth).toBe(1920)
-    expect(nativePreviewProofPollingProfile(true, 5120).maxWidth).toBe(960)
+    expect(nativePreviewProofPollingProfile(true, 5120).maxWidth).toBe(1920)
   })
 
   it('keeps the unquantized profile ceiling for layers that measure their drawn width', () => {
     // A docked Preview whose geometry went stale at 941 px still lets a layer
-    // drawn 1320 px wide ask for 1320; recording keeps its contained cap.
+    // drawn 1320 px wide ask for 1320, recording or not.
     expect(nativePreviewProofPollingProfile(false, 941).ceilingWidth).toBe(1920)
-    expect(nativePreviewProofPollingProfile(true, 941).ceilingWidth).toBe(960)
+    expect(nativePreviewProofPollingProfile(true, 941).ceilingWidth).toBe(1920)
   })
 
   it('holds the documented quality floor for tiny proof windows', () => {

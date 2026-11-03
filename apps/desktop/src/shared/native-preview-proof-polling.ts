@@ -30,11 +30,16 @@ const IDLE_PROOF_POLLING_PROFILE: Omit<NativePreviewProofPollingProfile, 'ceilin
 }
 
 const RECORDING_PROOF_POLLING_PROFILE: Omit<NativePreviewProofPollingProfile, 'ceilingWidth'> = {
-  // Windows' proof surface is production preview, so it must stay live while
-  // recording. Keep it useful without spending the recording's CPU budget on
-  // 25 full-resolution channel swaps, Lanczos resizes, and PNG encodes/sec.
-  intervalMs: 125,
-  maxWidth: 960
+  // The proof surface is the production Preview on Linux and Windows, so a
+  // recording keeps the idle profile: a stream's operator watches it the
+  // whole time. It used to drop to 960 px at 8 fps to spare the recording
+  // 25 Lanczos resizes and PNG encodes a second; the transport is now an
+  // uncompressed BMP with plan 191's integer triangle resize, measured in
+  // release at 5.2 ms per 1920x1080 -> 1320 frame (about 13% of one core
+  // at 25 fps) and 0.2 ms when the frame needs no resize. Kept separate so
+  // a platform that needs containment can set it here.
+  intervalMs: 40,
+  maxWidth: 1920
 }
 
 /**

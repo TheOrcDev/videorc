@@ -5905,7 +5905,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         // hint is floored at 1280: a docked Preview grown from 941 to 1320 px
         // kept asking for 960 and Chromium stretched it, blurring every pixel
         // of a screen share. A measured layer is bounded only by the profile's
-        // own ceiling (1920 idle, 960 while recording).
+        // own ceiling (1920).
         function profiledFrameUrl(url, displayedWidth) {
           try {
             const parsed = new URL(url);

@@ -38,12 +38,12 @@ export interface NativePreviewFramePollingRequestKeyInput {
 }
 
 /**
- * Whether the proof surface should poll with the contained recording profile
- * (960 px, 8 fps). Clips (plan 181) runs a buffer-only session whenever
- * Videorc is open: the backend reports it as `recording` with `replayOnly`,
- * the Studio reads Ready, and nothing is being recorded. It must keep the
- * idle profile, or the Linux and Windows Preview sits at 960 px stretched
- * across the docked panel for as long as the app is open.
+ * Whether the proof surface polls with the recording profile. Clips (plan
+ * 181) runs a buffer-only session whenever Videorc is open: the backend
+ * reports it as `recording` with `replayOnly`, the Studio reads Ready, and
+ * nothing is being recorded, so it always takes the idle profile. (The
+ * recording profile now matches idle; when it was 960 px at 8 fps, Clips
+ * held the Linux and Windows Preview there for as long as the app was open.)
  */
 export function nativePreviewProofPollingRecording(
   recordingActive: boolean,
