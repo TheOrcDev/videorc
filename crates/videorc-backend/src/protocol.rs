@@ -3943,7 +3943,7 @@ pub struct CompositorImageCacheStatus {
     pub evictions: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompositorFramePipelineStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3972,6 +3972,21 @@ pub struct CompositorFramePipelineStatus {
     /// the wire, so a run without one sends exactly what it sent before.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub preview_synthetic_refused: u64,
+    /// Plan 214 A4: what Videorc Camera's output did this process: frames
+    /// pushed to the platform camera, pushes that repeated the previous frame
+    /// (the run was slower than 30 fps), and the slowest CPU fit in
+    /// milliseconds (0 on the zero-copy Metal path). 0 is left off the wire,
+    /// so a run with the camera off sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub virtual_camera_pushed: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub virtual_camera_repeated: u64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub virtual_camera_convert_ms_max: f64,
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
 }
 
 fn is_zero_u32(value: &u32) -> bool {

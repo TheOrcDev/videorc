@@ -2533,6 +2533,15 @@ export interface CompositorFramePipelineStatus {
    * that the packaged backstop refused to the Preview. Absent while 0.
    */
   previewSyntheticRefused?: number
+  /**
+   * Plan 214 A4: what Videorc Camera's output did this process: frames
+   * pushed to the platform camera, pushes that repeated the previous frame
+   * (the run was slower than 30 fps), and the slowest CPU fit in
+   * milliseconds (0 on the zero-copy Metal path). Absent while 0.
+   */
+  virtualCameraPushed?: number
+  virtualCameraRepeated?: number
+  virtualCameraConvertMsMax?: number
 }
 
 export interface CompositorStatus {
@@ -4347,6 +4356,65 @@ export interface ScreenHideParams {
   reason: ScreenPrivacyReason
 }
 // --- end Hide screen (plan 210 S7) ---
+
+// --- Videorc Camera (plan 214 A4) ---
+/**
+ * Where the camera is. `off` is only ever a healthy camera that is off; a
+ * platform report (`needs-approval`, `needs-setup`, a failure) outranks the
+ * switch.
+ */
+export type VirtualCameraState =
+  | 'off'
+  | 'installing'
+  | 'needs-approval'
+  | 'needs-setup'
+  | 'ready'
+  | 'streaming'
+  | 'unavailable'
+
+/**
+ * What main reports about the platform's half of the camera: the macOS
+ * extension's activation (B3) or the Windows setup step (C2). Never guessed
+ * by the backend; absent until main reports.
+ */
+export type VirtualCameraPlatformStep =
+  | 'installing'
+  | 'needs-approval'
+  | 'needs-reboot'
+  | 'ready'
+  | 'failed'
+  | 'needs-setup'
+  | 'setting-up'
+  | 'unsupported'
+
+/**
+ * Videorc Camera's status. `virtualCamera.status` and `virtualCamera.set`
+ * return it; `virtualCamera.changed` carries it on every change. Absent
+ * fields are omitted by the backend, never `null`.
+ */
+export interface VirtualCameraStatus {
+  /** The saved switch (D4). */
+  on: boolean
+  /** Whether the camera can run on this computer at all. */
+  available: boolean
+  state: VirtualCameraState
+  /** Apps holding the camera, when the platform can count them (D13). */
+  viewers?: number
+  platformStep?: VirtualCameraPlatformStep
+  /** Plain copy for the status line, present when there is something to say. */
+  message?: string
+}
+
+export interface VirtualCameraSetParams {
+  on: boolean
+}
+
+/** `virtualCamera.platform.report` (admin socket only): main's report. */
+export interface VirtualCameraPlatformReportParams {
+  platformStep: VirtualCameraPlatformStep
+  message?: string
+}
+// --- end Videorc Camera (plan 214 A4) ---
 
 export interface RenameScreenParams {
   screenId: string

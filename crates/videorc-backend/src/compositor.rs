@@ -4245,12 +4245,13 @@ pub async fn arm_compositor_for_capture(
         compositor.capture_lease = Some(CompositorCaptureLease {
             session_id: session_id.to_string(),
             run_id: run_id.clone(),
-            replay_only: params.replay_only,
+            kind: params.lease,
+            replay_only,
             render_dimensions,
             preview_config,
             benchmark: params.benchmark,
         });
-        if !params.replay_only {
+        if !replay_only {
             // Decision 4 (plan 058): a draft never reaches a recording or a
             // stream. With the ring on by default (plan 181) a draft may be
             // live on the run this session takes over, so it ends here; the
@@ -11757,8 +11758,13 @@ fn try_update_compositor_status(
         metrics.metal_target_handoff,
     );
     compositor.status.sources = metrics.sources;
+    // Plan 214 A4: what Videorc Camera's output did (0 while off).
+    let camera = state.virtual_camera.counters().unwrap_or_default();
     compositor.status.frame_pipeline = CompositorFramePipelineStatus {
         preview_synthetic_refused: compositor.preview_backstop.refused(),
+        virtual_camera_pushed: camera.pushed,
+        virtual_camera_repeated: camera.repeated,
+        virtual_camera_convert_ms_max: camera.convert_us_max as f64 / 1000.0,
         ..metrics.frame_pipeline
     };
     // Plan 190: how the live background draws, and what it holds (0 while off).
