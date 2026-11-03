@@ -73,9 +73,7 @@ describe('videoSourceStatus', () => {
     )
     // Starting up is not silence, and only a camera can be silent this way.
     expect(videoSourceStatus({ ...base, preview: { state: 'live' } })?.label).toBe('Receiving')
-    expect(videoSourceStatus({ ...base, kind: 'screen', preview: silent })?.label).toBe(
-      'Receiving'
-    )
+    expect(videoSourceStatus({ ...base, kind: 'screen', preview: silent })?.label).toBe('Receiving')
   })
 
   it('reports a stale camera, never a stale screen', () => {

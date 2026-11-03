@@ -27,7 +27,10 @@ const snapshot: FirstFrameSnapshot = {
 describe('FirstFrameDecisionLog', () => {
   it('keeps the newest 20 decisions, oldest first', () => {
     let tick = 0
-    const log = new FirstFrameDecisionLog(undefined, () => new Date(Date.UTC(2026, 10, 3, 14, 51, tick++)))
+    const log = new FirstFrameDecisionLog(
+      undefined,
+      () => new Date(Date.UTC(2026, 10, 3, 14, 51, tick++))
+    )
     for (let index = 0; index < FIRST_FRAME_DECISION_LIMIT + 5; index += 1) {
       log.record({ watch: 'presenting-watch', decision: 'heal', reason: `step ${index}` })
     }
