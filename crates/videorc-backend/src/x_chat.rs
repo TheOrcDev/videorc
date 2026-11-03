@@ -2100,6 +2100,72 @@ mod tests {
         assert!(provider.message.contains("Sign in again"));
     }
 
+    /// Plan 215 A1: a streamer saw "Sign in to your Videorc account to
+    /// receive X comments." as a Failed X row while X itself was fine (the
+    /// row even read "Reading chat as Ram"). A missing Videorc sign-in is its
+    /// own state, in words that name Videorc, and never a failure: nothing
+    /// is broken, and one sign-in brings chat (A4).
+    #[tokio::test]
+    async fn a_missing_videorc_sign_in_is_named_and_is_not_a_failure() {
+        let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
+        let state = test_state();
+        let session_generation = start_test_session(&state, "session-1").await;
+        let mut config = mock_config(&server);
+        config.overrides.session_token = None;
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run_x_chat_connector(
+                state.clone(),
+                "session-1".to_string(),
+                session_generation,
+                config,
+            ),
+        )
+        .await
+        .expect("the connector parks without a sign-in");
+        let _ = server.shutdown.send(());
+
+        let provider = wait_for_provider_settled(&state).await;
+        assert_eq!(provider.message, "Sign in to Videorc to read X chat.");
+        assert_ne!(
+            provider.read,
+            CommentsReadState::Failed,
+            "a missing sign-in is not a failure"
+        );
+        assert_ne!(provider.state, LiveChatProviderConnectionState::Failed);
+        assert_eq!(provider.last_error, None);
+        assert!(
+            failure_events(&state, "session-1").is_empty(),
+            "no X failure is on file: X is fine"
+        );
+        assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The X row once the connector has stopped connecting.
+    async fn wait_for_provider_settled(state: &AppState) -> LiveChatProviderState {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(provider) =
+                current_status(state)
+                    .await
+                    .providers
+                    .into_iter()
+                    .find(|provider| {
+                        provider.platform == StreamPlatform::X
+                            && provider.state != LiveChatProviderConnectionState::Connecting
+                    })
+            {
+                return provider;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for the X provider to settle"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn persistence_rejection_retries_the_held_message_without_a_new_read() {
         let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;

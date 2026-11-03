@@ -306,6 +306,8 @@ import {
   showBrowserApproval,
   showStreamTargetNotice,
   showTakeoverEditRefused,
+  showChatNeedsVideorcSignIn,
+  showVideorcSignInExpired,
   showXBroadcastProblem,
   X_MEDIA_STUDIO_URL,
   sourceSwitchFailedDescription,
@@ -365,6 +367,7 @@ import {
 } from '@/lib/native-preview-surface-lifecycle'
 import type {
   AccountCallbackEnvelope,
+  AccountChangedEvent,
   AiCapabilities,
   AudioLevelsEvent,
   CohostActionCommand,
@@ -581,6 +584,7 @@ import {
   applyLiveChatProviderStatus,
   applyLiveChatSnapshot,
   chatSetupToastWarnings,
+  chatVideorcSignInWarnings,
   liveChatSendOperationQueryDecision,
   MAX_LIVE_CHAT_VIEW_MESSAGES,
   LiveChatRecoveryOverflowError,
@@ -1890,6 +1894,8 @@ interface StudioShellContextValue {
   recordingState: RecordingStatus['state']
   runtimeInfo: RuntimeInfo | null
   entitlementTier: EntitlementsSnapshot['tier'] | null
+  /** Chat or Buddy waits on the Videorc sign-in (plan 215 A5): the sidebar's account dot. */
+  accountNeedsSignIn: boolean
   previewWindowOpen: boolean
   togglePreviewWindow: () => Promise<void>
   notesWindowOpen: boolean
@@ -2411,6 +2417,30 @@ export function useStudio(): StudioContextValue {
     () => ({ ...core, ...recording, ...preview, ...diagnostics, ...chat, ...audio }),
     [audio, chat, core, diagnostics, preview, recording]
   )
+}
+
+/**
+ * Plan 215 A5, pure: the backend's `account.changed` event, applied. The
+ * snapshot is the backend's current truth, so it lands unless a sign-in or
+ * sign-out this renderer started is still in flight (that call commits its
+ * own answer). A sign-out the server made (`session-expired`) is news the
+ * streamer must hear (D7): until now it was silent, the sidebar read "Sign
+ * in", and chat failed at the next Go Live.
+ */
+export function handleAccountChangedEvent(
+  event: AccountChangedEvent,
+  deps: {
+    coordinator: AccountSnapshotCommitCoordinator
+    setAccount: (account: VideorcAccountSnapshot) => void
+  }
+): void {
+  const token = deps.coordinator.beginRefresh()
+  if (token && deps.coordinator.canCommit(token)) {
+    deps.setAccount(event.account)
+  }
+  if (event.reason === 'session-expired') {
+    showVideorcSignInExpired()
+  }
 }
 
 export function useStudioShell(): StudioShellContextValue {
@@ -2987,6 +3017,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         description: warning.message,
         action: { label: 'Open Livestream', onClick: () => openWorkspaceTab('live') }
       })
+    }
+    // Plan 215 A3: a connector parked on the Videorc sign-in is not "isn't
+    // connected", and Livestream would show X healthy. The toast names the
+    // account, once per destination, with Sign in as the fix.
+    for (const warning of chatVideorcSignInWarnings(liveChatSnapshot.providers)) {
+      const key = `videorc-sign-in:${warning.id}`
+      if (chatSetupWarnedRef.current.warned.has(key)) {
+        continue
+      }
+      chatSetupWarnedRef.current.warned.add(key)
+      showChatNeedsVideorcSignIn(CHAT_PLATFORM_LABELS[warning.platform])
     }
   }, [liveChatSnapshot, captureConfig.streamEnabled])
   // Live captions: status + transcript driven by captions.* events; the mic
@@ -7678,6 +7719,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('entitlements.updated', (payload) => {
         commitEntitlementsSnapshot(payload)
+      }),
+      // Plan 215 A5: the backend says when the account changes, so a sign-out
+      // the server made is news (D7), not a "Sign in" button nobody noticed.
+      nextClient.on('account.changed', (payload) => {
+        handleAccountChangedEvent(payload, {
+          coordinator: accountSnapshotCoordinatorRef.current,
+          setAccount
+        })
       }),
       nextClient.on('recording.finalization', (payload) => {
         // Background MP4 export (instant-record P2): patch the Library row in
@@ -18237,6 +18286,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .catch(reportError)
   })
 
+  // Plan 215 A5 (D7): chat or Buddy waits on the Videorc sign-in. One
+  // boolean, so the shell re-renders when it flips and never per message.
+  const accountNeedsSignIn = useMemo(
+    () =>
+      account?.status !== 'signed-in' &&
+      (liveChatSnapshot.providers.some((provider) => provider.read === 'needs-videorc-sign-in') ||
+        cohostState?.reason === 'signed-out' ||
+        cohostState?.reason === 'session-expired'),
+    [account?.status, cohostState?.reason, liveChatSnapshot.providers]
+  )
   const shellValue = useMemo<StudioShellContextValue>(
     () => ({
       wsStatus,
@@ -18244,6 +18303,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recordingState: recording.state,
       runtimeInfo,
       entitlementTier: entitlements?.tier ?? null,
+      accountNeedsSignIn,
       previewWindowOpen: previewWindow.open,
       togglePreviewWindow,
       notesWindowOpen: notesWindow.open,
@@ -18268,6 +18328,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setFirstRunSetupOpen
     }),
     [
+      accountNeedsSignIn,
       cancelStopSession,
       firstRunSetupOpen,
       closeCommentsWindow,

@@ -170,7 +170,8 @@ export function ChatPane({
   jumpTo = null,
   searchFocusSignal = 0,
   composerFocusSignal = 0,
-  onUseSignIn
+  onUseSignIn,
+  onSignInToVideorc
 }: {
   delivery?: ChatDelivery
   arrivalKey?: string
@@ -232,6 +233,9 @@ export function ChatPane({
   /** "Use Sign in" on a stream-key destination's chat row (plan 213 J1):
    * opens that destination in the main window. Absent in History. */
   onUseSignIn?: (targetId: string) => void
+  /** "Sign in to Videorc" on a chat row the relay parked (plan 215 A3):
+   * the main window starts the sign-in. Absent in History. */
+  onSignInToVideorc?: () => void
 }): ReactElement {
   const [filter, setFilter] = useState<ChatPaneFilter>({
     platform: 'all',
@@ -513,8 +517,15 @@ export function ChatPane({
       </div>
 
       {/* Plan 213 J1: a stream-key X destination says chat needs Sign in,
-          above the list so it stays while other chat arrives. */}
-      {onUseSignIn ? <ChatSignInRows providers={providers} onUseSignIn={onUseSignIn} /> : null}
+          above the list so it stays while other chat arrives. Plan 215 A3:
+          a connector parked on the Videorc sign-in says so the same way. */}
+      {onUseSignIn || onSignInToVideorc ? (
+        <ChatSignInRows
+          providers={providers}
+          onSignInToVideorc={onSignInToVideorc}
+          onUseSignIn={onUseSignIn}
+        />
+      ) : null}
       <div className="relative flex min-h-0 flex-1 flex-col">
         {/* The follow owns this scroll position, so the browser's own scroll
             anchoring stays out of it. */}
@@ -534,9 +545,13 @@ export function ChatPane({
               <OffAir
                 live={live}
                 providers={
-                  // The row above already says what a stream key needs.
-                  onUseSignIn
-                    ? providers.filter((provider) => provider.read !== 'needs-sign-in')
+                  // The rows above already say what a sign-in brings.
+                  onUseSignIn || onSignInToVideorc
+                    ? providers.filter(
+                        (provider) =>
+                          provider.read !== 'needs-sign-in' &&
+                          provider.read !== 'needs-videorc-sign-in'
+                      )
                     : providers
                 }
               />

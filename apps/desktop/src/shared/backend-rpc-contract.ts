@@ -647,6 +647,8 @@ export interface BackendEventMap {
   'scheduledStreams.changed': ScheduledStreamEvent
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
+  // Plan 215 A5: the account as the backend holds it, and why it changed.
+  'account.changed': import('./backend').AccountChangedEvent
   'noiseCleanup.status': NoiseCleanupJob
   'cleanCut.status': CleanCutJob
   'recording.finalization': RecordingFinalizationEvent
@@ -5527,6 +5529,14 @@ const runtimeEventSchemas = {
   'scheduledStreams.changed': boundedBackendPayloadSchema,
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,
+  // Plan 215 A5: the account as the backend holds it, and why it changed.
+  'account.changed': objectSchema(
+    {
+      account: accountSchema,
+      reason: enumSchema(['signed-in', 'signed-out', 'session-expired'])
+    },
+    { allowUnknown: false }
+  ),
   'noiseCleanup.status': noiseCleanupJobSchema,
   'cleanCut.status': cleanCutJobSchema,
   'recording.finalization': recordingFinalizationEventSchema,

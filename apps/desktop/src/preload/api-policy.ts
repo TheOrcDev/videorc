@@ -54,6 +54,8 @@ export const AUXILIARY_API_KEYS = {
     'openBuddyTabFromCommentsWindow',
     // "Use Sign in" opens the destination in the main window (plan 213 J1).
     'openDestinationFromCommentsWindow',
+    // "Sign in to Videorc" on a chat row (plan 215 A3): main window starts it.
+    'signInToVideorcFromCommentsWindow',
     // Remove from chat and Buddy's removal cards (plan 140, S6): relayed.
     'moderateFromCommentsWindow',
     'getCommentsWindowState',

@@ -498,6 +498,32 @@ describe('backend RPC contract', () => {
     ).toThrow('maxHeight')
   })
 
+  // Plan 215 A5: the backend says when the account changes, and why. A
+  // session-expired reason is the sign-out the server made.
+  it('strictly validates the account.changed event', () => {
+    const expired = { account: { status: 'signed-out' }, reason: 'session-expired' }
+    expect(validateBackendEventPayload('account.changed', expired)).toEqual(expired)
+    const signedIn = {
+      account: {
+        status: 'signed-in',
+        username: 'orc_dev',
+        displayName: 'Orc Dev',
+        email: 'orc@videorc.com'
+      },
+      reason: 'signed-in'
+    }
+    expect(validateBackendEventPayload('account.changed', signedIn)).toEqual(signedIn)
+    expect(() =>
+      validateBackendEventPayload('account.changed', { ...expired, reason: 'expired' })
+    ).toThrow('reason')
+    expect(() =>
+      validateBackendEventPayload('account.changed', { ...expired, token: 'never' })
+    ).toThrow('token must be a known field')
+    expect(() => validateBackendEventPayload('account.changed', { reason: 'signed-out' })).toThrow(
+      'account'
+    )
+  })
+
   it('types and exactly validates provider OAuth callback completion', () => {
     expectTypeOf<
       BackendRpcParams<'platformAccounts.oauth.complete'>

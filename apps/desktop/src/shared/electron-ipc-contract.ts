@@ -220,6 +220,8 @@ export const electronInvokeApiMethods = {
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
   'comments-window:open-destination': 'openDestinationFromCommentsWindow',
+  // Plan 215 A3: "Sign in to Videorc" on a chat row, started by the main window.
+  'comments-window:sign-in-videorc': 'signInToVideorcFromCommentsWindow',
   'comments-window:moderation': 'moderateFromCommentsWindow',
   'comments-window:moderation-result-push': 'pushModerationResult',
   'comments-window:viewers-push': 'pushViewerSample',
@@ -344,6 +346,8 @@ export interface ElectronIpcEventMap {
   'shortcut:navigate': string
   'buddy:deep-link': BuddyDeepLinkNavigation
   'livestream:open-destination': DestinationNavigation
+  /** Plan 215 A3: the Stream Manager asked for the Videorc sign-in; the shell starts it. */
+  'account:sign-in-request': undefined
   'shortcut:modifier': boolean
   'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
@@ -397,6 +401,7 @@ export const electronEventChannels = [
   'shortcut:navigate',
   'buddy:deep-link',
   'livestream:open-destination',
+  'account:sign-in-request',
   'shortcut:modifier',
   'window:visible',
   'app:front-changed',
@@ -1675,6 +1680,12 @@ const specificRuntimeInvokeContracts = {
     ]),
     booleanSchema
   ),
+  // Plan 215 A3: "Sign in to Videorc" carries nothing but its request id;
+  // main shows the main window, which starts the sign-in it owns.
+  'comments-window:sign-in-videorc': invokeContract(
+    tupleSchema([objectSchema({ requestId: boundedIdentifier }, { allowUnknown: false })]),
+    booleanSchema
+  ),
   // Plan 140, S6: one manual removal or one card answer, relayed to Studio.
   'comments-window:moderation': invokeContract(
     tupleSchema([commentsModerationCommandSchema]),
@@ -2053,6 +2064,8 @@ const specificRuntimeEventSchemas = {
     { targetId: stringSchema({ minLength: 1, maxLength: 128 }) },
     { allowUnknown: false }
   ),
+  // Plan 215 A3: the ask carries nothing; the shell owns the sign-in.
+  'account:sign-in-request': undefinedSchema,
   // Whether the command modifier is physically down. Main is the only place
   // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
   // never receives those chords — nor, in practice, the keyup that ends them.

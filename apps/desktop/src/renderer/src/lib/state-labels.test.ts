@@ -167,6 +167,14 @@ describe('chatStateLabel (plan 174 S2.3a, H-13)', () => {
     ).toBe('Needs Sign in')
   })
 
+  // Plan 215 A1: the relay waits on the Videorc account, not on X. The word
+  // names Videorc, and a parked connector is never "Failed" or "Waiting…".
+  it('says Needs Videorc sign-in when the relay waits on the Videorc account', () => {
+    expect(
+      chatStateLabel(chat({ state: 'waiting', read: 'needs-videorc-sign-in', write: 'ready' }))
+    ).toBe('Needs Videorc sign-in')
+  })
+
   it('pauses a parked connector that resumes on its own', () => {
     expect(chatStateLabel(chat({ state: 'waiting', retryAt: '2026-10-11T20:00:00Z' }))).toBe(
       'Paused'

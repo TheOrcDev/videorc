@@ -2526,6 +2526,60 @@ mod tests {
         }
     }
 
+    /// Plan 215 A1, the Kick twin: a missing Videorc sign-in is its own
+    /// state in words that name Videorc, never a Failed row.
+    #[tokio::test]
+    async fn a_missing_videorc_sign_in_is_named_and_is_not_a_failure() {
+        let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
+        let state = test_state();
+        let generation = start_test_session(&state, "session-1").await;
+        let mut config = mock_config(&server, "kick-no-videorc-sign-in");
+        config.overrides.session_token = None;
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run_kick_chat_connector(state.clone(), "session-1".to_string(), generation, config),
+        )
+        .await
+        .expect("the connector parks without a sign-in");
+        let _ = server.shutdown.send(());
+
+        let provider = wait_for_provider_settled(&state).await;
+        assert_eq!(provider.message, "Sign in to Videorc to read Kick chat.");
+        assert_ne!(
+            provider.read,
+            CommentsReadState::Failed,
+            "a missing sign-in is not a failure"
+        );
+        assert_ne!(provider.state, LiveChatProviderConnectionState::Failed);
+        assert_eq!(provider.last_error, None);
+        assert!(server.state.bind_bodies.lock().await.is_empty());
+    }
+
+    /// The Kick row once the connector has stopped connecting.
+    async fn wait_for_provider_settled(state: &AppState) -> LiveChatProviderState {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(provider) =
+                current_status(state)
+                    .await
+                    .providers
+                    .into_iter()
+                    .find(|provider| {
+                        provider.platform == StreamPlatform::Kick
+                            && provider.state != LiveChatProviderConnectionState::Connecting
+                    })
+            {
+                return provider;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for the Kick provider to settle"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn flapping_relay_reads_heal() {
         let server = spawn_mock_server(MockMode::FailReads(2), Vec::new()).await;

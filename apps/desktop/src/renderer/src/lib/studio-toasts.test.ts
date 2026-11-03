@@ -13,7 +13,9 @@ import type { CohostState } from '@/lib/backend'
 import {
   cohostStatusDetail,
   cohostStatusToast,
+  showChatNeedsVideorcSignIn,
   showStreamTargetNotice,
+  showVideorcSignInExpired,
   showXBroadcastProblem,
   sourceSwitchFailedDescription,
   sourceSwitchFailedTitle,
@@ -152,6 +154,40 @@ describe('showXBroadcastProblem', () => {
     expect(toast.warning).toHaveBeenLastCalledWith(
       "X chat isn't connected for X",
       expect.objectContaining({ action: expect.objectContaining({ label: 'Open Livestream' }) })
+    )
+  })
+})
+
+// Plan 215 A3 and A5 (D7): the Videorc sign-in, named. A streamer read "Sign
+// in to your Videorc account" as an X failure and was sent to Livestream,
+// where X looked fine; Sign in is the fix, so it is the action.
+describe('the Videorc sign-in toasts', () => {
+  it('names the account with Sign in as the fix, never Open Livestream', () => {
+    showChatNeedsVideorcSignIn('X')
+    expect(toast.warning).toHaveBeenLastCalledWith(
+      'X chat needs your Videorc sign-in',
+      expect.objectContaining({
+        id: 'chat-videorc-sign-in:X',
+        description: 'Your stream is fine. Sign in to read chat.',
+        action: expect.objectContaining({ label: 'Sign in' })
+      })
+    )
+    showChatNeedsVideorcSignIn('Kick')
+    expect(toast.warning).toHaveBeenLastCalledWith(
+      'Kick chat needs your Videorc sign-in',
+      expect.objectContaining({ id: 'chat-videorc-sign-in:Kick' })
+    )
+  })
+
+  it('says when the server signed the desktop out', () => {
+    showVideorcSignInExpired()
+    expect(toast.warning).toHaveBeenLastCalledWith(
+      'Your Videorc sign-in expired',
+      expect.objectContaining({
+        id: 'account-session-expired',
+        description: 'Sign in again.',
+        action: expect.objectContaining({ label: 'Sign in' })
+      })
     )
   })
 })
