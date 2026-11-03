@@ -157,6 +157,7 @@ import type { AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentStudioLink } from '@/lib/agent-studio-link'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
 import { useScreenPrivacy } from './use-screen-privacy'
+import { VirtualCameraContext, useVirtualCameraController } from './use-virtual-camera'
 import type { FollowFrontAppHost, FollowSceneApply } from './use-follow-front-app'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
 import type {
@@ -3897,6 +3898,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
+  // Plan 214 E: Videorc Camera's status, switch and actions, in its own context.
+  const virtualCamera = useVirtualCameraController(client, wsStatus, runtimeInfo)
   // Linux can't caption at all (no native microphone path): every session
   // skips captions there, as if "Continue without captions" were chosen.
   const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
@@ -18973,20 +18976,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   return (
     <StudioShellContext.Provider value={shellValue}>
       <StudioBannersContext.Provider value={bannersValue}>
-        <StudioContextProviders
-          audio={audioValue}
-          captions={captionsValue}
-          chat={chatValue}
-          core={value}
-          diagnostics={diagnosticsValue}
-          preview={previewValue}
-          recording={recordingValue}
-          recordingState={recordingStateValue}
-          replay={replayBufferControls}
-        >
-          {children}
-          {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
-        </StudioContextProviders>
+        <VirtualCameraContext.Provider value={virtualCamera}>
+          <StudioContextProviders
+            audio={audioValue}
+            captions={captionsValue}
+            chat={chatValue}
+            core={value}
+            diagnostics={diagnosticsValue}
+            preview={previewValue}
+            recording={recordingValue}
+            recordingState={recordingStateValue}
+            replay={replayBufferControls}
+          >
+            {children}
+            {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
+          </StudioContextProviders>
+        </VirtualCameraContext.Provider>
       </StudioBannersContext.Provider>
     </StudioShellContext.Provider>
   )
