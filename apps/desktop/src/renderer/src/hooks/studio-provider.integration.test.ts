@@ -7242,7 +7242,10 @@ describe('real StudioProvider lifecycle', () => {
           latest().sourceSelectionState.snapshot?.confirmed.screenId === screenId &&
           heldProofs.length === 1
       )
-      expect(latest().layoutSwitchPending).toBe('camera-only')
+      expect(latest().layoutSwitchPending).toEqual({
+        layoutPreset: 'camera-only',
+        arrangementMode: 'preset'
+      })
       expect(latest().captureConfig.layout.layoutPreset).toBe('screen-camera')
       // The first committed composition is camera-only while its output proof
       // is held. A newer screen or mixed intent must still have selected IDs.
