@@ -23,6 +23,7 @@ import type {
   CommentsViewSnapshot,
   LiveChatMessage,
   ModerationOperation,
+  StreamManagerHideMethod,
   ViewerSample
 } from '@/lib/backend'
 import {
@@ -249,6 +250,11 @@ function CommentsWindowApp(): ReactElement {
     return window.videorc.buddyActFromCommentsWindow({ requestId: crypto.randomUUID(), sentence })
   }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
+  // Hide from stream (plan 215 D6): main owns the value and the platform's
+  // way of hiding; this window renders and flips the switch.
+  const [hiddenFromStream, setHiddenFromStream] = useState(false)
+  const [hideFromStreamMethod, setHideFromStreamMethod] =
+    useState<StreamManagerHideMethod>('unsupported')
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
     DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
   )
@@ -366,6 +372,8 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => {
         if (!state) return
         setAlwaysOnTop(state.alwaysOnTop)
+        setHiddenFromStream(state.hiddenFromStream === true)
+        setHideFromStreamMethod(state.hideFromStreamMethod)
         setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
         setAutoShowActivity(state.autoShowActivity === true)
       })
@@ -394,6 +402,8 @@ function CommentsWindowApp(): ReactElement {
     const offDashboard = window.videorc?.onDashboard?.((state) => setDashboard(state))
     const offState = window.videorc?.onCommentsWindowState?.((state) => {
       setAlwaysOnTop(state.alwaysOnTop)
+      setHiddenFromStream(state.hiddenFromStream === true)
+      setHideFromStreamMethod(state.hideFromStreamMethod)
       setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
       setAutoShowActivity(state.autoShowActivity === true)
     })
@@ -1046,6 +1056,13 @@ function CommentsWindowApp(): ReactElement {
           onToggleAlwaysOnTop={() =>
             void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)
           }
+          hiddenFromStream={hiddenFromStream}
+          hideFromStreamMethod={hideFromStreamMethod}
+          onToggleHiddenFromStream={() => {
+            // Optimistic, like the pin: main's state event is the truth.
+            setHiddenFromStream(!hiddenFromStream)
+            void window.videorc?.setCommentsWindowHiddenFromStream?.(!hiddenFromStream)
+          }}
         />
       </ChatGifModeProvider>
       <BuddyConsentDialog open={buddyConsentAsked} onAnswer={answerBuddyConsent} />

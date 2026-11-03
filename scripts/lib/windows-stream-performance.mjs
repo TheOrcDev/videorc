@@ -2428,6 +2428,12 @@ export function evaluateWindowsCaptureProtectionPlacement({
     if (state?.captureProtectionMarkerInstalled !== true) {
       roleBlockers.push('capture-protection marker was not acknowledged')
     }
+    // Plan 215 C3: the Stream Manager is on stream by default; its marker is
+    // evidence only while Hide from stream is on and content protection took.
+    if (role === 'comments') {
+      if (state?.hiddenFromStream !== true) roleBlockers.push('Hide from stream was not on')
+      if (state?.protected !== true) roleBlockers.push('content protection was not on')
+    }
     if (!isRectangle(actualBounds)) {
       roleBlockers.push('actual bounds were missing')
     } else {

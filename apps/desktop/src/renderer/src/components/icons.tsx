@@ -237,7 +237,11 @@ export {
   BookmarkSimple as MarkerIcon,
   // Hide screen (plan 210): the screen is hidden from viewers. Never the
   // Preview's eye, which opens a window.
-  EyeSlash as HiddenIcon
+  EyeSlash as HiddenIcon,
+  // Hide from stream (plan 215 D6): the Stream Manager stays on the
+  // streamer's screen and out of the capture. Its own glyph, so it never
+  // reads as Hide screen.
+  EyeClosed as HiddenFromStreamIcon
 } from '@phosphor-icons/react'
 /**
  * Files, assets and editing.

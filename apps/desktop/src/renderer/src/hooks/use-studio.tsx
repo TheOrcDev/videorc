@@ -654,7 +654,8 @@ import {
 } from '@/lib/studio-bootstrap'
 import {
   deviceListWithoutProtectedOverlayWindows,
-  protectedOverlayWindowIdsFromOverlayWindows
+  protectedOverlayWindowIdsFromOverlayWindows,
+  streamManagerProtectedOverlayWindow
 } from '@/lib/protected-overlay-windows'
 
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
@@ -1339,6 +1340,8 @@ export type StudioContextValue = {
   closeCommentsWindow: () => Promise<void>
   toggleCommentsWindow: () => Promise<void>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
+  /** Hide from stream (plan 215 D6), flipped from ⌘K with the window closed too. */
+  setCommentsWindowHiddenFromStream: (hidden: boolean) => Promise<void>
   openSessionCommentsWindow: (sessionId: string, title: string, startedAt: string) => Promise<void>
   highlightedCommentId: string | null
   commentHighlightState: CommentHighlightState
@@ -2281,6 +2284,8 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   visible: false,
   bounds: null,
   alwaysOnTop: false,
+  hiddenFromStream: false,
+  hideFromStreamMethod: 'unsupported',
   highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   autoShowActivity: false,
   protected: false,
@@ -2311,12 +2316,20 @@ const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
 })
 
 async function currentProtectedOverlayWindowIds(): Promise<number[]> {
-  // Only Notes is capture-protected: it is a private teleprompter. Comments
-  // and Captions are part of the show and stay visible in recordings (owner
+  // Notes is capture-protected: it is a private teleprompter. Comments and
+  // Captions are part of the show and stay visible in recordings (owner
   // call, 2026-08-19), so they are neither excluded from capture nor hidden
-  // from the source picker.
-  const latestNotesWindow = await window.videorc?.getNotesWindowState?.().catch(() => null)
-  return protectedOverlayWindowIdsFromOverlayWindows(latestNotesWindow ?? idleNotesWindowState())
+  // from the source picker. The one choice (plan 215 D6): the Stream Manager
+  // joins the list while its Hide from stream switch is on. The backend
+  // applies a changed list to a running capture in place (C2).
+  const [latestNotesWindow, latestCommentsWindow] = await Promise.all([
+    window.videorc?.getNotesWindowState?.().catch(() => null),
+    window.videorc?.getCommentsWindowState?.().catch(() => null)
+  ])
+  return protectedOverlayWindowIdsFromOverlayWindows(
+    latestNotesWindow ?? idleNotesWindowState(),
+    streamManagerProtectedOverlayWindow(latestCommentsWindow ?? idleCommentsWindowState())
+  )
 }
 
 export function useStudioCore(): StudioCoreContextValue {
@@ -3794,6 +3807,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [refreshLiveChatSnapshotForComments])
   const setCommentsWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     await window.videorc?.setCommentsWindowAlwaysOnTop?.(alwaysOnTop)
+  }, [])
+  const setCommentsWindowHiddenFromStream = useCallback(async (hidden: boolean) => {
+    await window.videorc?.setCommentsWindowHiddenFromStream?.(hidden)
   }, [])
   const openSessionCommentsWindowRef = useRef<
     ((sessionId: string, title: string, startedAt: string) => Promise<void>) | null
@@ -12003,12 +12019,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await window.videorc?.setNotesWindowAlwaysOnTop?.(alwaysOnTop)
   }, [])
 
-  const notesProtectedOverlayKey = useMemo(
+  // The exclusion list's identity: Notes while open, and the Stream Manager
+  // while open and hidden from stream (plan 215 C2). A change re-sends the
+  // screen start, which the backend applies to the running capture in place.
+  const protectedOverlayKey = useMemo(
     () =>
-      notesWindow.open && typeof notesWindow.windowId === 'number'
-        ? String(notesWindow.windowId)
-        : '',
-    [notesWindow.open, notesWindow.windowId]
+      protectedOverlayWindowIdsFromOverlayWindows(
+        notesWindow,
+        streamManagerProtectedOverlayWindow(commentsWindow)
+      ).join(','),
+    [notesWindow, commentsWindow]
   )
 
   useEffect(() => {
@@ -12027,10 +12047,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [notesWindow.open, recording.state, runtimeInfo?.notesWindowRecordingOverlayAllowed])
 
+  // Plan 215 D6: with Hide from stream on, the window is out of the capture
+  // (macOS: our filter; Windows: content protection, which `protected`
+  // already says), so it stays open through the recording.
+  const commentsWindowHiddenFromStream =
+    commentsWindow.hiddenFromStream && commentsWindow.hideFromStreamMethod !== 'unsupported'
   useEffect(() => {
     if (
       !commentsWindow.open ||
       commentsWindow.protected ||
+      commentsWindowHiddenFromStream ||
       !isActiveRecordingState(recording.state) ||
       runtimeInfo?.commentsWindowRecordingOverlayAllowed
     ) {
@@ -12052,6 +12078,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [
     commentsWindow.open,
     commentsWindow.protected,
+    commentsWindowHiddenFromStream,
     recording.state,
     runtimeInfo?.commentsWindowRecordingOverlayAllowed
   ])
@@ -12063,7 +12090,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     nativePreviewScreenKeyRef.current = null
     void ensureNativePreviewScreen()
-  }, [ensureNativePreviewScreen, notesProtectedOverlayKey])
+  }, [ensureNativePreviewScreen, protectedOverlayKey])
 
   // The preview window is locked to the OUTPUT aspect ratio — the user can never
   // squeeze or stretch what they will record/stream.
@@ -17568,9 +17595,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     !isActiveRecordingState(recording.state) && !startRequestPending && !stopRequestPending
       ? (recordBlockedReason ?? liveStreamBlockedReason)
       : null
+  // The window picker never offers Notes, nor the Stream Manager while it is
+  // hidden from stream (plan 215 C2).
   const visibleDeviceList = useMemo(
-    () => deviceListWithoutProtectedOverlayWindows(deviceList, notesWindow),
-    [deviceList, notesWindow]
+    () =>
+      deviceListWithoutProtectedOverlayWindows(
+        deviceList,
+        notesWindow,
+        streamManagerProtectedOverlayWindow(commentsWindow)
+      ),
+    [deviceList, notesWindow, commentsWindow]
   )
   const selectedCaptureDevice = findDevice(
     visibleDeviceList.devices,
@@ -18536,6 +18570,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeCommentsWindow,
       toggleCommentsWindow,
       setCommentsWindowAlwaysOnTop,
+      setCommentsWindowHiddenFromStream,
       openSessionCommentsWindow,
       highlightedCommentId,
       commentHighlightState,
@@ -18783,6 +18818,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeCommentsWindow,
       toggleCommentsWindow,
       setCommentsWindowAlwaysOnTop,
+      setCommentsWindowHiddenFromStream,
       openSessionCommentsWindow,
       highlightedCommentId,
       commentHighlightState,

@@ -6,6 +6,7 @@ import {
   DarkModeIcon,
   DesktopIcon,
   EditIcon,
+  HiddenFromStreamIcon,
   ImageIcon,
   LightModeIcon,
   LivestreamIcon,
@@ -67,6 +68,7 @@ import {
   useStudioRecordingState,
   useStudioReplay
 } from '@/hooks/use-studio'
+import { CAPTURE_PROTECTION_UNSUPPORTED_REASON } from '../../../shared/capture-protection'
 import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
@@ -158,6 +160,7 @@ export function CommandPalette({
     closeNotesWindow,
     commentsWindow,
     toggleCommentsWindow,
+    setCommentsWindowHiddenFromStream,
     captionsWindow,
     toggleCaptionsWindow
   } = useStudioCore()
@@ -414,6 +417,32 @@ export function CommandPalette({
                 ? `Close ${WINDOW_NAMES.streamManager}`
                 : `Open ${WINDOW_NAMES.streamManager}`}
               {shortcut(shortcutAccelerator('comments-window'))}
+            </CommandItem>
+          ) : null}
+          {/* Hide from stream (plan 215 D6): the Stream Manager's switch,
+              reachable with the window closed too (main remembers it). A
+              platform that can't hide a window keeps the row, disabled, with
+              the reason as its context. */}
+          {runtimeInfo?.commentsWindowEnabled ? (
+            <CommandItem
+              value={
+                commentsWindow.hiddenFromStream
+                  ? `Show ${WINDOW_NAMES.streamManager} on stream`
+                  : `Hide ${WINDOW_NAMES.streamManager} from stream`
+              }
+              keywords={['chat', 'window', 'capture', 'hidden', 'private', 'pin']}
+              disabled={commentsWindow.hideFromStreamMethod === 'unsupported'}
+              onSelect={() =>
+                run(() => void setCommentsWindowHiddenFromStream(!commentsWindow.hiddenFromStream))
+              }
+            >
+              <HiddenFromStreamIcon className="size-4" />
+              {commentsWindow.hiddenFromStream
+                ? `Show ${WINDOW_NAMES.streamManager} on stream`
+                : `Hide ${WINDOW_NAMES.streamManager} from stream`}
+              {commentsWindow.hideFromStreamMethod === 'unsupported' ? (
+                <Context>{CAPTURE_PROTECTION_UNSUPPORTED_REASON}</Context>
+              ) : null}
             </CommandItem>
           ) : null}
           {captionsWindow.enabled || captionsWindow.open ? (
