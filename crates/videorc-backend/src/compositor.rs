@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime};
 
@@ -486,6 +486,12 @@ pub struct CompositorRuntime {
     /// composes CPU pixels once and hands them over. Lives for the runtime,
     /// not per run, so a stale render cache still shares it.
     program_picture_waiters: ProgramPictureWaiters,
+    /// Plan 214 A2: holders who need pixels from the metadata-only preview
+    /// (Videorc Camera while an app holds it, D13). While it is non-zero the
+    /// no-GPU native-preview tick composes CPU pixels every tick, as it does
+    /// once for a picture waiter; the Metal path changes nothing. Lives for
+    /// the runtime, like the waiters, so a stale render cache shares it.
+    pixel_demand: Arc<AtomicU32>,
     /// Plan 157: Screen/Camera ISO stores while a separate-source capture runs.
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     preview_frame_lease_capacity: Arc<tokio::sync::Semaphore>,
@@ -1470,6 +1476,8 @@ struct CompositorRenderCache {
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     program_frame_store: CompositorFrameStore,
     program_picture_waiters: ProgramPictureWaiters,
+    /// Plan 214 A2: see `CompositorRuntime::pixel_demand`.
+    pixel_demand: Arc<AtomicU32>,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
@@ -1562,6 +1570,7 @@ impl CompositorRenderCache {
             stream_frame_store: compositor.stream_frame_store.clone(),
             program_frame_store: compositor.program_frame_store.clone(),
             program_picture_waiters: compositor.program_picture_waiters.clone(),
+            pixel_demand: compositor.pixel_demand.clone(),
             source_iso_frame_stores: compositor.source_iso_frame_stores.clone(),
             snapshot: snapshot.cloned(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
@@ -3655,6 +3664,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         stream_frame_store: None,
         program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         program_picture_waiters: Arc::default(),
+        pixel_demand: Arc::default(),
         source_iso_frame_stores: None,
         preview_frame_lease_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
         frame_evidence: VecDeque::new(),
@@ -4948,6 +4958,14 @@ pub(crate) struct ProgramPicture {
     pub width: u32,
     pub height: u32,
     pub rgb: Vec<u8>,
+}
+
+/// Plan 214 A2: the runtime's pixel-demand counter, for a holder that needs
+/// the metadata-only preview to compose pixels (Videorc Camera). The counter
+/// lives for the runtime, so one handle serves every run.
+pub(crate) async fn pixel_demand(state: &AppState) -> crate::virtual_camera::PixelDemand {
+    let compositor = state.compositor.lock().await;
+    crate::virtual_camera::PixelDemand::from_counter(compositor.pixel_demand.clone())
 }
 
 /// The newest program frame's sequence, without reading its pixels.
@@ -10052,6 +10070,9 @@ async fn publish_compositor_frame(
     let mut metadata_only_preview = false;
     // Agents waiting for this metadata-only preview to compose pixels once.
     let mut picture_waiters = Vec::new();
+    // Plan 214 A2: Videorc Camera (or another holder) needs pixels from the
+    // metadata-only preview every tick while an app holds the camera.
+    let mut pixel_demanded = false;
     {
         let inputs = CompositorRenderInputs {
             sequence,
@@ -10133,6 +10154,7 @@ async fn publish_compositor_frame(
                             .lock()
                             .unwrap_or_else(|p| p.into_inner()),
                     );
+                    pixel_demanded = render_cache.pixel_demand.load(Ordering::Acquire) > 0;
                     let _ = reason;
                 } else if cfg!(target_os = "macos") {
                     compositor_fallback_reason = Some(reason.to_string());
@@ -10140,7 +10162,9 @@ async fn publish_compositor_frame(
                     let _ = reason;
                 }
                 if !retain_previous_native_frame
-                    && (frame_consumer.composes_cpu_pixels() || !picture_waiters.is_empty())
+                    && (frame_consumer.composes_cpu_pixels()
+                        || !picture_waiters.is_empty()
+                        || pixel_demanded)
                 {
                     bytes = {
                         let mut store = frame_store
@@ -13768,6 +13792,7 @@ mod tests {
                 stream_frame_store: None,
                 program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
                 program_picture_waiters: Arc::default(),
+                pixel_demand: Arc::default(),
                 source_iso_frame_stores: Some(stores.clone()),
                 snapshot: Some(snapshot),
                 simulcast_snapshot: None,
@@ -16439,6 +16464,43 @@ mod tests {
         publish_native_preview_tick_without_gpu(&state, 3, &mut live_sources, &mut render_cache)
             .await;
         assert_eq!(latest_frame_bytes_len(&store), 0);
+    }
+
+    /// Plan 214 A2: while Videorc Camera (or another holder) holds the pixel
+    /// demand, the no-GPU native preview composes CPU pixels every tick, as
+    /// it does once for a picture waiter; released, it is metadata-only
+    /// again (the Linux plan-0014 idle cost stays zero with the camera off).
+    #[tokio::test]
+    async fn metadata_only_preview_composes_pixels_while_demand_is_held() {
+        let state = test_state();
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+        publish_native_preview_tick_without_gpu(&state, 1, &mut live_sources, &mut render_cache)
+            .await;
+        let store = compositor_frame_store(&state).await;
+        assert_eq!(latest_frame_bytes_len(&store), 0);
+
+        let demand = pixel_demand(&state).await;
+        let guard = demand.hold();
+        publish_native_preview_tick_without_gpu(&state, 2, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(latest_frame_bytes_len(&store), raw_yuv420p_len(16, 8));
+        publish_native_preview_tick_without_gpu(&state, 3, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(
+            latest_frame_bytes_len(&store),
+            raw_yuv420p_len(16, 8),
+            "every tick while the demand is held, not once"
+        );
+
+        drop(guard);
+        publish_native_preview_tick_without_gpu(&state, 4, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(
+            latest_frame_bytes_len(&store),
+            0,
+            "released: metadata frames again"
+        );
     }
 
     #[tokio::test]
