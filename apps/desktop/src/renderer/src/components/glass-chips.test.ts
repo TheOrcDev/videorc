@@ -311,14 +311,12 @@ describe('chrome materials (plan 208 S4)', () => {
       '--chrome-led-lift',
       '--chrome-led-glow',
       '--chrome-edge',
-      '--chrome-row-edge-stops',
       '--chrome-row-live-top',
       '--chrome-row-live-bottom',
       '--chrome-row-live-hi',
       '--chrome-row-member-top',
       '--chrome-row-member-bottom',
       '--chrome-row-member-hi',
-      '--chrome-row-member-edge',
       '--chrome-row-rim',
       '--chrome-row-lift'
     ]
@@ -362,14 +360,14 @@ describe('chrome materials (plan 208 S4)', () => {
         /filter|blur|will-change|background-attachment|vw|vh|transform|::?(?:before|after)/
       )
     }
-    // The member hue is only the member row's edge; the on-stream row is neutral.
-    expect(body('chrome-row-member')).toContain('inset 2px 0 0 var(--chrome-row-member-edge)')
-    for (const column of [light, dark]) {
-      expect(column).toContain(
-        '--chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);'
-      )
+    // No row wears a stripe down its left: no narrow background layer, no
+    // offset inset shadow, no member hue.
+    for (const name of ['chrome-row-live', 'chrome-row-member']) {
+      expect(body(name), name).not.toMatch(/background-size|inset \d+px 0 0|--member/)
     }
-    expect(body('chrome-row-live')).not.toContain('--member')
+    for (const column of [light, dark]) {
+      expect(column).not.toMatch(/--chrome-row-(?:edge-stops|member-edge):/)
+    }
     // Each plate stands on the theme's solid, its last layer, also on hover.
     for (const name of ['chrome-row-live', 'chrome-row-member']) {
       const stacks = [...body(name).matchAll(/background-image:([^;]*);/g)].map(([, layers]) =>
