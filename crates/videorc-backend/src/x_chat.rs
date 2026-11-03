@@ -949,8 +949,11 @@ fn follow_event_to_message(
     })
 }
 
+/// The mock relay and its helpers are crate-visible so `live_chat.rs` can
+/// drive a real X connector through the relay (plan 215 A4: the reattach
+/// after the Videorc sign-in).
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -967,16 +970,18 @@ mod tests {
     };
     use crate::storage::Database;
 
-    const SESSION_TOKEN: &str = "desktop-session-token";
+    pub(crate) const SESSION_TOKEN: &str = "desktop-session-token";
     const WEBHOOK_ID: &str = "2090847910112202752";
     const X_USER_ID: &str = "742673143";
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MockMode {
+    pub(crate) enum MockMode {
         Deliver,
         /// Reads with a cursor answer 500 this many times, then deliver.
         FailReads(usize),
         BindRejected,
+        /// The relay refuses the session (a 401): the Videorc sign-in is
+        /// gone or expired, whatever bearer the connector sends.
         SignedOut,
         SubscriptionRejected,
         /// X refuses only the `follow.follow` subscription (plan 071).
@@ -990,10 +995,12 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct MockState {
-        mode: MockMode,
-        bind_calls: Arc<AtomicUsize>,
-        bind_authorizations: Arc<Mutex<Vec<String>>>,
+    pub(crate) struct MockState {
+        /// Switchable mid-test (plan 215 A4): a relay that refused the
+        /// session accepts it again once the streamer has signed in.
+        mode: Arc<std::sync::Mutex<MockMode>>,
+        pub(crate) bind_calls: Arc<AtomicUsize>,
+        pub(crate) bind_authorizations: Arc<Mutex<Vec<String>>>,
         read_calls: Arc<AtomicUsize>,
         read_queries: Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>,
         unbind_calls: Arc<AtomicUsize>,
@@ -1003,10 +1010,30 @@ mod tests {
         release: Arc<Notify>,
     }
 
-    struct MockServer {
-        base_url: String,
-        state: MockState,
-        shutdown: oneshot::Sender<()>,
+    impl MockState {
+        fn mode(&self) -> MockMode {
+            *self
+                .mode
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+    }
+
+    pub(crate) struct MockServer {
+        pub(crate) base_url: String,
+        pub(crate) state: MockState,
+        pub(crate) shutdown: oneshot::Sender<()>,
+    }
+
+    impl MockServer {
+        /// Change how the relay answers from now on.
+        pub(crate) fn set_mode(&self, mode: MockMode) {
+            *self
+                .state
+                .mode
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
+        }
     }
 
     fn relay_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
@@ -1029,7 +1056,7 @@ mod tests {
         Json(body): Json<Value>,
     ) -> (StatusCode, Json<Value>) {
         state.bind_calls.fetch_add(1, Ordering::SeqCst);
-        if !bearer_is_valid(&headers) || state.mode == MockMode::SignedOut {
+        if !bearer_is_valid(&headers) || state.mode() == MockMode::SignedOut {
             return relay_error(StatusCode::UNAUTHORIZED, "unauthorized");
         }
         state.bind_authorizations.lock().await.push(
@@ -1038,7 +1065,7 @@ mod tests {
                 .unwrap_or_default()
                 .to_string(),
         );
-        if state.mode == MockMode::BindRejected {
+        if state.mode() == MockMode::BindRejected {
             return relay_error(StatusCode::FORBIDDEN, "x-chat-bind-rejected");
         }
         (
@@ -1107,7 +1134,8 @@ mod tests {
             );
         };
         let call = state.read_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        match state.mode {
+        let mode = state.mode();
+        match mode {
             MockMode::FailReads(failures) if call <= failures => {
                 return relay_error(StatusCode::INTERNAL_SERVER_ERROR, "internal-error");
             }
@@ -1117,12 +1145,12 @@ mod tests {
         }
         if after == "41" {
             let mut events = vec![relay_event("message-1")];
-            if state.mode == MockMode::DeliverFollows {
+            if mode == MockMode::DeliverFollows {
                 // The same person twice: an unfollow and a refollow.
                 events.push(follow_relay_event("-7953119945885597316", "555"));
                 events.push(follow_relay_event("-7953119945885597317", "555"));
             }
-            if state.mode == MockMode::DeliverHost {
+            if mode == MockMode::DeliverHost {
                 // The streamer's own send, echoed back by XAA (plan 095).
                 let mut host = relay_event("message-host");
                 host["author"]["id"] = json!(X_USER_ID);
@@ -1150,7 +1178,7 @@ mod tests {
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.starts_with("OAuth "));
-        if !signed || state.mode == MockMode::SubscriptionRejected {
+        if !signed || state.mode() == MockMode::SubscriptionRejected {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "title": "Unauthorized", "detail": "Unauthorized" })),
@@ -1164,7 +1192,7 @@ mod tests {
         State(state): State<MockState>,
         Json(body): Json<Value>,
     ) -> (StatusCode, Json<Value>) {
-        if state.mode == MockMode::FollowRejected && body["event_type"] == "follow.follow" {
+        if state.mode() == MockMode::FollowRejected && body["event_type"] == "follow.follow" {
             return (
                 StatusCode::FORBIDDEN,
                 Json(json!({ "title": "Forbidden", "detail": "Forbidden" })),
@@ -1224,13 +1252,13 @@ mod tests {
         (StatusCode::OK, Json(json!({ "data": { "deleted": true } })))
     }
 
-    async fn spawn_mock_server(mode: MockMode, subscriptions: Vec<Value>) -> MockServer {
+    pub(crate) async fn spawn_mock_server(mode: MockMode, subscriptions: Vec<Value>) -> MockServer {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("mock listener");
         let addr = listener.local_addr().expect("mock address");
         let state = MockState {
-            mode,
+            mode: Arc::new(std::sync::Mutex::new(mode)),
             bind_calls: Arc::new(AtomicUsize::new(0)),
             bind_authorizations: Arc::new(Mutex::new(Vec::new())),
             read_calls: Arc::new(AtomicUsize::new(0)),
@@ -1281,7 +1309,7 @@ mod tests {
         }
     }
 
-    fn mock_config(server: &MockServer) -> XChatConfig {
+    pub(crate) fn mock_config(server: &MockServer) -> XChatConfig {
         XChatConfig {
             broadcast_id: "1NGarompkEqJj".to_string(),
             target_id: Some("x-target".to_string()),
@@ -1294,7 +1322,7 @@ mod tests {
         }
     }
 
-    fn test_state() -> AppState {
+    pub(crate) fn test_state() -> AppState {
         let (events, _) = broadcast::channel(32);
         AppState::new(
             "test-token".to_string(),

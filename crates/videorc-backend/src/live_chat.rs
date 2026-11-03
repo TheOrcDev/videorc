@@ -1034,6 +1034,34 @@ pub enum ChatSenderConfig {
     },
 }
 
+/// What re-spawns an X or Kick connector parked on the Videorc sign-in (plan
+/// 215 A4): the config it was started with, broadcast included. Captured at
+/// spawn and dropped at stop, like the senders; the connector itself reads
+/// the fresh session token from the store when it runs again.
+#[derive(Debug, Clone)]
+pub(crate) enum ReattachableConnector {
+    X(crate::x_chat::XChatConfig),
+    Kick(crate::kick_chat::KickChatConfig),
+}
+
+impl ReattachableConnector {
+    fn platform(&self) -> StreamPlatform {
+        match self {
+            Self::X(_) => StreamPlatform::X,
+            Self::Kick(_) => StreamPlatform::Kick,
+        }
+    }
+}
+
+/// One destination parked on the Videorc sign-in (plan 215 A4), and what
+/// re-spawns it when there is something registered.
+#[derive(Debug, Clone)]
+pub(crate) struct ParkedConnector {
+    pub(crate) destination_id: String,
+    pub(crate) platform: StreamPlatform,
+    pub(crate) connector: Option<ReattachableConnector>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommentsSendParams {
@@ -1185,6 +1213,9 @@ pub struct LiveChatCoordinator {
     tasks: Vec<JoinHandle<()>>,
     /// Send credentials per concrete destination; session-scoped.
     senders: HashMap<String, ChatSenderConfig>,
+    /// What each X and Kick connector needs to attach again after the Videorc
+    /// sign-in (plan 215 A4), by destination id; session-scoped like `senders`.
+    reattach: HashMap<String, ReattachableConnector>,
     /// Same-id callers subscribe to one backend-owned operation task. The receiver is
     /// removed after terminal persistence; SQLite remains the durable idempotency
     /// authority afterward.
@@ -1285,6 +1316,7 @@ impl LiveChatCoordinator {
             reconnect_count: 0,
             tasks: Vec::new(),
             senders: HashMap::new(),
+            reattach: HashMap::new(),
             send_operations_in_flight: HashMap::new(),
             chatters_seen: HashSet::new(),
             seventv_indexes: Arc::default(),
@@ -1297,6 +1329,39 @@ impl LiveChatCoordinator {
 
     pub fn register_sender(&mut self, destination_id: String, sender: ChatSenderConfig) {
         self.senders.insert(destination_id, sender);
+    }
+
+    /// Remember what re-spawns this destination's connector after the Videorc
+    /// sign-in (plan 215 A4). Registered at spawn, alongside the sender.
+    pub(crate) fn register_reattachable(
+        &mut self,
+        destination_id: String,
+        connector: ReattachableConnector,
+    ) {
+        self.reattach.insert(destination_id, connector);
+    }
+
+    /// The destinations parked on the Videorc sign-in (plan 215 A4), each
+    /// with what re-spawns it, or `None` when nothing was registered for it
+    /// (a row installed by a start path that spawned no connector). Pure, so
+    /// the choice is testable apart from the spawn.
+    pub(crate) fn connectors_awaiting_videorc_sign_in(&self) -> Vec<ParkedConnector> {
+        if self.session_id.is_none() {
+            return Vec::new();
+        }
+        self.providers
+            .iter()
+            .filter(|provider| provider.read == CommentsReadState::NeedsVideorcSignIn)
+            .map(|provider| ParkedConnector {
+                destination_id: provider.id.clone(),
+                platform: provider.platform,
+                connector: self
+                    .reattach
+                    .get(&provider.id)
+                    .filter(|connector| connector.platform() == provider.platform)
+                    .cloned(),
+            })
+            .collect()
     }
 
     /// Whether this session sends to Kick (its subscriptions are in use).
@@ -1442,6 +1507,7 @@ impl LiveChatCoordinator {
         self.messages_received = 0;
         self.reconnect_count = 0;
         self.senders.clear();
+        self.reattach.clear();
         self.fake_echo.clear();
         self.chatters_seen.clear();
         self.seventv_indexes = Arc::default();
@@ -1460,6 +1526,7 @@ impl LiveChatCoordinator {
         }
         self.session_id = None;
         self.senders.clear();
+        self.reattach.clear();
         self.fake_echo.clear();
         self.seventv_indexes = Arc::default();
     }
@@ -2403,10 +2470,16 @@ where
             session_generation,
             kick.clone(),
         ));
+        let destination_id = comments_destination_id(StreamPlatform::Kick, kick.target_id.as_deref());
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(handle);
+        // Plan 215 A4: the Videorc sign-in re-spawns this connector as is.
+        coordinator.register_reattachable(
+            destination_id.clone(),
+            ReattachableConnector::Kick(kick.clone()),
+        );
         coordinator.register_sender(
-            comments_destination_id(StreamPlatform::Kick, kick.target_id.as_deref()),
+            destination_id,
             ChatSenderConfig::Kick(crate::kick_chat::KickChatSenderConfig {
                 access_token: kick.access_token,
                 account_id: kick.account_id,
@@ -2421,10 +2494,16 @@ where
             state.clone(),
             params.session_id.clone(),
             session_generation,
-            x,
+            x.clone(),
         ));
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(handle);
+        // Plan 215 A4: the Videorc sign-in re-spawns this connector with its
+        // broadcast.
+        coordinator.register_reattachable(
+            comments_destination_id(StreamPlatform::X, x.target_id.as_deref()),
+            ReattachableConnector::X(x),
+        );
     }
     // Followers and subscribers (plan 055, S3) share the connectors'
     // abort-on-stop lifecycle.
@@ -2579,12 +2658,18 @@ where
         state.clone(),
         params.session_id,
         session_generation,
-        config,
+        config.clone(),
     ));
     {
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(viewer_handle);
         coordinator.attach_task(handle);
+        // Plan 215 A4: the Videorc sign-in re-spawns this connector with the
+        // broadcast it was attached for.
+        coordinator.register_reattachable(
+            sender_destination_id.clone(),
+            ReattachableConnector::X(config),
+        );
         coordinator.register_sender(
             sender_destination_id,
             ChatSenderConfig::X {
@@ -2598,6 +2683,88 @@ where
     state.emit_event("liveChat.snapshot", snapshot.clone());
     drop(lifecycle_delivery);
     Ok(snapshot)
+}
+
+/// Plan 215 A4: the Videorc sign-in just completed. Every X and Kick connector
+/// parked on it (`NeedsVideorcSignIn`) re-spawns with the config it was
+/// registered with, broadcast included, in the same chat session and
+/// generation: the stream never restarts, and the connector reads the fresh
+/// token from the store as it always did. A parked row nothing was registered
+/// for stays as it is and says so in the log; it attaches at the next Go
+/// Live. Returns how many connectors were re-spawned.
+pub async fn reattach_after_videorc_sign_in(state: &AppState) -> usize {
+    // The same lifecycle fence the start paths hold while they attach tasks,
+    // so a stop cannot retire the session between the choice and the spawn.
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let reattached = {
+        let mut coordinator = state.live_chat.lock().await;
+        let Some(session_id) = coordinator.session_id().map(str::to_string) else {
+            return 0;
+        };
+        let session_generation = coordinator.session_generation();
+        let parked = coordinator.connectors_awaiting_videorc_sign_in();
+        let mut reattached = 0;
+        for ParkedConnector {
+            destination_id,
+            platform,
+            connector,
+        } in parked
+        {
+            let Some(connector) = connector else {
+                state.emit_log(
+                    "warn",
+                    format!(
+                        "{} chat for {destination_id} waits on the Videorc sign-in but has no registered connector; it attaches at the next Go Live.",
+                        stream_platform_id(platform)
+                    ),
+                );
+                continue;
+            };
+            state.emit_log(
+                "info",
+                format!(
+                    "Videorc sign-in completed: attaching {} chat for {destination_id} again.",
+                    stream_platform_id(platform)
+                ),
+            );
+            let handle = match connector {
+                ReattachableConnector::X(config) => {
+                    tokio::spawn(crate::x_chat::run_x_chat_connector(
+                        state.clone(),
+                        session_id.clone(),
+                        session_generation,
+                        config,
+                    ))
+                }
+                ReattachableConnector::Kick(config) => {
+                    tokio::spawn(crate::kick_chat::run_kick_chat_connector(
+                        state.clone(),
+                        session_id.clone(),
+                        session_generation,
+                        config,
+                    ))
+                }
+            };
+            coordinator.attach_task(handle);
+            reattached += 1;
+        }
+        reattached
+    };
+    if reattached > 0 {
+        let snapshot = current_status(state).await;
+        state.emit_event("liveChat.snapshot", snapshot);
+    }
+    drop(lifecycle_delivery);
+    reattached
+}
+
+/// The Videorc account changed (plan 215 A4, A5): the renderer's chat rows
+/// hear the new truth. Between sessions the rows are the capability snapshot,
+/// which reads the session state as it is now; during a session the row is
+/// whatever the connectors say.
+pub async fn publish_chat_snapshot_after_account_change(state: &AppState) {
+    let snapshot = current_status(state).await;
+    state.emit_event("liveChat.snapshot", snapshot);
 }
 
 /// The YouTube connector resolves the live chat id from the broadcast id after
@@ -7846,5 +8013,201 @@ mod tests {
         stop_live_chat(&state).await;
         assert!(!crate::captions::caption_task_alive_for_test(&state).await);
         *state.recording.lock().await = None;
+    }
+
+    /// Plan 215 A4, the choice apart from the spawn: only a row parked on the
+    /// Videorc sign-in is attached again, with the connector registered for
+    /// it; a parked row nothing was registered for is reported without one;
+    /// a connected row is left alone; and between sessions there is nothing.
+    #[test]
+    fn only_rows_parked_on_the_videorc_sign_in_attach_again() {
+        let mut coordinator = LiveChatCoordinator::new(10);
+        assert!(coordinator.connectors_awaiting_videorc_sign_in().is_empty());
+
+        let parked_x = LiveChatProviderState {
+            read: CommentsReadState::NeedsVideorcSignIn,
+            state: LiveChatProviderConnectionState::Waiting,
+            message: X_CHAT_NEEDS_VIDEORC_SIGN_IN.to_string(),
+            ..connected_provider("x-target", StreamPlatform::X)
+        };
+        let parked_kick = LiveChatProviderState {
+            read: CommentsReadState::NeedsVideorcSignIn,
+            state: LiveChatProviderConnectionState::Waiting,
+            message: KICK_CHAT_NEEDS_VIDEORC_SIGN_IN.to_string(),
+            ..connected_provider("kick-target", StreamPlatform::Kick)
+        };
+        coordinator.start_session(
+            "session-1".to_string(),
+            vec![
+                parked_x,
+                connected_provider("yt-target", StreamPlatform::Youtube),
+                parked_kick,
+            ],
+        );
+        coordinator.register_reattachable(
+            "x-target".to_string(),
+            ReattachableConnector::X(crate::x_chat::XChatConfig {
+                broadcast_id: "1NGarompkEqJj".to_string(),
+                target_id: Some("x-target".to_string()),
+                overrides: Default::default(),
+            }),
+        );
+
+        let parked = coordinator.connectors_awaiting_videorc_sign_in();
+        assert_eq!(parked.len(), 2, "{parked:?}");
+        assert_eq!(parked[0].destination_id, "x-target");
+        assert_eq!(parked[0].platform, StreamPlatform::X);
+        assert!(matches!(
+            &parked[0].connector,
+            Some(ReattachableConnector::X(config)) if config.broadcast_id == "1NGarompkEqJj"
+        ));
+        assert_eq!(parked[1].destination_id, "kick-target");
+        assert!(parked[1].connector.is_none(), "nothing registered for Kick");
+
+        // Stop clears the registry with the senders.
+        coordinator.stop_session();
+        assert!(coordinator.connectors_awaiting_videorc_sign_in().is_empty());
+    }
+
+    /// Plan 215 A4, against the mock relay: X chat starts, the relay refuses
+    /// the Videorc session (the streamer's expired sign-in), and the row parks
+    /// in words that name Videorc. The streamer signs in: the parked connector
+    /// re-spawns with its registered broadcast in the same session and
+    /// generation, binds again, reaches Connected and delivers chat. The
+    /// stream never restarts. (A missing token parks the same way: the A1
+    /// tests in `x_chat.rs` and `kick_chat.rs`. The relay's refusal is used
+    /// here because a unit test cannot put a token into the process-wide test
+    /// secrets store without racing every test that asserts "signed out".)
+    #[tokio::test]
+    async fn x_chat_attaches_again_when_the_videorc_sign_in_completes() {
+        use crate::x_chat::tests::{MockMode, mock_config, spawn_mock_server};
+        use std::sync::atomic::Ordering;
+
+        let server = spawn_mock_server(MockMode::SignedOut, Vec::new()).await;
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        // Nothing to attach between sessions.
+        assert_eq!(reattach_after_videorc_sign_in(&state).await, 0);
+
+        let mut params = empty_start_params("session-1");
+        params.platforms = vec![StreamPlatform::X];
+        params.x = Some(mock_config(&server));
+        let started = start_live_chat(&state, params).await;
+        assert_eq!(started.session_id.as_deref(), Some("session-1"));
+        let session_generation = state.live_chat.lock().await.session_generation();
+
+        let parked = wait_for_x_provider(&state, |provider| {
+            provider.read == CommentsReadState::NeedsVideorcSignIn
+        })
+        .await;
+        assert_eq!(parked.state, LiveChatProviderConnectionState::Waiting);
+        assert_eq!(parked.message, X_CHAT_SIGN_IN_EXPIRED);
+        assert_eq!(parked.last_error, None);
+        assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 1);
+        {
+            let coordinator = state.live_chat.lock().await;
+            let awaiting = coordinator.connectors_awaiting_videorc_sign_in();
+            assert_eq!(awaiting.len(), 1);
+            assert!(matches!(
+                &awaiting[0].connector,
+                Some(ReattachableConnector::X(config)) if config.broadcast_id == "1NGarompkEqJj"
+            ));
+        }
+
+        // The streamer signs in: the relay accepts the session again, and the
+        // sign-in attaches the parked connector.
+        server.set_mode(MockMode::Deliver);
+        let mut events = state.events.subscribe();
+        assert_eq!(reattach_after_videorc_sign_in(&state).await, 1);
+
+        let connected = wait_for_x_provider(&state, |provider| {
+            provider.state == LiveChatProviderConnectionState::Connected
+        })
+        .await;
+        assert_eq!(connected.read, CommentsReadState::Ready);
+        assert_eq!(connected.last_error, None);
+        let message = wait_for_x_message(&state, "message-1").await;
+        assert_eq!(message.session_id, "session-1");
+
+        // The same session and generation: the stream never restarted. One
+        // more bind, with the registered broadcast.
+        let snapshot = current_status(&state).await;
+        assert_eq!(snapshot.session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            state.live_chat.lock().await.session_generation(),
+            session_generation
+        );
+        assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(server.state.bind_authorizations.lock().await.len(), 1);
+        assert!(
+            state
+                .live_chat
+                .lock()
+                .await
+                .connectors_awaiting_videorc_sign_in()
+                .is_empty()
+        );
+        // The renderer heard the rows change through the usual events.
+        let mut published = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(event) => published.push(event.event),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            published.iter().any(|event| event == "liveChat.snapshot"),
+            "{published:?}"
+        );
+        // A second sign-in has nothing left to attach.
+        assert_eq!(reattach_after_videorc_sign_in(&state).await, 0);
+
+        stop_live_chat(&state).await;
+        let _ = server.shutdown.send(());
+    }
+
+    async fn wait_for_x_provider(
+        state: &AppState,
+        condition: impl Fn(&LiveChatProviderState) -> bool,
+    ) -> LiveChatProviderState {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(provider) = current_status(state)
+                .await
+                .providers
+                .into_iter()
+                .find(|provider| provider.platform == StreamPlatform::X && condition(provider))
+            {
+                return provider;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for the X provider row"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_for_x_message(state: &AppState, provider_message_id: &str) -> LiveChatMessage {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(message) = current_status(state)
+                .await
+                .messages
+                .into_iter()
+                .find(|message| message.provider_message_id == provider_message_id)
+            {
+                return message;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for X message {provider_message_id}"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 }

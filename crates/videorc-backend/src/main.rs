@@ -9513,6 +9513,21 @@ async fn handle_text_message_with_role(
                             tokio::spawn(async move {
                                 cohost::resume_listen_after_sign_in(&listen_state).await
                             });
+                            // Plan 215 A4: X and Kick chat parked on the
+                            // Videorc sign-in attach again, in the running
+                            // session; the stream never restarts. Between
+                            // sessions the chat rows hear the new truth.
+                            let chat_state = state.clone();
+                            tokio::spawn(async move {
+                                if live_chat::reattach_after_videorc_sign_in(&chat_state).await
+                                    == 0
+                                {
+                                    live_chat::publish_chat_snapshot_after_account_change(
+                                        &chat_state,
+                                    )
+                                    .await;
+                                }
+                            });
                             ServerResponse::ok(command.id, resolved)
                         }
                         Err(error) => {
