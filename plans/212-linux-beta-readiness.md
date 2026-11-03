@@ -3400,3 +3400,27 @@ never answers, which leaves the deadline as the only way out. On Ogre the
 never failed on Ogre, so that shows the change breaks nothing, not that the
 Windows race is gone. The fix holds by construction, and the next Windows
 run is the check.
+
+### macOS CI at `3e0d0573`, 2026-11-03
+
+macOS Rust CI at `3e0d0573` (job 125686785862) failed one test: the backend's
+main binary ran 4,405 passed, 1 failed, 23 ignored, and the benchmark-arm
+test finished. Main's
+`audio::tests::native_audio_producer_eof_is_source_loss_and_claims_one_event`
+saw the input state reach `SourceLost` and then claimed no loss event. On
+capture stop the bus marks the stats lost inside one lock of its shared
+state and queues the loss event in a second one (`session_audio.rs`, the
+`CaptureStopped` arm), while the test polls the state without the lock, so a
+preempted runner reads between the two. The 15 macOS runs before it passed
+the test. Production reads both under the lock in one snapshot: a snapshot
+in the gap shows `SourceLost` with no queued loss, the recording monitor
+skips its silent-mic check for that state, and the next snapshot reports
+the loss, so the gap is not a product bug. The test now waits up to 1 s for
+the queued loss instead of reading once. On Ogre the 144 `audio::`-matching
+tests (the filter also matches `session_audio::`) pass and the test passed
+30 of 30 runs; it never failed on Ogre, so the macOS run is the check.
+
+Windows startup incident diagnostics at `3e0d0573` (job 125686709899): 48
+of 48 controlled cases pass; the FFmpeg-tone control passes 12 and fails 36
+on the packet-tail limit (114 to 267 ms), nine also on frame count. Same as
+main.
