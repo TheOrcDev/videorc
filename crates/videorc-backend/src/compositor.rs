@@ -685,6 +685,9 @@ pub struct CompositorStartParams {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// Plan 215 G: the chat box's legs, planned like the highlight card's.
+    pub chat_overlay_on_primary: bool,
+    pub chat_overlay_on_aux: bool,
     /// The run is a buffer-only (Clips) session's own (plan 181), started
     /// fresh because no preview run could be armed in place (a cold launch
     /// starts the ring before the Preview): scene editor drafts follow it and
@@ -698,6 +701,7 @@ pub struct CompositorStartParams {
     /// picture for the rest.
     pub highlight_overlay_on_program: bool,
     pub buddy_overlay_on_program: bool,
+    pub chat_overlay_on_program: bool,
     /// Plan 212 S1: the run is a performance check's benchmark session's own
     /// (no preview run could be armed in place): its startup scene goes to
     /// `benchmark_scene`, the user's scene stays, and the Preview hold
@@ -766,12 +770,16 @@ pub struct CompositorLoopConfig {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// Plan 215 G: the chat box's legs.
+    pub chat_overlay_on_primary: bool,
+    pub chat_overlay_on_aux: bool,
     /// Plan 205 S6: whether the program carries the item
     /// (`program_shows` for the Preview's shape). When the program carries
     /// an item the primary leg does not burn, the Preview composes its own
     /// picture (`preview_needs_program_leg`).
     pub highlight_overlay_on_program: bool,
     pub buddy_overlay_on_program: bool,
+    pub chat_overlay_on_program: bool,
 }
 
 /// Capture ownership of the preview compositor run.
@@ -811,24 +819,32 @@ pub struct CompositorArmParams {
     pub highlight_overlay_on_aux: bool,
     pub buddy_overlay_on_primary: bool,
     pub buddy_overlay_on_aux: bool,
+    /// Plan 215 G: the chat box's legs.
+    pub chat_overlay_on_primary: bool,
+    pub chat_overlay_on_aux: bool,
     /// Plan 205 S6: the program's verdict for the Preview's shape (a
     /// buffer-only lease is idle for the Preview: either switch).
     pub highlight_overlay_on_program: bool,
     pub buddy_overlay_on_program: bool,
+    pub chat_overlay_on_program: bool,
 }
 
-/// The per-leg flags of the two layout-driven overlays (plan 164): the
-/// comment-highlight card and the Buddy. Captions keep their start-time plan.
-/// `*_on_program` (plan 205) is whether the program carries the item, which
-/// the Preview's own picture draws when the primary leg does not.
+/// The per-leg flags of the layout-driven overlays (plan 164): the
+/// comment-highlight card, the Buddy and (plan 215 G) the chat box. Captions
+/// keep their start-time plan. `*_on_program` (plan 205) is whether the
+/// program carries the item, which the Preview's own picture draws when the
+/// primary leg does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayLegFlags {
     pub highlight_on_primary: bool,
     pub highlight_on_aux: bool,
     pub buddy_on_primary: bool,
     pub buddy_on_aux: bool,
+    pub chat_on_primary: bool,
+    pub chat_on_aux: bool,
     pub highlight_on_program: bool,
     pub buddy_on_program: bool,
+    pub chat_on_program: bool,
 }
 
 impl OverlayLegFlags {
@@ -845,8 +861,11 @@ impl OverlayLegFlags {
             highlight_on_aux: false,
             buddy_on_primary: shows(&layout.buddy),
             buddy_on_aux: false,
+            chat_on_primary: shows(&layout.chat),
+            chat_on_aux: false,
             highlight_on_program: shows(&layout.highlight),
             buddy_on_program: shows(&layout.buddy),
+            chat_on_program: shows(&layout.chat),
         }
     }
 
@@ -874,8 +893,11 @@ impl OverlayLegFlags {
             highlight_on_aux: plans.highlight.aux,
             buddy_on_primary: plans.buddy.primary,
             buddy_on_aux: plans.buddy.aux,
+            chat_on_primary: plans.chat.primary,
+            chat_on_aux: plans.chat.aux,
             highlight_on_program: shows(&layout.highlight),
             buddy_on_program: shows(&layout.buddy),
+            chat_on_program: shows(&layout.chat),
         }
     }
 }
@@ -901,6 +923,9 @@ pub(crate) struct ProgramLegOverlays {
     pub highlight_on_program: bool,
     pub buddy_on_primary: bool,
     pub buddy_on_program: bool,
+    /// Plan 215 G: the chat box, planned like the card.
+    pub chat_on_primary: bool,
+    pub chat_on_program: bool,
     pub caption_on_primary: bool,
     pub caption_on_aux: bool,
 }
@@ -927,6 +952,7 @@ pub(crate) fn preview_needs_program_leg(
     let missing = |program: bool, primary: bool| program && !primary;
     missing(overlays.highlight_on_program, overlays.highlight_on_primary)
         || missing(overlays.buddy_on_program, overlays.buddy_on_primary)
+        || missing(overlays.chat_on_program, overlays.chat_on_primary)
         || missing(
             overlays.caption_on_primary || overlays.caption_on_aux,
             overlays.caption_on_primary,
@@ -1015,8 +1041,11 @@ fn send_overlay_flags(compositor: &CompositorRuntime, flags: OverlayLegFlags) ->
         highlight_overlay_on_aux: flags.highlight_on_aux,
         buddy_overlay_on_primary: flags.buddy_on_primary,
         buddy_overlay_on_aux: flags.buddy_on_aux,
+        chat_overlay_on_primary: flags.chat_on_primary,
+        chat_overlay_on_aux: flags.chat_on_aux,
         highlight_overlay_on_program: flags.highlight_on_program,
         buddy_overlay_on_program: flags.buddy_on_program,
+        chat_overlay_on_program: flags.chat_on_program,
         ..current
     };
     if next == current {
@@ -3129,8 +3158,11 @@ mod editor_draft_tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         }
     }
@@ -3265,6 +3297,7 @@ mod editor_draft_tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -3768,12 +3801,15 @@ async fn start_synthetic_compositor_with_lifecycle(
         highlight_overlay_on_aux: params.highlight_overlay_on_aux,
         buddy_overlay_on_primary: params.buddy_overlay_on_primary,
         buddy_overlay_on_aux: params.buddy_overlay_on_aux,
+        chat_overlay_on_primary: params.chat_overlay_on_primary,
+        chat_overlay_on_aux: params.chat_overlay_on_aux,
         // Plan 205 S6: the caller's program verdict. The idle run and a
         // session's own run pass the union of their legs; a buffer-only run
         // (the ring started before the Preview, so no run was armed in
         // place) passes the idle program, which its legs do not burn.
         highlight_overlay_on_program: params.highlight_overlay_on_program,
         buddy_overlay_on_program: params.buddy_overlay_on_program,
+        chat_overlay_on_program: params.chat_overlay_on_program,
     });
     let stream_frame_store = params
         .stream_output
@@ -4167,8 +4203,11 @@ pub async fn arm_compositor_for_capture(
             highlight_overlay_on_aux: params.highlight_overlay_on_aux,
             buddy_overlay_on_primary: params.buddy_overlay_on_primary,
             buddy_overlay_on_aux: params.buddy_overlay_on_aux,
+            chat_overlay_on_primary: params.chat_overlay_on_primary,
+            chat_overlay_on_aux: params.chat_overlay_on_aux,
             highlight_overlay_on_program: params.highlight_overlay_on_program,
             buddy_overlay_on_program: params.buddy_overlay_on_program,
+            chat_overlay_on_program: params.chat_overlay_on_program,
         };
         let config_sent = compositor
             .loop_config_tx
@@ -4281,8 +4320,11 @@ pub async fn release_compositor_capture_lease(
                 highlight_overlay_on_aux: idle_overlays.highlight_on_aux,
                 buddy_overlay_on_primary: idle_overlays.buddy_on_primary,
                 buddy_overlay_on_aux: idle_overlays.buddy_on_aux,
+                chat_overlay_on_primary: idle_overlays.chat_on_primary,
+                chat_overlay_on_aux: idle_overlays.chat_on_aux,
                 highlight_overlay_on_program: idle_overlays.highlight_on_program,
                 buddy_overlay_on_program: idle_overlays.buddy_on_program,
+                chat_overlay_on_program: idle_overlays.chat_on_program,
                 ..lease.preview_config
             };
             let config_sent = compositor
@@ -6573,8 +6615,11 @@ async fn run_synthetic_compositor_loop(
         mut highlight_overlay_on_aux,
         mut buddy_overlay_on_primary,
         mut buddy_overlay_on_aux,
+        mut chat_overlay_on_primary,
+        mut chat_overlay_on_aux,
         mut highlight_overlay_on_program,
         mut buddy_overlay_on_program,
+        mut chat_overlay_on_program,
     } = *config_rx.borrow_and_update();
     let mut pending_loop_config: Option<CompositorLoopConfig> = None;
     let mut loop_config_closed = false;
@@ -6705,8 +6750,11 @@ async fn run_synthetic_compositor_loop(
             highlight_overlay_on_aux = next.highlight_overlay_on_aux;
             buddy_overlay_on_primary = next.buddy_overlay_on_primary;
             buddy_overlay_on_aux = next.buddy_overlay_on_aux;
+            chat_overlay_on_primary = next.chat_overlay_on_primary;
+            chat_overlay_on_aux = next.chat_overlay_on_aux;
             highlight_overlay_on_program = next.highlight_overlay_on_program;
             buddy_overlay_on_program = next.buddy_overlay_on_program;
+            chat_overlay_on_program = next.chat_overlay_on_program;
             tracing::info!(
                 "compositor {run_id} loop config swapped in place: {} fps, consumer {}",
                 target_fps,
@@ -6830,6 +6878,10 @@ async fn run_synthetic_compositor_loop(
                         highlight_overlay_on_aux,
                         buddy_overlay_on_primary,
                         buddy_overlay_on_aux,
+                        ChatOverlayLegs {
+                            primary: chat_overlay_on_primary,
+                            aux: chat_overlay_on_aux,
+                        },
                         LiveBackgroundLeg {
                             tick: crate::live_background::LiveBackgroundTick::new(
                                 ticked_at,
@@ -6844,6 +6896,7 @@ async fn run_synthetic_compositor_loop(
                             gpu: &mut program_gpu_compositor,
                             highlight_on_program: highlight_overlay_on_program,
                             buddy_on_program: buddy_overlay_on_program,
+                            chat_on_program: chat_overlay_on_program,
                             presenting: preview_surface_active,
                         },
                     )
@@ -7485,15 +7538,35 @@ struct CompositorPublishResult {
     timings: CompositorPublishTimings,
 }
 
+/// Plan 215 G: which encoded legs draw the chat box this tick, from the loop
+/// configuration (the same plan the highlight card's two flags carry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ChatOverlayLegs {
+    primary: bool,
+    aux: bool,
+}
+
+impl ChatOverlayLegs {
+    /// No leg draws the chat box (every test of the publish path that is not
+    /// about it, and the default until the layout turns it on).
+    #[cfg(test)]
+    const OFF: Self = Self {
+        primary: false,
+        aux: false,
+    };
+}
+
 /// Plan 205 S6: the program leg's working set for one tick: its compositor
 /// (built on the first tick the leg is wanted, dropped on the first it is
-/// not), the program's verdict for the two layout-driven items, and whether
-/// a Preview surface is live to show the picture (no surface, no twin).
+/// not), the program's verdict for the layout-driven items, and whether a
+/// Preview surface is live to show the picture (no surface, no twin).
 struct ProgramLeg<'a> {
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     gpu: &'a mut Option<GpuCompositor>,
     highlight_on_program: bool,
     buddy_on_program: bool,
+    /// Plan 215 G: the chat box in the program.
+    chat_on_program: bool,
     presenting: bool,
 }
 
@@ -7506,6 +7579,7 @@ impl<'a> ProgramLeg<'a> {
             gpu,
             highlight_on_program: false,
             buddy_on_program: false,
+            chat_on_program: false,
             presenting: false,
         }
     }
@@ -8108,6 +8182,31 @@ fn push_overlay_gpu_source_at<'a>(
         sampler: crate::metal_compositor::GpuSourceSampler::Scene,
         opacity: 1.0,
     });
+}
+
+/// The chat box's content namespace in the Metal texture cache (plan 215 G):
+/// its own, like the caption bar's (2) and the card's (3), so a box and a
+/// card of the same revision and size never alias.
+#[cfg(target_os = "macos")]
+const CHAT_OVERLAY_CONTENT_NAMESPACE: u64 = 10;
+
+/// The chat box on the Metal path (plan 215 G): after the caption bar, before
+/// the Buddy and the card, as the CPU path draws it.
+#[cfg(target_os = "macos")]
+fn push_chat_overlay_gpu_source<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    inputs: &CompositorRenderInputs<'a>,
+) {
+    if let Some(overlay) = inputs.chat_overlay {
+        push_caption_overlay_gpu_source(
+            prepared_sources,
+            overlay,
+            inputs.width,
+            inputs.height,
+            CHAT_OVERLAY_CONTENT_NAMESPACE,
+            0,
+        );
+    }
 }
 
 // The pet atlas's key-addressed Metal slot (D8) must be the namespace the
@@ -8730,6 +8829,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
+        push_chat_overlay_gpu_source(&mut prepared_sources, inputs);
         push_buddy_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
@@ -8811,6 +8911,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
+        push_chat_overlay_gpu_source(&mut prepared_sources, inputs);
         push_buddy_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
@@ -9096,6 +9197,7 @@ fn try_gpu_compose_with_chrome(
             safe_inset,
         );
     }
+    push_chat_overlay_gpu_source(&mut prepared_sources, inputs);
     push_buddy_gpu_sources(&mut prepared_sources, inputs);
     if let Some(overlay) = inputs.highlight_overlay {
         push_caption_overlay_gpu_source(
@@ -9749,9 +9851,14 @@ async fn publish_compositor_frame(
     highlight_overlay_on_aux: bool,
     buddy_overlay_on_primary: bool,
     buddy_overlay_on_aux: bool,
+    chat_overlay: ChatOverlayLegs,
     live: LiveBackgroundLeg<'_>,
     program_leg: ProgramLeg<'_>,
 ) -> CompositorPublishResult {
+    let ChatOverlayLegs {
+        primary: chat_overlay_on_primary,
+        aux: chat_overlay_on_aux,
+    } = chat_overlay;
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
     render_cache.refresh_nonblocking(state);
@@ -9969,6 +10076,16 @@ async fn publish_compositor_frame(
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
+    // Plan 215 G: the chat box, one raster per orientation like the card. Read
+    // only while some leg or the program draws it, so a box the renderer left
+    // behind costs an idle run nothing.
+    let chat_wanted = chat_overlay_on_primary || chat_overlay_on_aux || program_leg.chat_on_program;
+    let chat_overlay = chat_wanted
+        .then(|| crate::captions::current_caption_overlay(&state.chat_overlay))
+        .flatten();
+    let simulcast_chat_overlay = stream_output
+        .filter(|output| output.composes_simulcast_scene && chat_overlay_on_aux)
+        .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_chat_overlay));
     // Plan 205 D4: the primary leg draws the Buddy only while its plan
     // carries it (the idle run's plan is the program, so a Buddy on for an
     // output shows on the live canvas). The Scene editor holding or dragging
@@ -9993,6 +10110,11 @@ async fn publish_compositor_frame(
                 highlight_on_program: program_leg.highlight_on_program,
                 buddy_on_primary: buddy_overlay_on_primary,
                 buddy_on_program: program_leg.buddy_on_program,
+                // The program leg draws the box only while the renderer
+                // has pushed one: an empty slot is not a reason to compose
+                // a second picture.
+                chat_on_primary: chat_overlay_on_primary || chat_overlay.is_none(),
+                chat_on_program: program_leg.chat_on_program,
                 caption_on_primary: caption_overlay_on_primary,
                 caption_on_aux: caption_overlay_on_aux,
             },
@@ -10066,6 +10188,7 @@ async fn publish_compositor_frame(
             } else {
                 None
             },
+            chat_overlay: chat_overlay.as_ref().filter(|_| chat_overlay_on_primary),
             buddy_overlay: caption_overlay_for_output(
                 &buddy_overlays,
                 crate::captions::CaptionOverlayTarget::Primary,
@@ -10237,6 +10360,15 @@ async fn publish_compositor_frame(
         } else {
             highlight_overlay.as_ref()
         };
+        // Plan 215 G: the vertical leg takes its own portrait chat box (D5);
+        // the same-scene stream leg shares the landscape raster.
+        let aux_chat_overlay = if !chat_overlay_on_aux {
+            None
+        } else if stream_output.composes_simulcast_scene {
+            simulcast_chat_overlay.as_ref()
+        } else {
+            chat_overlay.as_ref()
+        };
         let aux_buddy = buddy_overlay_on_aux.then(|| {
             buddy_leg_frame(
                 state,
@@ -10302,6 +10434,7 @@ async fn publish_compositor_frame(
                 caption_overlay_on_aux,
             ),
             highlight_overlay: aux_highlight_overlay,
+            chat_overlay: aux_chat_overlay,
             // The bubble is rasterized per target like the caption bar (plan
             // 164 S-C2), so the auxiliary leg always has its own raster; the
             // pet has its own atlas per leg (plan 168 D5).
@@ -10444,6 +10577,7 @@ async fn publish_compositor_frame(
                 screen_frame: leg_screen_frame,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 // A source take is the source alone: no Buddy and no banners
                 // either (plan 157), whatever the Combined legs carry.
                 buddy_overlay: None,
@@ -10525,6 +10659,9 @@ async fn publish_compositor_frame(
         let twin_highlight = highlight_overlay
             .as_ref()
             .filter(|_| program_leg.highlight_on_program);
+        let twin_chat = chat_overlay
+            .as_ref()
+            .filter(|_| program_leg.chat_on_program);
         let twin_bubble = program_leg
             .buddy_on_program
             .then(|| {
@@ -10570,6 +10707,7 @@ async fn publish_compositor_frame(
             screen_frame: primary_screen_frame,
             caption_overlay: twin_caption,
             highlight_overlay: twin_highlight,
+            chat_overlay: twin_chat,
             buddy_overlay: twin_bubble,
             buddy_leg: twin_buddy.as_ref(),
             banners: &twin_banners,
@@ -10846,6 +10984,10 @@ struct CompositorRenderInputs<'a> {
     /// Comment-highlight card (Comments upgrade S2) — its own slot, composited
     /// after the caption bar; top vs bottom keeps them from overlapping.
     highlight_overlay: Option<&'a crate::captions::CaptionOverlay>,
+    /// The chat box (plan 215 G): the last five messages, composited after
+    /// the caption bar and BEFORE the Buddy and the highlight card, so a
+    /// character and the one urgent card stay on top of a standing panel.
+    chat_overlay: Option<&'a crate::captions::CaptionOverlay>,
     /// The Buddy's bubble raster (plan 168 D16; plan 164 Phase C's avatar
     /// raster before): composited after the pet and BEFORE the highlight
     /// card, so the card wins an overlap (owner answer 7: the most urgent
@@ -11000,6 +11142,9 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
                 inputs.height,
             ),
         );
+    }
+    if let Some(overlay) = inputs.chat_overlay {
+        composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
     }
     if let Some(sprite) = inputs.buddy_leg.and_then(|leg| leg.sprite.as_ref()) {
         crate::buddy_sprite::blit_sprite_affine_to_yuv420p(
@@ -11240,6 +11385,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         screen_frame,
         caption_overlay: _,
         highlight_overlay: _,
+        chat_overlay: _,
         buddy_overlay: _,
         buddy_leg: _,
         banners: _,
@@ -14764,6 +14910,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -14838,6 +14985,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -15207,6 +15355,7 @@ mod tests {
             screen_frame: Some(screen_frame),
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -15536,6 +15685,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15559,6 +15709,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15655,6 +15806,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15791,6 +15943,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15898,6 +16051,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -15946,6 +16100,7 @@ mod tests {
                 false,
                 false,
                 false,
+                ChatOverlayLegs::OFF,
                 LiveBackgroundLeg::unmeasured(&mut None),
                 ProgramLeg::off(&mut None),
             )
@@ -15997,6 +16152,7 @@ mod tests {
                 false,
                 false,
                 false,
+                ChatOverlayLegs::OFF,
                 LiveBackgroundLeg::unmeasured(&mut None),
                 ProgramLeg::off(&mut None),
             )
@@ -16063,6 +16219,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16098,6 +16255,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -16233,6 +16391,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16331,6 +16490,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16383,6 +16543,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16473,6 +16634,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16508,6 +16670,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16601,6 +16764,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -16688,6 +16852,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -16746,6 +16911,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -16855,8 +17021,11 @@ mod tests {
             highlight_on_aux: false,
             buddy_on_primary: false,
             buddy_on_aux: true,
+            chat_on_primary: false,
+            chat_on_aux: false,
             highlight_on_program: true,
             buddy_on_program: true,
+            chat_on_program: false,
         };
         // No live run: nothing to swap; the next session reads the layout.
         assert!(!update_overlay_flags(&state, flags).await);
@@ -16869,8 +17038,11 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         });
         state.compositor.lock().await.loop_config_tx = Some(loop_config_tx);
         assert!(update_overlay_flags(&state, flags).await);
@@ -16932,8 +17104,11 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         });
         let supervisor_state = state.clone();
         let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
@@ -17840,9 +18015,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -17902,9 +18080,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -18000,9 +18181,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -18226,6 +18410,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -19035,9 +19220,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -19064,9 +19252,12 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             replay_only: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         };
 
         let first = start_synthetic_compositor(state.clone(), params(64)).await;
@@ -19098,9 +19289,12 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             replay_only: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         }
     }
 
@@ -19118,8 +19312,11 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         }
     }
 
@@ -19232,8 +19429,11 @@ mod tests {
                 highlight_on_aux: false,
                 buddy_on_primary: false,
                 buddy_on_aux: false,
+                chat_on_primary: false,
+                chat_on_aux: false,
                 highlight_on_program: true,
                 buddy_on_program: false,
+                chat_on_program: false,
             },
             "the shipped layout: highlight on both, Buddy off"
         );
@@ -19254,6 +19454,7 @@ mod tests {
                 buddy_overlay_on_primary: idle.buddy_on_primary,
                 highlight_overlay_on_program: idle.highlight_on_program,
                 buddy_overlay_on_program: idle.buddy_on_program,
+                chat_overlay_on_program: idle.chat_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -19312,8 +19513,11 @@ mod tests {
                     highlight_on_aux: replanned.highlight.aux,
                     buddy_on_primary: replanned.buddy.primary,
                     buddy_on_aux: replanned.buddy.aux,
+                    chat_on_primary: replanned.chat.primary,
+                    chat_on_aux: replanned.chat.aux,
                     highlight_on_program: true,
                     buddy_on_program: true,
+                    chat_on_program: false,
                 }
             )
             .await
@@ -19364,6 +19568,7 @@ mod tests {
                 buddy_overlay_on_primary: flags.buddy_on_primary,
                 highlight_overlay_on_program: flags.highlight_on_program,
                 buddy_overlay_on_program: flags.buddy_on_program,
+                chat_overlay_on_program: flags.chat_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -19387,6 +19592,8 @@ mod tests {
                     highlight_on_program: config.highlight_overlay_on_program,
                     buddy_on_primary: config.buddy_overlay_on_primary,
                     buddy_on_program: config.buddy_overlay_on_program,
+                    chat_on_primary: config.chat_overlay_on_primary,
+                    chat_on_program: config.chat_overlay_on_program,
                     caption_on_primary: false,
                     caption_on_aux: false,
                 },
@@ -19412,6 +19619,7 @@ mod tests {
                 frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
                 buddy_overlay_on_primary: record.buddy_on_primary,
                 buddy_overlay_on_program: record.buddy_on_program,
+                chat_overlay_on_program: record.chat_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -19440,6 +19648,7 @@ mod tests {
                 buddy_overlay_on_primary: idle.buddy_on_primary,
                 highlight_overlay_on_program: idle.highlight_on_program,
                 buddy_overlay_on_program: idle.buddy_on_program,
+                chat_overlay_on_program: idle.chat_on_program,
                 ..preview_params(64, 36)
             },
         )
@@ -19843,9 +20052,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -19882,9 +20094,12 @@ mod tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: false,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             replay_only: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_program: false,
         };
         let (left, right) = tokio::join!(
             start_synthetic_compositor(state.clone(), params(64)),
@@ -19921,9 +20136,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -19962,9 +20180,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -20467,6 +20688,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -20551,6 +20773,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: caption,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -20650,6 +20873,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -20664,6 +20888,7 @@ mod tests {
             CompositorRenderInputs {
                 caption_overlay: Some(&caption),
                 highlight_overlay: Some(&highlight),
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21034,6 +21259,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: highlight,
+                chat_overlay: None,
                 buddy_overlay: buddy,
                 buddy_leg: None,
                 banners: &[],
@@ -21147,6 +21373,205 @@ mod tests {
         );
     }
 
+    /// Plan 215 G1: the chat box's twin of the parity fixture above. A
+    /// 1280x720 test-pattern scene with a 200x160 blue chat box at the chat
+    /// rect (0.1, 0.1, 0.3, 0.44) and a 200x100 red highlight card at
+    /// (0.15, 0.2, 0.25, 0.2), overlapping the box's lower part, renders
+    /// through CPU and Metal; the two agree on every pixel of the two rects
+    /// and their 2 px border (within ±2 per channel against each path's own
+    /// clean render), and the card wins the overlap on both paths (the box
+    /// is drawn after the caption bar and before the card).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_blit_the_same_chat_overlay_rect() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let (canvas_w, canvas_h) = (1280_u32, 720_u32);
+        let layout = crate::protocol::default_layout_settings();
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: true,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: canvas_w,
+                height: canvas_h,
+                fps: 30,
+                bitrate_kbps: 6000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let snapshot = CompositorSceneSnapshot {
+            synthetic_hard_content: false,
+            selected_sources: None,
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        };
+        let chat = test_caption_overlay(
+            200,
+            160,
+            [0, 0, 255, 255],
+            crate::chat_overlay::chat_overlay_placement(Some(
+                crate::overlay_layout::OverlayRect::new(0.1, 0.1, 0.3, 0.44),
+            )),
+        );
+        let highlight = test_caption_overlay(
+            200,
+            100,
+            [255, 0, 0, 255],
+            OverlayPlacement::new(
+                Some(crate::overlay_layout::OverlayRect::new(0.15, 0.2, 0.25, 0.2)),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
+        );
+        let chat_box = overlay_draw_rect(&chat, 1280, 720, 0);
+        let card = overlay_draw_rect(&highlight, 1280, 720, 0);
+        // The chat rect is a top-left box (128..512 x 72..389); the raster
+        // hugs its top-left corner. The card sits at 192..392 x 144..244,
+        // inside the box's lower-left part.
+        assert_eq!(chat_box, (128, 72, 328, 232));
+        assert_eq!(card, (192, 144, 392, 244));
+        fn inputs<'a>(
+            snapshot: &'a CompositorSceneSnapshot,
+            chat: Option<&'a crate::captions::CaptionOverlay>,
+            highlight: Option<&'a crate::captions::CaptionOverlay>,
+            sequence: u64,
+        ) -> CompositorRenderInputs<'a> {
+            CompositorRenderInputs {
+                sequence,
+                width: 1280,
+                height: 720,
+                snapshot: Some(snapshot),
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: None,
+                highlight_overlay: highlight,
+                chat_overlay: chat,
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
+                live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
+            }
+        }
+        let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(inputs(&snapshot, None, None, 1), &mut cpu_clean);
+        let mut cpu = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(
+            inputs(&snapshot, Some(&chat), Some(&highlight), 1),
+            &mut cpu,
+        );
+        let metal_clean = try_gpu_compose(Some(&mut gpu), &inputs(&snapshot, None, None, 1), true)
+            .expect("clean scene renders on Metal")
+            .yuv;
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(&snapshot, Some(&chat), Some(&highlight), 1),
+            true,
+        )
+        .expect("chat scene renders on Metal")
+        .yuv;
+        assert_eq!(metal.len(), cpu.len());
+
+        let (red_y, red_u, red_v) = rgb_to_yuv(255, 0, 0);
+        let (blue_y, blue_u, blue_v) = rgb_to_yuv(0, 0, 255);
+        let width = canvas_w as usize;
+        let height = canvas_h as usize;
+        let (uv_width, uv_height) = (width.div_ceil(2), height.div_ceil(2));
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 2;
+        let inside = |rect: (usize, usize, usize, usize), x: usize, y: usize| {
+            (rect.0..rect.2).contains(&x) && (rect.1..rect.3).contains(&y)
+        };
+        let (left, top) = (chat_box.0.min(card.0), chat_box.1.min(card.1));
+        let (right, bottom) = (chat_box.2.max(card.2), chat_box.3.max(card.3));
+        for y in top - 2..bottom + 2 {
+            for x in left - 2..right + 2 {
+                let index = y * width + x;
+                // The card is on top of the chat box where they overlap.
+                let expected = if inside(card, x, y) {
+                    Some(red_y)
+                } else if inside(chat_box, x, y) {
+                    Some(blue_y)
+                } else {
+                    None
+                };
+                match expected {
+                    Some(luma) => {
+                        assert!(
+                            close(cpu[index], luma),
+                            "cpu luma at {x},{y}: {}",
+                            cpu[index]
+                        );
+                        assert!(
+                            close(metal[index], luma),
+                            "metal luma at {x},{y}: {}",
+                            metal[index]
+                        );
+                    }
+                    None => {
+                        assert!(
+                            close(cpu[index], cpu_clean[index]),
+                            "cpu border luma changed at {x},{y}"
+                        );
+                        assert!(
+                            close(metal[index], metal_clean[index]),
+                            "metal border luma changed at {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+        // Chroma, sampled strictly inside each overlay's exclusive area (half
+        // resolution): the box's top part above the card, and the card's
+        // part right of the box.
+        let chroma = |rect: (usize, usize, usize, usize), u: u8, v: u8, name: &str| {
+            for uv_y in (rect.1 + 2) / 2..(rect.3 - 2) / 2 {
+                for uv_x in (rect.0 + 2) / 2..(rect.2 - 2) / 2 {
+                    let uv_index = uv_y * uv_width + uv_x;
+                    for (plane, expected, start) in [("u", u, u_start), ("v", v, v_start)] {
+                        assert!(
+                            close(cpu[start + uv_index], expected),
+                            "cpu {name} {plane} at {uv_x},{uv_y}"
+                        );
+                        assert!(
+                            close(metal[start + uv_index], expected),
+                            "metal {name} {plane} at {uv_x},{uv_y}"
+                        );
+                    }
+                }
+            }
+        };
+        chroma(
+            (chat_box.0, chat_box.1, chat_box.2, card.1),
+            blue_u,
+            blue_v,
+            "chat",
+        );
+        chroma((chat_box.2, card.1, card.2, card.3), red_u, red_v, "card");
+        // The overlap itself is the card's red on both paths.
+        chroma(
+            (card.0, card.1, chat_box.2, chat_box.3),
+            red_u,
+            red_v,
+            "overlap",
+        );
+    }
+
     #[test]
     fn highlight_overlay_pixels_land_only_inside_the_anchor_rect() {
         // 64x32: margin = round(32 * 0.04) = 1 on both axes; card 8x4.
@@ -21163,6 +21588,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -21194,6 +21620,7 @@ mod tests {
             render_compositor_yuv420p_frame(
                 CompositorRenderInputs {
                     highlight_overlay: Some(&highlight),
+                    chat_overlay: None,
                     buddy_overlay: None,
                     buddy_leg: None,
                     banners: &[],
@@ -21304,6 +21731,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21328,6 +21756,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21368,6 +21797,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21399,6 +21829,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21497,6 +21928,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21599,6 +22031,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21713,6 +22146,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -21973,6 +22407,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                chat_overlay: None,
                 buddy_overlay: None,
                 buddy_leg: None,
                 banners: &[],
@@ -22188,6 +22623,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -22302,6 +22738,7 @@ mod tests {
             false,
             false,
             false,
+            ChatOverlayLegs::OFF,
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg::off(&mut None),
         )
@@ -22665,6 +23102,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    ChatOverlayLegs::OFF,
                     LiveBackgroundLeg::unmeasured(&mut None),
                     ProgramLeg::off(&mut None),
                 )
@@ -22891,6 +23329,7 @@ mod buddy_sprite_tests {
             screen_frame: None,
             caption_overlay: caption,
             highlight_overlay: highlight,
+            chat_overlay: None,
             buddy_overlay: bubble,
             buddy_leg,
             banners: &[],
@@ -23604,6 +24043,7 @@ mod banner_tests {
             screen_frame: None,
             caption_overlay: caption,
             highlight_overlay: highlight,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners,
@@ -24591,6 +25031,8 @@ mod program_leg_tests {
             highlight_on_program: flags.highlight_on_program,
             buddy_on_primary: flags.buddy_on_primary,
             buddy_on_program: flags.buddy_on_program,
+            chat_on_primary: flags.chat_on_primary,
+            chat_on_program: flags.chat_on_program,
             caption_on_primary: captions.0,
             caption_on_aux: captions.1,
         }
@@ -24819,7 +25261,10 @@ mod program_leg_tests {
         stream_output: Option<CompositorAuxiliaryOutput>,
         buddy_on_primary: bool,
         buddy_on_aux: bool,
+        chat_on_primary: bool,
+        chat_on_aux: bool,
         buddy_on_program: bool,
+        chat_on_program: bool,
         presenting: bool,
     }
 
@@ -24847,11 +25292,16 @@ mod program_leg_tests {
             false,
             tick.buddy_on_primary,
             tick.buddy_on_aux,
+            ChatOverlayLegs {
+                primary: tick.chat_on_primary,
+                aux: tick.chat_on_aux,
+            },
             LiveBackgroundLeg::unmeasured(&mut None),
             ProgramLeg {
                 gpu: tick.program_gpu,
                 highlight_on_program: false,
                 buddy_on_program: tick.buddy_on_program,
+                chat_on_program: tick.chat_on_program,
                 presenting: tick.presenting,
             },
         )
@@ -24950,7 +25400,10 @@ mod program_leg_tests {
                 stream_output: None,
                 buddy_on_primary: false,
                 buddy_on_aux: false,
+                chat_on_primary: false,
+                chat_on_aux: false,
                 buddy_on_program: true,
+                chat_on_program: false,
                 presenting: true,
             },
         )
@@ -25046,7 +25499,10 @@ mod program_leg_tests {
                 stream_output: Some(stream_output),
                 buddy_on_primary: false,
                 buddy_on_aux: true,
+                chat_on_primary: false,
+                chat_on_aux: false,
                 buddy_on_program: true,
+                chat_on_program: false,
                 presenting: true,
             },
         )
@@ -25106,7 +25562,10 @@ mod program_leg_tests {
                     stream_output: None,
                     buddy_on_primary: false,
                     buddy_on_aux: false,
+                    chat_on_primary: false,
+                    chat_on_aux: false,
                     buddy_on_program: on,
+                    chat_on_program: false,
                     presenting: true,
                 },
             )
@@ -25166,8 +25625,11 @@ mod program_leg_tests {
             highlight_overlay_on_aux: false,
             buddy_overlay_on_primary: true,
             buddy_overlay_on_aux: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: true,
+            chat_overlay_on_program: false,
         }
     }
 
@@ -25179,8 +25641,11 @@ mod program_leg_tests {
                 highlight_on_aux: false,
                 buddy_on_primary: false,
                 buddy_on_aux: false,
+                chat_on_primary: false,
+                chat_on_aux: false,
                 highlight_on_program: false,
                 buddy_on_program: false,
+                chat_on_program: false,
             }
         }
     }
@@ -25341,6 +25806,7 @@ mod live_background_metal_tests {
             screen_frame: Some(screen),
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],
@@ -25744,6 +26210,7 @@ mod live_background_metal_tests {
                 false,
                 false,
                 false,
+                ChatOverlayLegs::OFF,
                 LiveBackgroundLeg::pinned_at(&mut self.slot, at),
                 ProgramLeg::off(&mut None),
             )
@@ -26123,6 +26590,7 @@ mod live_background_metal_tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            chat_overlay: None,
             buddy_overlay: None,
             buddy_leg: None,
             banners: &[],

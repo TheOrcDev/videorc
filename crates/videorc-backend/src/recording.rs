@@ -2268,6 +2268,11 @@ pub struct ActiveRecording {
     /// Portrait canvas `(width, height)` of the vertical simulcast leg when it
     /// burns the comment card. The renderer rasterizes a second card for it.
     pub comment_highlight_vertical_canvas: Option<(u32, u32)>,
+    /// Portrait canvas `(width, height)` of the vertical simulcast leg
+    /// whenever the session has one (plan 215 G): the renderer rasterizes a
+    /// second chat box for it, whatever the chat switches say at start, so a
+    /// switch flipped mid-session lands on the next repaint.
+    pub simulcast_vertical_canvas: Option<(u32, u32)>,
     /// The session shape the overlay leg plan was built for (plan 164), kept
     /// so a layout saved mid-session can re-plan the compositor flags. None
     /// on paths without the compositor bridge (nothing draws overlays there).
@@ -2406,6 +2411,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         performance_check: false,
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
+        simulcast_vertical_canvas: None,
         overlay_session_shape: None,
         accepts_banners: true,
         _capture_permit: None,
@@ -4721,6 +4727,9 @@ async fn start_session_with_timeline(
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
+    // The chat box too (plan 215 G): a new session never inherits the last
+    // session's messages; the renderer repaints it from this session's chat.
+    let _ = crate::chat_overlay::clear_chat_overlay(&state);
     // The Buddy's bubble too (plan 164): the avatar stays (its raster is the
     // renderer's, re-pushed for this session's canvases), the words do not.
     let _ = crate::buddy_overlay::clear(&state).await;
@@ -4911,18 +4920,28 @@ async fn start_session_with_timeline(
                     overlay_layout.buddy.show_on_stream,
                     overlay_layout.buddy.show_in_recording,
                 );
+                // Plan 215 G: the chat box rides the same plan as the card.
+                let chat_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.chat.show_on_stream,
+                    overlay_layout.chat.show_in_recording,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
+                    chat: state.chat_overlay.clone(),
                     buddy: state.buddy_overlay.clone(),
                     buddy_sprite: state.buddy_sprite.clone(),
                     caption_on_primary: session_caption_plan.primary,
                     caption_on_auxiliary: session_caption_plan.aux,
                     highlight_on_primary,
                     highlight_on_auxiliary,
+                    chat_on_primary: d3d11_overlay_plans.chat.primary,
+                    chat_on_auxiliary: d3d11_overlay_plans.chat.aux,
                     buddy_on_primary: d3d11_overlay_plans.buddy.primary,
                     buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
                     highlight_in_program,
+                    chat_in_program,
                     buddy_in_program,
                     // Plan 186 S4: banners follow this session's leg plan
                     // live, from the compositor's banner set.
@@ -5293,6 +5312,8 @@ async fn start_session_with_timeline(
             aux = highlight_overlay_plan.1,
             buddy_primary = overlay_plans.buddy.primary,
             buddy_aux = overlay_plans.buddy.aux,
+            chat_primary = overlay_plans.chat.primary,
+            chat_aux = overlay_plans.chat.aux,
             // S-B2.2: any item (not only captions) whose switches disagree
             // on a shared leg asks for the split; the topology decides.
             needs_split = crate::overlay_layout::overlay_layout_needs_split(
@@ -5370,6 +5391,8 @@ async fn start_session_with_timeline(
         && !highlight_overlay_plan.1
         && !overlay_plans.buddy.primary
         && !overlay_plans.buddy.aux
+        && !overlay_plans.chat.primary
+        && !overlay_plans.chat.aux
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
@@ -5528,8 +5551,11 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        chat_overlay_on_primary: overlay_plans.chat.primary,
+                        chat_overlay_on_aux: overlay_plans.chat.aux,
                         highlight_overlay_on_program: overlay_flags.highlight_on_program,
                         buddy_overlay_on_program: overlay_flags.buddy_on_program,
+                        chat_overlay_on_program: overlay_flags.chat_on_program,
                     },
                 )
                 .await
@@ -5614,6 +5640,8 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        chat_overlay_on_primary: overlay_plans.chat.primary,
+                        chat_overlay_on_aux: overlay_plans.chat.aux,
                         // Plan 205 S6: the same program verdict the in-place
                         // arm carries. A buffer-only session lands here on a
                         // cold launch (the ring starts before the Preview's
@@ -5623,6 +5651,7 @@ async fn start_session_with_timeline(
                         replay_only,
                         highlight_overlay_on_program: overlay_flags.highlight_on_program,
                         buddy_overlay_on_program: overlay_flags.buddy_on_program,
+                        chat_overlay_on_program: overlay_flags.chat_on_program,
                     },
                 )
                 .await;
@@ -6933,6 +6962,7 @@ async fn start_session_with_timeline(
             highlight_overlay_plan,
         ),
         comment_highlight_vertical_canvas,
+        simulcast_vertical_canvas: simulcast_vertical_canvas(encoder_bridge_stream_output.as_ref()),
         overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
         accepts_banners,
         _capture_permit: Some(capture_permit),
@@ -11489,6 +11519,9 @@ async fn monitor_session(
     // session's card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &session_id)
         .await;
+    // The chat box (plan 215 G) leaves with the session like the caption bars
+    // above; a newer session's renderer repaints it on its next message.
+    let _ = crate::chat_overlay::clear_chat_overlay(&state);
     state.soundboard.session_ended(&state, &session_id);
 
     if let Some(native_audio_stats) = monitored_recording.native_audio_stats.as_ref() {
@@ -24290,8 +24323,11 @@ pub async fn apply_overlay_layout_to_active_session(
         highlight_aux = plans.highlight.aux,
         buddy_primary = plans.buddy.primary,
         buddy_aux = plans.buddy.aux,
+        chat_primary = plans.chat.primary,
+        chat_aux = plans.chat.aux,
         highlight_program = flags.highlight_on_program,
         buddy_program = flags.buddy_on_program,
+        chat_program = flags.chat_on_program,
         buddy_legs_prepared = buddy_canvases,
         swapped,
         "overlay layout changed mid-session"
@@ -24325,6 +24361,7 @@ async fn apply_overlay_layout_to_idle_preview(
     tracing::info!(
         highlight_primary = flags.highlight_on_primary,
         buddy_primary = flags.buddy_on_primary,
+        chat_primary = flags.chat_on_primary,
         swapped,
         "overlay layout changed while nothing runs"
     );
@@ -24383,6 +24420,17 @@ fn comment_highlight_vertical_canvas(
 ) -> Option<(u32, u32)> {
     stream_output
         .filter(|output| output.composes_simulcast_scene && leg_plan.1)
+        .map(|output| (output.width, output.height))
+}
+
+/// Portrait canvas of the vertical simulcast leg whenever the session runs
+/// one (plan 215 G): the chat box is rasterized for it whatever the chat
+/// switches say at start (`chat_overlay::chat_overlay_canvases`).
+fn simulcast_vertical_canvas(
+    stream_output: Option<&CompositorAuxiliaryOutput>,
+) -> Option<(u32, u32)> {
+    stream_output
+        .filter(|output| output.composes_simulcast_scene)
         .map(|output| (output.width, output.height))
 }
 
@@ -32618,6 +32666,7 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            simulcast_vertical_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
             _capture_permit: None,
@@ -39594,9 +39643,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -41662,6 +41714,7 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            simulcast_vertical_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
             _capture_permit: None,

@@ -37,6 +37,7 @@ mod capture_input;
 mod capture_interruption;
 mod capture_log;
 mod capture_recovery;
+mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
 mod cohost;
@@ -5555,6 +5556,7 @@ fn websocket_observation_requires_operator_fence(text: &str) -> bool {
                 | "captions.status.get"
                 | "comments.highlight.status"
                 | "comments.highlight.canvases"
+                | "chat.overlay.canvases"
                 | CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD
                 | CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD
         )
@@ -5641,6 +5643,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "captions.overlay.set"
         | "comments.highlight.set"
         | "comments.highlight.clear"
+        | "chat.overlay.set"
+        | "chat.overlay.clear"
         | "cohost.start"
         | "cohost.stop"
         | "cohost.question.answered"
@@ -5906,6 +5910,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "captions.test.snapshot"
         | "comments.highlight.status"
         | "comments.highlight.canvases"
+        | "chat.overlay.canvases"
         | "overlays.layout.get"
         | "cohost.status"
         | "cohost.settings.get"
@@ -6053,6 +6058,8 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "captions.style.set"
         | "comments.highlight.set"
         | "comments.highlight.clear"
+        | "chat.overlay.set"
+        | "chat.overlay.clear"
         | "screen.hide"
         | "screen.show" => Some(WebSocketIsolatedCommandLaneKind::LiveControl),
         "session.stop" | COMMAND_LANE_SMOKE_RELEASE_METHOD => {
@@ -9792,6 +9799,27 @@ async fn handle_text_message_with_role(
         "comments.highlight.clear" => ServerResponse::ok(
             command.id,
             comment_highlight::clear_comment_highlight(state).await,
+        ),
+        // Plan 215 G: the chat box, pushed like the highlight card.
+        "chat.overlay.set" => {
+            match serde_json::from_value::<chat_overlay::SetChatOverlayParams>(command.params) {
+                Ok(params) => match chat_overlay::set_chat_overlay(state, params).await {
+                    Ok(info) => ServerResponse::ok(command.id, info),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "chat.overlay.clear" => {
+            ServerResponse::ok(command.id, chat_overlay::clear_chat_overlay(state))
+        }
+        "chat.overlay.canvases" => ServerResponse::ok(
+            command.id,
+            chat_overlay::chat_overlay_canvases(state).await,
         ),
         "cohost.status" => ServerResponse::ok(command.id, cohost::cohost_status(state).await),
         "cohost.start" => {
@@ -16712,6 +16740,7 @@ mod tests {
             "captions.status.get",
             "comments.highlight.status",
             "comments.highlight.canvases",
+            "chat.overlay.canvases",
             "scene.get",
             "liveChat.status",
             "liveChat.sendOperations.list",
@@ -16880,6 +16909,8 @@ mod tests {
             "captions.style.set",
             "comments.highlight.set",
             "comments.highlight.clear",
+            "chat.overlay.set",
+            "chat.overlay.clear",
             "screen.hide",
             "screen.show",
             "capture.recovery.retry",
@@ -21754,9 +21785,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;

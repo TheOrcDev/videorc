@@ -99,13 +99,19 @@ pub struct OverlayItemLayout {
     pub show_in_recording: bool,
 }
 
-/// The three placeable overlay items. `buddy` is carried from Phase B on so
-/// the leg plan and the canvas already know it; Phase C adds its slot.
+/// The placeable overlay items. `buddy` is carried from Phase B on so the leg
+/// plan and the canvas already know it; Phase C adds its slot. `chat` (plan
+/// 215 G, D5) is the chat box: it came after the row was first saved, so it
+/// takes its default when a stored layout lacks it. A layout saved before
+/// this field loads with its highlight, captions and Buddy placement intact;
+/// `load_overlay_layout` must never fall back to defaults because of it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OverlayLayout {
     pub highlight: OverlayItemLayout,
     pub captions: OverlayItemLayout,
     pub buddy: OverlayItemLayout,
+    #[serde(default = "default_chat_layout")]
+    pub chat: OverlayItemLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,13 +120,17 @@ pub enum OverlayItem {
     Highlight,
     Captions,
     Buddy,
+    /// The chat box (plan 215 G): the last few chat messages, off by default
+    /// because it shows viewers' names.
+    Chat,
 }
 
 impl OverlayItem {
-    pub const ALL: [OverlayItem; 3] = [
+    pub const ALL: [OverlayItem; 4] = [
         OverlayItem::Highlight,
         OverlayItem::Captions,
         OverlayItem::Buddy,
+        OverlayItem::Chat,
     ];
 
     /// How the Go Live sheet names the item mid-sentence.
@@ -129,6 +139,7 @@ impl OverlayItem {
             OverlayItem::Highlight => "highlights",
             OverlayItem::Captions => "captions",
             OverlayItem::Buddy => "the Buddy",
+            OverlayItem::Chat => "chat",
         }
     }
 }
@@ -186,7 +197,10 @@ impl From<CommentHighlightAnchor> for OverlaySnap {
 /// Default size `(w, h)` of an item on an orientation, in canvas units. The
 /// highlight and caption widths are the rasterizers' width fractions
 /// (`lib/comment-highlight.ts`, `lib/caption-overlay.ts`); their heights bound
-/// a content-driven bitmap. The Buddy is a square in pixels.
+/// a content-driven bitmap. The Buddy is a square in pixels. The chat box
+/// (plan 215 G) is a column five rows tall: 30% of a landscape width, 80% of
+/// a portrait one, the renderer wrapping each row to the rect's width
+/// (`lib/chat-overlay.ts`).
 pub fn overlay_default_size(item: OverlayItem, orientation: OverlayOrientation) -> (f64, f64) {
     match (item, orientation) {
         (OverlayItem::Highlight, OverlayOrientation::Horizontal) => (0.60, 0.26),
@@ -195,7 +209,22 @@ pub fn overlay_default_size(item: OverlayItem, orientation: OverlayOrientation) 
         (OverlayItem::Captions, OverlayOrientation::Vertical) => (0.76, 0.14),
         (OverlayItem::Buddy, OverlayOrientation::Horizontal) => (0.18, 0.18 * 16.0 / 9.0),
         (OverlayItem::Buddy, OverlayOrientation::Vertical) => (0.32, 0.32 * 9.0 / 16.0),
+        (OverlayItem::Chat, OverlayOrientation::Horizontal) => (0.30, 0.44),
+        (OverlayItem::Chat, OverlayOrientation::Vertical) => (0.80, 0.30),
     }
+}
+
+/// The snap the chat box takes when a push carries no rect and when a stored
+/// layout predates it: the top-left corner, off the highlight's bottom-left,
+/// the captions' bottom bar, the Buddy's bottom-right and the usual top-right
+/// camera bubble.
+pub const CHAT_DEFAULT_SNAP: OverlaySnap = OverlaySnap::TopLeft;
+
+/// `OverlayLayout::default().chat`, and what a stored layout from before
+/// plan 215 G loads with: the box in its corner, off for both outputs (D5:
+/// it shows viewers' names, so the streamer turns it on).
+fn default_chat_layout() -> OverlayItemLayout {
+    snapped_item(OverlayItem::Chat, CHAT_DEFAULT_SNAP, false, false)
 }
 
 /// The rect a snap preset produces for an item on an orientation: the
@@ -256,7 +285,8 @@ impl Default for OverlayLayout {
     /// outputs. Captions: the bottom bar; their switches mirror the shipped
     /// `burnTarget` default (`off`), so a fresh install burns nothing until
     /// the streamer turns captions on. Buddy: bottom right, off for both
-    /// outputs (opt-in: the streamer turns it on per output).
+    /// outputs (opt-in: the streamer turns it on per output). Chat: top left,
+    /// off for both outputs (plan 215 D5).
     fn default() -> Self {
         Self {
             highlight: snapped_item(
@@ -272,6 +302,7 @@ impl Default for OverlayLayout {
                 false,
             ),
             buddy: snapped_item(OverlayItem::Buddy, OverlaySnap::BottomRight, false, false),
+            chat: default_chat_layout(),
         }
     }
 }
@@ -282,6 +313,7 @@ impl OverlayLayout {
             OverlayItem::Highlight => &self.highlight,
             OverlayItem::Captions => &self.captions,
             OverlayItem::Buddy => &self.buddy,
+            OverlayItem::Chat => &self.chat,
         }
     }
 
@@ -502,13 +534,15 @@ pub struct OverlaySessionShape {
 
 /// Per-item plans for the session, with the D13 fallbacks already applied:
 /// an item whose switches disagree on a shared leg burns on that leg
-/// (`highlight`, `buddy`). Captions keep their own path
+/// (`highlight`, `buddy`, `chat`). Captions keep their own path
 /// (`captions::caption_overlay_leg_plan_with_vertical_leg`), so the plan here
-/// is what the compositor flags are built from for the other two items.
+/// is what the compositor flags are built from for the other three items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlaySessionPlans {
     pub highlight: OverlayLegPlan,
     pub buddy: OverlayLegPlan,
+    /// The chat box (plan 215 G): the same leg plan as the highlight card.
+    pub chat: OverlayLegPlan,
 }
 
 impl OverlaySessionPlans {
@@ -517,6 +551,7 @@ impl OverlaySessionPlans {
         match item {
             OverlayItem::Highlight => Some(self.highlight),
             OverlayItem::Buddy => Some(self.buddy),
+            OverlayItem::Chat => Some(self.chat),
             OverlayItem::Captions => None,
         }
     }
@@ -544,6 +579,7 @@ pub fn overlay_session_plans(
     OverlaySessionPlans {
         highlight: resolved_item_plan(shape, &layout.highlight),
         buddy: resolved_item_plan(shape, &layout.buddy),
+        chat: resolved_item_plan(shape, &layout.chat),
     }
 }
 
@@ -600,14 +636,15 @@ pub fn program_shows(
     }
 }
 
-/// What a start notice names: one of the three placeable items, or every
-/// shown banner as one item (plan 186 D6, mid-sentence label `banners`).
+/// What a start notice names: one of the placeable items, or every shown
+/// banner as one item (plan 186 D6, mid-sentence label `banners`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverlayNoticeItem {
     Highlight,
     Captions,
     Buddy,
+    Chat,
     Banners,
 }
 
@@ -617,6 +654,7 @@ impl From<OverlayItem> for OverlayNoticeItem {
             OverlayItem::Highlight => OverlayNoticeItem::Highlight,
             OverlayItem::Captions => OverlayNoticeItem::Captions,
             OverlayItem::Buddy => OverlayNoticeItem::Buddy,
+            OverlayItem::Chat => OverlayNoticeItem::Chat,
         }
     }
 }
@@ -628,6 +666,7 @@ impl OverlayNoticeItem {
             OverlayNoticeItem::Highlight => OverlayItem::Highlight.label(),
             OverlayNoticeItem::Captions => OverlayItem::Captions.label(),
             OverlayNoticeItem::Buddy => OverlayItem::Buddy.label(),
+            OverlayNoticeItem::Chat => OverlayItem::Chat.label(),
             OverlayNoticeItem::Banners => "banners",
         }
     }
@@ -875,11 +914,74 @@ mod tests {
             layout.buddy.vertical.w * 9.0,
             layout.buddy.vertical.h * 16.0,
         );
+        // Chat (plan 215 D5): top left, off for both outputs, a column five
+        // rows tall that clears the portrait safe area.
+        assert_close(layout.chat.horizontal.x, 43.2 / 1920.0);
+        assert_close(layout.chat.horizontal.y, 0.04);
+        assert_close(layout.chat.horizontal.w, 0.30);
+        assert_close(layout.chat.horizontal.h, 0.44);
+        assert_close(layout.chat.vertical.y, 0.08);
+        assert_close(layout.chat.vertical.w, 0.80);
+        assert!(!layout.chat.show_on_stream && !layout.chat.show_in_recording);
         layout.validate().expect("defaults validate");
-        for item in OverlayItem::ALL {
+        for item in [OverlayItem::Highlight, OverlayItem::Captions, OverlayItem::Buddy] {
             assert!(layout.item(item).horizontal.bottom_gravity());
             assert!(layout.item(item).vertical.bottom_gravity());
         }
+        assert!(!layout.chat.horizontal.bottom_gravity());
+        assert!(!layout.chat.vertical.bottom_gravity());
+    }
+
+    /// Plan 215 G1: a row saved before the chat box (`57b0c457`, three items)
+    /// loads with its highlight, captions and Buddy placement intact and the
+    /// chat box at its default, both through serde and through the database
+    /// (`load_overlay_layout` falls back to defaults on any parse error, so a
+    /// missing `chat` must parse). A row saved with `chat` round-trips.
+    #[test]
+    fn a_layout_saved_before_the_chat_box_loads_with_its_placement_intact() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/high-risk-contracts.json"
+        ))
+        .unwrap();
+        let mut saved_before = fixture
+            .pointer("/overlayLayout/placed")
+            .expect("shared protocol fixture is missing /overlayLayout/placed")
+            .clone();
+        let with_chat: OverlayLayout = serde_json::from_value(saved_before.clone()).unwrap();
+        saved_before
+            .as_object_mut()
+            .unwrap()
+            .remove("chat")
+            .expect("the placed fixture carries the chat box");
+        assert_eq!(saved_before.as_object().unwrap().len(), 3);
+
+        let loaded: OverlayLayout = serde_json::from_value(saved_before.clone()).unwrap();
+        assert_eq!(loaded.highlight, with_chat.highlight);
+        assert_eq!(loaded.captions, with_chat.captions);
+        assert_eq!(loaded.buddy, with_chat.buddy);
+        assert_eq!(loaded.chat, OverlayLayout::default().chat);
+        assert!(!loaded.chat.show_on_stream && !loaded.chat.show_in_recording);
+        loaded.validate().unwrap();
+
+        let database = Database::open_in_memory_for_tests();
+        database
+            .save_setting(OVERLAY_LAYOUT_KEY, &saved_before)
+            .unwrap();
+        let from_database = load_overlay_layout(&database);
+        assert_eq!(from_database, loaded, "the stored row must not reset");
+        assert_ne!(
+            from_database.highlight,
+            OverlayLayout::default().highlight,
+            "the placed highlight is not the default, so a reset would show"
+        );
+        // Saving it back writes the chat box, and the row round-trips.
+        save_overlay_layout(&database, &from_database).unwrap();
+        let stored: serde_json::Value = database
+            .load_setting(OVERLAY_LAYOUT_KEY)
+            .unwrap()
+            .expect("saved");
+        assert!(stored["chat"]["showOnStream"].is_boolean());
+        assert_eq!(load_overlay_layout(&database), from_database);
     }
 
     #[test]
@@ -1178,6 +1280,9 @@ mod tests {
         assert_eq!(plans.buddy.primary, true);
         assert!(overlay_layout_needs_split(shared, &layout));
         assert_eq!(plans.plan(OverlayItem::Captions), None);
+        // The chat box ships off: no leg burns it until a switch is on.
+        assert_eq!(plans.chat, OverlayLegPlan::NONE);
+        assert_eq!(plans.plan(OverlayItem::Chat), Some(OverlayLegPlan::NONE));
 
         let split = shape(true, true, OverlayAuxLeg::Stream);
         let plans = overlay_session_plans(split, &layout);
@@ -1192,6 +1297,36 @@ mod tests {
         // Captions count too: stream-only captions on a shared leg need a split.
         layout.captions.show_on_stream = true;
         assert!(overlay_layout_needs_split(shared, &layout));
+        layout.captions.show_on_stream = false;
+        // Plan 215 G: a stream-only chat box takes the same path as the
+        // highlight card: the split when the topology has one, else the
+        // shared leg.
+        layout.chat.show_on_stream = true;
+        assert!(overlay_layout_needs_split(shared, &layout));
+        assert_eq!(
+            overlay_session_plans(shared, &layout).chat,
+            OverlayLegPlan {
+                primary: true,
+                aux: false,
+                needs_split: false
+            }
+        );
+        assert_eq!(
+            (
+                overlay_session_plans(split, &layout).chat.primary,
+                overlay_session_plans(split, &layout).chat.aux
+            ),
+            (false, true)
+        );
+        let vertical = shape(false, true, OverlayAuxLeg::VerticalSimulcast);
+        assert_eq!(
+            (
+                overlay_session_plans(vertical, &layout).chat.primary,
+                overlay_session_plans(vertical, &layout).chat.aux
+            ),
+            (true, true),
+            "a vertical stream gets its own chat card (D5)"
+        );
     }
 
     #[test]
@@ -1251,6 +1386,19 @@ mod tests {
             serde_json::to_value(&vertical[0]).unwrap()["item"],
             "highlight"
         );
+        // Plan 215 G: a stream-only chat box on a shared encode gets its own
+        // sentence, after the Buddy's, and serializes as `chat`.
+        layout.chat.show_on_stream = true;
+        let shared = overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout, &[]);
+        assert_eq!(shared.len(), 3);
+        assert_eq!(
+            shared[2],
+            OverlayStartNotice {
+                item: OverlayNoticeItem::Chat,
+                notice: "Both the stream and the recording will include chat: this computer shares one encode for them.".to_string(),
+            }
+        );
+        assert_eq!(serde_json::to_value(&shared[2]).unwrap()["item"], "chat");
     }
 
     /// Plan 186 D6: every shown banner is one item, `banners`; each sentence
@@ -1475,9 +1623,14 @@ mod tests {
         assert!(highlight["showInRecording"].is_boolean());
         assert!(highlight["horizontal"]["x"].is_number());
         assert_eq!(highlight.as_object().unwrap().len(), 4);
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert!(value["chat"]["showOnStream"].is_boolean());
         let round_trip: OverlayLayout = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip, OverlayLayout::default());
+        assert_eq!(
+            serde_json::to_value(OverlayItem::Chat).unwrap(),
+            serde_json::json!("chat")
+        );
     }
 
     #[test]

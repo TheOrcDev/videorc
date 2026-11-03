@@ -44,7 +44,15 @@ describe('overlay stage helpers', () => {
       buddy: { ...DEFAULT_OVERLAY_LAYOUT.buddy, showOnStream: true, showInRecording: false }
     }
     const items = overlayStageItems(layout, 'vertical')
-    expect(items.map((item) => item.item)).toEqual(['highlight', 'captions', 'buddy'])
+    expect(items.map((item) => item.item)).toEqual(['highlight', 'captions', 'buddy', 'chat'])
+    // Plan 215 D5: the chat box ships off for both outputs.
+    expect(items[3]).toMatchObject({
+      stageId: 'overlay:chat',
+      label: 'Chat',
+      badge: 'off',
+      off: true,
+      picture: null
+    })
     expect(items[2]).toMatchObject({
       stageId: 'overlay:buddy',
       label: 'Buddy',

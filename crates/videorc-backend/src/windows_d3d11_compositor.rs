@@ -300,6 +300,8 @@ pub(crate) enum WindowsD3d11SceneSourceKind {
     Image,
     CaptionOverlay,
     CommentHighlight,
+    /// The chat box (plan 215 G): between the caption bar and the Buddy.
+    ChatOverlay,
     /// The Buddy's bubble (plan 168 D16; plan 164 Phase C's avatar raster
     /// before): between the pet and the card.
     BuddyOverlay,
@@ -328,6 +330,7 @@ impl WindowsD3d11SceneSourceKind {
             Self::Image => "image",
             Self::CaptionOverlay => "caption-overlay",
             Self::CommentHighlight => "comment-highlight",
+            Self::ChatOverlay => "chat-overlay",
             Self::BuddyOverlay => "buddy-overlay",
             Self::BuddySprite => "buddy-sprite",
             Self::SolidColor(_) => "solid-color",

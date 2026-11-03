@@ -800,10 +800,55 @@ describe('shared high-risk protocol fixture', () => {
       })
     ).toThrow()
     // The shipped defaults: highlight bottom-left on both outputs, captions
-    // off (today's burnTarget default), the Buddy bottom-right.
+    // off (today's burnTarget default), the Buddy bottom-right, the chat box
+    // (plan 215 D5) top-left and off for both outputs.
     expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
     expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
     expect(fixtures.overlayLayout.defaults.buddy.horizontal.x).toBeCloseTo(0.7975, 6)
+    expect(fixtures.overlayLayout.defaults.chat.showOnStream).toBe(false)
+    expect(fixtures.overlayLayout.defaults.chat.showInRecording).toBe(false)
+    expect(fixtures.overlayLayout.defaults.chat.horizontal.y).toBeCloseTo(0.04, 6)
+    // The wire shape is exact: a layout without the chat box is refused here
+    // (the backend always writes it; `#[serde(default)]` is for stored rows).
+    const { chat: _chat, ...withoutChat } = fixtures.overlayLayout.defaults
+    expect(() => validateBackendRpcResult('overlays.layout.get', withoutChat)).toThrow()
+  })
+
+  it('keeps the chat box RPCs strict (plan 215 G)', () => {
+    const png = 'iVBORw0KGgo='
+    const rect = fixtures.overlayLayout.placed.chat.horizontal
+    expect(validateBackendRpcParams('chat.overlay.set', { pngBase64: png })).toStrictEqual({
+      pngBase64: png
+    })
+    expect(
+      validateBackendRpcParams('chat.overlay.set', {
+        pngBase64: png,
+        rect,
+        verticalPngBase64: png,
+        verticalRect: fixtures.overlayLayout.placed.chat.vertical
+      })
+    ).toStrictEqual({
+      pngBase64: png,
+      rect,
+      verticalPngBase64: png,
+      verticalRect: fixtures.overlayLayout.placed.chat.vertical
+    })
+    expect(() => validateBackendRpcParams('chat.overlay.set', { pngBase64: '' })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('chat.overlay.set', { pngBase64: png, anchor: 'top-left' })
+    ).toThrow()
+    const info = { active: true, width: 640, height: 480, revision: 7, vertical: false }
+    expect(validateBackendRpcResult('chat.overlay.set', info)).toStrictEqual(info)
+    expect(validateBackendRpcResult('chat.overlay.clear', { ...info, active: false })).toStrictEqual(
+      { ...info, active: false }
+    )
+    expect(() => validateBackendRpcResult('chat.overlay.set', { ...info, vertical: null })).toThrow()
+    expect(validateBackendRpcResult('chat.overlay.canvases', {})).toStrictEqual({})
+    expect(
+      validateBackendRpcResult('chat.overlay.canvases', { vertical: { width: 1080, height: 1920 } })
+    ).toStrictEqual({ vertical: { width: 1080, height: 1920 } })
+    // The serde null trap: an absent vertical canvas is omitted, never null.
+    expect(() => validateBackendRpcResult('chat.overlay.canvases', { vertical: null })).toThrow()
   })
 
   it('keeps the banner wire shape identical across languages, timer off or on (plan 186)', () => {
