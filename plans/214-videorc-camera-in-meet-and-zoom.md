@@ -29,6 +29,15 @@
     Each platform's on-device proof stays owed until its spike runs.
   - Lanes: Codex is out until 2026-11-04 12:40, so the `gpt-6.1-sol`
     workstreams (D, F) run on `fable-5.1`, the next stronger lane.
+- **Owner, 2026-11-03, later:**
+  - "Don't do smokes and runs here. We are going to do it later when we
+    merge everything to main." No smoke, probe, app launch or
+    on-device run happens before the merge. The PR lists them as owed.
+  - Workstream C (Windows) kept hitting account limits, so the owner
+    chose to ship it as a **follow-up PR**. PR 1 carries macOS, Linux
+    (hidden) and the shared parts. Windows stays hidden (`unsupported`),
+    and its Set up action answers "Not available on this computer."
+    until C lands.
 - **Was:** PLANNED 2026-11-02.
 - **Source:** the owner, 2026-11-02: "how hard would it be to create a
   virtual camera from Videorc? like OBS has, that can be used for example
