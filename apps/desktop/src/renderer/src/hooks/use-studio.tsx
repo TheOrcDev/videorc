@@ -12410,7 +12410,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ),
           automaticSourceFallbacks: automaticSourceFallbacks.current,
           nativePreviewSurfaceStatus: previewSurfaceStatus,
-          runtimeInfo: freshRuntimeInfo ?? undefined
+          runtimeInfo: freshRuntimeInfo ?? undefined,
+          // Plan 214 E3: the camera's state, never its words.
+          virtualCamera: (await import('@/lib/virtual-camera-view')).virtualCameraBundleLine(
+            virtualCamera.status
+          )
         }
       }
       const result = await client.request<SupportBundleExportResult>(
@@ -12442,7 +12446,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  }, [
+    client,
+    previewSurfaceStatus,
+    reportError,
+    runtimeInfo,
+    supportBundleExportPending,
+    virtualCamera.status
+  ])
   // Plan 174 A-20: a toast whose raw details were withheld offers this export
   // (latest-value hand-off, like the ref mirrors above; idempotent per render).
   registerSupportBundleExport(() => void exportSupportBundle())
