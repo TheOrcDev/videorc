@@ -12,7 +12,7 @@ import {
 import { normalizeSceneVisual, type SavedScene, type VisualSources } from '@/lib/scene-presets'
 import { SceneList } from './scene-list'
 
-const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
+const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown>, editScene: vi.fn() }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   useStudioAudio: () => ({ audioMeter: null })
@@ -102,6 +102,7 @@ beforeEach(() => {
     canSaveScene: true,
     wsStatus: 'connected',
     scene: { id: 'scene:default', sources: [] },
+    sceneEditMode: false,
     saveScene: vi.fn(() => true),
     renameSavedScene: vi.fn(() => true),
     deleteSavedScene: vi.fn(() => true),
@@ -118,7 +119,9 @@ afterEach(async () => {
 })
 
 async function render(): Promise<void> {
-  await act(async () => root.render(createElement(SceneList)))
+  await act(async () =>
+    root.render(createElement(SceneList, { onEditScene: mocked.editScene }))
+  )
 }
 const actions = () => mocked.core.sceneLibraryActions as Record<string, ReturnType<typeof vi.fn>>
 const rowButton = (name: string) =>
@@ -254,6 +257,31 @@ describe('the Scene page scene list (plan 210 D6)', () => {
       save.closest('[aria-describedby]')!.getAttribute('aria-describedby')!
     )
     expect(reason?.textContent).toBe('Videorc is reconnecting. Try again in a moment.')
+  })
+
+  // Plan 215 D4 (B2): the editor's door beside Save and New, until it's on.
+  it('offers Edit scene beside Save and New while the editor is off', async () => {
+    mocked.editScene.mockClear()
+    await render()
+    const edit = container.querySelector<HTMLButtonElement>('[data-testid="scene-edit"]')!
+    expect(edit.textContent).toBe('Edit scene')
+    const header = [...edit.parentElement!.querySelectorAll('button')].map(
+      (button) => button.textContent
+    )
+    expect(header.slice(-3)).toEqual(['Edit scene', 'Save scene…', 'New scene…'])
+    await act(async () => edit.click())
+    expect(mocked.editScene).toHaveBeenCalledOnce()
+
+    mocked.core.sceneEditMode = true
+    await render()
+    expect(container.querySelector('[data-testid="scene-edit"]')).toBeNull()
+  })
+
+  it('still offers Edit scene while recording or live', async () => {
+    mocked.core.isSessionActive = true
+    await render()
+    const edit = container.querySelector<HTMLButtonElement>('[data-testid="scene-edit"]')!
+    expect(edit.disabled).toBe(false)
   })
 
   it('never offers Update or Modified', async () => {

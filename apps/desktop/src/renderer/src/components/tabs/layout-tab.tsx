@@ -47,6 +47,7 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Toggle } from '@/components/ui/toggle'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
+import { useEditScene } from '@/hooks/use-edit-scene'
 import { useStudioBanners, useStudioCore } from '@/hooks/use-studio'
 import { BANNER_MAX_SHOWN } from '@/lib/backend'
 import type {
@@ -113,6 +114,29 @@ const CHROMA_KEY_BLUE = '#0000FF'
 // its lens still change live, so the copy names only what is locked.
 export const SCENE_POSITION_LOCK_REASON =
   "Position and size are locked while you're recording or live."
+const PLACEMENT_HINT =
+  'Click the source on the stage to edit it: drag it, or nudge it with the arrows.'
+
+/**
+ * The Placement section's arrows and its one line. The arrows wait for the
+ * editor (a click on the stage, or Edit scene, plan 215 D4); while recording
+ * or live Edit scene still opens the editor, and the line says what is
+ * locked.
+ */
+export function placementControls({
+  sceneEditMode,
+  isSessionActive,
+  stageDragging
+}: {
+  sceneEditMode: boolean
+  isSessionActive: boolean
+  stageDragging: boolean
+}): { nudgeDisabled: boolean; description: string } {
+  return {
+    nudgeDisabled: !sceneEditMode || isSessionActive || stageDragging,
+    description: isSessionActive ? SCENE_POSITION_LOCK_REASON : PLACEMENT_HINT
+  }
+}
 const ORIENTATION_LOCK_REASON =
   "The canvas is fixed while you're recording or live. Stop to switch orientation."
 
@@ -268,11 +292,13 @@ export function LayoutTab(): ReactElement {
     reportError,
     wsStatus
   } = useStudioCore()
+  const editScene = useEditScene()
   // The stage's phase (plan 174, C-5): only a pointer gesture takes the
   // inspector out of play (`inert`); a commit still landing leaves every
   // control enabled and focused, and `runPreciseEdit` drops the input instead.
   const [stagePhase, setStagePhase] = useState<StagePhase>('idle')
   const stageDragging = stagePhase === 'dragging'
+  const placement = placementControls({ sceneEditMode, isSessionActive, stageDragging })
   const stageBusy = stagePhase !== 'idle'
   // Overlay items on the canvas (plan 164, D15). One selection on the stage:
   // picking an item clears the source selection and the other way round.
@@ -589,7 +615,13 @@ export function LayoutTab(): ReactElement {
   return (
     <div className="flex flex-col">
       {/* Plan 210 D6: the scene list leads the page. */}
-      <SceneList />
+      <SceneList
+        onEditScene={() => {
+          // The stage's one selection goes to the camera, as a click on it does.
+          setSelectedOverlayItem(null)
+          editScene()
+        }}
+      />
       <div className={SCENE_GRID}>
         <div className={PAGE_LEAD_COLUMN}>
           <PanelSection
@@ -1027,11 +1059,7 @@ export function LayoutTab(): ReactElement {
                 // first pointerdown on the stage starts it, and a line that
                 // left then would shrink the page under the pointer and
                 // cancel that very gesture (stage-undo-control.ts).
-                description={
-                  isSessionActive
-                    ? SCENE_POSITION_LOCK_REASON
-                    : 'Click the source on the stage to edit it: drag it, or nudge it with the arrows.'
-                }
+                description={placement.description}
                 headingLevel={3}
                 title="Placement"
               >
@@ -1069,7 +1097,7 @@ export function LayoutTab(): ReactElement {
                   <span />
                   <Button
                     aria-label="Nudge source up"
-                    disabled={!sceneEditMode || isSessionActive || stageDragging}
+                    disabled={placement.nudgeDisabled}
                     size="icon"
                     variant="outline"
                     onClick={(event) =>
@@ -1083,7 +1111,7 @@ export function LayoutTab(): ReactElement {
                   <span />
                   <Button
                     aria-label="Nudge source left"
-                    disabled={!sceneEditMode || isSessionActive || stageDragging}
+                    disabled={placement.nudgeDisabled}
                     size="icon"
                     variant="outline"
                     onClick={(event) =>
@@ -1096,7 +1124,7 @@ export function LayoutTab(): ReactElement {
                   </Button>
                   <Button
                     aria-label="Nudge source down"
-                    disabled={!sceneEditMode || isSessionActive || stageDragging}
+                    disabled={placement.nudgeDisabled}
                     size="icon"
                     variant="outline"
                     onClick={(event) =>
@@ -1109,7 +1137,7 @@ export function LayoutTab(): ReactElement {
                   </Button>
                   <Button
                     aria-label="Nudge source right"
-                    disabled={!sceneEditMode || isSessionActive || stageDragging}
+                    disabled={placement.nudgeDisabled}
                     size="icon"
                     variant="outline"
                     onClick={(event) =>
