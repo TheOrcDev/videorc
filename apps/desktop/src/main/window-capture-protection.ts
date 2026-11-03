@@ -1,5 +1,9 @@
 import type { BrowserWindow } from 'electron'
 
+import type { StreamManagerHideMethod } from '../shared/backend'
+
+export type { StreamManagerHideMethod }
+
 export type VideorcWindowRole =
   | 'main'
   | 'preview'
@@ -33,17 +37,57 @@ export const WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS: Readonly<Record<VideorcWin
     'proof-surface': '#1e90a8'
   })
 
+/** What a window's owner has chosen, where the rule depends on a choice. */
+export interface WindowCaptureProtectionContext {
+  /** The Stream Manager's Hide from stream switch (plan 215 D6). */
+  hiddenFromStream?: boolean
+}
+
 /**
- * Only Notes is a private teleprompter that must never enter a captured
- * display; Comments and Captions are part of the show and stay VISIBLE in
- * recordings (owner call, 2026-08-19 — "only notes should be invisible").
- * The rule is deliberately identical on every platform.
+ * How the Stream Manager leaves the stream when Hide from stream is on
+ * (plan 215 D6). On macOS Videorc's own ScreenCaptureKit filter leaves the
+ * window out of every capture it starts, applied live, so the streamer's
+ * screenshots, QuickTime and Zoom still see it. On Windows the monitor
+ * capture has no exclusion list; content protection
+ * (`WDA_EXCLUDEFROMCAPTURE`) is the only route, and it hides the window from
+ * every capture app and screenshot too. Linux has neither.
+ */
+export function streamManagerHideMethod(platform: NodeJS.Platform): StreamManagerHideMethod {
+  if (platform === 'darwin') {
+    return 'capture-filter'
+  }
+  if (platform === 'win32') {
+    return 'content-protection'
+  }
+  return 'unsupported'
+}
+
+/**
+ * Notes is a private teleprompter that must never enter a captured display;
+ * Comments and Captions are part of the show and stay VISIBLE in recordings
+ * by default (owner call, 2026-08-19 — "only notes should be invisible").
+ * Plan 215 D6 adds the one choice: the Stream Manager is protected while
+ * its Hide from stream switch is on, but only where content protection is
+ * how it hides (Windows). On macOS the capture filter does that job, and
+ * content protection would also hide the window from the streamer's own
+ * tools, so it is never applied there. Notes' rule stays identical on every
+ * platform.
  */
 export function videorcWindowRequiresCaptureProtection(
   role: VideorcWindowRole,
-  _platform: NodeJS.Platform
+  platform: NodeJS.Platform,
+  context: WindowCaptureProtectionContext = {}
 ): boolean {
-  return role === 'notes'
+  if (role === 'notes') {
+    return true
+  }
+  if (role === 'comments') {
+    return (
+      context.hiddenFromStream === true &&
+      streamManagerHideMethod(platform) === 'content-protection'
+    )
+  }
+  return false
 }
 
 /**
@@ -71,10 +115,14 @@ export function applyVideorcWindowCaptureProtection(
   options: {
     platform?: NodeJS.Platform
     onFailure?: (reason: string) => void
-  } = {}
+  } & WindowCaptureProtectionContext = {}
 ): WindowCaptureProtectionResult {
   const platform = options.platform ?? process.platform
-  if (!videorcWindowRequiresCaptureProtection(role, platform)) {
+  if (
+    !videorcWindowRequiresCaptureProtection(role, platform, {
+      hiddenFromStream: options.hiddenFromStream
+    })
+  ) {
     return { state: 'not-required', protected: false }
   }
   if (protectedWindows.has(window)) {
@@ -96,5 +144,24 @@ export function applyVideorcWindowCaptureProtection(
         : 'Electron rejected content protection.'
     options.onFailure?.(reason)
     return { state: 'failed', protected: false, reason }
+  }
+}
+
+/**
+ * Takes a window's content protection off again (plan 215 D6: Hide from
+ * stream turned off on Windows). A window this module never protected is
+ * left alone, so Notes can never be exposed by a Stream Manager toggle.
+ * Returns whether the window is still protected afterwards.
+ */
+export function releaseVideorcWindowCaptureProtection(window: ContentProtectionWindow): boolean {
+  if (!protectedWindows.has(window)) {
+    return false
+  }
+  try {
+    window.setContentProtection(false)
+    protectedWindows.delete(window)
+    return false
+  } catch {
+    return true
   }
 }

@@ -1339,6 +1339,8 @@ export type StudioContextValue = {
   closeCommentsWindow: () => Promise<void>
   toggleCommentsWindow: () => Promise<void>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
+  /** Hide from stream (plan 215 D6), flipped from ⌘K with the window closed too. */
+  setCommentsWindowHiddenFromStream: (hidden: boolean) => Promise<void>
   openSessionCommentsWindow: (sessionId: string, title: string, startedAt: string) => Promise<void>
   highlightedCommentId: string | null
   commentHighlightState: CommentHighlightState
@@ -2281,6 +2283,8 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   visible: false,
   bounds: null,
   alwaysOnTop: false,
+  hiddenFromStream: false,
+  hideFromStreamMethod: 'unsupported',
   highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   autoShowActivity: false,
   protected: false,
@@ -3794,6 +3798,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [refreshLiveChatSnapshotForComments])
   const setCommentsWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     await window.videorc?.setCommentsWindowAlwaysOnTop?.(alwaysOnTop)
+  }, [])
+  const setCommentsWindowHiddenFromStream = useCallback(async (hidden: boolean) => {
+    await window.videorc?.setCommentsWindowHiddenFromStream?.(hidden)
   }, [])
   const openSessionCommentsWindowRef = useRef<
     ((sessionId: string, title: string, startedAt: string) => Promise<void>) | null
@@ -18536,6 +18543,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeCommentsWindow,
       toggleCommentsWindow,
       setCommentsWindowAlwaysOnTop,
+      setCommentsWindowHiddenFromStream,
       openSessionCommentsWindow,
       highlightedCommentId,
       commentHighlightState,
@@ -18783,6 +18791,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeCommentsWindow,
       toggleCommentsWindow,
       setCommentsWindowAlwaysOnTop,
+      setCommentsWindowHiddenFromStream,
       openSessionCommentsWindow,
       highlightedCommentId,
       commentHighlightState,

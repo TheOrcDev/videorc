@@ -486,9 +486,15 @@ import {
 } from './window-glass'
 import {
   applyVideorcWindowCaptureProtection,
+  releaseVideorcWindowCaptureProtection,
+  streamManagerHideMethod,
   type VideorcWindowRole,
   WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
 } from './window-capture-protection'
+import {
+  COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION,
+  commentsWindowHiddenFromStreamPreference
+} from './comments-window-prefs'
 import {
   assessProofPresentationWatch,
   assessProofSourceFrame,
@@ -833,6 +839,8 @@ let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
 let commentsHighlightAnchorValue: CommentHighlightAnchor | undefined
 let commentsAutoShowActivityValue: boolean | undefined
+/** Hide from stream (plan 215 D6), loaded lazily from prefs like the anchor. */
+let commentsHiddenFromStreamValue: boolean | undefined
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
@@ -3403,8 +3411,11 @@ function restoreNotesWindowOnLaunch(): void {
 // --- Stream Manager window (code name: comments) ------------------------------
 // The live dashboard in its own OS window (plan 055): chat, activity, stats
 // and Buddy, relayed from the main renderer. Plain BrowserWindow with no
-// native surface. It is NOT capture-protected (owner call, 2026-08-19: only
-// Notes is), so Studio closes it during a recording that would capture it.
+// native surface. It is NOT capture-protected by default (owner call,
+// 2026-08-19: only Notes is), so Studio closes it during a recording that
+// would capture it. Plan 215 D6 adds the streamer's choice: with Hide from
+// stream on, macOS leaves it out of Videorc's own capture filter and Windows
+// turns content protection on; it is then part of the show no more.
 type CommentsWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
@@ -3412,6 +3423,9 @@ type CommentsWindowPrefs = {
   /** Auto-show Activity celebrations on stream (plan 156). Default off. */
   autoShowActivity?: boolean
   alwaysOnTopPreferenceVersion?: number
+  /** Hide from stream (plan 215 D6). Default off; counts only with its version. */
+  hiddenFromStream?: boolean
+  hiddenFromStreamPreferenceVersion?: number
   open?: boolean
   /** 2 once the frame moved off the old Chat default (plan 055, S8). */
   layoutVersion?: number
@@ -3513,6 +3527,52 @@ function setCommentsWindowAutoShowActivity(on: unknown): CommentsWindowState {
   return commentsWindowState()
 }
 
+// Hide from stream (plan 215 D6): read with the window closed too (the Studio
+// renderer builds the capture exclusion list from it, and ⌘K flips it), so it
+// loads lazily from prefs. A file from before the switch, or a forged value,
+// lands on OFF (`commentsWindowHiddenFromStreamPreference`).
+function commentsHiddenFromStream(): boolean {
+  commentsHiddenFromStreamValue ??= commentsWindowHiddenFromStreamPreference(
+    loadCommentsWindowPrefs()
+  )
+  return commentsHiddenFromStreamValue
+}
+
+// The switch applies live. Windows is the one platform where content
+// protection is how the window hides (`streamManagerHideMethod`), so the
+// open window's protection follows the value there and nowhere else: on
+// macOS our own capture filter leaves it out (the Studio renderer sends the
+// window's id with the next screen start), and Linux cannot hide it, which
+// the state says through `hideFromStreamMethod`.
+function setCommentsWindowHiddenFromStream(hidden: unknown): CommentsWindowState {
+  commentsHiddenFromStreamValue = hidden === true
+  applyCommentsWindowCaptureProtection()
+  saveCommentsWindowPrefs({
+    hiddenFromStream: commentsHiddenFromStreamValue,
+    hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION
+  })
+  emitCommentsWindowState()
+  return commentsWindowState()
+}
+
+function applyCommentsWindowCaptureProtection(): void {
+  const window = commentsWindow
+  if (!window || window.isDestroyed()) {
+    commentsWindowContentProtected = false
+    return
+  }
+  const hiddenFromStream = commentsHiddenFromStream()
+  const result = applyVideorcWindowCaptureProtection(window, 'comments', {
+    hiddenFromStream,
+    onFailure: (reason) =>
+      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
+  })
+  commentsWindowContentProtected =
+    result.state === 'not-required'
+      ? releaseVideorcWindowCaptureProtection(window)
+      : result.protected
+}
+
 function commentsWindowIsOpen(): boolean {
   return Boolean(commentsWindow && !commentsWindow.isDestroyed() && !commentsWindowClosing)
 }
@@ -3536,6 +3596,8 @@ function commentsWindowState(message?: string): CommentsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
+    hiddenFromStream: commentsHiddenFromStream(),
+    hideFromStreamMethod: streamManagerHideMethod(process.platform),
     highlightAnchor: commentsHighlightAnchor(),
     autoShowActivity: commentsAutoShowActivity(),
     protected: open ? commentsWindowContentProtected : false,
@@ -4085,10 +4147,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
-  commentsWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'comments', {
-    onFailure: (reason) =>
-      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
-  }).protected
+  applyCommentsWindowCaptureProtection()
   installCaptureProtectionSmokeMarker(window, 'comments')
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
   if (commentsWindowAlwaysOnTop) {
@@ -12351,6 +12410,12 @@ async function runSmokePreviewMotionCommand(
     }
   }
 
+  // Hide from stream (plan 215 C5): the invisibility smoke flips the switch
+  // before and during a recording, exactly as the status bar does.
+  if (command === 'comments-window-set-hidden-from-stream') {
+    return setCommentsWindowHiddenFromStream(params.hidden === true)
+  }
+
   if (command === 'comments-window-push-snapshot') {
     const view = validateSmokeCommentsSnapshotParams(params)
     if (!view) throw new Error('Invalid Comments fixture snapshot.')
@@ -16570,6 +16635,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:get-state', () => commentsWindowState())
   secureIpcHandle('comments-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setCommentsWindowAlwaysOnTop(Boolean(alwaysOnTop))
+  )
+  secureIpcHandle('comments-window:set-hidden-from-stream', (_event, hidden: unknown) =>
+    setCommentsWindowHiddenFromStream(hidden)
   )
   secureIpcHandle('comments-window:set-highlight-anchor', (_event, anchor: unknown) =>
     setCommentsWindowHighlightAnchor(anchor)
