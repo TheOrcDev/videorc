@@ -412,6 +412,9 @@ As the lab account, from `~/videorc`:
 # Display: a 1920x1080 headless output far to the right of the real screen.
 cp config/live-lab/linux/hyprland.videorc-lab.conf ~/.config/hypr/videorc-lab.conf
 echo 'source = ~/.config/hypr/videorc-lab.conf' >> ~/.config/hypr/hyprland.conf
+# A Lua config (~/.config/hypr/hyprland.lua, Omarchy on Hyprland 0.56+) takes
+# the Lua twin instead; require("hypr.videorc_lab") in hyprland.lua:
+#   cp config/live-lab/linux/hyprland.videorc-lab.lua ~/.config/hypr/videorc_lab.lua
 hyprctl reload && hyprctl output create headless videorc-lab
 pnpm live:hookup --lab-display videorc-lab
 
@@ -430,7 +433,9 @@ pactl get-default-sink; pactl get-default-source   # must be real devices, never
 The headless output must not hold focus (the doctor WARNs when it does): new
 windows and notifications land on the focused output. The harness focuses it
 only while it opens the card, makes the card fullscreen there (a run is
-refused when it cannot), then gives focus back. `systemd-inhibit` holds
+refused when it cannot), then gives focus back. On a Lua config Hyprland
+refuses the classic `hyprctl dispatch focusmonitor ...` form; the harness then
+sends the same dispatch as Lua (`hl.dsp.focus(...)`). `systemd-inhibit` holds
 sleep, idle and the lid for the run; polkit may refuse it outside the seat's
 active session (SSH, a user unit), which the run log says, and then the
 masked sleep targets and the stopped hypridle are what keep the box awake.
