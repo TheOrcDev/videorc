@@ -1092,8 +1092,7 @@ async function paintCaptureProtectionSmokeMarker(
       })()`,
       true
     )
-    const installed =
-      result?.installed === true && result?.role === role && result?.color === color
+    const installed = result?.installed === true && result?.role === role && result?.color === color
     captureProtectionMarkerStates.set(window, installed)
     return installed
   } catch (error) {
@@ -3546,9 +3545,8 @@ function setCommentsWindowAutoShowActivity(on: unknown): CommentsWindowState {
 // loads lazily from prefs. A file from before the switch, or a forged value,
 // lands on OFF (`commentsWindowHiddenFromStreamPreference`).
 function commentsHiddenFromStream(): boolean {
-  commentsHiddenFromStreamValue ??= commentsWindowHiddenFromStreamPreference(
-    loadCommentsWindowPrefs()
-  )
+  commentsHiddenFromStreamValue ??=
+    commentsWindowHiddenFromStreamPreference(loadCommentsWindowPrefs())
   return commentsHiddenFromStreamValue
 }
 
