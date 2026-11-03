@@ -3104,6 +3104,73 @@ mod tests {
         }
     }
 
+    /// 2026-11-03, smoke:smart-scenes `hide`: the renderer stops the preview
+    /// camera because its app scene shows none, while the record+stream take
+    /// armed with Separate source recordings composes that camera into its
+    /// Camera file every tick. The client's stop is refused while the take's
+    /// Camera member is live, and goes through once that member retired.
+    #[tokio::test]
+    async fn a_client_camera_stop_is_refused_while_a_source_take_records_the_camera() {
+        let state = test_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub("iso"));
+        // The program scene is screen-only (an app scene); the take's selection
+        // still names the camera, which only the Camera file composes.
+        let mut params = config(LayoutPreset::ScreenOnly, true, true);
+        params.video.as_mut().unwrap().width = 64;
+        params.video.as_mut().unwrap().height = 36;
+        let video = params.video.as_ref().unwrap();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            params.sources.camera_id.as_deref().unwrap(),
+            &params.layout,
+            video,
+        )
+        .await;
+        let stores = crate::compositor::test_install_source_iso_frame_stores(&state).await;
+        let scene = scene_from_capture_config(params.clone());
+        assert!(
+            !required_scene_sources(&scene).camera,
+            "the program scene must not show the camera"
+        );
+        crate::compositor::update_compositor_scene_with_selected_sources(
+            &state,
+            CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(scene),
+                layout: params.layout.clone(),
+                active_screen: None,
+                transition_ms: None,
+            },
+            &params.sources,
+        )
+        .await;
+        assert!(crate::preview_camera::source_take_records_camera(&state).await);
+
+        let status = crate::preview_camera::stop_preview_camera_from_client(&state).await;
+        assert_eq!(
+            status.message.as_deref(),
+            Some(crate::preview_camera::CAMERA_STOP_REFUSED_BY_SOURCE_TAKE_MESSAGE)
+        );
+        assert!(
+            crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .is_some(),
+            "the camera the Camera file records must keep capturing"
+        );
+
+        // The Camera file ended (shed, or its source removed): the stop lands.
+        stores
+            .batches
+            .retire(crate::compositor::source_iso_batch::CAMERA, None);
+        assert!(!crate::preview_camera::source_take_records_camera(&state).await);
+        crate::preview_camera::stop_preview_camera_from_client(&state).await;
+        assert!(
+            crate::preview_camera::preview_camera_frame_source(&state)
+                .await
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn source_iso_retirement_rechecks_demand_after_startup_admission_wait() {
         for preset in [LayoutPreset::CameraOnly, LayoutPreset::ScreenOnly] {
