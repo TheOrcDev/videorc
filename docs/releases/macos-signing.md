@@ -116,3 +116,112 @@ pnpm release:preflight:macos
 
 The release workflow also runs this preflight before the expensive verification
 and packaging steps, so missing signing or notarization secrets fail early.
+
+## Videorc Camera (plan 214)
+
+The Videorc Camera system extension (`apps/desktop/camera-extension/`) needs
+`com.apple.developer.system-extension.install` on the app. That entitlement is
+restricted: Apple honours it only with a Developer ID provisioning profile
+embedded in the app, and the sandboxed extension needs a profile of its own for
+the app group. A restricted key signed without its profile gets the app killed
+by AMFI at launch, so the build embeds nothing until both profiles are present,
+and a release without them fails validation instead of shipping a camera-less
+build by accident.
+
+### Secrets
+
+| Name                           | Holds                                                                                                                      | Where                                                             |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `VIDEORC_MACOS_PROFILE_APP`    | Developer ID profile for `dev.theorcdev.videorc` with System Extension and App Groups (`C2PA37RB58.dev.theorcdev.videorc`) | GitHub secret (base64); `~/.videorc-release.env` (base64 or path) |
+| `VIDEORC_MACOS_PROFILE_CAMERA` | Developer ID profile for `dev.theorcdev.videorc.camera` with App Groups (`C2PA37RB58.dev.theorcdev.videorc`)               | same                                                              |
+
+Each value is either the base64 of the `.provisionprofile`
+(`base64 -i Videorc.provisionprofile | tr -d '\n'`) or an absolute path to it
+(`~/` is expanded). Set both or neither: one without the other is an error in
+the packaging hook, `package:preflight:macos` and `sign:desktop:local`.
+
+Creating them (B0, the owner, once, in the Apple Developer portal): enable
+System Extension and App Groups on the `dev.theorcdev.videorc` App ID, register
+`dev.theorcdev.videorc.camera` with App Groups, create the app group
+`C2PA37RB58.dev.theorcdev.videorc`, then create one Developer ID provisioning
+profile per App ID. Check each before installing it:
+
+```sh
+security cms -D -i Videorc.provisionprofile | plutil -extract Entitlements xml1 -o - -
+```
+
+The app profile must show `com.apple.developer.team-identifier` `C2PA37RB58`,
+`com.apple.application-identifier` `C2PA37RB58.dev.theorcdev.videorc`, the app
+group and `com.apple.developer.system-extension.install`; the camera profile the
+same team, `C2PA37RB58.dev.theorcdev.videorc.camera` and the app group. The
+packaging hook repeats these checks and refuses swapped, foreign or expired
+profiles. Install them:
+
+```sh
+base64 -i Videorc.provisionprofile | tr -d '\n' | gh secret set VIDEORC_MACOS_PROFILE_APP --repo TheOrcDev/videorc --body-file -
+base64 -i VideorcCamera.provisionprofile | tr -d '\n' | gh secret set VIDEORC_MACOS_PROFILE_CAMERA --repo TheOrcDev/videorc --body-file -
+```
+
+and add the same two names to `~/.videorc-release.env`.
+
+### What changes in the signed app
+
+- `Contents/Library/SystemExtensions/VideorcCamera.systemextension`, signed
+  before the app with its own entitlements (app sandbox, the app group, its
+  application and team identifiers) and its own `Contents/embedded.provisionprofile`.
+- `Contents/embedded.provisionprofile` on the app.
+- The app's entitlements: the five pre-camera keys plus
+  `com.apple.developer.system-extension.install`,
+  `com.apple.security.application-groups`, `com.apple.application-identifier`
+  and `com.apple.developer.team-identifier`, generated at pack time into
+  `apps/desktop/build/camera-extension/entitlements.mac.app.plist`.
+- Every helper and bare binary (backend, preview helper, `videorc-mcp`, the
+  `.node` addon, ffmpeg, ffprobe): `entitlements.mac.inherit.plist`, the five
+  keys only. A bare binary cannot carry a profile.
+- One build log line: `Videorc Camera embedded at Contents/Library/SystemExtensions/...`,
+  or `Videorc Camera skipped: ...` with the reason. A release must never show
+  the second.
+
+### Renewal
+
+Developer ID provisioning profiles expire (the portal shows the date; the
+packaging hook warns 30 days ahead and refuses an expired one). Regenerate both
+profiles in the portal against the same App IDs and capabilities, re-set both
+GitHub secrets and the two lines in `~/.videorc-release.env`, and rebuild. The
+Developer ID certificate's own expiry bounds the profiles: renewing the
+certificate (`CSC_LINK`) means regenerating both profiles too.
+
+### The validator's lines
+
+`pnpm release:validate:macos` adds, for the `.app`:
+
+```text
+[ok] Videorc Camera extension Info.plist bundle identifier
+[ok] Videorc Camera extension CMIOExtensionMachServiceName
+[ok] Videorc Camera extension usage description
+[ok] Videorc Camera extension signature
+[ok] Videorc Camera extension entitlements
+[ok] Videorc Camera extension embedded profile
+[ok] app embedded profile (Videorc Camera)
+[ok] system extension entitlements (app)
+[ok] no system extension entitlement (videorc-backend)
+[ok] no system extension entitlement (native_preview_host_helper)
+[ok] no system extension entitlement (videorc-mcp)
+[ok] no system extension entitlement (ffmpeg)
+[ok] no system extension entitlement (ffprobe)
+[ok] no system extension entitlement (videorc_native_preview.node)
+```
+
+`pnpm check:packaged-app` reports `cameraExtension` (`embedded`, `partial`, or
+`absent (...)`) and fails a Developer ID build that lacks any part of it; an
+unsigned or ad hoc local build without the camera only reports it.
+
+### Rollback
+
+A build without the profiles fails `release:preflight:macos` and
+`release:validate:macos` and never ships. Do not work around that by unsetting
+the secrets: shipping without the camera means removing the packaging hook, the
+entitlements split and the validator checks together in one reviewed PR. A Beta
+whose camera misbehaves rolls forward with a higher version like any other
+(never overwrite release bytes); the installed extension is replaced by the next
+activation and removed when the app is deleted.

@@ -1,5 +1,11 @@
 import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
+import {
+  cameraExtensionBindingFromModule,
+  createCameraExtensionController,
+  shouldActivateCameraExtensionAtLaunch,
+  type CameraExtensionController
+} from './camera-extension'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
@@ -1397,6 +1403,41 @@ if (windowAppearanceLoad.unavailableReason && process.platform === 'darwin') {
   safeConsole.warn(
     `Window appearance pin unavailable; Preview paints the solid palette: ${windowAppearanceLoad.unavailableReason}`
   )
+}
+// Plan 214 B3: the Videorc Camera system extension, activated from this
+// process (macOS looks it up in the requester's bundle). The controller holds
+// the last state; the camera switch and the backend RPC that receives this
+// state are plan 214 A4's, see `cameraExtensionSwitchOnAtLaunch` below.
+let cameraExtensionController: CameraExtensionController | undefined
+function cameraExtension(): CameraExtensionController {
+  if (!cameraExtensionController) {
+    let binding = null
+    if (process.platform === 'darwin' && nativePreviewInProcessModuleResolution.path) {
+      try {
+        binding = cameraExtensionBindingFromModule(
+          requireNativePreviewRealSurfaceModule(nativePreviewInProcessModuleResolution.path)
+        )
+      } catch (error) {
+        safeConsole.warn(`Videorc Camera extension binding unavailable: ${errorMessage(error)}`)
+      }
+    }
+    cameraExtensionController = createCameraExtensionController({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      binding,
+      log: (line) => logBackend('info', line),
+      onState: () => {
+        // Plan 214 A4 (last step of Workstream B): forward the state to the
+        // backend's virtual_camera RPC so the Output page shows it.
+      }
+    })
+  }
+  return cameraExtensionController
+}
+// Plan 214 A4 supplies the saved switch (D4). Until then only the lab env
+// VIDEORC_CAMERA_EXTENSION_ACTIVATE_AT_LAUNCH=1 activates at launch.
+function cameraExtensionSwitchOnAtLaunch(): boolean {
+  return false
 }
 type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
 const nativePreviewRealSurfaceDriverLoad = loadNativePreviewPrimaryDriver()
@@ -13565,6 +13606,22 @@ async function runSmokePreviewMotionCommand(
   // Allocator-level memory attribution (PartitionAlloc/V8/mojo/cc per process)
   // via Chromium memory-infra dumps — the only window into renderer memory
   // that lives OUTSIDE the V8 heap. Probes diff two dumps to find leaks.
+  // Plan 214 B3: the extension's state for the packaged smoke (F1/F2); only a
+  // signed build in the Applications folder can activate.
+  if (command === 'camera-extension') {
+    const action = params.action
+    if (action === 'activate') {
+      return cameraExtension().activate()
+    }
+    if (action === 'deactivate') {
+      return cameraExtension().deactivate()
+    }
+    return {
+      availability: cameraExtension().availability(),
+      state: cameraExtension().state()
+    }
+  }
+
   if (command === 'memory-infra-dump') {
     const seconds = typeof params.seconds === 'number' ? Math.min(20, params.seconds) : 6
     await contentTracing.startRecording({
@@ -16245,6 +16302,17 @@ app.whenReady().then(async () => {
   }
 
   installRendererSessionPermissions(session.defaultSession)
+  // Plan 214 B3: Apple asks for the activation as early as possible so an
+  // update replaces the installed extension at launch.
+  if (
+    shouldActivateCameraExtensionAtLaunch({
+      availability: cameraExtension().availability(),
+      switchOn: cameraExtensionSwitchOnAtLaunch(),
+      env: process.env
+    })
+  ) {
+    void cameraExtension().activate()
+  }
   moveLegacyBuddyAssetsOnce()
   scheduleStaleHttpCacheCleanup()
   // Plan 209 D20 and review #8: a Linux or Windows agent app runs the bridge

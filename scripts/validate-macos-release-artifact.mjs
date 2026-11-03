@@ -21,6 +21,7 @@ import {
   evaluateFileExcludesEnvSecretCheck,
   formatArtifactPath,
   formatReleaseArtifactValidationReport,
+  outputExclusionFailures,
   sanitizeReleaseValidationOutput,
   selectLatestReleaseArtifacts,
   stdoutExpectationFailures
@@ -204,11 +205,15 @@ function runCheck(check) {
   // e.g. the capture-entitlement gate requires the device entitlements to appear
   // in `codesign -d --entitlements` output (a signed binary without them exits 0).
   const missing = (check.expectOutputIncludes ?? []).filter((needle) => !rawOutput.includes(needle))
+  // Plan 214 B5: a bare binary that claims the restricted system-extension
+  // key or the app group cannot carry a profile, so AMFI kills it at launch.
+  const forbidden = outputExclusionFailures(check, rawOutput)
   const stdoutFailures = stdoutExpectationFailures(check, result.stdout)
   const output = sanitizeReleaseValidationOutput(
     [
       rawOutput,
       ...missing.map((needle) => `missing required entitlement: ${needle}`),
+      ...forbidden,
       ...stdoutFailures
     ]
       .filter(Boolean)
@@ -218,7 +223,11 @@ function runCheck(check) {
 
   return {
     label: check.label,
-    ok: result.status === 0 && missing.length === 0 && stdoutFailures.length === 0,
+    ok:
+      result.status === 0 &&
+      missing.length === 0 &&
+      forbidden.length === 0 &&
+      stdoutFailures.length === 0,
     output
   }
 }

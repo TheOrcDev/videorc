@@ -150,6 +150,10 @@ check (default in packaged builds since 0.9.10; opt out via
   keychain (or `CSC_LINK`). See [macos-signing.md](macos-signing.md).
   **Auto-update requires a signed build** — electron-updater refuses to apply an
   unsigned/ad-hoc update.
+- **Videorc Camera profiles** (plan 214) — `VIDEORC_MACOS_PROFILE_APP` and
+  `VIDEORC_MACOS_PROFILE_CAMERA` in `~/.videorc-release.env` (base64 or a
+  path to each Developer ID provisioning profile). See
+  [Videorc Camera](#videorc-camera-plan-214) below.
 - **Storage write creds** — the Neon uploader key
   (`VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `storage:read` + `storage:write`) in
   `~/.videorc-release.env`. While R2 is still an origin, also the
@@ -170,6 +174,37 @@ check (default in packaged builds since 0.9.10; opt out via
   `videorc-releases/updates/...` (where nothing reads them) while the upload still
   reports success. If your `.env` endpoint has the bucket suffix, fix it there or
   override per-run (Step 3 below).
+
+## Videorc Camera (plan 214)
+
+The signed build embeds the Videorc Camera system extension
+(`apps/desktop/camera-extension/`) when both `VIDEORC_MACOS_PROFILE_APP` and
+`VIDEORC_MACOS_PROFILE_CAMERA` are set; the secrets, how to create and renew
+the profiles, and what the signed app looks like are in
+[macos-signing.md, "Videorc Camera"](macos-signing.md#videorc-camera-plan-214).
+What the release path checks:
+
+- `release:preflight:macos` requires both profile variables (named with a
+  pointer at plan 214 B0 when missing).
+- `package:preflight:macos` requires the built extension
+  (`pnpm build:camera-extension`, part of `package:backend:macos`) when
+  the profiles are set, and prints `Videorc Camera skipped: ...` when not.
+- The packaging hook logs `Videorc Camera embedded at
+  Contents/Library/SystemExtensions/VideorcCamera.systemextension (<version>)`.
+  A release log that says `Videorc Camera skipped` is not a release.
+- `release:validate:macos` fails a release that lacks the extension, its
+  signature and entitlements, either embedded profile, or the restricted keys
+  on the app, and fails if any bare binary claims them (the lines are listed
+  in macos-signing.md). `check:packaged-app` fails a Developer ID build that
+  lacks any part of it.
+- The acceptance gate for the camera is plan 214 F2 on the lab Mac: the
+  approval flow in System Settings, Meet, Zoom, FaceTime, an update that
+  replaces the extension, and delete-the-app uninstalling it.
+
+Rollback: a build without the profiles never passes validation; a shipped
+camera problem rolls forward with a higher version like any other. Shipping
+without the camera is a reviewed PR that removes the hook, the entitlements
+split and the validator checks together, never an unset secret.
 
 ## Storage origins
 
@@ -831,4 +866,7 @@ Fail closed instead of mutating a bad release — see "Beta Download Rollback" i
 cut a `-beta.N+1` rather than overwriting. For the feed, publish a corrected build
 with a **higher** version; the bad one stops being offered once a higher version
 exists. (The flat `updates/macos/` prefix is overwritten each release, so the
-feed always reflects the latest upload.)
+feed always reflects the latest upload.) Videorc Camera (plan 214): a build that
+lacks the provisioning profiles fails the validator and never ships; a camera
+that misbehaves in a shipped Beta rolls forward the same way, and the next
+activation replaces the installed extension.

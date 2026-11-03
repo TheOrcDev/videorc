@@ -41,6 +41,11 @@ electronFuses:
   enableNodeCliInspectArguments: false
   onlyLoadAppFromAsar: true
 
+# Plan 214 B2: embeds and signs the Videorc Camera extension (macOS only; a
+# no-op elsewhere). See the comment on mac.entitlements below and
+# docs/releases/macos-signing.md, "Videorc Camera".
+afterPack: ../../scripts/electron-builder-after-pack-macos.cjs
+
 # Shared across platforms. Platform-specific resources live under mac:/win:
 # because electron-builder CONCATENATES global + platform extraResources
 # (it does not override) — a global entry with a mac-only path breaks the
@@ -105,8 +110,31 @@ mac:
         - source-patches/**/*
   hardenedRuntime: true
   icon: build-resources/icon.icns
-  entitlements: build-resources/entitlements.mac.plist
-  entitlementsInherit: build-resources/entitlements.mac.plist
+  # Plan 214 B2 (Videorc Camera). The app and its helpers no longer share one
+  # plist:
+  # - `entitlements` (the app itself) is GENERATED on every macOS pack by the
+  #   afterPack hook (top of this file) into the gitignored build/ dir: the five keys of
+  #   build-resources/entitlements.mac.plist, plus the restricted
+  #   com.apple.developer.system-extension.install, the app group and the
+  #   application/team identifiers ONLY when both VIDEORC_MACOS_PROFILE_APP and
+  #   VIDEORC_MACOS_PROFILE_CAMERA are set (the Developer ID profiles from plan
+  #   214 B0). A restricted key without its embedded profile gets the app
+  #   killed by AMFI at launch, so the hook never writes it without them.
+  # - `entitlementsInherit` signs everything else: Electron's helpers and the
+  #   bare binaries in Contents/Resources (videorc-backend, preview helper,
+  #   videorc-mcp, the .node addon, ffmpeg). Exactly the five pre-camera keys,
+  #   never the restricted one: a bare binary cannot carry a profile.
+  # - `signIgnore` keeps @electron/osx-sign away from the extension's Mach-O,
+  #   which it would otherwise re-sign as a bare file with the inherit plist and
+  #   break the bundle; the hook signs the whole .systemextension with its own
+  #   entitlements before the app is signed, so the app seals it as nested code.
+  # The app profile is embedded by the hook (Contents/embedded.provisionprofile),
+  # not through `provisioningProfile`: that key cannot be conditional in YAML and
+  # electron-builder fails when the file it names is missing (no-profile builds).
+  entitlements: build/camera-extension/entitlements.mac.app.plist
+  entitlementsInherit: build-resources/entitlements.mac.inherit.plist
+  signIgnore:
+    - /Contents/Library/SystemExtensions/
   # Signed + notarized for Developer ID distribution. The cert is the keychain's
   # "Developer ID Application: Uros Miric (C2PA37RB58)" — electron-builder
   # auto-detects it. In electron-builder 26 `notarize` is a boolean; the notary
