@@ -180,7 +180,17 @@ export function outputProfileStep({ id = 'output-profile', profileParam = 'profi
       await ctx.ui.evaluate(
         `(() => { localStorage.setItem(${JSON.stringify(CAPTURE_CONFIG_KEY)}, ${JSON.stringify(JSON.stringify(next))}); return true })()`
       )
+      // The backend relays a remote intent once, to the renderer connected at
+      // that moment; one sent before the reloaded renderer is back is lost
+      // and never acked. The renderer republishes its remote surface on every
+      // connect, so its next remote.state means it is there to take one.
+      const rendererBack = ctx.waitFor((type) => type === 'remote.state', {
+        deadlineMs: 60_000,
+        label: 'renderer back on the backend after the reload'
+      })
+      rendererBack.catch(() => undefined)
       await ctx.ui.reload()
+      await rendererBack
       const check = JSON.parse(
         (await ctx.ui.evaluate(`localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`)) ??
           'null'
