@@ -322,6 +322,43 @@ pub(crate) fn stored_session_token_result() -> Result<Option<String>> {
         .map(|token| token.filter(|token| !token.trim().is_empty()))
 }
 
+/// Whether the desktop holds a Videorc session token (plan 215 A1): the one
+/// truth the chat connectors, the Go Live check and the support bundle read.
+/// A store that cannot be read is its own state, never "signed out": a
+/// streamer who is signed in must not be told to sign in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionState {
+    SignedIn,
+    SignedOut,
+    /// The secrets store could not be read; the error, for the row and the log.
+    Unreadable(String),
+}
+
+impl SessionState {
+    pub fn is_signed_in(&self) -> bool {
+        matches!(self, Self::SignedIn)
+    }
+}
+
+/// The stored session token for a Bearer call, or why there is none.
+pub fn session_token() -> std::result::Result<String, SessionState> {
+    match stored_session_token_result() {
+        Ok(Some(token)) => Ok(token),
+        Ok(None) => Err(SessionState::SignedOut),
+        Err(error) => {
+            tracing::warn!("Could not read the Videorc session token: {error:#}");
+            Err(SessionState::Unreadable(format!("{error:#}")))
+        }
+    }
+}
+
+pub fn session_state() -> SessionState {
+    match session_token() {
+        Ok(_) => SessionState::SignedIn,
+        Err(state) => state,
+    }
+}
+
 enum PreparedAccountRefreshOutcome {
     NoStoredSession,
     Refreshed(SessionRefresh),

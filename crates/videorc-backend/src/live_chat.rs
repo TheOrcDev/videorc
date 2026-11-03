@@ -50,6 +50,10 @@ pub enum CommentsReadState {
     /// The destination streams with a key, and the platform shares chat only
     /// with apps you sign in to: Sign in brings it (plan 213 J1). Not a failure.
     NeedsSignIn,
+    /// The Videorc sign-in is missing or no longer accepted, so the relay that
+    /// reads X and Kick chat has nothing to show (plan 215 A1). Not a
+    /// failure: the connector parks, and Sign in attaches it again (A4).
+    NeedsVideorcSignIn,
 }
 
 /// Write capability for one concrete stream destination.
@@ -845,6 +849,21 @@ pub const X_AUTHORIZE_LIVE_FOR_CHAT: &str = "Authorize X Live to read and send c
 /// needs Sign in. The Stream Manager row and the Go Live check say the same.
 pub const X_STREAM_KEY_CHAT_NEEDS_SIGN_IN: &str = "X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to.";
 
+/// The relay that reads X chat waits on the Videorc sign-in (plan 215 A1):
+/// the Stream Manager row, in words that name Videorc and never X.
+pub const X_CHAT_NEEDS_VIDEORC_SIGN_IN: &str = "Sign in to Videorc to read X chat.";
+/// The Kick twin.
+pub const KICK_CHAT_NEEDS_VIDEORC_SIGN_IN: &str = "Sign in to Videorc to read Kick chat.";
+/// The relay refused the stored session (a 401): the same parked state, with
+/// the reason.
+pub const X_CHAT_SIGN_IN_EXPIRED: &str =
+    "Your Videorc sign-in expired. Sign in to Videorc to read X chat.";
+pub const KICK_CHAT_SIGN_IN_EXPIRED: &str =
+    "Your Videorc sign-in expired. Sign in to Videorc to read Kick chat.";
+/// The Go Live check and the toast (plan 215 A2, A3): the sentence form.
+pub const X_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN: &str = "X chat needs your Videorc sign-in.";
+pub const KICK_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN: &str = "Kick chat needs your Videorc sign-in.";
+
 /// Chat capability for every native platform (YouTube, Twitch, X, Kick), preferring a connected
 /// account over stale saved rows. Custom RTMP has no platform comments and is omitted, and so
 /// are the key-only destinations (Facebook, TikTok, Instagram): a session that streams to one
@@ -1626,6 +1645,29 @@ impl LiveChatCoordinator {
                     .unwrap_or(true)
         }) {
             provider.retry_at = retry_at;
+        }
+    }
+
+    /// The relay waits on the Videorc sign-in (plan 215 A1): the connector
+    /// parks (`Waiting`, no resume time) with the read state that names it.
+    /// Not a failure, so `last_error` clears; Sign in attaches it again (A4).
+    pub fn set_provider_needs_videorc_sign_in(
+        &mut self,
+        platform: StreamPlatform,
+        target_id: Option<&str>,
+        message: &str,
+    ) {
+        if let Some(provider) = self.providers.iter_mut().find(|provider| {
+            provider.platform == platform
+                && target_id
+                    .map(|target_id| provider.target_id.as_deref() == Some(target_id))
+                    .unwrap_or(true)
+        }) {
+            provider.state = LiveChatProviderConnectionState::Waiting;
+            provider.read = CommentsReadState::NeedsVideorcSignIn;
+            provider.message = message.to_string();
+            provider.last_error = None;
+            provider.retry_at = None;
         }
     }
 
@@ -3594,7 +3636,7 @@ pub(crate) async fn set_provider_and_emit(
         (expected_session_id, expected_generation),
         platform,
         target_id,
-        (connection, None),
+        ProviderTransition::Connection(connection, None),
         message,
         (std::future::ready(()), std::future::ready(())),
     )
@@ -3617,11 +3659,43 @@ pub(crate) async fn set_provider_waiting_and_emit(
         (expected_session_id, expected_generation),
         platform,
         target_id,
-        (LiveChatProviderConnectionState::Waiting, Some(retry_at)),
+        ProviderTransition::Connection(LiveChatProviderConnectionState::Waiting, Some(retry_at)),
         message,
         (std::future::ready(()), std::future::ready(())),
     )
     .await
+}
+
+/// The relay waits on the Videorc sign-in (plan 215 A1): the provider parks
+/// with the read state that names it, and the renderer hears it like any
+/// other transition.
+pub(crate) async fn set_provider_needs_videorc_sign_in_and_emit(
+    state: &AppState,
+    expected_session_id: &str,
+    expected_generation: u64,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+    message: &str,
+) -> bool {
+    set_provider_and_emit_with_hooks(
+        state,
+        (expected_session_id, expected_generation),
+        platform,
+        target_id,
+        ProviderTransition::NeedsVideorcSignIn,
+        message,
+        (std::future::ready(()), std::future::ready(())),
+    )
+    .await
+}
+
+/// One provider transition: a connection state with an optional resume time,
+/// or the parked state that waits on the Videorc sign-in (plan 215 A1), which
+/// is a read state and not a connection failure.
+#[derive(Clone, Copy)]
+enum ProviderTransition<'a> {
+    Connection(LiveChatProviderConnectionState, Option<&'a str>),
+    NeedsVideorcSignIn,
 }
 
 async fn set_provider_and_emit_with_hooks<F, G>(
@@ -3629,7 +3703,7 @@ async fn set_provider_and_emit_with_hooks<F, G>(
     expected_owner: (&str, u64),
     platform: StreamPlatform,
     target_id: Option<&str>,
-    transition: (LiveChatProviderConnectionState, Option<&str>),
+    transition: ProviderTransition<'_>,
     message: &str,
     hooks: (F, G),
 ) -> bool
@@ -3637,7 +3711,6 @@ where
     F: std::future::Future<Output = ()>,
     G: std::future::Future<Output = ()>,
 {
-    let (connection, retry_at) = transition;
     let (expected_session_id, expected_generation) = expected_owner;
     let (before_mutation, before_emit) = hooks;
     before_mutation.await;
@@ -3659,8 +3732,19 @@ where
         if !provider_exists {
             return false;
         }
-        coordinator.set_provider_status(platform, target_id, connection, message, &now);
-        coordinator.set_provider_retry_at(platform, target_id, retry_at.map(str::to_string));
+        match transition {
+            ProviderTransition::Connection(connection, retry_at) => {
+                coordinator.set_provider_status(platform, target_id, connection, message, &now);
+                coordinator.set_provider_retry_at(
+                    platform,
+                    target_id,
+                    retry_at.map(str::to_string),
+                );
+            }
+            ProviderTransition::NeedsVideorcSignIn => {
+                coordinator.set_provider_needs_videorc_sign_in(platform, target_id, message);
+            }
+        }
         coordinator
             .providers
             .iter()
@@ -6433,7 +6517,7 @@ mod tests {
                 ("session-a", session_generation),
                 StreamPlatform::Youtube,
                 Some("shared-target"),
-                (LiveChatProviderConnectionState::Reconnecting, None),
+                ProviderTransition::Connection(LiveChatProviderConnectionState::Reconnecting, None),
                 "Transient connection loss.",
                 (std::future::ready(()), async move {
                     let _ = captured_tx.send(());
@@ -6490,7 +6574,7 @@ mod tests {
                 ("shared-session", original_generation),
                 StreamPlatform::Youtube,
                 Some("shared-target"),
-                (LiveChatProviderConnectionState::Reconnecting, None),
+                ProviderTransition::Connection(LiveChatProviderConnectionState::Reconnecting, None),
                 "Old connector retry.",
                 (
                     async move {

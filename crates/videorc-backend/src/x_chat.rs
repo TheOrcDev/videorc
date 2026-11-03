@@ -181,6 +181,24 @@ fn terminal(message: impl Into<String>) -> anyhow::Error {
     XChatTerminalFailure(message.into()).into()
 }
 
+/// The Videorc sign-in is missing or no longer accepted (plan 215 A1). Not a
+/// failure and not retried: the connector parks, and Sign in attaches it
+/// again (A4). The words name Videorc, never X, because X is fine.
+#[derive(Debug)]
+struct XChatNeedsVideorcSignIn(String);
+
+impl std::fmt::Display for XChatNeedsVideorcSignIn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for XChatNeedsVideorcSignIn {}
+
+fn needs_videorc_sign_in(message: impl Into<String>) -> anyhow::Error {
+    XChatNeedsVideorcSignIn(message.into()).into()
+}
+
 pub fn x_chat_message(has_x_account: bool) -> &'static str {
     if has_x_account {
         "X live chat can be read and sent for native X broadcasts."
@@ -267,6 +285,36 @@ pub async fn run_x_chat_connector(
             return;
         }
 
+        // Plan 215 A1: the relay waits on the Videorc sign-in. Not a failure
+        // (X is fine) and not a retry: the row parks in words that name
+        // Videorc, and Sign in attaches the connector again (A4).
+        if let Some(parked) = error.downcast_ref::<XChatNeedsVideorcSignIn>() {
+            if follows_live {
+                crate::audience::set_named_follows(&state, &session_id, StreamPlatform::X, false);
+            }
+            state.emit_log(
+                "warn",
+                format!("X live chat is waiting for the Videorc sign-in: {parked}"),
+            );
+            let _ = crate::recording::emit_health_event(
+                &state,
+                Some(&session_id),
+                crate::protocol::HealthLevel::Warn,
+                "x-live-chat-needs-videorc-sign-in",
+                &parked.0,
+            );
+            crate::live_chat::set_provider_needs_videorc_sign_in_and_emit(
+                &state,
+                &session_id,
+                session_generation,
+                StreamPlatform::X,
+                config.target_id.as_deref(),
+                &parked.0,
+            )
+            .await;
+            return;
+        }
+
         let storage_terminal = error
             .downcast_ref::<LiveChatPersistenceFailure>()
             .filter(|failure| failure.is_terminal())
@@ -350,12 +398,18 @@ async fn run_x_chat_session(
     follows_live: &mut bool,
 ) -> Result<()> {
     ensure_active_session(state, session_id, session_generation).await?;
-    let session_token = config
-        .overrides
-        .session_token
-        .clone()
-        .or_else(crate::account::stored_session_token)
-        .ok_or_else(|| terminal("Sign in to your Videorc account to receive X comments."))?;
+    // Plan 215 A1: no token is the parked state, in words that name Videorc.
+    // A store that cannot be read is a real failure with its error, never
+    // "signed out": a streamer who is signed in must not be told to sign in.
+    let session_token = match config.overrides.session_token.clone() {
+        Some(token) => token,
+        None => crate::account::session_token().map_err(|state| match state {
+            crate::account::SessionState::Unreadable(error) => {
+                terminal(format!("Couldn't read the Videorc sign-in: {error}"))
+            }
+            _ => needs_videorc_sign_in(crate::live_chat::X_CHAT_NEEDS_VIDEORC_SIGN_IN),
+        })?,
+    };
     let credentials = match config.overrides.credentials.clone() {
         Some(credentials) => credentials,
         None => crate::x_live::x_livestream_credentials()
@@ -623,14 +677,14 @@ impl RelayClient {
         }
         let (code, message) = crate::videorc_api::read_error_code_and_message(response).await;
         match code.as_str() {
-            "unauthorized" => Err(terminal(
-                "Your Videorc sign-in expired. Sign in again to receive X comments.",
+            "unauthorized" => Err(needs_videorc_sign_in(
+                crate::live_chat::X_CHAT_SIGN_IN_EXPIRED,
             )),
             "x-chat-bind-rejected" => Err(terminal(
                 "X did not confirm this account. Re-authorize X Live to receive X comments.",
             )),
-            _ if status.as_u16() == 401 => Err(terminal(
-                "Your Videorc sign-in expired. Sign in again to receive X comments.",
+            _ if status.as_u16() == 401 => Err(needs_videorc_sign_in(
+                crate::live_chat::X_CHAT_SIGN_IN_EXPIRED,
             )),
             // Everything else (relay not configured, binding lost, 5xx, rate
             // limits) can heal without the user, so the connector retries.
@@ -2046,7 +2100,6 @@ mod tests {
     async fn rejected_identity_proof_fails_terminally_without_retrying() {
         for (mode, expected) in [
             (MockMode::BindRejected, "Re-authorize X Live"),
-            (MockMode::SignedOut, "Sign in again"),
             (MockMode::SubscriptionRejected, "Re-authorize X Live"),
         ] {
             let server = spawn_mock_server(mode, Vec::new()).await;
@@ -2074,30 +2127,42 @@ mod tests {
         }
     }
 
+    /// A stored session the relay refuses (a 401) parks the connector the
+    /// same way (plan 215 A1): the fix is the same Sign in, and A4 attaches
+    /// it again. One bind, no retry, no failure on file.
     #[tokio::test]
-    async fn missing_videorc_sign_in_is_a_truthful_terminal_state() {
-        let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
-        let state = test_state();
-        let session_generation = start_test_session(&state, "session-1").await;
-        let mut config = mock_config(&server);
-        config.overrides.session_token = Some("stale-token".to_string());
+    async fn a_rejected_videorc_sign_in_parks_the_connector_with_the_reason() {
+        for (mode, token) in [
+            (MockMode::Deliver, "stale-token"),
+            (MockMode::SignedOut, SESSION_TOKEN),
+        ] {
+            let server = spawn_mock_server(mode, Vec::new()).await;
+            let state = test_state();
+            let session_generation = start_test_session(&state, "session-1").await;
+            let mut config = mock_config(&server);
+            config.overrides.session_token = Some(token.to_string());
 
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            run_x_chat_connector(
-                state.clone(),
-                "session-1".to_string(),
-                session_generation,
-                config,
-            ),
-        )
-        .await
-        .expect("terminal failure stops the connector");
-        let _ = server.shutdown.send(());
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                run_x_chat_connector(
+                    state.clone(),
+                    "session-1".to_string(),
+                    session_generation,
+                    config,
+                ),
+            )
+            .await
+            .expect("the connector parks on a refused sign-in");
+            let _ = server.shutdown.send(());
 
-        let provider =
-            wait_for_provider_state(&state, LiveChatProviderConnectionState::Failed).await;
-        assert!(provider.message.contains("Sign in again"));
+            let provider =
+                wait_for_provider_state(&state, LiveChatProviderConnectionState::Waiting).await;
+            assert_eq!(provider.read, CommentsReadState::NeedsVideorcSignIn);
+            assert_eq!(provider.message, crate::live_chat::X_CHAT_SIGN_IN_EXPIRED);
+            assert_eq!(provider.last_error, None);
+            assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 1);
+            assert!(failure_events(&state, "session-1").is_empty());
+        }
     }
 
     /// Plan 215 A1: a streamer saw "Sign in to your Videorc account to
@@ -2128,13 +2193,21 @@ mod tests {
 
         let provider = wait_for_provider_settled(&state).await;
         assert_eq!(provider.message, "Sign in to Videorc to read X chat.");
-        assert_ne!(
-            provider.read,
-            CommentsReadState::Failed,
-            "a missing sign-in is not a failure"
+        assert_eq!(
+            provider.message,
+            crate::live_chat::X_CHAT_NEEDS_VIDEORC_SIGN_IN
         );
-        assert_ne!(provider.state, LiveChatProviderConnectionState::Failed);
+        assert_eq!(
+            provider.read,
+            CommentsReadState::NeedsVideorcSignIn,
+            "a missing sign-in is its own state, not a failure"
+        );
+        assert_eq!(provider.state, LiveChatProviderConnectionState::Waiting);
         assert_eq!(provider.last_error, None);
+        assert_eq!(
+            serde_json::to_value(provider.read).unwrap(),
+            serde_json::json!("needs-videorc-sign-in")
+        );
         assert!(
             failure_events(&state, "session-1").is_empty(),
             "no X failure is on file: X is fine"

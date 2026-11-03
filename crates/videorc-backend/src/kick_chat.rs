@@ -297,6 +297,24 @@ fn terminal(message: impl Into<String>) -> anyhow::Error {
     KickChatTerminalFailure(message.into()).into()
 }
 
+/// The Videorc sign-in is missing or no longer accepted (plan 215 A1). Not a
+/// failure and not retried: the connector parks, and Sign in attaches it
+/// again (A4). The words name Videorc, never Kick, because Kick is fine.
+#[derive(Debug)]
+struct KickChatNeedsVideorcSignIn(String);
+
+impl std::fmt::Display for KickChatNeedsVideorcSignIn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for KickChatNeedsVideorcSignIn {}
+
+fn needs_videorc_sign_in(message: impl Into<String>) -> anyhow::Error {
+    KickChatNeedsVideorcSignIn(message.into()).into()
+}
+
 /// A Kick API call that answered with an HTTP error.
 #[derive(Debug)]
 pub struct KickApiError {
@@ -663,6 +681,33 @@ pub async fn run_kick_chat_connector(
             return;
         }
 
+        // Plan 215 A1: the relay waits on the Videorc sign-in. Not a failure
+        // (Kick is fine) and not a retry: the row parks in words that name
+        // Videorc, and Sign in attaches the connector again (A4).
+        if let Some(parked) = error.downcast_ref::<KickChatNeedsVideorcSignIn>() {
+            state.emit_log(
+                "warn",
+                format!("Kick live chat is waiting for the Videorc sign-in: {parked}"),
+            );
+            let _ = crate::recording::emit_health_event(
+                &state,
+                Some(&session_id),
+                crate::protocol::HealthLevel::Warn,
+                "kick-live-chat-needs-videorc-sign-in",
+                &parked.0,
+            );
+            crate::live_chat::set_provider_needs_videorc_sign_in_and_emit(
+                &state,
+                &session_id,
+                session_generation,
+                StreamPlatform::Kick,
+                config.target_id.as_deref(),
+                &parked.0,
+            )
+            .await;
+            return;
+        }
+
         let storage_terminal = error
             .downcast_ref::<LiveChatPersistenceFailure>()
             .filter(|failure| failure.is_terminal())
@@ -794,12 +839,18 @@ async fn run_kick_chat_session(
     reached_ready: &mut bool,
 ) -> Result<()> {
     ensure_active_session(state, session_id, session_generation).await?;
-    let session_token = config
-        .overrides
-        .session_token
-        .clone()
-        .or_else(crate::account::stored_session_token)
-        .ok_or_else(|| terminal("Sign in to your Videorc account to receive Kick comments."))?;
+    // Plan 215 A1: no token is the parked state, in words that name Videorc.
+    // A store that cannot be read is a real failure with its error, never
+    // "signed out".
+    let session_token = match config.overrides.session_token.clone() {
+        Some(token) => token,
+        None => crate::account::session_token().map_err(|state| match state {
+            crate::account::SessionState::Unreadable(error) => {
+                terminal(format!("Couldn't read the Videorc sign-in: {error}"))
+            }
+            _ => needs_videorc_sign_in(crate::live_chat::KICK_CHAT_NEEDS_VIDEORC_SIGN_IN),
+        })?,
+    };
     let relay = RelayClient::new(config.overrides.relay_base_url.clone(), session_token)?;
     let api_base = config.overrides.kick_api_base_url.as_deref();
 
@@ -1062,12 +1113,12 @@ impl RelayClient {
         }
         let (code, message) = crate::videorc_api::read_error_code_and_message(response).await;
         match code.as_str() {
-            "unauthorized" => Err(terminal(
-                "Your Videorc sign-in expired. Sign in again to receive Kick comments.",
+            "unauthorized" => Err(needs_videorc_sign_in(
+                crate::live_chat::KICK_CHAT_SIGN_IN_EXPIRED,
             )),
             "kick-chat-bind-rejected" => Err(BindRejected.into()),
-            _ if status.as_u16() == 401 => Err(terminal(
-                "Your Videorc sign-in expired. Sign in again to receive Kick comments.",
+            _ if status.as_u16() == 401 => Err(needs_videorc_sign_in(
+                crate::live_chat::KICK_CHAT_SIGN_IN_EXPIRED,
             )),
             // Relay not configured, binding lost, 5xx: can heal on its own.
             _ => Err(RelayHttpError {
@@ -2504,26 +2555,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_identity_and_signed_out_fail_terminally() {
-        for (mode, expected) in [
-            (MockMode::BindRejected, "Reconnect Kick"),
-            (MockMode::SignedOut, "Sign in again"),
-        ] {
-            let server = spawn_mock_server(mode, Vec::new()).await;
-            let state = test_state();
-            let generation = start_test_session(&state, "session-1").await;
-            run_kick_chat_connector(
-                state.clone(),
-                "session-1".to_string(),
-                generation,
-                mock_config(&server, "kick-rejected"),
-            )
-            .await;
-            let provider =
-                wait_for_provider_state(&state, LiveChatProviderConnectionState::Failed).await;
-            assert!(provider.message.contains(expected), "{}", provider.message);
-            let _ = server.shutdown.send(());
-        }
+    async fn rejected_identity_fails_terminally() {
+        let server = spawn_mock_server(MockMode::BindRejected, Vec::new()).await;
+        let state = test_state();
+        let generation = start_test_session(&state, "session-1").await;
+        run_kick_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            generation,
+            mock_config(&server, "kick-rejected"),
+        )
+        .await;
+        let provider =
+            wait_for_provider_state(&state, LiveChatProviderConnectionState::Failed).await;
+        assert!(
+            provider.message.contains("Reconnect Kick"),
+            "{}",
+            provider.message
+        );
+        let _ = server.shutdown.send(());
+    }
+
+    /// A stored session the relay refuses (a 401) parks the connector like a
+    /// missing one (plan 215 A1): the fix is the same Sign in, and A4
+    /// attaches it again. Not a failure, so not "Failed".
+    #[tokio::test]
+    async fn a_rejected_videorc_sign_in_parks_the_connector_with_the_reason() {
+        let server = spawn_mock_server(MockMode::SignedOut, Vec::new()).await;
+        let state = test_state();
+        let generation = start_test_session(&state, "session-1").await;
+        run_kick_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            generation,
+            mock_config(&server, "kick-signed-out"),
+        )
+        .await;
+        let provider =
+            wait_for_provider_state(&state, LiveChatProviderConnectionState::Waiting).await;
+        assert_eq!(provider.read, CommentsReadState::NeedsVideorcSignIn);
+        assert_eq!(
+            provider.message,
+            crate::live_chat::KICK_CHAT_SIGN_IN_EXPIRED
+        );
+        assert_eq!(provider.last_error, None);
+        let _ = server.shutdown.send(());
     }
 
     /// Plan 215 A1, the Kick twin: a missing Videorc sign-in is its own
@@ -2546,12 +2622,16 @@ mod tests {
 
         let provider = wait_for_provider_settled(&state).await;
         assert_eq!(provider.message, "Sign in to Videorc to read Kick chat.");
-        assert_ne!(
-            provider.read,
-            CommentsReadState::Failed,
-            "a missing sign-in is not a failure"
+        assert_eq!(
+            provider.message,
+            crate::live_chat::KICK_CHAT_NEEDS_VIDEORC_SIGN_IN
         );
-        assert_ne!(provider.state, LiveChatProviderConnectionState::Failed);
+        assert_eq!(
+            provider.read,
+            CommentsReadState::NeedsVideorcSignIn,
+            "a missing sign-in is its own state, not a failure"
+        );
+        assert_eq!(provider.state, LiveChatProviderConnectionState::Waiting);
         assert_eq!(provider.last_error, None);
         assert!(server.state.bind_bodies.lock().await.is_empty());
     }
