@@ -257,7 +257,7 @@ async fn set_on_without_saving(state: &AppState, on: bool) -> VirtualCameraStatu
                         }
                     }
                 }
-                Err(VirtualCameraUnavailable { reason }) => {
+                Err(VirtualCameraUnavailable { reason, .. }) => {
                     tracing::warn!("Videorc Camera is unavailable here: {reason}");
                     inner.sink_unavailable = Some(reason);
                 }
@@ -528,9 +528,9 @@ mod tests {
     async fn a_build_without_a_sink_says_unavailable_and_never_claims_success() {
         let service = VirtualCameraService::with_sink_factory(
             Box::new(|| {
-                Err(VirtualCameraUnavailable {
-                    reason: "No sink on this platform yet.".to_string(),
-                })
+                Err(VirtualCameraUnavailable::new(
+                    "No sink on this platform yet.",
+                ))
             }),
             (192, 108),
         )
