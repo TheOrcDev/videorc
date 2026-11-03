@@ -91,7 +91,9 @@ impl SignedPixelRect {
     }
 
     /// The whole box as an on-canvas rect, only when the canvas edge cuts
-    /// nothing off it.
+    /// nothing off it. Only the Windows recording path asks; elsewhere the
+    /// tests still read it.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn whole_on_canvas(self, canvas_width: u32, canvas_height: u32) -> Option<PixelRect> {
         let cut = self.intersect_canvas(canvas_width, canvas_height)?;
         (cut.cut_left == 0
