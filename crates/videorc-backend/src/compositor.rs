@@ -70,8 +70,8 @@ use crate::protocol::{
 use crate::scene_geometry::{
     ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, SceneMaskTester, SignedPixelRect,
     background_stage_margin, background_zoom_crop, camera_chroma_key, camera_mask,
-    chroma_key_alpha, chroma_key_despill, scene_crop_from_transform, scene_source_fit,
-    scene_source_rect_pixels, scene_source_render_transform,
+    chroma_key_alpha, chroma_key_despill, contain_rect_pixels, scene_crop_from_transform,
+    scene_source_fit, scene_source_rect_pixels, scene_source_render_transform,
 };
 #[cfg_attr(target_os = "windows", allow(unused_imports))]
 pub use crate::source_mask::SourceMask;
@@ -13277,20 +13277,15 @@ fn source_fit(
     let source_aspect = source_w / source_h;
     let rect_aspect = f64::from(rect.width) / f64::from(rect.height);
     if contain {
-        let (width, height) = if source_aspect > rect_aspect {
-            let width = rect.width;
-            let height = (f64::from(width) / source_aspect).round().max(1.0) as u32;
-            (width, height.min(rect.height))
-        } else {
-            let height = rect.height;
-            let width = (f64::from(height) * source_aspect).round().max(1.0) as u32;
-            (width.min(rect.width), height)
-        };
+        // Plan 216 B1: the one contain rule, shared with the Scene stage
+        // through `scene_geometry::scene_picture_rect_pixels`, so the box the
+        // stage draws is the picture this draws.
+        let fitted = contain_rect_pixels(source_w, source_h, rect);
         Some(SourceFit {
-            x: rect.x + i64::from((rect.width - width) / 2),
-            y: rect.y + i64::from((rect.height - height) / 2),
-            width,
-            height,
+            x: fitted.x,
+            y: fitted.y,
+            width: fitted.width,
+            height: fitted.height,
             source_x,
             source_y,
             source_width: source_w,

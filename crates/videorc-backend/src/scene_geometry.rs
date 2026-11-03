@@ -1,7 +1,7 @@
 use crate::protocol::{
     ArrangementMode, CameraAspect, CameraCorner, CameraFit, CameraShape, CameraSize,
-    CameraTransformMode, EffectiveSceneBackground, LayoutPreset, LayoutSettings, SceneSourceKind,
-    SceneTransform, SideBySideSplit,
+    CameraTransform, CameraTransformMode, EffectiveSceneBackground, LayoutPreset, LayoutSettings,
+    SceneSourceKind, SceneTransform, SideBySideSplit,
 };
 
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
@@ -259,6 +259,115 @@ pub fn scene_crop_from_transform(transform: &SceneTransform) -> SceneCrop {
         right: transform.crop_right.clamp(0.0, 0.95),
         bottom: transform.crop_bottom.clamp(0.0, 0.95),
     }
+}
+
+/// The largest box of a picture's aspect inside `rect`, centred: the
+/// compositor's Fit (plan 216 B1). `source_width` and `source_height` are
+/// the picture after its crop, in source pixels. This is the one contain
+/// arithmetic: `compositor::source_fit` draws with it, and
+/// [`scene_picture_rect_pixels`] tells the renderer where the picture is,
+/// so the Scene stage's box, handles and hit target land on the picture the
+/// compositor really draws (`apps/desktop/src/shared/scene-picture-geometry.ts`
+/// is its TypeScript twin; `protocol-fixtures/scene-picture-geometry.json`
+/// keeps them equal). A degenerate box or picture comes back as the box.
+pub fn contain_rect_pixels(
+    source_width: f64,
+    source_height: f64,
+    rect: SignedPixelRect,
+) -> SignedPixelRect {
+    // A NaN size is not a size either: `NaN > 0.0` is false.
+    let fits = source_width > 0.0 && source_height > 0.0 && rect.width > 0 && rect.height > 0;
+    if !fits {
+        return rect;
+    }
+    let source_aspect = source_width / source_height;
+    let rect_aspect = f64::from(rect.width) / f64::from(rect.height);
+    let (width, height) = if source_aspect > rect_aspect {
+        let width = rect.width;
+        let height = (f64::from(width) / source_aspect).round().max(1.0) as u32;
+        (width, height.min(rect.height))
+    } else {
+        let height = rect.height;
+        let width = (f64::from(height) * source_aspect).round().max(1.0) as u32;
+        (width.min(rect.width), height)
+    };
+    SignedPixelRect {
+        x: rect.x + i64::from((rect.width - width) / 2),
+        y: rect.y + i64::from((rect.height - height) / 2),
+        width,
+        height,
+    }
+}
+
+/// Where a scene source's PICTURE lands, in canvas pixels (plan 216 B1,
+/// owner decision D2): the source's frame mapped onto the scene background's
+/// stage margin ([`scene_source_render_transform`]) and rounded to pixels
+/// ([`scene_source_rect_pixels`]), then, on Fit with a known source size,
+/// the cropped picture's largest box inside it ([`contain_rect_pixels`]).
+/// Fill, the test pattern (drawn at the canvas size) and an unknown size
+/// give the frame itself. `None` only for an empty frame.
+///
+/// The renderer's twin is the consumer today (the fixture keeps the two
+/// equal); plan 215 F's rounded-screen mask is the first Rust caller.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn scene_picture_rect_pixels(
+    transform: &SceneTransform,
+    kind: &SceneSourceKind,
+    fit: SceneFit,
+    source_size: Option<(u32, u32)>,
+    stage_margin: f64,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Option<SignedPixelRect> {
+    let staged = scene_source_render_transform(transform, kind, stage_margin);
+    let rect = scene_source_rect_pixels(&staged, canvas_width, canvas_height)?;
+    let Some((source_width, source_height)) = source_size else {
+        return Some(rect);
+    };
+    if matches!(fit, SceneFit::Cover)
+        || matches!(kind, SceneSourceKind::TestPattern)
+        || source_width == 0
+        || source_height == 0
+    {
+        return Some(rect);
+    }
+    let crop = scene_crop_from_transform(&staged);
+    Some(contain_rect_pixels(
+        f64::from(source_width) * crop.kept_width(),
+        f64::from(source_height) * crop.kept_height(),
+        rect,
+    ))
+}
+
+/// [`scene_picture_rect_pixels`] as canvas fractions: the box the Scene
+/// stage draws and edits for the source.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn scene_picture_rect(
+    transform: &SceneTransform,
+    kind: &SceneSourceKind,
+    fit: SceneFit,
+    source_size: Option<(u32, u32)>,
+    stage_margin: f64,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Option<CameraTransform> {
+    let pixels = scene_picture_rect_pixels(
+        transform,
+        kind,
+        fit,
+        source_size,
+        stage_margin,
+        canvas_width,
+        canvas_height,
+    )?;
+    let width = f64::from(canvas_width.max(1));
+    let height = f64::from(canvas_height.max(1));
+    Some(CameraTransform {
+        x: pixels.x as f64 / width,
+        y: pixels.y as f64 / height,
+        width: f64::from(pixels.width) / width,
+        height: f64::from(pixels.height) / height,
+    })
 }
 
 /// True for every vertical-mode preset: their regions are short-form bands
@@ -874,10 +983,196 @@ fn finite_or_zero(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{CameraTransform, SideBySideCameraSide, default_layout_settings};
+    use crate::protocol::{SideBySideCameraSide, default_layout_settings};
 
     fn layout() -> LayoutSettings {
         default_layout_settings()
+    }
+
+    /// Plan 216 B1: the shared fixture pins the Rust picture rect to the TS
+    /// `scenePictureRectPixels`, within a pixel, case for case.
+    #[test]
+    fn picture_rect_reproduces_the_shared_fixture() {
+        #[derive(serde::Deserialize)]
+        struct FixtureSize {
+            width: u32,
+            height: u32,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FixtureCrop {
+            #[serde(default)]
+            crop_left: f64,
+            #[serde(default)]
+            crop_top: f64,
+            #[serde(default)]
+            crop_right: f64,
+            #[serde(default)]
+            crop_bottom: f64,
+        }
+        #[derive(serde::Deserialize)]
+        struct FixtureRect {
+            x: i64,
+            y: i64,
+            width: i64,
+            height: i64,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FixtureCase {
+            name: String,
+            frame: CameraTransform,
+            kind: SceneSourceKind,
+            fit: String,
+            source: Option<FixtureSize>,
+            crop: Option<FixtureCrop>,
+            #[serde(default)]
+            stage_margin: f64,
+            canvas: FixtureSize,
+            expected: FixtureRect,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            schema_version: u32,
+            cases: Vec<FixtureCase>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/scene-picture-geometry.json"
+        ))
+        .expect("protocol-fixtures/scene-picture-geometry.json is valid JSON");
+        assert_eq!(fixture.schema_version, 1);
+        assert!(fixture.cases.len() >= 12);
+        for case in fixture.cases {
+            let crop = case.crop.unwrap_or(FixtureCrop {
+                crop_left: 0.0,
+                crop_top: 0.0,
+                crop_right: 0.0,
+                crop_bottom: 0.0,
+            });
+            let transform = SceneTransform {
+                x: case.frame.x,
+                y: case.frame.y,
+                width: case.frame.width,
+                height: case.frame.height,
+                crop_left: crop.crop_left,
+                crop_top: crop.crop_top,
+                crop_right: crop.crop_right,
+                crop_bottom: crop.crop_bottom,
+            };
+            let fit = match case.fit.as_str() {
+                "contain" => SceneFit::Contain,
+                "cover" => SceneFit::Cover,
+                other => panic!("{}: unknown fit {other}", case.name),
+            };
+            let pixels = scene_picture_rect_pixels(
+                &transform,
+                &case.kind,
+                fit,
+                case.source.as_ref().map(|size| (size.width, size.height)),
+                case.stage_margin,
+                case.canvas.width,
+                case.canvas.height,
+            )
+            .unwrap_or_else(|| panic!("{}: no picture rect", case.name));
+            let within = |actual: i64, expected: i64, what: &str| {
+                assert!(
+                    (actual - expected).abs() <= 1,
+                    "{}: {what} {actual} vs {expected}",
+                    case.name
+                );
+            };
+            within(pixels.x, case.expected.x, "x");
+            within(pixels.y, case.expected.y, "y");
+            within(i64::from(pixels.width), case.expected.width, "width");
+            within(i64::from(pixels.height), case.expected.height, "height");
+            // The fraction form is the pixel form over the canvas.
+            let fraction = scene_picture_rect(
+                &transform,
+                &case.kind,
+                fit,
+                case.source.as_ref().map(|size| (size.width, size.height)),
+                case.stage_margin,
+                case.canvas.width,
+                case.canvas.height,
+            )
+            .unwrap();
+            within(
+                (fraction.x * f64::from(case.canvas.width)).round() as i64,
+                case.expected.x,
+                "fraction x",
+            );
+            within(
+                (fraction.width * f64::from(case.canvas.width)).round() as i64,
+                case.expected.width,
+                "fraction width",
+            );
+        }
+    }
+
+    /// The streamer's numbers (plan 216): a 2228x1440 display Fit in a
+    /// 16:9 frame of 2321x1306 px at 9.3% is about 2021 px wide, at x 0.152.
+    #[test]
+    fn picture_rect_is_the_fitted_picture_not_the_frame() {
+        let frame = SceneTransform {
+            x: 0.0932,
+            y: 0.0932,
+            width: 0.9068,
+            height: 0.9068,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        let picture = scene_picture_rect(
+            &frame,
+            &SceneSourceKind::Screen,
+            SceneFit::Contain,
+            Some((2228, 1440)),
+            0.0,
+            2560,
+            1440,
+        )
+        .unwrap();
+        assert!((picture.x - 0.152).abs() < 0.001, "{picture:?}");
+        assert!((picture.width - 0.789).abs() < 0.001, "{picture:?}");
+        assert!((picture.y - frame.y).abs() < 0.001, "{picture:?}");
+        // Fill, an unknown size and the test pattern give the frame.
+        for (fit, kind, size) in [
+            (SceneFit::Cover, SceneSourceKind::Screen, Some((2228, 1440))),
+            (SceneFit::Contain, SceneSourceKind::Screen, None),
+            (
+                SceneFit::Cover,
+                SceneSourceKind::TestPattern,
+                Some((2560, 1440)),
+            ),
+        ] {
+            let rect =
+                scene_picture_rect_pixels(&frame, &kind, fit, size, 0.0, 2560, 1440).unwrap();
+            assert_eq!(
+                rect,
+                scene_source_rect_pixels(&frame, 2560, 1440).unwrap(),
+                "{kind:?} {fit:?}"
+            );
+        }
+        // A scene background's margin moves the screen's picture, never the camera's.
+        let staged = scene_picture_rect_pixels(
+            &frame,
+            &SceneSourceKind::Screen,
+            SceneFit::Contain,
+            Some((2228, 1440)),
+            0.1,
+            2560,
+            1440,
+        )
+        .unwrap();
+        let expected = scene_source_render_transform(&frame, &SceneSourceKind::Screen, 0.1);
+        let expected = contain_rect_pixels(
+            2228.0,
+            1440.0,
+            scene_source_rect_pixels(&expected, 2560, 1440).unwrap(),
+        );
+        assert_eq!(staged, expected);
     }
 
     #[test]
