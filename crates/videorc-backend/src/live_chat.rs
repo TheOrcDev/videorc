@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep, timeout};
 
+use crate::account::SessionState;
 use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
 use crate::streaming::{PlatformAccount, StreamPlatform, stream_platform_id};
@@ -482,8 +483,12 @@ pub(crate) fn comments_destination_id(platform: StreamPlatform, target_id: Optio
 /// Build the initial Live Chat snapshot for setup time (no session running): one provider
 /// row per native platform derived from its chat capability, with no messages yet. The
 /// LiveChatCoordinator replaces this with live connector state once Go Live starts.
-pub fn initial_chat_snapshot(accounts: &[PlatformAccount], updated_at: String) -> LiveChatSnapshot {
-    let providers = chat_capabilities(accounts)
+pub fn initial_chat_snapshot(
+    accounts: &[PlatformAccount],
+    updated_at: String,
+    session: &SessionState,
+) -> LiveChatSnapshot {
+    let providers = chat_capabilities(accounts, session)
         .into_iter()
         .map(provider_state_from_capability)
         .collect();
@@ -569,10 +574,42 @@ pub struct ChatCapability {
     pub message: String,
 }
 
-/// Capability to read live chat for one platform, given its connected account (if any).
+/// X and Kick chat come through the Videorc relay, so a platform-ready
+/// capability still cannot read without the Videorc sign-in (plan 215 A2).
+/// Signed out is the parked read state in the Go Live check's words; a store
+/// that cannot be read is a failure with its error, never "signed out".
+/// Sending and removing stay with the platform's own credentials.
+fn gate_relay_chat_on_videorc_session(
+    capability: ChatCapability,
+    session: &SessionState,
+    needs_sign_in: &str,
+) -> ChatCapability {
+    if capability.read != CommentsReadState::Ready {
+        return capability;
+    }
+    match session {
+        SessionState::SignedIn => capability,
+        SessionState::SignedOut => ChatCapability {
+            read: CommentsReadState::NeedsVideorcSignIn,
+            chat_read_available: false,
+            message: needs_sign_in.to_string(),
+            ..capability
+        },
+        SessionState::Unreadable(error) => ChatCapability {
+            read: CommentsReadState::Failed,
+            chat_read_available: false,
+            message: format!("Couldn't read your Videorc sign-in: {error}"),
+            ..capability
+        },
+    }
+}
+
+/// Capability to read live chat for one platform, given its connected account
+/// (if any) and the Videorc session the relay platforms need (plan 215 A2).
 pub fn chat_capability(
     platform: StreamPlatform,
     account: Option<&PlatformAccount>,
+    session: &SessionState,
 ) -> ChatCapability {
     match platform {
         StreamPlatform::Youtube => {
@@ -636,45 +673,49 @@ pub fn chat_capability(
                     .ok()
                     .flatten()
                     .is_some();
-            ChatCapability {
-                platform,
-                state: if x_live_ready {
-                    ChatCapabilityState::Available
-                } else {
-                    ChatCapabilityState::NotConnected
+            gate_relay_chat_on_videorc_session(
+                ChatCapability {
+                    platform,
+                    state: if x_live_ready {
+                        ChatCapabilityState::Available
+                    } else {
+                        ChatCapabilityState::NotConnected
+                    },
+                    chat_read_available: x_live_ready,
+                    read: if x_live_ready {
+                        CommentsReadState::Ready
+                    } else {
+                        CommentsReadState::Unavailable
+                    },
+                    write: if x_live_ready {
+                        // POST /2/broadcasts/:id/chat accepts the OAuth 1.0a user
+                        // context we already hold (closed-beta Livestream API).
+                        CommentsWriteState::Ready
+                    } else {
+                        CommentsWriteState::ReadOnly
+                    },
+                    // The same credentials sign DELETE .../chat/{id} (plan 140);
+                    // without them "Authorize X Live" is the fix, like a scope.
+                    moderate: if x_live_ready {
+                        Some(CommentsModerateState::Ready)
+                    } else if account.is_some() {
+                        Some(CommentsModerateState::MissingScope)
+                    } else {
+                        None
+                    },
+                    required_scope: None,
+                    account_id: account.map(|account| account.account_id.clone()),
+                    account_label: account.map(|account| account.account_label.clone()),
+                    // Authorize X Live is named only once Sign in is done (plan 213 J3).
+                    message: if signed_in && !x_live_ready {
+                        X_AUTHORIZE_LIVE_FOR_CHAT.to_string()
+                    } else {
+                        crate::x_chat::x_chat_message(x_live_ready).to_string()
+                    },
                 },
-                chat_read_available: x_live_ready,
-                read: if x_live_ready {
-                    CommentsReadState::Ready
-                } else {
-                    CommentsReadState::Unavailable
-                },
-                write: if x_live_ready {
-                    // POST /2/broadcasts/:id/chat accepts the OAuth 1.0a user
-                    // context we already hold (closed-beta Livestream API).
-                    CommentsWriteState::Ready
-                } else {
-                    CommentsWriteState::ReadOnly
-                },
-                // The same credentials sign DELETE .../chat/{id} (plan 140);
-                // without them "Authorize X Live" is the fix, like a scope.
-                moderate: if x_live_ready {
-                    Some(CommentsModerateState::Ready)
-                } else if account.is_some() {
-                    Some(CommentsModerateState::MissingScope)
-                } else {
-                    None
-                },
-                required_scope: None,
-                account_id: account.map(|account| account.account_id.clone()),
-                account_label: account.map(|account| account.account_label.clone()),
-                // Authorize X Live is named only once Sign in is done (plan 213 J3).
-                message: if signed_in && !x_live_ready {
-                    X_AUTHORIZE_LIVE_FOR_CHAT.to_string()
-                } else {
-                    crate::x_chat::x_chat_message(x_live_ready).to_string()
-                },
-            }
+                session,
+                X_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN,
+            )
         }
         // Kick chat is read through the videorc-web relay (webhooks need a
         // public endpoint) and sent straight to Kick (plan 063, S5).
@@ -702,7 +743,11 @@ pub fn chat_capability(
             };
             capability.moderate =
                 moderate_state_for_scope(account, crate::kick_chat::KICK_CHAT_MODERATE_SCOPE);
-            capability
+            gate_relay_chat_on_videorc_session(
+                capability,
+                session,
+                KICK_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN,
+            )
         }
         // A stream-key Facebook live can't be read: comments need the Page
         // sign-in that waits on Meta's review (plan 206 S9).
@@ -868,8 +913,11 @@ pub const KICK_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN: &str = "Kick chat needs your Vid
 /// account over stale saved rows. Custom RTMP has no platform comments and is omitted, and so
 /// are the key-only destinations (Facebook, TikTok, Instagram): a session that streams to one
 /// gets its unsupported row from its destination instead.
-pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
-    chat_capabilities_with_quota(accounts, false)
+pub fn chat_capabilities(
+    accounts: &[PlatformAccount],
+    session: &SessionState,
+) -> Vec<ChatCapability> {
+    chat_capabilities_with_quota(accounts, false, session)
 }
 
 /// Like [`chat_capabilities`], with the YouTube quota breaker folded into the
@@ -878,6 +926,7 @@ pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
 pub fn chat_capabilities_with_quota(
     accounts: &[PlatformAccount],
     youtube_paused: bool,
+    session: &SessionState,
 ) -> Vec<ChatCapability> {
     [
         StreamPlatform::Youtube,
@@ -894,7 +943,7 @@ pub fn chat_capabilities_with_quota(
                     && account.status == crate::streaming::PlatformAccountStatus::Connected
             })
             .or_else(|| accounts.iter().find(|account| account.platform == platform));
-        let mut capability = chat_capability(platform, account);
+        let mut capability = chat_capability(platform, account, session);
         if youtube_paused
             && platform == StreamPlatform::Youtube
             && capability.moderate == Some(CommentsModerateState::Ready)
@@ -1812,6 +1861,7 @@ fn session_provider_rows(
     accounts: &[PlatformAccount],
     platforms: &[StreamPlatform],
     destinations: &[LiveChatDestinationStart],
+    session: &SessionState,
 ) -> Vec<LiveChatProviderState> {
     if !destinations.is_empty() {
         return destinations
@@ -1822,6 +1872,7 @@ fn session_provider_rows(
                     accounts
                         .iter()
                         .find(|account| account.platform == destination.platform),
+                    session,
                 );
                 let mut provider = provider_state_from_capability(capability);
                 provider.id = destination.target_id.clone();
@@ -1855,7 +1906,7 @@ fn session_provider_rows(
             .collect();
     }
     let requested: HashSet<StreamPlatform> = platforms.iter().copied().collect();
-    chat_capabilities(accounts)
+    chat_capabilities(accounts, session)
         .into_iter()
         .filter(|capability| requested.is_empty() || requested.contains(&capability.platform))
         .map(provider_state_from_capability)
@@ -2078,7 +2129,12 @@ where
         );
     }
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
-    let mut providers = session_provider_rows(&accounts, &params.platforms, &params.destinations);
+    let mut providers = session_provider_rows(
+        &accounts,
+        &params.platforms,
+        &params.destinations,
+        &crate::account::session_state(),
+    );
     for provider in &mut providers {
         let configured_target_id = match provider.platform {
             StreamPlatform::Youtube => params
@@ -2453,25 +2509,30 @@ where
     F: std::future::Future<Output = ()>,
 {
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
-    let mut provider = session_provider_rows(&accounts, &[StreamPlatform::X], &[])
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| LiveChatProviderState {
-            id: comments_destination_id(StreamPlatform::X, params.target_id.as_deref()),
-            platform: StreamPlatform::X,
-            target_id: None,
-            account_id: None,
-            account_label: None,
-            read: CommentsReadState::WaitingForBroadcastContext,
-            write: CommentsWriteState::Ready,
-            moderate: None,
-            state: LiveChatProviderConnectionState::Disabled,
-            message: crate::x_chat::x_chat_message(false).to_string(),
-            last_connected_at: None,
-            last_message_at: None,
-            last_error: None,
-            retry_at: None,
-        });
+    let mut provider = session_provider_rows(
+        &accounts,
+        &[StreamPlatform::X],
+        &[],
+        &crate::account::session_state(),
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| LiveChatProviderState {
+        id: comments_destination_id(StreamPlatform::X, params.target_id.as_deref()),
+        platform: StreamPlatform::X,
+        target_id: None,
+        account_id: None,
+        account_label: None,
+        read: CommentsReadState::WaitingForBroadcastContext,
+        write: CommentsWriteState::Ready,
+        moderate: None,
+        state: LiveChatProviderConnectionState::Disabled,
+        message: crate::x_chat::x_chat_message(false).to_string(),
+        last_connected_at: None,
+        last_message_at: None,
+        last_error: None,
+        retry_at: None,
+    });
     provider.target_id = params.target_id.clone();
     provider.id = comments_destination_id(StreamPlatform::X, provider.target_id.as_deref());
 
@@ -3307,7 +3368,7 @@ pub async fn current_status(state: &AppState) -> LiveChatSnapshot {
         return snapshot;
     }
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
-    initial_chat_snapshot(&accounts, now)
+    initial_chat_snapshot(&accounts, now, &crate::account::session_state())
 }
 
 /// Current live-chat diagnostics for the `liveChat.diagnostics` command.
@@ -7068,19 +7129,27 @@ mod tests {
     #[test]
     fn youtube_force_ssl_account_can_read_and_send_chat() {
         let granted = account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE]);
-        let capability = chat_capability(StreamPlatform::Youtube, Some(&granted));
+        let capability = chat_capability(
+            StreamPlatform::Youtube,
+            Some(&granted),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::Available);
         assert!(capability.chat_read_available);
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::Ready);
 
         let without_scope = account(StreamPlatform::Youtube, &[]);
-        let capability = chat_capability(StreamPlatform::Youtube, Some(&without_scope));
+        let capability = chat_capability(
+            StreamPlatform::Youtube,
+            Some(&without_scope),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
         assert_eq!(capability.read, CommentsReadState::Unavailable);
         assert_eq!(capability.write, CommentsWriteState::MissingScope);
 
-        let capability = chat_capability(StreamPlatform::Youtube, None);
+        let capability = chat_capability(StreamPlatform::Youtube, None, &SessionState::SignedIn);
         assert_eq!(capability.state, ChatCapabilityState::NotConnected);
         assert_eq!(capability.write, CommentsWriteState::Unavailable);
     }
@@ -7092,7 +7161,11 @@ mod tests {
             StreamPlatform::Twitch,
             &["channel:manage:broadcast", "channel:read:stream_key"],
         );
-        let capability = chat_capability(StreamPlatform::Twitch, Some(&account));
+        let capability = chat_capability(
+            StreamPlatform::Twitch,
+            Some(&account),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
         assert!(!capability.chat_read_available);
         assert!(capability.message.contains("Reconnect Twitch"));
@@ -7101,7 +7174,11 @@ mod tests {
     #[test]
     fn twitch_with_user_read_chat_is_available() {
         let account = account(StreamPlatform::Twitch, &[TWITCH_CHAT_SCOPE]);
-        let capability = chat_capability(StreamPlatform::Twitch, Some(&account));
+        let capability = chat_capability(
+            StreamPlatform::Twitch,
+            Some(&account),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::Available);
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::MissingScope);
@@ -7113,7 +7190,11 @@ mod tests {
             StreamPlatform::Twitch,
             &[TWITCH_CHAT_SCOPE, TWITCH_CHAT_WRITE_SCOPE],
         );
-        let capability = chat_capability(StreamPlatform::Twitch, Some(&account));
+        let capability = chat_capability(
+            StreamPlatform::Twitch,
+            Some(&account),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::Ready);
     }
@@ -7126,7 +7207,11 @@ mod tests {
         );
         stale.status = PlatformAccountStatus::NeedsReconnect;
 
-        let capability = chat_capability(StreamPlatform::Twitch, Some(&stale));
+        let capability = chat_capability(
+            StreamPlatform::Twitch,
+            Some(&stale),
+            &SessionState::SignedIn,
+        );
 
         assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
         assert_eq!(capability.read, CommentsReadState::Unavailable);
@@ -7150,7 +7235,7 @@ mod tests {
         connected.id = "connected".to_string();
         connected.account_id = "connected-channel".to_string();
 
-        let capability = chat_capabilities(&[stale, connected])
+        let capability = chat_capabilities(&[stale, connected], &SessionState::SignedIn)
             .into_iter()
             .find(|capability| capability.platform == StreamPlatform::Twitch)
             .unwrap();
@@ -7211,13 +7296,13 @@ mod tests {
 
     #[test]
     fn x_without_account_is_not_connected_and_custom_has_no_comments() {
-        let x = chat_capability(StreamPlatform::X, None);
+        let x = chat_capability(StreamPlatform::X, None, &SessionState::SignedIn);
         assert_eq!(x.state, ChatCapabilityState::NotConnected);
         assert_eq!(x.write, CommentsWriteState::ReadOnly);
         // Plan 213 J3: signed out, Sign in comes first, never Authorize X Live.
         assert_eq!(x.message, "Sign in to X to read and send chat.");
         assert_eq!(
-            chat_capability(StreamPlatform::Custom, None).state,
+            chat_capability(StreamPlatform::Custom, None, &SessionState::SignedIn).state,
             ChatCapabilityState::Unsupported
         );
     }
@@ -7225,7 +7310,7 @@ mod tests {
     #[test]
     fn missing_account_reports_not_connected() {
         assert_eq!(
-            chat_capability(StreamPlatform::Twitch, None).state,
+            chat_capability(StreamPlatform::Twitch, None, &SessionState::SignedIn).state,
             ChatCapabilityState::NotConnected
         );
     }
@@ -7234,7 +7319,7 @@ mod tests {
     fn moderate_readiness_follows_the_moderation_scopes_and_the_quota_pause() {
         // Plan 140 S4: honest per-destination "Remove messages" readiness.
         // No account: absent on the wire.
-        let no_account = chat_capability(StreamPlatform::Twitch, None);
+        let no_account = chat_capability(StreamPlatform::Twitch, None, &SessionState::SignedIn);
         assert_eq!(no_account.moderate, None);
         assert!(
             serde_json::to_value(&no_account)
@@ -7248,7 +7333,12 @@ mod tests {
             &[TWITCH_CHAT_SCOPE, TWITCH_CHAT_WRITE_SCOPE],
         );
         assert_eq!(
-            chat_capability(StreamPlatform::Twitch, Some(&twitch)).moderate,
+            chat_capability(
+                StreamPlatform::Twitch,
+                Some(&twitch),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::MissingScope)
         );
         let twitch_moderator = account(
@@ -7259,12 +7349,17 @@ mod tests {
             ],
         );
         assert_eq!(
-            chat_capability(StreamPlatform::Twitch, Some(&twitch_moderator)).moderate,
+            chat_capability(
+                StreamPlatform::Twitch,
+                Some(&twitch_moderator),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::Ready)
         );
         let kick = account(StreamPlatform::Kick, &[crate::kick_chat::KICK_EVENTS_SCOPE]);
         assert_eq!(
-            chat_capability(StreamPlatform::Kick, Some(&kick)).moderate,
+            chat_capability(StreamPlatform::Kick, Some(&kick), &SessionState::SignedIn).moderate,
             Some(CommentsModerateState::MissingScope)
         );
         let kick_moderator = account(
@@ -7275,30 +7370,48 @@ mod tests {
             ],
         );
         assert_eq!(
-            chat_capability(StreamPlatform::Kick, Some(&kick_moderator)).moderate,
+            chat_capability(
+                StreamPlatform::Kick,
+                Some(&kick_moderator),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::Ready)
         );
         // YouTube's force-ssl already covers deletes.
         let youtube = account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE]);
         assert_eq!(
-            chat_capability(StreamPlatform::Youtube, Some(&youtube)).moderate,
+            chat_capability(
+                StreamPlatform::Youtube,
+                Some(&youtube),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::Ready)
         );
         let youtube_stale = account(StreamPlatform::Youtube, &[]);
         assert_eq!(
-            chat_capability(StreamPlatform::Youtube, Some(&youtube_stale)).moderate,
+            chat_capability(
+                StreamPlatform::Youtube,
+                Some(&youtube_stale),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::MissingScope)
         );
         // No native path at all.
-        let custom = chat_capability(StreamPlatform::Custom, None);
+        let custom = chat_capability(StreamPlatform::Custom, None, &SessionState::SignedIn);
         assert_eq!(custom.moderate, Some(CommentsModerateState::Unsupported));
         assert_eq!(
             serde_json::to_value(&custom).unwrap()["moderate"],
             "unsupported"
         );
         // The quota pause downgrades a ready YouTube destination only.
-        let paused =
-            chat_capabilities_with_quota(&[youtube.clone(), twitch_moderator.clone()], true);
+        let paused = chat_capabilities_with_quota(
+            &[youtube.clone(), twitch_moderator.clone()],
+            true,
+            &SessionState::SignedIn,
+        );
         let by_platform = |capabilities: &[ChatCapability], platform: StreamPlatform| {
             capabilities
                 .iter()
@@ -7314,7 +7427,8 @@ mod tests {
             by_platform(&paused, StreamPlatform::Twitch),
             Some(CommentsModerateState::Ready)
         );
-        let running = chat_capabilities_with_quota(&[youtube.clone()], false);
+        let running =
+            chat_capabilities_with_quota(&[youtube.clone()], false, &SessionState::SignedIn);
         assert_eq!(
             by_platform(&running, StreamPlatform::Youtube),
             Some(CommentsModerateState::Ready)
@@ -7323,6 +7437,7 @@ mod tests {
         let row = provider_state_from_capability(chat_capability(
             StreamPlatform::Youtube,
             Some(&youtube),
+            &SessionState::SignedIn,
         ));
         assert_eq!(row.moderate, Some(CommentsModerateState::Ready));
         let mut wire = serde_json::to_value(&row).unwrap();
@@ -7335,7 +7450,7 @@ mod tests {
     #[test]
     fn capabilities_cover_every_native_platform() {
         let accounts = vec![account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE])];
-        let capabilities = chat_capabilities(&accounts);
+        let capabilities = chat_capabilities(&accounts, &SessionState::SignedIn);
         assert_eq!(capabilities.len(), 4);
         assert_eq!(capabilities[0].platform, StreamPlatform::Youtube);
         assert_eq!(capabilities[0].state, ChatCapabilityState::Available);
@@ -7356,20 +7471,84 @@ mod tests {
                 crate::kick_chat::KICK_CHAT_WRITE_SCOPE,
             ],
         );
-        let capability = chat_capability(StreamPlatform::Kick, Some(&both));
+        let capability =
+            chat_capability(StreamPlatform::Kick, Some(&both), &SessionState::SignedIn);
         assert_eq!(capability.state, ChatCapabilityState::Available);
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::Ready);
 
         let read_only = account(StreamPlatform::Kick, &[crate::kick_chat::KICK_EVENTS_SCOPE]);
-        let capability = chat_capability(StreamPlatform::Kick, Some(&read_only));
+        let capability = chat_capability(
+            StreamPlatform::Kick,
+            Some(&read_only),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::MissingScope);
 
         let neither = account(StreamPlatform::Kick, &[]);
-        let capability = chat_capability(StreamPlatform::Kick, Some(&neither));
+        let capability = chat_capability(
+            StreamPlatform::Kick,
+            Some(&neither),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
         assert!(capability.message.contains("Reconnect Kick"));
+    }
+
+    /// Plan 215 A2: X and Kick chat ride the Videorc relay. Signed out of
+    /// Videorc, a platform-ready capability names the Videorc sign-in in the
+    /// Go Live check's words and cannot read; a store that cannot be read is
+    /// a failure with its error, never "signed out". Sending stays with the
+    /// platform. YouTube and Twitch never look at the Videorc account.
+    #[test]
+    fn relay_chat_capability_names_the_missing_videorc_sign_in() {
+        let kick = account(
+            StreamPlatform::Kick,
+            &[
+                crate::kick_chat::KICK_EVENTS_SCOPE,
+                crate::kick_chat::KICK_CHAT_WRITE_SCOPE,
+            ],
+        );
+        let signed_out =
+            chat_capability(StreamPlatform::Kick, Some(&kick), &SessionState::SignedOut);
+        assert_eq!(signed_out.read, CommentsReadState::NeedsVideorcSignIn);
+        assert_eq!(signed_out.write, CommentsWriteState::Ready);
+        assert!(!signed_out.chat_read_available);
+        assert_eq!(signed_out.message, KICK_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN);
+        assert_eq!(signed_out.message, "Kick chat needs your Videorc sign-in.");
+        assert!(signed_out.account_id.is_some(), "the account rides along");
+
+        let unreadable = chat_capability(
+            StreamPlatform::Kick,
+            Some(&kick),
+            &SessionState::Unreadable("permission denied".to_string()),
+        );
+        assert_eq!(unreadable.read, CommentsReadState::Failed);
+        assert!(
+            unreadable.message.contains("permission denied"),
+            "{}",
+            unreadable.message
+        );
+        assert!(!unreadable.message.to_lowercase().contains("sign in"));
+
+        // The X words name X chat, and a signed-out X account still comes first.
+        assert_eq!(
+            X_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN,
+            "X chat needs your Videorc sign-in."
+        );
+        let x_signed_out = chat_capability(StreamPlatform::X, None, &SessionState::SignedOut);
+        assert_eq!(x_signed_out.read, CommentsReadState::Unavailable);
+        assert_eq!(x_signed_out.message, X_SIGN_IN_FOR_CHAT);
+
+        let youtube = account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE]);
+        let youtube_signed_out = chat_capability(
+            StreamPlatform::Youtube,
+            Some(&youtube),
+            &SessionState::SignedOut,
+        );
+        assert_eq!(youtube_signed_out.read, CommentsReadState::Ready);
+        assert!(youtube_signed_out.chat_read_available);
     }
 
     #[tokio::test]
@@ -7439,6 +7618,7 @@ mod tests {
                 ),
                 notice: None,
             }],
+            &SessionState::SignedIn,
         );
 
         assert_eq!(providers[0].state, LiveChatProviderConnectionState::Failed);
@@ -7448,13 +7628,13 @@ mod tests {
 
     #[test]
     fn facebook_stream_key_destination_says_comments_need_sign_in() {
-        let capability = chat_capability(StreamPlatform::Facebook, None);
+        let capability = chat_capability(StreamPlatform::Facebook, None, &SessionState::SignedIn);
         assert_eq!(capability.state, ChatCapabilityState::Unsupported);
         assert!(!capability.chat_read_available);
         assert_eq!(capability.message, FACEBOOK_COMMENTS_UNAVAILABLE);
         // Only a session that streams to Facebook carries its row.
         assert!(
-            chat_capabilities(&[])
+            chat_capabilities(&[], &SessionState::SignedIn)
                 .iter()
                 .all(|capability| capability.platform != StreamPlatform::Facebook)
         );
@@ -7469,6 +7649,7 @@ mod tests {
                 preparation_error: None,
                 notice: None,
             }],
+            &SessionState::SignedIn,
         );
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].target_id.as_deref(), Some("facebook"));
@@ -7528,7 +7709,7 @@ mod tests {
     #[test]
     fn initial_snapshot_maps_capabilities_to_provider_rows() {
         let accounts = vec![account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE])];
-        let snapshot = initial_chat_snapshot(&accounts, "now".to_string());
+        let snapshot = initial_chat_snapshot(&accounts, "now".to_string(), &SessionState::SignedIn);
         assert_eq!(snapshot.providers.len(), 4);
         assert!(snapshot.messages.is_empty());
         assert_eq!(snapshot.providers[0].platform, StreamPlatform::Youtube);

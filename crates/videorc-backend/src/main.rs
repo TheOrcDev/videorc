@@ -12039,6 +12039,7 @@ async fn handle_text_message_with_role(
                 live_chat::chat_capabilities_with_quota(
                     &accounts,
                     crate::youtube_quota::paused_until(state).is_some(),
+                    &account::session_state(),
                 ),
             ),
             Err(error) => {
@@ -12663,7 +12664,12 @@ async fn handle_text_message_with_role(
                         {
                             Ok(()) => ServerResponse::ok(
                                 command.id,
-                                preflight::validate_go_live_preflight(params, &metadata, &accounts),
+                                preflight::validate_go_live_preflight(
+                                    params,
+                                    &metadata,
+                                    &accounts,
+                                    &account::session_state(),
+                                ),
                             ),
                             Err(error) => ServerResponse::error(
                                 command.id,
