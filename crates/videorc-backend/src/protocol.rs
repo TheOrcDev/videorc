@@ -336,6 +336,14 @@ pub struct RecordingStatus {
     /// on the wire for every other session.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay_only: bool,
+    /// Plan 215 D1: whether a scene edit (a source's position, size or crop)
+    /// committed from now on reaches this session's picture. The compositor
+    /// paths read the installed scene every tick; the legacy FFmpeg graph is
+    /// static, so `scene.source.transform.update`, `.nudge` and `.reset` are
+    /// refused there (`scene-edit-refused`) and the Scene page keeps its
+    /// lock. Absent on the wire while nothing runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepts_live_scene_edits: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1456,6 +1464,8 @@ pub struct ReplayStateEvent {
     /// True when the session exists only for the buffer (no file, no stream).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay_only: bool,
+    /// Why the ring is `error`, or `off` when it did not start: a session
+    /// that failed, or the software encoder guard's refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Segment files in the ring after the last prune pass (diagnostics and
@@ -7891,12 +7901,23 @@ mod tests {
     fn shared_high_risk_contract_fixture_matches_recording_status_defaults() {
         let wire = shared_high_risk_contract_fixture_value("/recordingStatus/wire");
         let status: RecordingStatus = serde_json::from_value(wire.clone()).unwrap();
+        // Plan 215 D1: a running session says whether a source moved now
+        // reaches its picture.
+        assert_eq!(status.accepts_live_scene_edits, Some(true));
         assert_eq!(serde_json::to_value(status).unwrap(), wire);
+
+        // A session on the legacy FFmpeg graph composes a fixed picture.
+        let fixed = shared_high_risk_contract_fixture_value("/recordingStatus/fixedSceneWire");
+        let status: RecordingStatus = serde_json::from_value(fixed.clone()).unwrap();
+        assert_eq!(status.accepts_live_scene_edits, Some(false));
+        assert_eq!(serde_json::to_value(status).unwrap(), fixed);
 
         let minimal = shared_high_risk_contract_fixture_value("/recordingStatus/minimalWire");
         let expected =
             shared_high_risk_contract_fixture_value("/recordingStatus/minimalNormalized");
         let status: RecordingStatus = serde_json::from_value(minimal).unwrap();
+        // Nothing running: no flag at all, on the wire or off it.
+        assert_eq!(status.accepts_live_scene_edits, None);
         assert_eq!(serde_json::to_value(status).unwrap(), expected);
 
         // Plan 069: the one mixed track reports its sources; an unmixed track

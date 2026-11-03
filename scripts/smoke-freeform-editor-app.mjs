@@ -13,9 +13,17 @@
 // that hold is on the backend whenever the stage is idle with a selection.
 // The preview's `framesRendered` cadence is sampled through the whole
 // 20 move + 20 resize matrix and gated for stalls.
+//
+// Plan 215 D3 (move while recording or live): the final-artifact proof
+// presses Record, moves and then resizes the camera through the inspector's
+// fields, and decodes every frame of the recording; a second pass does the
+// same while streaming to a local RTMP sink and decodes what the sink
+// received (on macOS the stream is the aux compositor leg). Each frame must
+// match one of the three committed placements, in order, with no black,
+// unmatched or frozen frame around either commit.
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { appendFileSync, existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { cpus, loadavg, platform, release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
@@ -116,8 +124,17 @@ const report = {
     refusal: null,
     control: process.env.VIDEORC_FREEFORM_LIVE_CONTROL === '1'
   },
+  liveMove: null,
   failures: []
 }
+// Plan 215 D3: the live move's three placements (before, moved, resized)
+// and how long each one is held, so every output carries a clear span of
+// each. The camera starts at the artifact proof's box below.
+const LIVE_PLACEMENT_HINT = 'Changes apply to your stream when you let go.'
+const LIVE_MOVE_SETTLE_MS = Number(process.env.VIDEORC_FREEFORM_LIVE_MOVE_SETTLE_MS ?? 2000)
+const LIVE_MOVE_STREAM_PORT = Number(process.env.VIDEORC_FREEFORM_LIVE_MOVE_STREAM_PORT ?? 19631)
+const LIVE_MOVE_DEFINITION =
+  "Record (then Record + stream to a local RTMP sink), wait, set the camera's X field (one commit), wait, set its Height field (one commit), wait, Stop. Every decoded frame of the recording (and of what the sink received) is matched against the committed placement before, after the move and after the resize with the artifact placement gate; the frames must step through those three in order. Gate: no black frame, no frame matching none of them, and no two identical consecutive frames within 10 frames of either commit; identical pairs elsewhere are counted, not gated. The session id, its state and the compositor run id must be the same before and after both commits."
 // Control runs keep the preview floating: same gestures and commits, no live
 // surface and no idle hold (the floating preview still follows each drag's
 // drafts, not gated here); the cadence samplers still run for the A/B.
@@ -327,28 +344,158 @@ async function recordCommittedComposition() {
     path: outputDirectory,
     kind: 'output-directory'
   })
+  const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
+  const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
+  // Plan 215 D3: the camera moves and resizes mid-session, through the
+  // inspector's fields the streamer uses, once while recording and once
+  // while recording and streaming to a local RTMP sink (on macOS the stream
+  // is the aux compositor leg, so the file alone proves nothing about it).
+  report.liveMove = { definition: LIVE_MOVE_DEFINITION, passes: [] }
+  for (const streaming of [false, true]) {
+    report.liveMove.passes.push(
+      await recordWithLiveMove({
+        scene,
+        saved,
+        resource,
+        transforms,
+        streaming,
+        width,
+        height,
+        fps,
+        ffmpegPath,
+        ffprobePath
+      })
+    )
+  }
+  const first = report.liveMove.passes[0]
+  report.artifact = {
+    path: first.recording.artifact,
+    framePath: first.recording.framePaths[0],
+    sourceSubstitution:
+      'Committed source IDs, transforms and crops retained; capture kinds replaced by deterministic test-pattern sources to avoid dev camera TCC. Explicit scene exercises compositor/encoder; persisted overrides asserted separately.',
+    transforms,
+    persistedAfter: first.persistedAfter,
+    qualityPaths: first.recording.qualityPaths,
+    placement: first.recording.placements
+  }
+}
+
+/**
+ * One session with a live move (plan 215 D3): Record (and stream when
+ * `streaming`), hold the committed placement, move the camera with its X
+ * field, hold, shrink it with its Height field, hold, Stop. Then decode every
+ * frame of every output and check the boxes step through the three
+ * placements with nothing black, unmatched or frozen around either commit.
+ */
+async function recordWithLiveMove({
+  scene,
+  saved,
+  resource,
+  transforms,
+  streaming,
+  width,
+  height,
+  fps,
+  ffmpegPath,
+  ffprobePath
+}) {
+  const label = streaming ? 'record-stream' : 'recording'
+  console.log(`Freeform: live move while ${streaming ? 'recording and streaming' : 'recording'}`)
+  const sink = streaming ? await startRtmpSink(ffmpegPath, label) : null
+  const sourceIds = Object.keys(transforms)
+  const fields = ['x', 'y', 'width', 'height']
+  const timestamp = '2026-01-01T00:00:00.000Z'
   const started = await request(backend, timeoutMs, 'session.start', {
     sources: { testPattern: true },
     scene,
     layout: saved.layout,
     output: {
       recordEnabled: true,
-      streamEnabled: false,
+      streamEnabled: streaming,
       outputDirectoryCapability: resource.capabilityId,
       video: { preset: 'custom', width, height, fps, bitrateKbps: 2000 },
-      rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
-    }
+      rtmp: {
+        preset: 'custom',
+        serverUrl: sink?.serverUrl ?? '',
+        streamKey: sink?.streamKey ?? ''
+      }
+    },
+    ...(sink
+      ? {
+          streaming: {
+            enabled: true,
+            mode: 'single',
+            targets: [
+              {
+                id: 'custom',
+                platform: 'custom',
+                label: 'Local RTMP',
+                enabled: true,
+                serverUrl: sink.serverUrl,
+                urlMode: 'server-and-key',
+                streamKey: sink.streamKey,
+                streamKeyPresent: true,
+                authMode: 'manual-rtmp',
+                createdAt: timestamp,
+                updatedAt: timestamp
+              }
+            ],
+            defaultOutputPreset: 'tutorial-1080p30',
+            defaultBitrateKbps: 2000,
+            enabledTargetIds: ['custom']
+          }
+        }
+      : {})
   })
-  assert.equal(started.state, 'recording')
+  assert.equal(started.state, streaming ? 'streaming' : 'recording', JSON.stringify(started))
   const during = await request(backend, timeoutMs, 'scene.get')
   assertSceneTransforms(during, transforms)
   await draftRefusedWhileRecording()
-  await new Promise((resolve) => setTimeout(resolve, 2500))
+
+  // Plan 215 D1: the session says it takes a move, and the page unlocked
+  // with the one line that says where a change lands.
+  const status = await request(backend, timeoutMs, 'recording.status')
+  assert.equal(status.sessionId, started.sessionId)
+  assert.equal(
+    status.acceptsLiveSceneEdits,
+    true,
+    `recording.status must say the session takes a scene edit: ${JSON.stringify(status)}`
+  )
+  await selectSource('source:camera')
+  await waitUntil(`document.body.textContent.includes(${JSON.stringify(LIVE_PLACEMENT_HINT)})`)
+  await waitUntil(`document.querySelector('[data-videorc-transform-field="x"]')?.disabled===false`)
+  await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  const runBefore = (await request(backend, timeoutMs, 'compositor.status')).runId ?? null
+  await sleep(LIVE_MOVE_SETTLE_MS)
+
+  // One field per commit, so every frame shows exactly one of three
+  // placements: the box slides left, then shrinks.
+  const camera = transforms['source:camera']
+  const moved = { ...camera, x: 0.4 }
+  const movedAt = Date.now()
+  await setRect({ x: 40 })
+  await assertCommitted('source:camera', moved, 'move')
+  await sleep(LIVE_MOVE_SETTLE_MS)
+  const resized = { ...moved, height: 0.2 }
+  const resizedAt = Date.now()
+  await setRect({ height: 20 })
+  await assertCommitted('source:camera', resized, 'resize')
+  await sleep(LIVE_MOVE_SETTLE_MS)
+
+  // The same session and the same compositor run: a commit restarts nothing.
+  const after = await request(backend, timeoutMs, 'recording.status')
+  assert.equal(after.sessionId, started.sessionId, 'the session changed across a live move')
+  assert.equal(after.state, started.state, 'the session state changed across a live move')
+  const runAfter = (await request(backend, timeoutMs, 'compositor.status')).runId ?? null
+  assert.equal(runAfter, runBefore, 'the compositor restarted across a live move')
   const stopped = await request(backend, timeoutMs, 'session.stop')
   const path = await resolveFinalRecordingPath({ started, stopped, timeoutMs })
   assert.ok(path?.endsWith('.mp4'), 'finalized MP4 required')
-  const after = await request(backend, timeoutMs, 'scene.get')
-  assertSceneTransforms(after, transforms)
+  const received = sink ? await sink.stop() : null
+
+  // The committed scene and the stored overrides both carry the move.
+  const finalTransforms = { ...transforms, 'source:camera': resized }
+  assertSceneTransforms(await request(backend, timeoutMs, 'scene.get'), finalTransforms)
   await draftAcceptedAgainAfterStop()
   const persistedAfter = await cdp.eval(
     `JSON.parse(localStorage.getItem('videorc.captureConfig')).layout.sourceTransformOverrides`
@@ -356,63 +503,317 @@ async function recordCommittedComposition() {
   for (const id of sourceIds)
     for (const field of fields)
       assert.ok(
-        Math.abs(persistedAfter[id][field] - transforms[id][field]) < 0.000001,
-        `stored ${id}.${field} changed during recording`
+        Math.abs(persistedAfter[id][field] - finalTransforms[id][field]) < 0.000001,
+        `stored ${id}.${field} does not carry the live move`
       )
-  const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
-  const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
-  const quality = await analyzeRecording(path, {
-    ffmpegPath,
-    ffprobePath,
-    intendedFps: fps,
-    expectAudio: false,
-    gates: { requireMotion: false }
-  })
-  const qualityPaths = writeReports(quality, { outDir: join(outputDirectory, 'artifact-reports') })
-  assert.equal(quality.verdict.pass, true, JSON.stringify(quality.verdict.failures))
-  assert.equal(quality.metrics.width, width)
-  assert.equal(quality.metrics.height, height)
-  const pixels = execFileSync(
+
+  // What every output shows, frame by frame.
+  const placements = [
+    { label: 'before', rects: [transforms[baseSourceId], camera] },
+    { label: 'moved', rects: [transforms[baseSourceId], moved] },
+    { label: 'resized', rects: [transforms[baseSourceId], resized] }
+  ]
+  const outputs = [{ kind: 'recording', artifact: path }]
+  if (received) outputs.push({ kind: 'stream', artifact: received })
+  const results = {}
+  for (const { kind, artifact } of outputs) {
+    const quality = await analyzeRecording(artifact, {
+      ffmpegPath,
+      ffprobePath,
+      intendedFps: fps,
+      expectAudio: false,
+      gates: { requireMotion: false }
+    })
+    const qualityPaths = writeReports(quality, {
+      outDir: join(outputDirectory, 'artifact-reports')
+    })
+    assert.equal(
+      quality.verdict.pass,
+      true,
+      `${label} ${kind}: ${JSON.stringify(quality.verdict.failures)}`
+    )
+    assert.equal(quality.metrics.width, width)
+    assert.equal(quality.metrics.height, height)
+    const move = await evaluateLiveMoveFrames({
+      ffmpegPath,
+      artifact,
+      width,
+      height,
+      fps,
+      placements,
+      label: `${label} ${kind}`
+    })
+    // One still per placement, for the eye.
+    const framePaths = move.placements.map((placement) => {
+      const framePath = join(outputDirectory, `${label}-${kind}-${placement.label}.png`)
+      execFileSync(
+        ffmpegPath,
+        [
+          '-v',
+          'error',
+          '-y',
+          '-i',
+          artifact,
+          '-vf',
+          `select=eq(n\\,${placement.first + Math.floor(placement.frames / 2)})`,
+          '-frames:v',
+          '1',
+          framePath
+        ],
+        { timeout: 30000 }
+      )
+      return framePath
+    })
+    results[kind] = { artifact, qualityPaths, framePaths, ...move }
+    console.log(
+      `Freeform: ${label} ${kind} carries the live move: ${move.placements
+        .map(
+          (placement) => `${placement.label} ${placement.frames} frames from #${placement.first}`
+        )
+        .join(', ')}; ${move.identicalPairs} identical consecutive frames outside the commits`
+    )
+  }
+  return {
+    label,
+    sessionId: started.sessionId,
+    movedAt: movedAt - Date.parse(started.startedAt),
+    resizedAt: resizedAt - Date.parse(started.startedAt),
+    compositorRunId: runBefore,
+    transforms,
+    moved,
+    resized,
+    persistedAfter,
+    ...results
+  }
+}
+
+async function assertCommitted(sourceId, rect, phase) {
+  const scene = await request(backend, timeoutMs, 'scene.get')
+  const source = scene.sources.find((candidate) => candidate.id === sourceId)
+  for (const field of ['x', 'y', 'width', 'height'])
+    assert.ok(
+      source && Math.abs(source.transform[field] - rect[field]) < 0.000001,
+      `${sourceId}.${field} after the live ${phase}: ${JSON.stringify(source?.transform)} is not ${JSON.stringify(rect)}`
+    )
+}
+
+/**
+ * A local RTMP sink: FFmpeg listening on the loopback, keeping what the app
+ * streams as FLV. `stop` waits for it, checks it received something and
+ * indexes the FLV as MP4 (exact sample durations for the analyzer).
+ */
+async function startRtmpSink(ffmpegPath, label) {
+  const streamKey = 'freeform-live-move'
+  const recvPath = join(outputDirectory, `${label}-stream-received.flv`)
+  const listenUrl = `rtmp://127.0.0.1:${LIVE_MOVE_STREAM_PORT}/live/${streamKey}`
+  const proc = spawn(
     ffmpegPath,
     [
-      '-v',
+      '-y',
+      '-hide_banner',
+      '-loglevel',
       'error',
-      '-ss',
+      '-listen',
       '1',
       '-i',
-      path,
-      '-frames:v',
-      '1',
+      listenUrl,
+      '-c',
+      'copy',
       '-f',
-      'rawvideo',
-      '-pix_fmt',
-      'rgb24',
-      'pipe:1'
+      'flv',
+      recvPath
     ],
-    { timeout: 30000, maxBuffer: width * height * 4 }
+    { stdio: ['ignore', 'ignore', 'pipe'] }
   )
-  const placement = evaluateFreeformArtifact({
-    pixels,
-    width,
-    height,
-    rects: sourceIds.map((id) => transforms[id])
+  let stopping = false
+  proc.stderr.setEncoding('utf8')
+  proc.stderr.on('data', (text) => {
+    if (stopping) return
+    for (const line of text.split(/\r?\n/))
+      if (line.trim()) console.error(`[freeform-rtmp-sink :${LIVE_MOVE_STREAM_PORT}] ${line}`)
   })
-  const framePath = join(outputDirectory, 'freeform-recorded-composition.png')
-  execFileSync(ffmpegPath, ['-v', 'error', '-ss', '1', '-i', path, '-frames:v', '1', framePath], {
-    timeout: 30000
-  })
-  report.artifact = {
-    path,
-    framePath,
-    sourceSubstitution:
-      'Committed source IDs, transforms and crops retained; capture kinds replaced by deterministic test-pattern sources to avoid dev camera TCC. Explicit scene exercises compositor/encoder; persisted overrides asserted separately.',
-    transforms,
-    persistedAfter,
-    qualityPaths,
-    placement
+  // The listener binds before the session starts.
+  await sleep(1500)
+  return {
+    serverUrl: `rtmp://127.0.0.1:${LIVE_MOVE_STREAM_PORT}/live`,
+    streamKey,
+    recvPath,
+    async stop() {
+      stopping = true
+      await stopProcess(proc)
+      assert.ok(
+        existsSync(recvPath) && statSync(recvPath).size > 0,
+        `the local RTMP sink received nothing: ${recvPath}`
+      )
+      const indexed = join(outputDirectory, `${label}-stream-received.mp4`)
+      execFileSync(
+        ffmpegPath,
+        ['-v', 'error', '-y', '-i', recvPath, '-map', '0', '-c', 'copy', indexed],
+        {
+          timeout: 60000
+        }
+      )
+      return indexed
+    }
   }
-  assert.equal(placement.ok, true, placement.failures.join('; '))
 }
+
+function stopProcess(proc) {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      resolve()
+      return
+    }
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL')
+      } catch {
+        // already gone
+      }
+      resolve()
+    }, 5000)
+    proc.once('exit', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    // The app closed the connection at Stop, so the listener is usually
+    // finishing on its own; a TERM only hurries a straggler.
+    try {
+      proc.kill('SIGTERM')
+    } catch {
+      clearTimeout(timer)
+      resolve()
+    }
+  })
+}
+
+/**
+ * Decode every frame of `artifact` as RGB and match it against the committed
+ * placements (plan 215 D3). Returns where each placement starts and how long
+ * it lasts; throws on a black frame, a frame matching no placement, a step
+ * backwards, or two identical consecutive frames within 10 frames of a
+ * commit (a frozen picture). Identical pairs elsewhere are counted only.
+ */
+async function evaluateLiveMoveFrames({
+  ffmpegPath,
+  artifact,
+  width,
+  height,
+  fps,
+  placements,
+  label
+}) {
+  const phases = []
+  const identical = []
+  let previous = null
+  await decodeFrames({ ffmpegPath, artifact, width, height }, (frame, index) => {
+    const bright = countBrightPixels(frame)
+    const matched = placements.findIndex(
+      (placement) =>
+        evaluateFreeformArtifact({ pixels: frame, width, height, rects: placement.rects }).ok
+    )
+    phases.push(bright < width * height * 0.01 ? 'black' : matched === -1 ? 'unmatched' : matched)
+    if (previous && previous.equals(frame)) identical.push(index)
+    previous = Buffer.from(frame)
+  })
+  assert.ok(phases.length >= fps, `${label}: only ${phases.length} frames decoded`)
+  const bad = phases
+    .map((phase, index) => (typeof phase === 'number' ? null : `#${index} ${phase}`))
+    .filter(Boolean)
+  assert.equal(
+    bad.length,
+    0,
+    `${label}: frames that show no committed placement: ${bad.join(', ')}`
+  )
+  for (let index = 1; index < phases.length; index++)
+    assert.ok(
+      phases[index] >= phases[index - 1],
+      `${label}: frame #${index} shows ${placements[phases[index]].label} after ${placements[phases[index - 1]].label}`
+    )
+  const spans = placements.map((placement, phase) => {
+    const first = phases.indexOf(phase)
+    const frames = phases.filter((candidate) => candidate === phase).length
+    return { label: placement.label, first, frames }
+  })
+  for (const span of spans)
+    assert.ok(
+      span.frames >= fps / 2,
+      `${label}: ${span.label} shows for ${span.frames} frames (${JSON.stringify(spans)})`
+    )
+  const commits = spans.slice(1).map((span) => span.first)
+  const frozen = identical.filter((index) =>
+    commits.some((commit) => Math.abs(index - commit) <= 10)
+  )
+  assert.equal(
+    frozen.length,
+    0,
+    `${label}: identical consecutive frames at a commit (frames ${frozen.join(', ')}; commits at ${commits.join(', ')})`
+  )
+  return { frames: phases.length, placements: spans, identicalPairs: identical.length }
+}
+
+/** Stream `artifact`'s video as raw RGB frames through `onFrame(frame, index)`. */
+function decodeFrames({ ffmpegPath, artifact, width, height }, onFrame) {
+  const frameBytes = width * height * 3
+  return new Promise((resolve, reject) => {
+    const proc = spawn(
+      ffmpegPath,
+      [
+        '-v',
+        'error',
+        '-i',
+        artifact,
+        '-map',
+        '0:v:0',
+        '-pix_fmt',
+        'rgb24',
+        '-fps_mode',
+        'passthrough',
+        '-f',
+        'rawvideo',
+        'pipe:1'
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    )
+    const errors = []
+    proc.stderr.on('data', (chunk) => errors.push(chunk))
+    let pending = Buffer.alloc(0)
+    let index = 0
+    proc.stdout.on('data', (chunk) => {
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk
+      while (pending.length >= frameBytes) {
+        try {
+          onFrame(pending.subarray(0, frameBytes), index++)
+        } catch (error) {
+          proc.kill('SIGKILL')
+          reject(error)
+          return
+        }
+        pending = pending.subarray(frameBytes)
+      }
+    })
+    proc.once('error', reject)
+    proc.once('close', (code) => {
+      if (code !== 0)
+        reject(new Error(`ffmpeg decode of ${artifact} exited ${code}: ${Buffer.concat(errors)}`))
+      else if (pending.length)
+        reject(new Error(`${artifact}: ${pending.length} trailing bytes, not a whole frame`))
+      else resolve(index)
+    })
+  })
+}
+
+function countBrightPixels(frame) {
+  let bright = 0
+  for (let offset = 0; offset < frame.length; offset += 3)
+    if (Math.max(frame[offset], frame[offset + 1], frame[offset + 2]) >= 50) bright++
+  return bright
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function assertSceneTransforms(scene, transforms) {
   for (const [id, rect] of Object.entries(transforms))
     for (const field of ['x', 'y', 'width', 'height']) {

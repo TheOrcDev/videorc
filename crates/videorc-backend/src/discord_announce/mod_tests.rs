@@ -617,6 +617,7 @@ async fn sessions_without_destinations_send_no_fact() {
     state.discord_announce.facts.set(sender).unwrap();
     let status = RecordingStatus {
         replay_only: false,
+        accepts_live_scene_edits: None,
         state: RecordingState::Recording,
         session_id: Some("s1".to_string()),
         output_path: None,

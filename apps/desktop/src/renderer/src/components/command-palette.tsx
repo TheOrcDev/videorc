@@ -5,6 +5,8 @@ import {
   ClipIcon,
   DarkModeIcon,
   DesktopIcon,
+  EditIcon,
+  HiddenFromStreamIcon,
   ImageIcon,
   LightModeIcon,
   LivestreamIcon,
@@ -21,7 +23,7 @@ import {
   TerminalIcon
 } from '@/components/icons'
 import { useTheme } from 'next-themes'
-import { useState, type ReactElement, type ReactNode } from 'react'
+import { Fragment, useState, type ReactElement, type ReactNode } from 'react'
 
 import {
   CommandDialog,
@@ -57,16 +59,19 @@ import {
   type WorkspaceTabGroup
 } from '@/components/workspace-nav'
 import { useAgents, useAgentsActions } from '@/hooks/use-agents'
+import { useEditScene } from '@/hooks/use-edit-scene'
 import { useSoundboard } from '@/hooks/use-soundboard'
 import { useVirtualCamera } from '@/hooks/use-virtual-camera'
 import { VIDEORC_CAMERA_COPY, virtualCameraView } from '@/lib/virtual-camera-view'
 import { CONNECT_AGENT_COMMAND, STOP_AGENTS_COMMAND } from '@/lib/agents-view'
+import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import {
   useStudioBanners,
   useStudioCore,
   useStudioRecordingState,
   useStudioReplay
 } from '@/hooks/use-studio'
+import { CAPTURE_PROTECTION_UNSUPPORTED_REASON } from '../../../shared/capture-protection'
 import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
@@ -80,7 +85,16 @@ export const PAGE_KEYWORDS: Readonly<Record<WorkspaceTab, readonly string[]>> = 
   studio: ['record', 'go live', 'stage', 'transport'],
   ai: ['companion', 'ai', 'chat', 'voice', 'reports', 'clean cut'],
   sources: ['camera', 'microphone', 'screen', 'window', 'devices', 'audio', 'mixer'],
-  layouts: ['layout', 'layouts', 'composition', 'background', 'takeover', 'presets'],
+  layouts: [
+    'layout',
+    'layouts',
+    'composition',
+    'background',
+    'takeover',
+    'presets',
+    'edit scene',
+    'scene editor'
+  ],
   assets: ['backgrounds', 'overlays', 'images', 'takeovers', 'banners', 'sounds', 'soundboard'],
   live: ['destinations', 'stream key', 'youtube', 'twitch', 'kick', 'schedule', 'go live'],
   captions: ['subtitles', 'transcription'],
@@ -127,6 +141,7 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void
 }): ReactElement {
   const { active, setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
+  const editScene = useEditScene()
   const {
     screenPrivacy,
     toggleScreenHidden,
@@ -148,6 +163,7 @@ export function CommandPalette({
     closeNotesWindow,
     commentsWindow,
     toggleCommentsWindow,
+    setCommentsWindowHiddenFromStream,
     captionsWindow,
     toggleCaptionsWindow
   } = useStudioCore()
@@ -352,16 +368,30 @@ export function CommandPalette({
           {PAGES.map((page) => {
             const digit = shortcutDigitFor(page.id)
             return (
-              <CommandItem
-                key={page.id}
-                value={`Open ${page.label}`}
-                keywords={[...PAGE_KEYWORDS[page.id]]}
-                onSelect={() => run(() => openPage(page.id))}
-              >
-                <page.icon className="size-4" />
-                {page.label}
-                {shortcut(digit ? `CmdOrCtrl+${digit}` : undefined)}
-              </CommandItem>
+              <Fragment key={page.id}>
+                <CommandItem
+                  value={`Open ${page.label}`}
+                  keywords={[...PAGE_KEYWORDS[page.id]]}
+                  onSelect={() => run(() => openPage(page.id))}
+                >
+                  <page.icon className="size-4" />
+                  {page.label}
+                  {shortcut(digit ? `CmdOrCtrl+${digit}` : undefined)}
+                </CommandItem>
+                {/* Plan 215 D4: the Scene page with the editor on and the
+                    camera selected, the same Edit scene as the page's own. */}
+                {page.id === 'layouts' ? (
+                  <CommandItem
+                    value={EDIT_SCENE_LABEL}
+                    keywords={['edit', 'move camera', 'resize', 'freeform', 'position']}
+                    onSelect={() => run(editScene)}
+                  >
+                    <EditIcon className="size-4" />
+                    {EDIT_SCENE_LABEL}
+                    <Context>Scene</Context>
+                  </CommandItem>
+                ) : null}
+              </Fragment>
             )
           })}
           <CommandItem
@@ -419,6 +449,32 @@ export function CommandPalette({
                 ? `Close ${WINDOW_NAMES.streamManager}`
                 : `Open ${WINDOW_NAMES.streamManager}`}
               {shortcut(shortcutAccelerator('comments-window'))}
+            </CommandItem>
+          ) : null}
+          {/* Hide from stream (plan 215 D6): the Stream Manager's switch,
+              reachable with the window closed too (main remembers it). A
+              platform that can't hide a window keeps the row, disabled, with
+              the reason as its context. */}
+          {runtimeInfo?.commentsWindowEnabled ? (
+            <CommandItem
+              value={
+                commentsWindow.hiddenFromStream
+                  ? `Show ${WINDOW_NAMES.streamManager} on stream`
+                  : `Hide ${WINDOW_NAMES.streamManager} from stream`
+              }
+              keywords={['chat', 'window', 'capture', 'hidden', 'private', 'pin']}
+              disabled={commentsWindow.hideFromStreamMethod === 'unsupported'}
+              onSelect={() =>
+                run(() => void setCommentsWindowHiddenFromStream(!commentsWindow.hiddenFromStream))
+              }
+            >
+              <HiddenFromStreamIcon className="size-4" />
+              {commentsWindow.hiddenFromStream
+                ? `Show ${WINDOW_NAMES.streamManager} on stream`
+                : `Hide ${WINDOW_NAMES.streamManager} from stream`}
+              {commentsWindow.hideFromStreamMethod === 'unsupported' ? (
+                <Context>{CAPTURE_PROTECTION_UNSUPPORTED_REASON}</Context>
+              ) : null}
             </CommandItem>
           ) : null}
           {captionsWindow.enabled || captionsWindow.open ? (

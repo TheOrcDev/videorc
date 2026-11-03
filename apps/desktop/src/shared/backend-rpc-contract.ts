@@ -918,7 +918,9 @@ const recordingStatusSchema = objectSchema(
     pipeline: optionalSchema(boundedBackendPayloadSchema),
     durationMs: optionalSchema(numberSchema({ min: 0 })),
     message: optionalText,
-    replayOnly: optionalSchema(booleanSchema)
+    replayOnly: optionalSchema(booleanSchema),
+    // Plan 215 D1: the running session's word on live scene edits.
+    acceptsLiveSceneEdits: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<RecordingStatus>

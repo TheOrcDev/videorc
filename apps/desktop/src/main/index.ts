@@ -408,10 +408,12 @@ import {
   composeDockedScreenRect,
   decideDockVisibility,
   initialPreviewWindowMode,
+  inWindowDockedRect,
   parseDockSlotReport,
   parsePreviewWindowMode,
   previewWindowClosePrefs,
   previewWindowExternalResizePolicy,
+  usableDockSlotSize,
   type DockHiddenReason,
   type DockSlot,
   type DockSlotReport,
@@ -498,9 +500,15 @@ import {
 } from './window-glass'
 import {
   applyVideorcWindowCaptureProtection,
+  releaseVideorcWindowCaptureProtection,
+  streamManagerHideMethod,
   type VideorcWindowRole,
   WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
 } from './window-capture-protection'
+import {
+  COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION,
+  commentsWindowHiddenFromStreamPreference
+} from './comments-window-prefs'
 import {
   assessProofPresentationWatch,
   assessProofSourceFrame,
@@ -845,6 +853,8 @@ let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
 let commentsHighlightAnchorValue: CommentHighlightAnchor | undefined
 let commentsAutoShowActivityValue: boolean | undefined
+/** Hide from stream (plan 215 D6), loaded lazily from prefs like the anchor. */
+let commentsHiddenFromStreamValue: boolean | undefined
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
@@ -1055,42 +1065,55 @@ function installCaptureProtectionSmokeMarker(window: BrowserWindow, role: Videor
   captureProtectionMarkerStates.set(window, false)
   const color = WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS[role]
   window.webContents.on('did-finish-load', () => {
-    if (window.isDestroyed() || window.webContents.isDestroyed()) {
-      return
-    }
-    captureProtectionMarkerStates.set(window, false)
-    const markerId = `videorc-capture-protection-marker-${role}`
-    void window.webContents
-      .executeJavaScript(
-        `(() => {
-          const markerId = ${JSON.stringify(markerId)};
-          const role = ${JSON.stringify(role)};
-          const color = ${JSON.stringify(color)};
-          let marker = document.getElementById(markerId);
-          if (!marker) {
-            marker = document.createElement('div');
-            marker.id = markerId;
-            document.documentElement.appendChild(marker);
-          }
-          marker.dataset.videorcCaptureProtectionRole = role;
-          marker.style.cssText =
-            'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
-            color;
-          return { role, color, installed: true };
-        })()`,
-        true
-      )
-      .then((result) => {
-        captureProtectionMarkerStates.set(
-          window,
-          result?.installed === true && result?.role === role && result?.color === color
-        )
-      })
-      .catch((error) => {
-        captureProtectionMarkerStates.set(window, false)
-        safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
-      })
+    void paintCaptureProtectionSmokeMarker(window, role, color)
   })
+}
+
+/**
+ * Paints one window edge to edge in a marker colour the artifact gates look
+ * for: the Windows stream smoke's role colours at load (above), and the
+ * macOS invisibility smokes' red on request (plan 215 C5, the Stream
+ * Manager; Notes paints its own through `?smokeMarker=1`). Resolves whether
+ * the marker took, and remembers it for the window-state commands.
+ */
+async function paintCaptureProtectionSmokeMarker(
+  window: BrowserWindow,
+  role: VideorcWindowRole,
+  color: string
+): Promise<boolean> {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) {
+    return false
+  }
+  captureProtectionMarkerStates.set(window, false)
+  const markerId = `videorc-capture-protection-marker-${role}`
+  try {
+    const result = await window.webContents.executeJavaScript(
+      `(() => {
+        const markerId = ${JSON.stringify(markerId)};
+        const role = ${JSON.stringify(role)};
+        const color = ${JSON.stringify(color)};
+        let marker = document.getElementById(markerId);
+        if (!marker) {
+          marker = document.createElement('div');
+          marker.id = markerId;
+          document.documentElement.appendChild(marker);
+        }
+        marker.dataset.videorcCaptureProtectionRole = role;
+        marker.style.cssText =
+          'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
+          color;
+        return { role, color, installed: true };
+      })()`,
+      true
+    )
+    const installed = result?.installed === true && result?.role === role && result?.color === color
+    captureProtectionMarkerStates.set(window, installed)
+    return installed
+  } catch (error) {
+    captureProtectionMarkerStates.set(window, false)
+    safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
+    return false
+  }
 }
 
 const captureProtectionMarkerStates = new WeakMap<BrowserWindow, boolean>()
@@ -2933,6 +2956,9 @@ let previewWindowModeLoaded = false
 // close-while-docked never persists the slot rect as the floating frame.
 let previewWindowFloatingFrame: Electron.Rectangle | null = null
 let previewDockSlot: DockSlotReport | null = null
+// The last size a slot report measured: the in-window dock keeps the idle
+// program at this size while no slot shows (inWindowDockedRect).
+let previewDockLastSlotSize: { width: number; height: number } | null = null
 // Bumped on every dock engage; slot reports answering an older epoch are stale
 // (measured before the redock) and are dropped.
 let previewDockEpoch = 0
@@ -3570,8 +3596,11 @@ function restoreNotesWindowOnLaunch(): void {
 // --- Stream Manager window (code name: comments) ------------------------------
 // The live dashboard in its own OS window (plan 055): chat, activity, stats
 // and Buddy, relayed from the main renderer. Plain BrowserWindow with no
-// native surface. It is NOT capture-protected (owner call, 2026-08-19: only
-// Notes is), so Studio closes it during a recording that would capture it.
+// native surface. It is NOT capture-protected by default (owner call,
+// 2026-08-19: only Notes is), so Studio closes it during a recording that
+// would capture it. Plan 215 D6 adds the streamer's choice: with Hide from
+// stream on, macOS leaves it out of Videorc's own capture filter and Windows
+// turns content protection on; it is then part of the show no more.
 type CommentsWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
@@ -3579,6 +3608,9 @@ type CommentsWindowPrefs = {
   /** Auto-show Activity celebrations on stream (plan 156). Default off. */
   autoShowActivity?: boolean
   alwaysOnTopPreferenceVersion?: number
+  /** Hide from stream (plan 215 D6). Default off; counts only with its version. */
+  hiddenFromStream?: boolean
+  hiddenFromStreamPreferenceVersion?: number
   open?: boolean
   /** 2 once the frame moved off the old Chat default (plan 055, S8). */
   layoutVersion?: number
@@ -3680,6 +3712,51 @@ function setCommentsWindowAutoShowActivity(on: unknown): CommentsWindowState {
   return commentsWindowState()
 }
 
+// Hide from stream (plan 215 D6): read with the window closed too (the Studio
+// renderer builds the capture exclusion list from it, and ⌘K flips it), so it
+// loads lazily from prefs. A file from before the switch, or a forged value,
+// lands on OFF (`commentsWindowHiddenFromStreamPreference`).
+function commentsHiddenFromStream(): boolean {
+  commentsHiddenFromStreamValue ??=
+    commentsWindowHiddenFromStreamPreference(loadCommentsWindowPrefs())
+  return commentsHiddenFromStreamValue
+}
+
+// The switch applies live. Windows is the one platform where content
+// protection is how the window hides (`streamManagerHideMethod`), so the
+// open window's protection follows the value there and nowhere else: on
+// macOS our own capture filter leaves it out (the Studio renderer sends the
+// window's id with the next screen start), and Linux cannot hide it, which
+// the state says through `hideFromStreamMethod`.
+function setCommentsWindowHiddenFromStream(hidden: unknown): CommentsWindowState {
+  commentsHiddenFromStreamValue = hidden === true
+  applyCommentsWindowCaptureProtection()
+  saveCommentsWindowPrefs({
+    hiddenFromStream: commentsHiddenFromStreamValue,
+    hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION
+  })
+  emitCommentsWindowState()
+  return commentsWindowState()
+}
+
+function applyCommentsWindowCaptureProtection(): void {
+  const window = commentsWindow
+  if (!window || window.isDestroyed()) {
+    commentsWindowContentProtected = false
+    return
+  }
+  const hiddenFromStream = commentsHiddenFromStream()
+  const result = applyVideorcWindowCaptureProtection(window, 'comments', {
+    hiddenFromStream,
+    onFailure: (reason) =>
+      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
+  })
+  commentsWindowContentProtected =
+    result.state === 'not-required'
+      ? releaseVideorcWindowCaptureProtection(window)
+      : result.protected
+}
+
 function commentsWindowIsOpen(): boolean {
   return Boolean(commentsWindow && !commentsWindow.isDestroyed() && !commentsWindowClosing)
 }
@@ -3703,6 +3780,8 @@ function commentsWindowState(message?: string): CommentsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
+    hiddenFromStream: commentsHiddenFromStream(),
+    hideFromStreamMethod: streamManagerHideMethod(process.platform),
     highlightAnchor: commentsHighlightAnchor(),
     autoShowActivity: commentsAutoShowActivity(),
     protected: open ? commentsWindowContentProtected : false,
@@ -4252,10 +4331,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
-  commentsWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'comments', {
-    onFailure: (reason) =>
-      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
-  }).protected
+  applyCommentsWindowCaptureProtection()
   installCaptureProtectionSmokeMarker(window, 'comments')
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
   if (commentsWindowAlwaysOnTop) {
@@ -4701,17 +4777,23 @@ function previewWindowPresentedVisible(window: BrowserWindow): boolean {
   return window.isVisible() && !window.isMinimized()
 }
 
-// The Studio/Scene slot in main-window content terms. Before the first report
-// (and after every epoch bump) there is no slot: a 1x1 rect at the content
-// origin keeps the placement push flowing so visible:false reaches the surface.
+// The Studio/Scene slot in main-window content terms. With no slot rect (no
+// report yet, after an epoch bump, or another tab) a rect at the content origin
+// keeps the placement push flowing so visible:false reaches the surface. It
+// keeps the last slot's size (else the hidden lifecycle window's): the backend
+// sizes the idle program from these bounds, and a 1x1 rect made the program a
+// single pixel off Studio, which is what an agent's get_picture read.
 function inWindowDockedVideoBounds(): Electron.Rectangle | null {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return null
   }
-  const content = mainWindow.getContentBounds()
-  return previewDockSlot
-    ? composeDockedScreenRect(previewDockSlot, content)
-    : { x: content.x, y: content.y, width: 1, height: 1 }
+  const lifecycleWindow =
+    previewWindow && !previewWindow.isDestroyed() ? previewWindow.getContentBounds() : null
+  return inWindowDockedRect(
+    previewDockSlot,
+    mainWindow.getContentBounds(),
+    previewDockLastSlotSize ?? lifecycleWindow
+  )
 }
 
 // The docked placement hot path: recompute the docked window frame from the
@@ -5309,6 +5391,7 @@ function reportPreviewDockSlot(raw: unknown): PreviewWindowState {
   // the exact race that made the 2026-06-09 glue attempt resurface bounds.
   if (report && report.epoch === previewDockEpoch) {
     previewDockSlot = report
+    previewDockLastSlotSize = usableDockSlotSize(report) ?? previewDockLastSlotSize
     queueDockedPreviewPlacement()
   }
   return previewWindowState()
@@ -6006,6 +6089,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         let framePollingSuppressed = false;
         let framePollingIntervalMs = 40;
         let framePollingMaxWidth = 1920;
+        let framePollingCeilingWidth = 1920;
         let proofSurfaceSuspended = false;
         let animationFrameId = null;
         let compositorStatus = null;
@@ -6030,13 +6114,51 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           return String(next * 100) + '%';
         }
 
-        function profiledFrameUrl(url) {
+        // The device pixels a source layer's frame is actually drawn across:
+        // the <img> box (already widened by any crop) narrowed by its
+        // object-fit to the frame's aspect. Null while the layer has no
+        // laid-out box (hidden, not yet attached).
+        function displayedFramePixelWidth(image) {
+          if (!image || typeof image.getBoundingClientRect !== 'function') {
+            return null;
+          }
+          const box = image.getBoundingClientRect();
+          if (!(box.width > 0) || !(box.height > 0)) {
+            return null;
+          }
+          let width = box.width;
+          const naturalWidth = image.naturalWidth;
+          const naturalHeight = image.naturalHeight;
+          const fit = image.style.objectFit;
+          if (naturalWidth > 0 && naturalHeight > 0 && fit !== 'fill') {
+            const fitted = box.height * (naturalWidth / naturalHeight);
+            width = fit === 'cover' ? Math.max(box.width, fitted) : Math.min(box.width, fitted);
+          }
+          const dpr = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+            ? window.devicePixelRatio
+            : 1;
+          const pixels = Math.ceil(width * dpr);
+          return Number.isFinite(pixels) && pixels > 0 ? pixels : null;
+        }
+
+        // displayedWidth (source layers only): ask the backend for exactly the
+        // width the frame is drawn at, so Chromium shows its pixels 1:1. The
+        // profile width is quantized up in 160 px steps from a surface width
+        // main measured at its last geometry push, and the main process's
+        // hint is floored at 1280: a docked Preview grown from 941 to 1320 px
+        // kept asking for 960 and Chromium stretched it, blurring every pixel
+        // of a screen share. A measured layer is bounded only by the profile's
+        // own ceiling (1920).
+        function profiledFrameUrl(url, displayedWidth) {
           try {
             const parsed = new URL(url);
             const requested = Number(parsed.searchParams.get('maxWidth'));
-            const maxWidth = Number.isFinite(requested) && requested > 0
-              ? Math.min(requested, framePollingMaxWidth)
-              : framePollingMaxWidth;
+            const measured = typeof displayedWidth === 'number' && displayedWidth > 0;
+            const maxWidth = measured
+              ? Math.min(displayedWidth, framePollingCeilingWidth)
+              : Number.isFinite(requested) && requested > 0
+                ? Math.min(requested, framePollingMaxWidth)
+                : framePollingMaxWidth;
             parsed.searchParams.set('maxWidth', String(Math.max(1, Math.round(maxWidth))));
             return parsed.toString();
           } catch {
@@ -6044,11 +6166,18 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           }
         }
 
-        function frameRequestUrl(url, poller) {
-          const profiled = profiledFrameUrl(url);
+        function frameRequestUrl(url, poller, displayedWidth) {
+          const profiled = profiledFrameUrl(url, displayedWidth);
           try {
             const parsed = new URL(profiled);
+            // A new width needs the current frame resent even when the source
+            // has not advanced (a still screen sends no PipeWire frames), so a
+            // resized Preview never keeps the old size's pixels.
+            const maxWidth = parsed.searchParams.get('maxWidth');
+            const widthChanged = poller.requestedMaxWidth !== maxWidth;
+            poller.requestedMaxWidth = maxWidth;
             if (
+              !widthChanged &&
               typeof poller.generation === 'string' &&
               poller.generation.length > 0 &&
               Number.isSafeInteger(poller.sequence) &&
@@ -6216,6 +6345,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (Number.isFinite(maxWidth) && maxWidth >= 1) {
             framePollingMaxWidth = Math.round(maxWidth);
           }
+          const ceilingWidth = Number(profile?.ceilingWidth);
+          framePollingCeilingWidth = Number.isFinite(ceilingWidth) && ceilingWidth >= 1
+            ? Math.round(ceilingWidth)
+            : framePollingMaxWidth;
         }
 
         function startFramePolling(id, kind, image, url) {
@@ -6261,10 +6394,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             poller.abortController = abortController;
             try {
               markProofPollerRequestStarted(poller);
-              const response = await fetch(frameRequestUrl(url, poller), {
-                cache: 'no-store',
-                signal: abortController.signal
-              });
+              const response = await fetch(
+                frameRequestUrl(url, poller, displayedFramePixelWidth(poller.image)),
+                {
+                  cache: 'no-store',
+                  signal: abortController.signal
+                }
+              );
               if (poller.cancelled) {
                 return;
               }
@@ -12470,6 +12606,32 @@ async function runSmokePreviewMotionCommand(
     }
   }
 
+  // Hide from stream (plan 215 C5): the invisibility smoke flips the switch
+  // before and during a recording, exactly as the status bar does.
+  if (command === 'comments-window-set-hidden-from-stream') {
+    return setCommentsWindowHiddenFromStream(params.hidden === true)
+  }
+
+  // The invisibility smoke's marker: the window painted edge to edge in a
+  // colour the artifact gate looks for (red by default, the Notes smoke's).
+  if (command === 'comments-window-set-smoke-marker') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return commentsWindowState('Chat window is not open.')
+    }
+    const color =
+      typeof params.color === 'string' && /^#[0-9a-f]{6}$/i.test(params.color)
+        ? params.color
+        : '#ff0000'
+    const markerInstalled = await paintCaptureProtectionSmokeMarker(window, 'comments', color)
+    return {
+      ...commentsWindowState(),
+      ...smokeNativeWindowIdentity(window),
+      markerInstalled,
+      markerColor: color
+    }
+  }
+
   if (command === 'comments-window-push-snapshot') {
     const view = validateSmokeCommentsSnapshotParams(params)
     if (!view) throw new Error('Invalid Comments fixture snapshot.')
@@ -16729,6 +16891,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:get-state', () => commentsWindowState())
   secureIpcHandle('comments-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setCommentsWindowAlwaysOnTop(Boolean(alwaysOnTop))
+  )
+  secureIpcHandle('comments-window:set-hidden-from-stream', (_event, hidden: unknown) =>
+    setCommentsWindowHiddenFromStream(hidden)
   )
   secureIpcHandle('comments-window:set-highlight-anchor', (_event, anchor: unknown) =>
     setCommentsWindowHighlightAnchor(anchor)

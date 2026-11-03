@@ -66,6 +66,7 @@ import type {
   LiveChatSnapshot,
   ModerationOperation,
   ScopeReconnectPlatform,
+  StreamManagerHideMethod,
   ViewerSample
 } from '@/lib/backend'
 import { isActivityOnlyEvent } from '@/lib/backend'
@@ -271,6 +272,11 @@ export interface StreamManagerProps {
   viewerSample?: ViewerSample | null
   alwaysOnTop?: boolean
   onToggleAlwaysOnTop?: () => void
+  /** Hide from stream (plan 215 D6): the switch's state and this platform's
+   * way of hiding the window, from main's window state. */
+  hiddenFromStream?: boolean
+  hideFromStreamMethod?: StreamManagerHideMethod
+  onToggleHiddenFromStream?: () => void
   highlightAnchor?: CommentHighlightAnchor
   onHighlightAnchorChange?: (anchor: CommentHighlightAnchor) => void
   highlightedId?: string | null
@@ -410,6 +416,9 @@ export function StreamManager({
   viewerSample = null,
   alwaysOnTop = false,
   onToggleAlwaysOnTop,
+  hiddenFromStream = false,
+  hideFromStreamMethod = 'unsupported',
+  onToggleHiddenFromStream,
   highlightAnchor,
   onHighlightAnchorChange,
   highlightedId = null,
@@ -1309,6 +1318,9 @@ export function StreamManager({
 
       <StreamManagerStatusBar
         alwaysOnTop={alwaysOnTop}
+        hiddenFromStream={hiddenFromStream}
+        hideFromStreamMethod={hideFromStreamMethod}
+        onToggleHiddenFromStream={onToggleHiddenFromStream}
         audience={inHistory ? (history?.audience ?? null) : (dashboard?.audience ?? null)}
         highlightAnchor={onHighlightAnchorChange && !inHistory ? highlightAnchor : undefined}
         providers={snapshot.providers}

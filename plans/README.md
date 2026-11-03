@@ -1,34 +1,52 @@
 # Implementation Plans
 
+- 2026-11-03: [Plan 215](215-streamer-list-2026-11-02.md), a streamer's
+  list from 2026-11-02. Seven workstreams, one PR each:
+  - A: X chat names the missing Videorc sign-in, warns before Go Live, and
+    attaches when you sign in. A silent sign-out on a 401 was the likely
+    cause; X itself was fine.
+  - B: Edit scene on the Scene page and in ⌘K, as well as in Studio.
+  - C: Hide from stream for the Stream Manager, next to Keep on top.
+  - D: move and resize while recording or live. This was locked since
+    2026-07-03, not a regression; outputs move on release.
+  - E: sources up to 400% and cut off at the canvas edge, never squashed;
+    a screen Zoom slider.
+  - F: rounded corners for the screen on all four render paths.
+  - G: chat on stream, the last 5 messages, off by default.
+
+  **PLANNED** 2026-11-03; the owner took D1 to D7 as recommended.
+
 - 2026-11-02: [Plan 214](214-videorc-camera-in-meet-and-zoom.md), Videorc
   Camera in Meet and Zoom. Owner ask: a virtual camera like OBS's, so the
   program shows up as a camera in Google Meet, Zoom, Teams and Discord, on
-  macOS, Windows 11 and Linux. Three spikes outside the tree (a signed,
-  notarized macOS Camera Extension; a Windows Media Foundation virtual
-  camera in the Frame Server; v4l2loopback), then six workstreams:
+  macOS, Windows 11 and Linux. Three spikes outside the tree, then six
+  workstreams:
   - A: the output tap, reading the program as the Preview shows it,
     converting off the compositor tick, and asking for pixels at idle on
     Windows and Linux.
   - B: the macOS Camera Extension in the bundle, with the restricted
-    entitlement, two Developer ID provisioning profiles, split
-    entitlements, activation from Electron main, and the release
-    validator.
+    entitlement, one Developer ID provisioning profile for the app, split
+    entitlements, activation from Electron main, the backend's CMIO sink,
+    and the release validator.
   - C: the Windows media-source DLL, a cross-session shared ring, and a
     one-time elevated setup.
   - D: the Linux v4l2loopback writer with install guidance.
   - E: the Output page switch, the approval guidance, ⌘K and the agents'
     mirror, Health.
   - F: a packaged read-back smoke that compares the camera with a
-    recording and proves Hide screen, plus acceptance on each box.
+    recording and proves Hide screen.
 
   No audio (a virtual microphone is a separate, harder project).
-  Fourteen owner decisions, each with a recommendation; D1 is the go on
-  an OBS-parity feature after the goal pivot.
 
   **EXECUTING** 2026-11-03: the owner said "execute the entire plan and
-  create a pr". So D1 is go, D2 to D14 are as recommended, and the plan
-  ships as one PR. The spikes wait on the Apple portal (B0) and the
-  Windows and Linux boxes.
+  create a pr", so D1 to D14 are as recommended.
+  - P0a is a go on macOS 26: Xcode issued the one profile, a notarized test
+    camera showed a pushed picture in Chrome, and a re-signed app launched
+    with no AMFI kill.
+  - PR 1 carries A, B, D, E and F. Linux is hidden until P0c. Windows (C)
+    follows in its own PR, hidden until P0b.
+  - Owner rule: no smokes or app runs before main. The PR lists them as
+    owed.
 
 - 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
   feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,

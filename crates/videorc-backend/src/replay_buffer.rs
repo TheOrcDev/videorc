@@ -999,6 +999,37 @@ pub fn snapshot(state: &AppState) -> ReplayStateEvent {
     }
 }
 
+/// An automatic buffer-only start the software encoder guard refused
+/// ([`AutoStartRefused`]): the ring stays off, and `replay.status` says why
+/// instead of a bare `off`, so a remote, an agent or a smoke reading the
+/// backend sees the same reason the Output page shows. A ring that runs
+/// later (the user turned Clips on) replaces it; one already running (a
+/// recording's ring) keeps its own state.
+pub fn note_auto_start_refused(state: &AppState, reason: &str) {
+    let event = {
+        let mut registry = lock(state);
+        if registry.active.is_some() {
+            return;
+        }
+        let seconds = registry
+            .last_event
+            .as_ref()
+            .map_or(DEFAULT_SECONDS, |event| event.seconds);
+        let event = ReplayStateEvent {
+            state: ReplayBufferState::Off,
+            session_id: None,
+            seconds,
+            buffered_seconds: 0.0,
+            replay_only: false,
+            reason: Some(reason.to_string()),
+            segment_files: None,
+        };
+        registry.last_event = Some(event.clone());
+        event
+    };
+    state.emit_event("replay.state", event);
+}
+
 fn emit_state(state: &AppState) {
     let event = snapshot(state);
     {
@@ -1888,6 +1919,73 @@ mod runtime_tests {
         assert_eq!(failed.payload["reason"], "FFmpeg exited.");
         clean_leftovers(&state);
         assert!(!ring_root(&state).exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_guard_refusal_is_an_off_with_its_reason_until_a_ring_runs() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let refusal = auto_start_refusal(crate::protocol::EncodeBackend::SoftwareOpenH264)
+            .expect("OpenH264 is a software encoder path");
+        assert!(refusal.message.contains("OpenH264"));
+        // Mirrored by `SOFTWARE_ENCODER_GUARD_PREFIX` in
+        // scripts/lib/remote-control-smoke-gates.mjs.
+        assert!(
+            refusal
+                .message
+                .starts_with("This computer encodes video on its processor")
+        );
+        note_auto_start_refused(&state, &refusal.message);
+        let refused = events.recv().await.unwrap();
+        assert_eq!(refused.event, "replay.state");
+        assert_eq!(refused.payload["state"], "off");
+        assert_eq!(refused.payload["reason"], refusal.message.as_str());
+        let status = snapshot(&state);
+        assert_eq!(status.state, ReplayBufferState::Off);
+        assert_eq!(status.reason.as_deref(), Some(refusal.message.as_str()));
+
+        // The user turns Clips on: the running ring answers for itself, and
+        // the reason is gone once it stops.
+        let params: StartSessionParams = serde_json::from_value(serde_json::json!({
+            "sources": { "screenId": null, "windowId": null, "cameraId": null, "microphoneId": null, "testPattern": true },
+            "layout": { "cameraCorner": "bottom-right", "cameraSize": "medium", "cameraShape": "rectangle", "cameraMargin": 32 },
+            "output": {
+                "recordEnabled": false,
+                "streamEnabled": false,
+                "outputDirectory": null,
+                "ffmpegPath": null,
+                "video": { "preset": "tutorial-1080p30", "width": 1920, "height": 1080, "fps": 30, "bitrateKbps": 8000 },
+                "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+            },
+            "replay": { "seconds": 30 }
+        }))
+        .unwrap();
+        let recordings = std::env::temp_dir().join("videorc-replay-recordings-test");
+        let guard = prepare(
+            &state,
+            RingRequest {
+                session_id: "session-explicit",
+                params: &params,
+                replay_only: true,
+                recordings_dir: &recordings,
+                ffmpeg_path: "ffmpeg",
+            },
+        )
+        .unwrap();
+        let _ = events.recv().await.unwrap();
+        assert_eq!(snapshot(&state).reason, None);
+        // A recording's ring that already runs keeps its own state.
+        note_auto_start_refused(&state, &refusal.message);
+        assert_eq!(snapshot(&state).state, ReplayBufferState::Starting);
+        assert_eq!(snapshot(&state).reason, None);
+        attach(&state, guard);
+        let _ = events.recv().await.unwrap();
+        retire(&state, "session-explicit", RetireOutcome::Stopped);
+        let off = events.recv().await.unwrap();
+        assert_eq!(off.payload["state"], "off");
+        assert!(off.payload.get("reason").is_none());
+        assert_eq!(snapshot(&state).reason, None);
+        clean_leftovers(&state);
     }
 
     #[test]

@@ -32,6 +32,11 @@ import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { selectRecordingMatrixProfiles } from './lib/recording-matrix-profiles.mjs'
 import {
+  hardContentContract,
+  softwareSkipGates,
+  softwareSkipWarning
+} from './lib/recording-matrix-software-skip.mjs'
+import {
   countTransientFifoPauseMarkers,
   evaluateSharedRecordStreamPressure,
   evaluateTransientFifoPressure,
@@ -154,6 +159,11 @@ const TRANSIENT_FIFO_GATES = Object.freeze({
   cadenceMismatchTolerancePct: Number.POSITIVE_INFINITY
 })
 
+// Hard content on OpenH264 skips frames on overshoot by design
+// (recording-matrix-software-skip.mjs). Only the frame-skipping laws relax;
+// the 2 s keyframe cadence and the A/V stop tail stay gated.
+const SOFTWARE_SKIP_GATES = softwareSkipGates(MATRIX_GATES)
+
 /** The renderer's default ring, on and buffer-only, or off by its switch. */
 async function waitForStableRing(ws, label) {
   const deadline = Date.now() + 45_000
@@ -173,6 +183,7 @@ async function recordCombo({
   streamTarget = null,
   assertPreviewLiveness = false,
   stress = false,
+  hardContent = false,
   requireTransientFifoPressure = false,
   getTransientFifoPauseFiredCount = () => 0
 }) {
@@ -307,18 +318,34 @@ async function recordCombo({
     throw new Error('recording produced no output file')
   }
 
+  const contract = hardContentContract({
+    stress,
+    hardContent,
+    encodeBackend: bridgeDiagnostics.encodeBackend
+  })
   const quality = await analyzeRecording(outputPath, {
     ffmpegPath,
     ffprobePath,
     intendedFps: combo.fps,
     expectAudio: true,
-    gates: stress
-      ? STRESS_GATES
-      : requireTransientFifoPressure
-        ? TRANSIENT_FIFO_GATES
-        : MATRIX_GATES
+    gates:
+      contract === 'stress'
+        ? STRESS_GATES
+        : contract === 'software-skip'
+          ? SOFTWARE_SKIP_GATES
+          : requireTransientFifoPressure
+            ? TRANSIENT_FIFO_GATES
+            : MATRIX_GATES
   })
   writeReports(quality)
+  const softwareSkip =
+    contract === 'software-skip'
+      ? softwareSkipWarning({
+          label: `${combo.label}:hard`,
+          requestedFps: combo.fps,
+          observedFps: quality.metrics.observedFps
+        })
+      : null
 
   const failures = [...quality.verdict.failures]
   if (livenessFailure) {
@@ -343,7 +370,7 @@ async function recordCombo({
   }
   const observedFps = quality.metrics.observedFps
   if (
-    !stress &&
+    contract === 'full' &&
     !requireTransientFifoPressure &&
     observedFps != null &&
     Math.abs(observedFps - combo.fps) > combo.fps * 0.02
@@ -355,7 +382,8 @@ async function recordCombo({
     outputPath,
     sizeBytes: statSync(outputPath).size,
     failures,
-    warnings: quality.verdict.warnings,
+    warnings: softwareSkip ? [...quality.verdict.warnings, softwareSkip] : quality.verdict.warnings,
+    softwareSkipWarning: softwareSkip,
     metrics: quality.metrics,
     bridgeDiagnostics,
     transientFifoPauseFiredCount,
@@ -437,6 +465,7 @@ async function runPass({
           streamTarget,
           assertPreviewLiveness,
           stress: combo.stress ?? false,
+          hardContent: passLabel === 'hard',
           requireTransientFifoPressure,
           getTransientFifoPauseFiredCount: () => transientFifoPauseFiredCount
         })
@@ -473,6 +502,9 @@ async function runPass({
         )
         for (const failure of result.failures) {
           console.error(`  ❌ ${failure}`)
+        }
+        if (result.softwareSkipWarning) {
+          console.log(`  WARN ${result.softwareSkipWarning}`)
         }
       } catch (error) {
         passResults.push({ combo: label, failures: [String(error?.message ?? error)] })
@@ -646,8 +678,10 @@ try {
   // starvation, latency-contract kills) that the easy 64x64 pattern hides —
   // 0.9.44 shipped its mid-recording-crash regression through green gates
   // exactly that way. Preview must stay live THROUGH the recording.
-  // 1080p60 must hold FULL cadence under noise (proven headroom); 4K noise is
-  // beyond any real content, so 4K30 runs as a survival stress combo.
+  // 1080p60 must hold FULL cadence under noise on the hardware encoders
+  // (proven headroom); OpenH264 skips frames there by design and is held to
+  // SOFTWARE_SKIP_GATES. 4K noise is beyond any real content, so 4K30 runs as
+  // a survival stress combo.
   if (HARD_COMBOS.length > 0) {
     results.push(
       ...(await runPass({

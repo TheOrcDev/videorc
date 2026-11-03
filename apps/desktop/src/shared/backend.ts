@@ -441,6 +441,14 @@ export interface RecordingStatus {
    * Record or Go Live hand over to a real session. Absent otherwise.
    */
   replayOnly?: boolean
+  /**
+   * Plan 215 D1: whether a scene edit (a source's position, size or crop)
+   * committed now reaches this session's picture. True on every compositor
+   * path; false on the legacy FFmpeg graph, where the backend refuses the
+   * edit (`scene-edit-refused`) and the Scene page keeps its lock. Absent
+   * while nothing runs.
+   */
+  acceptsLiveSceneEdits?: boolean
 }
 
 export type AutomaticSourceFallbackSourceKind = 'capture' | 'camera' | 'microphone'
@@ -1814,6 +1822,8 @@ export interface ReplayStateEvent {
   bufferedSeconds: number
   /** The session exists only for the buffer (no file, no stream). */
   replayOnly?: boolean
+  /** Why the ring is `error`, or `off` when it did not start: a session that
+   * failed, or the software encoder guard's refusal. */
   reason?: string
   /** Segment files in the ring after the last prune pass: never above ceil(N/2) + 3. */
   segmentFiles?: number
@@ -4915,12 +4925,28 @@ export interface NotesDocument {
   updatedAt: string
 }
 
+/**
+ * How a platform leaves the Stream Manager out of the stream (plan 215 D6):
+ * `capture-filter` is Videorc's own ScreenCaptureKit exclusion (macOS; the
+ * streamer's screenshots, QuickTime and Zoom still see the window),
+ * `content-protection` is the OS-level exclusion (Windows; every capture app
+ * and screenshot loses the window), and `unsupported` means the switch is
+ * disabled with `CAPTURE_PROTECTION_UNSUPPORTED_REASON` (Linux).
+ */
+export type StreamManagerHideMethod = 'capture-filter' | 'content-protection' | 'unsupported'
+
 export interface CommentsWindowState {
   open: boolean
   visible: boolean
   bounds: { x: number; y: number; width: number; height: number } | null
   windowId?: number
   alwaysOnTop: boolean
+  /** Hide from stream (plan 215 D6): the streamer's switch, off by default
+   * and remembered. Owned by main so the Studio renderer can read it with
+   * the window closed (it builds the capture exclusion list). */
+  hiddenFromStream: boolean
+  /** How this platform hides the window when the switch is on. */
+  hideFromStreamMethod: StreamManagerHideMethod
   /** Where highlighted messages land on the stream. Owned by main so a
    * highlight fired with the window closed (shortcut, deck, co-host) still
    * honours the streamer's pick. */
@@ -5442,6 +5468,7 @@ export interface VideorcApi {
   toggleCommentsWindow: () => Promise<CommentsWindowState>
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
+  setCommentsWindowHiddenFromStream: (hidden: boolean) => Promise<CommentsWindowState>
   setCommentsWindowHighlightAnchor: (anchor: CommentHighlightAnchor) => Promise<CommentsWindowState>
   setCommentsWindowAutoShowActivity: (on: boolean) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void

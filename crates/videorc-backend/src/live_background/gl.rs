@@ -1744,13 +1744,43 @@ mod tests {
             };
             let expected = base64_decode(frame["rgb"].as_str().unwrap());
             let (mean, max) = grid_error(&bgra, width, height, &expected);
+            let (mean_limit, max_cell) = golden_bound(id);
             assert!(
-                mean <= 2.0 && max <= 10,
+                mean <= mean_limit && max <= max_cell,
                 "{id:?} {}: mean {mean:.3}, max {max}",
                 look.id
             );
         }
         unsafe { state.destroy(gl) };
+    }
+
+    /// The (mean, max cell) bound a golden frame stays inside, in 0–255
+    /// units: mean 2.0 and cell 10, except Beams and Ghost Fibers.
+    ///
+    /// Those two hash with `fract(sin(x) * 47453.5453)` of large arguments
+    /// (Beams' lanes reach about 950 rad, Ghost Fibers' about 1e7), so one
+    /// ulp of `sin` moves a Beams lane's glints by about a sixth of a noise
+    /// period. The goldens hold the last bits of ANGLE on an Apple GPU, which
+    /// no GLES driver has to reproduce: radeonsi's `sin` scales into
+    /// revolutions first (about 1e-4 rad off at 900 rad), llvmpipe rounds
+    /// differently again, and WARP and the paravirtual Metal GPU miss the
+    /// same way (see their golden tests). Beams' Perlin gradients also land
+    /// exactly on `step(0, 0)` for one hash in seven, which divide rounding
+    /// decides. On 2026-11-03 radeonsi (RX 9070 XT) measured Beams at means
+    /// 9.1–21.2 with a worst cell of 227 and Ghost Fibers at means up to 1.69
+    /// with a worst cell of 82; llvmpipe 4.8–11.4 / 220 and 0.82 / 16. With
+    /// Beams' lane hash made an integer one and its gradient choice exact,
+    /// radeonsi and llvmpipe agreed on Beams to a grid mean of 0.11 and a
+    /// cell of 1, so the GL setup (the mipmapped half-float field included)
+    /// is not the cause. The bounds are the paravirtual Metal ones; a mean
+    /// over them is a port bug.
+    #[cfg(target_os = "linux")]
+    fn golden_bound(id: LiveBackgroundId) -> (f64, u8) {
+        match id {
+            LiveBackgroundId::Beams => (24.0, 240),
+            LiveBackgroundId::GhostFibers => (2.0, 96),
+            _ => (2.0, 10),
+        }
     }
 
     #[cfg(target_os = "linux")]
