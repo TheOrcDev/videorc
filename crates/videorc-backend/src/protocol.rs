@@ -1456,6 +1456,8 @@ pub struct ReplayStateEvent {
     /// True when the session exists only for the buffer (no file, no stream).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay_only: bool,
+    /// Why the ring is `error`, or `off` when it did not start: a session
+    /// that failed, or the software encoder guard's refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Segment files in the ring after the last prune pass (diagnostics and

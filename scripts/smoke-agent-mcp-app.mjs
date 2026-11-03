@@ -661,6 +661,12 @@ try {
       `get_picture is ${size.width}×${size.height}; at most 1280 wide, as structuredContent says`
     )
   }
+  // The app opens on a tab with no Preview slot: the docked Preview is hidden
+  // there, and the program must keep a real size (a 1×1 program was the
+  // in-window dock's placeholder rect sizing the idle compositor).
+  if (size.width < 160 || size.height < 90) {
+    fail(`get_picture is ${size.width}×${size.height}: the program collapsed off the Preview's tab`)
+  }
   const picturePath = join(outputDirectory, 'agent-picture.jpg')
   writeFileSync(picturePath, image.bytes)
   const probe = spawnSync(

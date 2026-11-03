@@ -51,6 +51,16 @@ class FakeWebSocket {
   }
 }
 
+/**
+ * The client lazy-loads its protocol validator (a dynamic import, cached per
+ * module) before it constructs a socket. The first test in the file pays the
+ * cold transform, which under a loaded host took longer than `vi.waitFor`'s
+ * 1 s default and failed the test though nothing was wrong.
+ */
+function socketConstructed(): Promise<void> {
+  return vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1), { timeout: 10_000 })
+}
+
 describe('BackendClient request lifetime', () => {
   beforeEach(() => {
     FakeWebSocket.instances = []
@@ -70,7 +80,7 @@ describe('BackendClient request lifetime', () => {
 
     expect(duplicateConnect).toBe(firstConnect)
     expect(FakeWebSocket.instances).toHaveLength(0)
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await socketConstructed()
 
     const socket = FakeWebSocket.instances[0]!
     socket.open()
@@ -91,7 +101,7 @@ describe('BackendClient request lifetime', () => {
   it('rejects an in-flight connection when closed while the socket is connecting', async () => {
     const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
     const connecting = client.connect()
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await socketConstructed()
 
     client.close()
 
@@ -104,7 +114,7 @@ describe('BackendClient request lifetime', () => {
     const statuses: RecordingStatus[] = []
     client.on('recording.status', (status) => statuses.push(status))
     const connecting = client.connect()
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await socketConstructed()
     const socket = FakeWebSocket.instances[0]!
 
     client.close()
@@ -133,7 +143,7 @@ describe('BackendClient request lifetime', () => {
   it('does not revive a failed connection attempt through a late open callback', async () => {
     const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
     const connecting = client.connect()
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await socketConstructed()
     const socket = FakeWebSocket.instances[0]!
 
     socket.onerror?.()
@@ -146,7 +156,7 @@ describe('BackendClient request lifetime', () => {
   it('rejects a connecting attempt when the socket closes itself', async () => {
     const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
     const connecting = client.connect()
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await socketConstructed()
 
     FakeWebSocket.instances[0]!.close()
 
@@ -157,7 +167,7 @@ describe('BackendClient request lifetime', () => {
   it('deduplicates connect calls while the socket is connecting', async () => {
     const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
     const firstConnect = client.connect()
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await socketConstructed()
 
     const duplicateConnect = client.connect()
 
@@ -170,7 +180,7 @@ describe('BackendClient request lifetime', () => {
   it('deduplicates until the original connect promise has settled', async () => {
     const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
     const firstConnect = client.connect()
-    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    await socketConstructed()
 
     FakeWebSocket.instances[0]!.open()
     const duplicateConnect = client.connect()
@@ -449,7 +459,7 @@ async function connectedClient(): Promise<{
 }> {
   const client = new BackendClient({ host: '127.0.0.1', port: 9988, token: 'token' })
   const connected = client.connect()
-  await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+  await socketConstructed()
   const socket = FakeWebSocket.instances.at(-1)
   if (!socket) {
     throw new Error('BackendClient did not create a WebSocket')

@@ -5,12 +5,14 @@ import {
   aspectFitRect,
   composeDockedScreenRect,
   decideDockVisibility,
+  inWindowDockedRect,
   initialPreviewWindowMode,
   parseDockSlot,
   parseDockSlotReport,
   parsePreviewWindowMode,
   previewWindowClosePrefs,
   previewWindowExternalResizePolicy,
+  usableDockSlotSize,
   type DockSlotReport,
   type DockVisibilityInput
 } from './preview-dock'
@@ -219,6 +221,52 @@ describe('composeDockedScreenRect', () => {
     )
     expect(rect.width).toBeGreaterThanOrEqual(1)
     expect(rect.height).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('inWindowDockedRect', () => {
+  const content = { x: 0, y: 29, width: 1896, height: 1001 }
+
+  it('places the surface at a slot that has a rect', () => {
+    expect(inWindowDockedRect(slot, content, { width: 640, height: 360 })).toEqual(
+      composeDockedScreenRect(slot, content)
+    )
+  })
+
+  // The backend sizes the idle program from these bounds: off Studio a 1x1
+  // rect made the program (and get_picture) a single pixel.
+  it('keeps the remembered size when the slot unmounts or never reported', () => {
+    const unmounted = { ...slot, x: 0, y: 0, width: 0, height: 0, mounted: false }
+    const remembered = { width: 800, height: 450 }
+    expect(inWindowDockedRect(unmounted, content, remembered)).toEqual({
+      x: 0,
+      y: 29,
+      width: 800,
+      height: 450
+    })
+    expect(inWindowDockedRect(null, content, remembered)).toEqual({
+      x: 0,
+      y: 29,
+      width: 800,
+      height: 450
+    })
+  })
+
+  it('falls to 1x1 only when no size is known at all', () => {
+    expect(inWindowDockedRect(null, content, null)).toEqual({ x: 0, y: 29, width: 1, height: 1 })
+  })
+})
+
+describe('usableDockSlotSize', () => {
+  it('reads the size of a mounted slot with a rect', () => {
+    expect(usableDockSlotSize(slot)).toEqual({ width: 800, height: 450 })
+  })
+
+  it('has none for no report, an unmounted slot or a collapsed rect', () => {
+    expect(usableDockSlotSize(null)).toBeNull()
+    expect(usableDockSlotSize({ ...slot, mounted: false })).toBeNull()
+    expect(usableDockSlotSize({ ...slot, width: 0 })).toBeNull()
+    expect(usableDockSlotSize({ ...slot, height: 0.4 })).toBeNull()
   })
 })
 

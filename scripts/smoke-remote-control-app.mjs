@@ -23,8 +23,14 @@ import {
   remoteRequest as remoteRequestClient,
   waitForRemoteEvent as waitForRemoteEventClient
 } from './lib/remote-control-client.mjs'
-import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
-import { CAPTURE_CONFIG_STORAGE_KEY, RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
+import {
+  defaultRingVerdict,
+  syntheticCompositorReady
+} from './lib/remote-control-smoke-gates.mjs'
+import {
+  CAPTURE_CONFIG_STORAGE_KEY,
+  RELOAD_KEEPING_SEED_JS
+} from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -228,26 +234,43 @@ try {
   console.log('remote-control smoke: sceneApply ack + confirmed state OK')
 
   // 4b. clipMark (plan 068 D6; plan 181 R4) is on the allowlist and relays
-  // through the renderer. Explicitly enable Clips using the Output switch's
-  // own path: automatic startup intentionally refuses software encoders such
-  // as OpenH264. This tests the remote command on either encoder, not whether
-  // the default is admitted. With the ring on, the press saves a clip (the
-  // file is proven by pnpm smoke:replay-buffer); with it off, the renderer
-  // refuses with the reason. Both round trips must acknowledge the ticket.
-  const enabled = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    { code: 'return window.__videorcSmokeSetReplayBuffer?.(true) ?? null' },
-    { timeoutMs }
-  )
-  if (enabled?.result !== true) fail('the renderer has no clip buffer smoke hook')
-  const ringOn = await waitForBackendState(
+  // through the renderer. The ring runs by default (R2), so with nothing
+  // recording the press is admitted and saves a clip (the file is proven by
+  // pnpm smoke:replay-buffer); with the switch off the renderer refuses it
+  // with the reason, so the round trip proves admission + relay + ack both
+  // ways. On a software encoder path (OpenH264 on Linux, a software Media
+  // Foundation encoder) the guard keeps the default ring off by design and
+  // replay.status names why: the default leg SKIPs with that reason, and the
+  // ring is turned on the way the Output switch does, so the clip relay is
+  // still proven with the ring on.
+  const defaultRing = await waitForBackendState(
     renderer,
     'replay.status',
-    (ring) => ring?.state === 'on',
-    'the explicitly enabled ring'
+    (ring) => defaultRingVerdict(ring) !== null,
+    'the default ring'
   )
-  console.log(`remote-control smoke: ring on after explicit enable (${ringOn.seconds} s)`)
+  const defaultVerdict = defaultRingVerdict(defaultRing)
+  if (defaultVerdict.kind === 'on') {
+    console.log(`remote-control smoke: ring on by default (${defaultRing.seconds} s)`)
+  } else {
+    console.log(
+      `remote-control smoke: SKIP ring on by default (software encoder guard): ${defaultVerdict.reason}`
+    )
+    const armed = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      { code: 'return window.__videorcSmokeSetReplayBuffer?.(true) ?? null' },
+      { timeoutMs }
+    )
+    if (armed?.result !== true) fail('the renderer has no clip buffer smoke hook')
+    const ringOn = await waitForBackendState(
+      renderer,
+      'replay.status',
+      (ring) => ring?.state === 'on',
+      'the ring turned on with the switch'
+    )
+    console.log(`remote-control smoke: ring on with the switch (${ringOn.seconds} s)`)
+  }
   const clipOnAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const clipOnTicket = await remoteRequest(remote, 'remote.intent', { kind: 'clipMark' })
   if (!clipOnTicket.payload?.accepted) fail('clipMark intent was not accepted')
