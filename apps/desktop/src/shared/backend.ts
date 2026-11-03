@@ -441,6 +441,14 @@ export interface RecordingStatus {
    * Record or Go Live hand over to a real session. Absent otherwise.
    */
   replayOnly?: boolean
+  /**
+   * Plan 215 D1: whether a scene edit (a source's position, size or crop)
+   * committed now reaches this session's picture. True on every compositor
+   * path; false on the legacy FFmpeg graph, where the backend refuses the
+   * edit (`scene-edit-refused`) and the Scene page keeps its lock. Absent
+   * while nothing runs.
+   */
+  acceptsLiveSceneEdits?: boolean
 }
 
 export type AutomaticSourceFallbackSourceKind = 'capture' | 'camera' | 'microphone'

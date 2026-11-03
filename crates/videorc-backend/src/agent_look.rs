@@ -1333,6 +1333,7 @@ mod tests {
             duration_ms: None,
             message: None,
             replay_only,
+            accepts_live_scene_edits: None,
         };
         assert_eq!(
             session_word(&status(RecordingState::Recording, true, None)),

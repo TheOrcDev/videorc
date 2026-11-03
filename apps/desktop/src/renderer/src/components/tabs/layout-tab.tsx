@@ -109,32 +109,68 @@ import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proo
 const CHROMA_KEY_GREEN = '#00FF00'
 const CHROMA_KEY_BLUE = '#0000FF'
 
-// What a running recording or livestream locks on this page (plan 174, C-22):
-// where a source sits and whether it shows. The layout, the camera's frame and
-// its lens still change live, so the copy names only what is locked.
+// What a running recording or livestream locks on this page (plan 174, C-22,
+// narrowed by plan 215 D1): where a source sits, until the session says a
+// commit reaches its picture; whether it shows; and the orientation. The
+// layout, the camera's frame and its lens still change live, so the copy
+// names only what is locked.
 export const SCENE_POSITION_LOCK_REASON =
   "Position and size are locked while you're recording or live."
+// Plan 215 D1: a session on the legacy FFmpeg graph composes a fixed picture,
+// and the backend refuses a move with this sentence (`scene-edit-refused`).
+export const SCENE_POSITION_UNAVAILABLE_REASON =
+  "Moving and resizing isn't available on this recording. Stop and record again."
+// The screen's share of the canvas is the background's Visibility (plan 213
+// G4), not a source's box, so it keeps the session lock (out of plan 215).
+const SCREEN_SIZE_LOCK_REASON = "Screen size is locked while you're recording or live."
 const PLACEMENT_HINT =
   'Click the source on the stage to edit it: drag it, or nudge it with the arrows.'
+// Plan 215 D1: a drag shows the outline, and the outputs move on release
+// (a draft never reaches them, plan 058 decision 4).
+export const LIVE_PLACEMENT_HINT = 'Changes apply to your stream when you let go.'
+
+/**
+ * Why a source's position and size are locked right now, or null while they
+ * can change (plan 215 D1). A running session keeps the lock until the
+ * backend says a commit reaches its picture (`acceptsLiveSceneEdits`): a
+ * session on the legacy FFmpeg graph says it never will (`false`), and a
+ * session still starting, or an older backend, has not said (`null`).
+ */
+export function scenePositionLockReason({
+  isSessionActive,
+  acceptsLiveSceneEdits
+}: {
+  isSessionActive: boolean
+  acceptsLiveSceneEdits: boolean | null
+}): string | null {
+  if (!isSessionActive || acceptsLiveSceneEdits === true) return null
+  return acceptsLiveSceneEdits === false
+    ? SCENE_POSITION_UNAVAILABLE_REASON
+    : SCENE_POSITION_LOCK_REASON
+}
 
 /**
  * The Placement section's arrows and its one line. The arrows wait for the
- * editor (a click on the stage, or Edit scene, plan 215 D4); while recording
- * or live Edit scene still opens the editor, and the line says what is
- * locked.
+ * editor (a click on the stage, or Edit scene, plan 215 D4) and for the
+ * position lock to lift (plan 215 D1); the line says what is locked, or,
+ * while recording or live with the lock lifted, where a change lands.
  */
 export function placementControls({
   sceneEditMode,
   isSessionActive,
+  acceptsLiveSceneEdits,
   stageDragging
 }: {
   sceneEditMode: boolean
   isSessionActive: boolean
+  acceptsLiveSceneEdits: boolean | null
   stageDragging: boolean
-}): { nudgeDisabled: boolean; description: string } {
+}): { nudgeDisabled: boolean; description: string; lockReason: string | null } {
+  const lockReason = scenePositionLockReason({ isSessionActive, acceptsLiveSceneEdits })
   return {
-    nudgeDisabled: !sceneEditMode || isSessionActive || stageDragging,
-    description: isSessionActive ? SCENE_POSITION_LOCK_REASON : PLACEMENT_HINT
+    lockReason,
+    nudgeDisabled: !sceneEditMode || lockReason !== null || stageDragging,
+    description: lockReason ?? (isSessionActive ? LIVE_PLACEMENT_HINT : PLACEMENT_HINT)
   }
 }
 const ORIENTATION_LOCK_REASON =
@@ -280,6 +316,7 @@ export function LayoutTab(): ReactElement {
     applyCameraPreset,
     setSceneSourceVisible,
     isSessionActive,
+    acceptsLiveSceneEdits,
     layoutSwitchPending,
     savedScenePendingId,
     savedScenes,
@@ -298,7 +335,16 @@ export function LayoutTab(): ReactElement {
   // control enabled and focused, and `runPreciseEdit` drops the input instead.
   const [stagePhase, setStagePhase] = useState<StagePhase>('idle')
   const stageDragging = stagePhase === 'dragging'
-  const placement = placementControls({ sceneEditMode, isSessionActive, stageDragging })
+  const placement = placementControls({
+    sceneEditMode,
+    isSessionActive,
+    acceptsLiveSceneEdits,
+    stageDragging
+  })
+  // Plan 215 D1: a source's box moves while recording or live once the
+  // session says a commit reaches its picture; visibility and the
+  // orientation keep the session lock.
+  const positionLocked = placement.lockReason !== null
   const stageBusy = stagePhase !== 'idle'
   // Overlay items on the canvas (plan 164, D15). One selection on the stage:
   // picking an item clears the source selection and the other way round.
@@ -790,7 +836,7 @@ export function LayoutTab(): ReactElement {
               dragEnabled={
                 !verticalView &&
                 (showOverlayControls || isFreeform) &&
-                !isSessionActive &&
+                !positionLocked &&
                 !preciseEditPending &&
                 !sceneSwitchPending
               }
@@ -802,19 +848,23 @@ export function LayoutTab(): ReactElement {
               resizeEnabled={
                 !verticalView &&
                 (showOverlayControls || isFreeform) &&
-                !isSessionActive &&
+                !positionLocked &&
                 !preciseEditPending &&
                 !sceneSwitchPending
               }
               // Plan 213 G2: a crop is saved with the freeform box, so only
-              // Freeform crops; locked while recording or live like the box.
-              cropEnabled={isFreeform && !isSessionActive}
+              // Freeform crops; locked exactly when the box is.
+              cropEnabled={isFreeform && !positionLocked}
               // The vertical view is the derived stream's canvas: a greyed
               // stage with that stream's overlay rects; the sources stay with
               // the primary (the stream is derived, plan 164 out of scope).
               scene={verticalView ? null : scene}
               selectedSourceId={verticalView || selectedBanner ? null : selectedSceneSourceId}
               liveDocked={!verticalView && liveCanvasActive}
+              // Plan 215 D1: a running session refuses drafts (plan 058
+              // decision 4), so the stage paints the outline and the
+              // outputs move on release.
+              draftsRefused={isSessionActive}
               liveHint={verticalView ? 'Vertical stream: overlay placement only.' : liveHint}
               liveSurface={!verticalView && liveSurface}
               // The preview floating in its own window follows a drag too.
@@ -860,9 +910,12 @@ export function LayoutTab(): ReactElement {
               }
               onShowLive={liveCanvasSupported ? () => void showLiveHere() : undefined}
               // Live drafts (plan 058 S4): only flow while the surface is the
-              // canvas; the stage gates them on `liveSurface`.
-              onDraft={liveCanvasSupported ? setSceneEditorDraft : undefined}
-              onDraftClear={liveCanvasSupported ? clearSceneEditorDraft : undefined}
+              // canvas; the stage gates them on `liveSurface`. Off while
+              // recording or live (plan 215 D1): the backend refuses them.
+              onDraft={liveCanvasSupported && !isSessionActive ? setSceneEditorDraft : undefined}
+              onDraftClear={
+                liveCanvasSupported && !isSessionActive ? clearSceneEditorDraft : undefined
+              }
               outputWidth={captureConfig.video.width}
               onCommitTransform={setSceneSourceTransform}
               // Arrows on the focused canvas (C-31) ride the same one-at-a-time
@@ -870,7 +923,7 @@ export function LayoutTab(): ReactElement {
               onNudge={(sourceId, directionX, directionY, large) =>
                 runPreciseEdit(() => nudgeSceneSource(sourceId, directionX, directionY, large))
               }
-              onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
+              onRequestFreeform={isFreeform || positionLocked ? undefined : enterFreeform}
               onSelectSource={(sourceId) => {
                 setSelectedOverlayItem(null)
                 selectBanner(null)
@@ -978,6 +1031,7 @@ export function LayoutTab(): ReactElement {
               layout={layout}
               outputHeight={captureConfig.video.height}
               outputWidth={captureConfig.video.width}
+              positionLockReason={placement.lockReason}
               showCameraBubbleControls={showCameraBubbleControls}
               showCameraCornerControls={showCameraCornerControls}
               source={selectedSource}
@@ -1024,7 +1078,7 @@ export function LayoutTab(): ReactElement {
               {scene?.background ? (
                 <ScreenSizeField
                   background={scene.background}
-                  disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : null}
+                  disabledReason={isSessionActive ? SCREEN_SIZE_LOCK_REASON : null}
                 />
               ) : null}
             </PanelSection>
@@ -1040,14 +1094,14 @@ export function LayoutTab(): ReactElement {
                 {scene?.background ? (
                   <ScreenSizeField
                     background={scene.background}
-                    disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : null}
+                    disabledReason={isSessionActive ? SCREEN_SIZE_LOCK_REASON : null}
                   />
                 ) : null}
               </PanelSection>
               <PanelSection
                 action={
                   <Button
-                    disabled={isSessionActive || stageDragging}
+                    disabled={positionLocked || stageDragging}
                     variant="outline"
                     onClick={() => void resetSceneSource(selectedSource.id)}
                   >
@@ -1071,8 +1125,8 @@ export function LayoutTab(): ReactElement {
                   key={selectedSource.id}
                   aspectLocked={aspectLocked}
                   onAspectLockedChange={setAspectLocked}
-                  disabled={isSessionActive || stageDragging}
-                  disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : undefined}
+                  disabled={positionLocked || stageDragging}
+                  disabledReason={placement.lockReason ?? undefined}
                   outputHeight={captureConfig.video.height}
                   outputWidth={captureConfig.video.width}
                   source={selectedSource}
@@ -1084,7 +1138,7 @@ export function LayoutTab(): ReactElement {
                 {isFreeform && sourceCroppable(selectedSource.kind) ? (
                   <SourceCropFields
                     key={`${selectedSource.id}-crop`}
-                    disabled={isSessionActive || stageDragging}
+                    disabled={positionLocked || stageDragging}
                     source={selectedSource}
                     onCommit={(patch) =>
                       runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
@@ -1191,6 +1245,7 @@ function CameraInspector({
   showCameraCornerControls,
   showCameraBubbleControls,
   isSessionActive,
+  positionLockReason,
   stageDragging,
   aspectLocked,
   outputWidth,
@@ -1214,6 +1269,8 @@ function CameraInspector({
   showCameraCornerControls: boolean
   showCameraBubbleControls: boolean
   isSessionActive: boolean
+  /** Why the camera's box can't move now, or null while it can (plan 215 D1). */
+  positionLockReason: string | null
   stageDragging: boolean
   aspectLocked: boolean
   outputWidth: number
@@ -1227,15 +1284,22 @@ function CameraInspector({
   onTransformCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
   onVisibilityChange: (sourceId: string, visible: boolean) => Promise<void>
 }): ReactElement {
-  const placementDescription = isFreeform
-    ? 'Drag and resize the camera on the stage, or set exact numbers below.'
-    : isCameraOnly
-      ? "Camera only fills the frame as a rectangle. Corner, size and shape don't apply; frame yourself under Lens."
-      : isVerticalCameraOnly
-        ? "The camera fills the whole 9:16 canvas and crops to fit. Corner, size and shape don't apply; frame yourself under Lens."
-        : isVerticalStack
-          ? "The stacked vertical scenes give the camera and the screen fixed bands of the 9:16 canvas. Corner, size and shape don't apply; frame yourself under Lens."
-          : undefined
+  // Plan 215 D1: while recording or live, the box's line says what is locked
+  // or where a change lands; the preset copy stays where there is no box.
+  const positionLocked = positionLockReason !== null
+  const liveBox = isSessionActive && !positionLocked && (isFreeform || showCameraBubbleControls)
+  const placementDescription = liveBox
+    ? LIVE_PLACEMENT_HINT
+    : isFreeform
+      ? (positionLockReason ??
+        'Drag and resize the camera on the stage, or set exact numbers below.')
+      : isCameraOnly
+        ? "Camera only fills the frame as a rectangle. Corner, size and shape don't apply; frame yourself under Lens."
+        : isVerticalCameraOnly
+          ? "The camera fills the whole 9:16 canvas and crops to fit. Corner, size and shape don't apply; frame yourself under Lens."
+          : isVerticalStack
+            ? "The stacked vertical scenes give the camera and the screen fixed bands of the 9:16 canvas. Corner, size and shape don't apply; frame yourself under Lens."
+            : undefined
   // Vertical bands and the full-canvas vertical camera ALWAYS fill and crop:
   // a "Fit frame" option would letterbox the short-form frame (2026-07-13
   // fill-crop plan), so the toggle is hidden and honest copy replaces it.
@@ -1362,8 +1426,8 @@ function CameraInspector({
         aspectLocked={aspectLocked}
         onAspectLockedChange={onAspectLockedChange}
         aspectForced={layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'}
-        disabled={isSessionActive || stageDragging}
-        disabledReason={isSessionActive ? SCENE_POSITION_LOCK_REASON : undefined}
+        disabled={positionLocked || stageDragging}
+        disabledReason={positionLockReason ?? undefined}
         outputHeight={outputHeight}
         outputWidth={outputWidth}
         source={source}

@@ -11231,40 +11231,53 @@ async fn handle_text_message_with_role(
         "scene.source.transform.update" => {
             match serde_json::from_value::<protocol::SceneTransformUpdateParams>(command.params) {
                 Ok(params) => {
-                    // Plan 058: a live editor draft for this source ends exactly
-                    // when the scene this commit installs reaches the
-                    // compositor. Capture the draft generation first so a
-                    // gesture that starts during the commit is never ended by it.
-                    let draft_generation =
-                        compositor::editor_draft_generation_for(state, &params.source_id).await;
-                    let result = {
-                        let mut guard = state.scene.lock().await;
-                        update_source_transform(&mut guard, params)
-                    };
-                    match result {
-                        Ok(scene) => {
-                            match live_layout::commit_scene_with_current_layout(state, &scene).await
-                            {
-                                Ok(status) => {
-                                    if let Some(generation) = draft_generation {
-                                        compositor::release_editor_draft_at(
-                                            state,
-                                            generation,
-                                            status.scene_revision,
-                                        )
-                                        .await;
+                    // Plan 215 D1: a session on the legacy FFmpeg graph composes
+                    // a fixed picture, so the move is refused before it touches
+                    // the scene; every compositor path takes the commit hot.
+                    if let Some(reason) = recording::live_scene_edit_refusal(state).await {
+                        ServerResponse::error(
+                            command.id,
+                            recording::LIVE_SCENE_EDIT_REFUSED_CODE,
+                            reason,
+                        )
+                    } else {
+                        // Plan 058: a live editor draft for this source ends
+                        // exactly when the scene this commit installs reaches
+                        // the compositor. Capture the draft generation first so
+                        // a gesture that starts during the commit is never
+                        // ended by it.
+                        let draft_generation =
+                            compositor::editor_draft_generation_for(state, &params.source_id).await;
+                        let result = {
+                            let mut guard = state.scene.lock().await;
+                            update_source_transform(&mut guard, params)
+                        };
+                        match result {
+                            Ok(scene) => {
+                                match live_layout::commit_scene_with_current_layout(state, &scene)
+                                    .await
+                                {
+                                    Ok(status) => {
+                                        if let Some(generation) = draft_generation {
+                                            compositor::release_editor_draft_at(
+                                                state,
+                                                generation,
+                                                status.scene_revision,
+                                            )
+                                            .await;
+                                        }
+                                        ServerResponse::ok(command.id, status)
                                     }
-                                    ServerResponse::ok(command.id, status)
+                                    Err(error) => ServerResponse::error(
+                                        command.id,
+                                        "scene-commit-failed",
+                                        error.to_string(),
+                                    ),
                                 }
-                                Err(error) => ServerResponse::error(
-                                    command.id,
-                                    "scene-commit-failed",
-                                    error.to_string(),
-                                ),
                             }
-                        }
-                        Err(error) => {
-                            ServerResponse::error(command.id, "scene-update-failed", error)
+                            Err(error) => {
+                                ServerResponse::error(command.id, "scene-update-failed", error)
+                            }
                         }
                     }
                 }
@@ -11302,24 +11315,34 @@ async fn handle_text_message_with_role(
         "scene.source.transform.reset" => {
             match serde_json::from_value::<protocol::SceneSourceParams>(command.params) {
                 Ok(params) => {
-                    let result = {
-                        let mut guard = state.scene.lock().await;
-                        reset_source_transform(&mut guard, params)
-                    };
-                    match result {
-                        Ok(scene) => {
-                            match live_layout::commit_scene_with_current_layout(state, &scene).await
-                            {
-                                Ok(status) => ServerResponse::ok(command.id, status),
-                                Err(error) => ServerResponse::error(
-                                    command.id,
-                                    "scene-commit-failed",
-                                    error.to_string(),
-                                ),
+                    // Plan 215 D1: refused on a fixed picture, like the update.
+                    if let Some(reason) = recording::live_scene_edit_refusal(state).await {
+                        ServerResponse::error(
+                            command.id,
+                            recording::LIVE_SCENE_EDIT_REFUSED_CODE,
+                            reason,
+                        )
+                    } else {
+                        let result = {
+                            let mut guard = state.scene.lock().await;
+                            reset_source_transform(&mut guard, params)
+                        };
+                        match result {
+                            Ok(scene) => {
+                                match live_layout::commit_scene_with_current_layout(state, &scene)
+                                    .await
+                                {
+                                    Ok(status) => ServerResponse::ok(command.id, status),
+                                    Err(error) => ServerResponse::error(
+                                        command.id,
+                                        "scene-commit-failed",
+                                        error.to_string(),
+                                    ),
+                                }
                             }
-                        }
-                        Err(error) => {
-                            ServerResponse::error(command.id, "scene-reset-failed", error)
+                            Err(error) => {
+                                ServerResponse::error(command.id, "scene-reset-failed", error)
+                            }
                         }
                     }
                 }
@@ -11360,30 +11383,40 @@ async fn handle_text_message_with_role(
         "scene.source.nudge" => {
             match serde_json::from_value::<protocol::SceneSourceNudgeParams>(command.params) {
                 Ok(params) => {
-                    let result = {
-                        let mut guard = state.scene.lock().await;
-                        nudge_source(
-                            &mut guard,
-                            &params.source_id,
-                            params.direction_x,
-                            params.direction_y,
-                            params.large,
+                    // Plan 215 D1: refused on a fixed picture, like the update.
+                    if let Some(reason) = recording::live_scene_edit_refusal(state).await {
+                        ServerResponse::error(
+                            command.id,
+                            recording::LIVE_SCENE_EDIT_REFUSED_CODE,
+                            reason,
                         )
-                    };
-                    match result {
-                        Ok(scene) => {
-                            match live_layout::commit_scene_with_current_layout(state, &scene).await
-                            {
-                                Ok(status) => ServerResponse::ok(command.id, status),
-                                Err(error) => ServerResponse::error(
-                                    command.id,
-                                    "scene-commit-failed",
-                                    error.to_string(),
-                                ),
+                    } else {
+                        let result = {
+                            let mut guard = state.scene.lock().await;
+                            nudge_source(
+                                &mut guard,
+                                &params.source_id,
+                                params.direction_x,
+                                params.direction_y,
+                                params.large,
+                            )
+                        };
+                        match result {
+                            Ok(scene) => {
+                                match live_layout::commit_scene_with_current_layout(state, &scene)
+                                    .await
+                                {
+                                    Ok(status) => ServerResponse::ok(command.id, status),
+                                    Err(error) => ServerResponse::error(
+                                        command.id,
+                                        "scene-commit-failed",
+                                        error.to_string(),
+                                    ),
+                                }
                             }
-                        }
-                        Err(error) => {
-                            ServerResponse::error(command.id, "scene-nudge-failed", error)
+                            Err(error) => {
+                                ServerResponse::error(command.id, "scene-nudge-failed", error)
+                            }
                         }
                     }
                 }
@@ -14427,6 +14460,7 @@ async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus
             duration_ms: None,
             message: Some("Finalizing recording output.".to_string()),
             replay_only: false,
+            accepts_live_scene_edits: None,
         };
     }
     idle_status()
@@ -16838,6 +16872,176 @@ mod tests {
         *state.recording.lock().await = None;
         let response = handle_text_message_with_role(&state, &hide, BackendRole::Renderer).await;
         assert!(response.ok, "{:?}", response.error);
+    }
+
+    /// Plan 215 D1: a session on the legacy FFmpeg graph composes a fixed
+    /// picture, so a move, a nudge and a reset are refused with one named
+    /// code and the committed scene stays as it was. A session that composes
+    /// live takes the same edits hot, and `recording.status` says which.
+    #[tokio::test]
+    async fn scene_edits_are_refused_while_a_legacy_ffmpeg_session_runs() {
+        let state = test_state();
+        let mut layout = protocol::default_layout_settings();
+        layout.layout_preset = protocol::LayoutPreset::ScreenCamera;
+        let config = protocol::SceneConfigParams {
+            transition_ms: None,
+            sources: protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: Some("camera:avfoundation-native:camera-1".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: None,
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let scene = scene_from_capture_config(config);
+        live_layout::commit_scene_with_layout(&state, &scene, layout, None)
+            .await
+            .expect("the idle scene commits");
+
+        let mut session = recording::test_active_recording_stub("legacy");
+        session.set_accepts_live_scene_edits_for_test(false);
+        *state.recording.lock().await = Some(session);
+        assert_eq!(
+            current_recording_status(&state)
+                .await
+                .accepts_live_scene_edits,
+            Some(false)
+        );
+        let edits = [
+            (
+                "scene.source.transform.update",
+                json!({ "sourceId": "source:camera", "transform": { "x": 0.5, "y": 0.5 } }),
+            ),
+            (
+                "scene.source.nudge",
+                json!({ "sourceId": "source:camera", "directionX": 1.0, "directionY": 0.0 }),
+            ),
+            (
+                "scene.source.transform.reset",
+                json!({ "sourceId": "source:camera" }),
+            ),
+        ];
+        let before = serde_json::to_value(&*state.scene.lock().await).unwrap();
+        for (method, params) in &edits {
+            let text = json!({ "id": method, "method": method, "params": params }).to_string();
+            let response =
+                handle_text_message_with_role(&state, &text, BackendRole::Renderer).await;
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{method} must be refused on a fixed picture"));
+            assert_eq!(error.code, "scene-edit-refused", "{method}");
+            assert_eq!(
+                error.message,
+                "Moving and resizing isn't available on this recording. Stop and record again.",
+                "{method}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&*state.scene.lock().await).unwrap(),
+            before,
+            "a refusal changes nothing"
+        );
+
+        // A session that composes live takes every one of them, hot.
+        *state.recording.lock().await = Some(recording::test_active_recording_stub("bridge"));
+        assert_eq!(
+            current_recording_status(&state)
+                .await
+                .accepts_live_scene_edits,
+            Some(true)
+        );
+        for (method, params) in &edits {
+            let text = json!({ "id": method, "method": method, "params": params }).to_string();
+            let response =
+                handle_text_message_with_role(&state, &text, BackendRole::Renderer).await;
+            assert!(response.ok, "{method}: {:?}", response.error);
+            assert_eq!(response.payload.unwrap()["mode"], "hot", "{method}");
+        }
+
+        // Nothing running: no flag, and the edit lands idle.
+        *state.recording.lock().await = None;
+        assert_eq!(
+            current_recording_status(&state)
+                .await
+                .accepts_live_scene_edits,
+            None
+        );
+        let (method, params) = &edits[0];
+        let text = json!({ "id": method, "method": method, "params": params }).to_string();
+        let response = handle_text_message_with_role(&state, &text, BackendRole::Renderer).await;
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.payload.unwrap()["mode"], "idle");
+    }
+
+    /// Plan 215 D1, review fix: the replay-only Clips ring (plan 181) runs
+    /// while the user is idle, and on a profile outside the bridge envelope
+    /// it runs on the legacy graph. An idle edit must keep landing in the
+    /// Preview then, as it always did; only a recording or a livestream on a
+    /// fixed picture refuses.
+    #[tokio::test]
+    async fn scene_edits_are_never_refused_for_a_clips_ring_on_a_fixed_picture() {
+        let state = test_state();
+        let mut layout = protocol::default_layout_settings();
+        layout.layout_preset = protocol::LayoutPreset::ScreenCamera;
+        let config = protocol::SceneConfigParams {
+            transition_ms: None,
+            sources: protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: Some("camera:avfoundation-native:camera-1".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: None,
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let scene = scene_from_capture_config(config);
+        live_layout::commit_scene_with_layout(&state, &scene, layout, None)
+            .await
+            .expect("the idle scene commits");
+        let edit = json!({
+            "id": "move",
+            "method": "scene.source.transform.update",
+            "params": { "sourceId": "source:camera", "transform": { "x": 0.5, "y": 0.5 } }
+        })
+        .to_string();
+
+        let mut ring = recording::test_active_recording_stub("clips-ring");
+        ring.replay_only = true;
+        ring.set_accepts_live_scene_edits_for_test(false);
+        *state.recording.lock().await = Some(ring);
+        let response = handle_text_message_with_role(&state, &edit, BackendRole::Renderer).await;
+        assert!(
+            response.ok,
+            "a Clips ring on a fixed picture must not refuse an idle edit: {:?}",
+            response.error
+        );
+        let moved = state
+            .scene
+            .lock()
+            .await
+            .sources
+            .iter()
+            .find(|source| source.id == "source:camera")
+            .map(|source| (source.transform.x, source.transform.y))
+            .expect("the camera is in the scene");
+        assert_eq!(moved, (0.5, 0.5), "the idle edit landed");
+
+        // The same picture, recorded for real: refused.
+        let mut session = recording::test_active_recording_stub("legacy");
+        session.set_accepts_live_scene_edits_for_test(false);
+        *state.recording.lock().await = Some(session);
+        let response = handle_text_message_with_role(&state, &edit, BackendRole::Renderer).await;
+        assert_eq!(
+            response.error.expect("refused").code,
+            recording::LIVE_SCENE_EDIT_REFUSED_CODE
+        );
     }
 
     #[test]
