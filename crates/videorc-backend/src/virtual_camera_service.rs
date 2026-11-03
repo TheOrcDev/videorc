@@ -370,6 +370,8 @@ fn ensure_supervisor(state: &AppState) {
 /// The lease and the status, reconciled twice a second while the process
 /// lives. Cheap while off: one atomic and one short lock per pass.
 async fn run_supervisor(state: AppState) {
+    #[cfg(target_os = "linux")]
+    let mut linux_probe = LinuxProbe::default();
     loop {
         tokio::time::sleep(SUPERVISOR_INTERVAL).await;
         let on = state.virtual_camera.lock().on;
@@ -379,7 +381,42 @@ async fn run_supervisor(state: AppState) {
                 tracing::info!("Videorc Camera armed the preview run at its canvas");
             }
         }
+        #[cfg(target_os = "linux")]
+        linux_probe_pass(&state, &mut linux_probe).await;
         publish_if_changed(&state);
+    }
+}
+
+/// Plan 214 D1: the supervisor's v4l2loopback probe on Linux.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct LinuxProbe {
+    next_at: Option<std::time::Instant>,
+    memory: crate::virtual_camera_linux::ProbeMemory,
+}
+
+/// Plan 214 D1: on Linux the backend probes v4l2loopback itself (main only
+/// reports `setting-up` while its `pkexec modprobe` runs, and `failed` when
+/// it is refused): once a second until the device is there, every ten
+/// seconds after, and never while the camera is hidden (`PROVEN` false).
+/// Main's word stands until the box changes (`ProbeMemory`). The caller
+/// publishes the change.
+#[cfg(target_os = "linux")]
+async fn linux_probe_pass(state: &AppState, probe: &mut LinuxProbe) {
+    use crate::virtual_camera_linux as linux;
+    let now = std::time::Instant::now();
+    if !linux::PROVEN || probe.next_at.is_some_and(|at| now < at) {
+        return;
+    }
+    // `modinfo` is a process: off the runtime's threads.
+    let Ok(report) = tokio::task::spawn_blocking(linux::platform_report_now).await else {
+        return;
+    };
+    let ready = report.0 == VirtualCameraPlatformStep::Ready;
+    probe.next_at = Some(std::time::Instant::now() + linux::next_probe_interval(ready));
+    let mut inner = state.virtual_camera.lock();
+    if let Some(merged) = probe.memory.merge(inner.platform.as_ref(), report) {
+        inner.platform = Some(merged);
     }
 }
 

@@ -635,12 +635,247 @@ pub mod abi {
     }
 }
 
-/// The Linux sink lands with the writer (D2); until then every platform
-/// refuses, never a silent stub.
+// ---------------------------------------------------------------------------
+// D2: the writer (Linux only)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod writer {
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::path::{Path, PathBuf};
+
+    use super::abi::{
+        V4L2_BUF_TYPE_VIDEO_OUTPUT, V4L2_CAP_TIMEPERFRAME, V4L2_CAP_VIDEO_OUTPUT, V4l2Capability,
+        V4l2Format, V4l2Fract, V4l2OutputParm, V4l2Streamparm, VIDIOC_G_FMT, VIDIOC_QUERYCAP,
+        VIDIOC_S_FMT, VIDIOC_S_PARM, check_output_format, output_pix_format,
+    };
+    use super::{LinuxCameraRoots, LinuxSetupState, MODINFO, not_ready_message, probe_setup};
+    use crate::virtual_camera::{
+        VIRTUAL_CAMERA_FPS, VIRTUAL_CAMERA_HEIGHT, VIRTUAL_CAMERA_WIDTH, VirtualCameraFrame,
+        VirtualCameraPts, VirtualCameraPush, VirtualCameraSink, VirtualCameraSinkError,
+        i420_to_yuyv,
+    };
+
+    /// `/dev/video42` (found by name) held open for output while the switch
+    /// is on. One `write()` per tick; the file closes on off, and with
+    /// `exclusive_caps=1` that is what removes the camera from Chrome's list.
+    pub struct V4l2LoopbackSink {
+        roots: LinuxCameraRoots,
+        device: Option<(PathBuf, File)>,
+        yuyv: Vec<u8>,
+        frame_len: usize,
+    }
+
+    impl V4l2LoopbackSink {
+        pub fn new() -> Self {
+            Self {
+                roots: LinuxCameraRoots::default(),
+                device: None,
+                yuyv: Vec::new(),
+                frame_len: 0,
+            }
+        }
+    }
+
+    fn ioctl<T>(file: &File, request: u32, arg: &mut T) -> std::io::Result<()> {
+        loop {
+            // SAFETY: `request` is one of the V4L2 ioctls in `abi`, and `T` is
+            // the struct that ioctl reads and writes, laid out as
+            // `videodev2.h` says (the tests pin the sizes); `arg` outlives
+            // the call.
+            let result = unsafe { libc::ioctl(file.as_raw_fd(), request as _, arg as *mut T) };
+            if result >= 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
+    /// Open the loopback node for output and set YUYV 1920×1080 at 30 fps:
+    /// the file and the bytes one frame write carries.
+    fn open_output(path: &Path) -> Result<(File, usize), VirtualCameraSinkError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| {
+                let fix = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    " Add your user to the `video` group (sudo usermod -aG video $USER) and log in again."
+                } else {
+                    ""
+                };
+                VirtualCameraSinkError::disconnected(format!(
+                    "Could not open {} for Videorc Camera: {error}.{fix}",
+                    path.display()
+                ))
+            })?;
+
+        // SAFETY: all-zero bytes are a valid `V4l2Capability` (plain integers
+        // and byte arrays).
+        let mut capability: V4l2Capability = unsafe { std::mem::zeroed() };
+        ioctl(&file, VIDIOC_QUERYCAP, &mut capability).map_err(|error| {
+            VirtualCameraSinkError::disconnected(format!(
+                "{} is not a V4L2 device (VIDIOC_QUERYCAP: {error}).",
+                path.display()
+            ))
+        })?;
+        if capability.node_caps() & V4L2_CAP_VIDEO_OUTPUT == 0 {
+            return Err(VirtualCameraSinkError::disconnected(format!(
+                "{} ({}) is not a V4L2 output device; Videorc Camera needs the v4l2loopback node.",
+                path.display(),
+                capability.card_name()
+            )));
+        }
+
+        // The frame rate is a hint to readers; a driver that refuses it still
+        // takes frames, so this is best effort.
+        // SAFETY: zero is a valid `V4l2Streamparm` (integers and a byte union).
+        let mut parm: V4l2Streamparm = unsafe { std::mem::zeroed() };
+        parm.type_ = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        parm.parm.output = V4l2OutputParm {
+            capability: V4L2_CAP_TIMEPERFRAME,
+            outputmode: 0,
+            timeperframe: V4l2Fract {
+                numerator: 1,
+                denominator: VIRTUAL_CAMERA_FPS,
+            },
+            extendedmode: 0,
+            writebuffers: 0,
+            reserved: [0; 4],
+        };
+        if let Err(error) = ioctl(&file, VIDIOC_S_PARM, &mut parm) {
+            tracing::warn!(
+                "Videorc Camera: {} refused {} fps (VIDIOC_S_PARM: {error}); writing anyway",
+                path.display(),
+                VIRTUAL_CAMERA_FPS
+            );
+        }
+
+        // SAFETY: zero is a valid `V4l2Format` (integers, bytes and a null
+        // pointer in the alignment member).
+        let mut format: V4l2Format = unsafe { std::mem::zeroed() };
+        format.type_ = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        // Read the driver's defaults first (OBS does), then set ours over them.
+        let _ = ioctl(&file, VIDIOC_G_FMT, &mut format);
+        format.type_ = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        format.fmt.pix = output_pix_format(VIRTUAL_CAMERA_WIDTH, VIRTUAL_CAMERA_HEIGHT);
+        ioctl(&file, VIDIOC_S_FMT, &mut format).map_err(|error| {
+            VirtualCameraSinkError::disconnected(format!(
+                "{} refused YUYV {}×{} (VIDIOC_S_FMT: {error}). Another writer may hold v4l2loopback.",
+                path.display(),
+                VIRTUAL_CAMERA_WIDTH,
+                VIRTUAL_CAMERA_HEIGHT
+            ))
+        })?;
+        // SAFETY: the driver filled `pix` for a VIDEO_OUTPUT format.
+        let pix = unsafe { format.fmt.pix };
+        let frame_len = check_output_format(&pix, VIRTUAL_CAMERA_WIDTH, VIRTUAL_CAMERA_HEIGHT)
+            .map_err(|why| {
+                VirtualCameraSinkError::disconnected(format!(
+                    "{} cannot carry Videorc Camera: {why}.",
+                    path.display()
+                ))
+            })?;
+        Ok((file, frame_len))
+    }
+
+    impl VirtualCameraSink for V4l2LoopbackSink {
+        fn label(&self) -> &'static str {
+            "v4l2loopback"
+        }
+
+        fn connect(&mut self) -> Result<(), VirtualCameraSinkError> {
+            if self.device.is_some() {
+                return Ok(());
+            }
+            let state = probe_setup(&self.roots, &MODINFO);
+            let LinuxSetupState::Ready { device } = state else {
+                return Err(VirtualCameraSinkError::disconnected(
+                    not_ready_message(&state)
+                        .unwrap_or_else(|| "v4l2loopback is not ready.".to_string()),
+                ));
+            };
+            let (file, frame_len) = open_output(&device)?;
+            tracing::info!(
+                "Videorc Camera writes YUYV {}×{} at {} fps to {}",
+                VIRTUAL_CAMERA_WIDTH,
+                VIRTUAL_CAMERA_HEIGHT,
+                VIRTUAL_CAMERA_FPS,
+                device.display()
+            );
+            self.frame_len = frame_len;
+            self.device = Some((device, file));
+            Ok(())
+        }
+
+        fn disconnect(&mut self) {
+            if let Some((device, file)) = self.device.take() {
+                drop(file);
+                tracing::info!("Videorc Camera closed {}", device.display());
+            }
+        }
+
+        fn push(
+            &mut self,
+            frame: &VirtualCameraFrame<'_>,
+            _pts: VirtualCameraPts,
+        ) -> Result<VirtualCameraPush, VirtualCameraSinkError> {
+            let Some((device, file)) = self.device.as_mut() else {
+                return Err(VirtualCameraSinkError::disconnected(
+                    "Videorc Camera's device is not open.",
+                ));
+            };
+            let VirtualCameraFrame::I420 { planes, .. } = frame else {
+                return Err(VirtualCameraSinkError::transient(format!(
+                    "Videorc Camera on Linux writes CPU frames only; got {}",
+                    frame.kind()
+                )));
+            };
+            i420_to_yuyv(&planes.view(), &mut self.yuyv);
+            if self.yuyv.len() != self.frame_len {
+                return Err(VirtualCameraSinkError::transient(format!(
+                    "Videorc Camera's frame is {} bytes, {} expects {}",
+                    self.yuyv.len(),
+                    device.display(),
+                    self.frame_len
+                )));
+            }
+            match file.write_all(&self.yuyv) {
+                Ok(()) => Ok(VirtualCameraPush::Pushed),
+                Err(error) => {
+                    // The module was unloaded or the node vanished: the
+                    // output reconnects once a second, re-finding the device.
+                    let message = format!("Videorc Camera lost {}: {error}", device.display());
+                    self.device = None;
+                    Err(VirtualCameraSinkError::disconnected(message))
+                }
+            }
+        }
+
+        fn viewers(&self) -> Option<u32> {
+            // D13: v4l2loopback has no reader count; unknown counts as held.
+            None
+        }
+    }
+}
+
+/// The Linux sink. `platform_sink` reaches it only once [`PROVEN`] is true.
 pub fn sink() -> Result<Box<dyn VirtualCameraSink>, VirtualCameraUnavailable> {
-    Err(VirtualCameraUnavailable::new(
-        "Videorc Camera's v4l2loopback writer has not landed yet (plan 214 D2).",
-    ))
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(writer::V4l2LoopbackSink::new()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(VirtualCameraUnavailable::new(
+            "Videorc Camera's v4l2loopback writer runs on Linux only.",
+        ))
+    }
 }
 
 /// Keeps `Path` in the pure half's signature set on every platform.
@@ -1135,10 +1370,11 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn the_sink_refuses_until_the_writer_lands() {
-        let refused = sink().err().expect("no writer yet");
+    fn off_linux_the_sink_says_so() {
+        let refused = sink().err().expect("no writer off Linux");
         assert!(!refused.hidden);
-        assert!(refused.reason.contains("D2"));
+        assert!(refused.reason.contains("Linux only"));
     }
 }
