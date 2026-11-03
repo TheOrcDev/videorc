@@ -40,6 +40,12 @@ describe('renderer security policy', () => {
       expect(roleCanInvokeChannel(role, 'scheduled-streams:import-thumbnail')).toBe(false)
     }
   })
+  it('lets only the Studio renderer run a Videorc Camera action (plan 214 E)', () => {
+    expect(roleCanInvokeChannel('main', 'virtual-camera:action')).toBe(true)
+    for (const role of ['notes', 'comments', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'virtual-camera:action')).toBe(false)
+    }
+  })
   it('derives only known preload roles from main-owned process arguments', () => {
     expect(rendererRoleFromArguments(['electron', '--videorc-renderer-role=comments'])).toBe(
       'comments'

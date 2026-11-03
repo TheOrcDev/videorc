@@ -1910,6 +1910,9 @@ describe('Windows capture-protection pixel evidence', () => {
         }
       ])
     )
+    // Plan 215 C3: the Stream Manager counts only with Hide from stream on.
+    ready.comments.hiddenFromStream = true
+    ready.comments.protected = true
     ready['proof-surface'] = {
       exists: true,
       visible: true,
@@ -1931,6 +1934,17 @@ describe('Windows capture-protection pixel evidence', () => {
       evaluateWindowsCaptureProtectionPlacement({ placement, states: absent }).verdict,
       'BLOCKED'
     )
+
+    const onStream = structuredClone(ready)
+    onStream.comments.hiddenFromStream = false
+    onStream.comments.protected = false
+    const onStreamResult = evaluateWindowsCaptureProtectionPlacement({
+      placement,
+      states: onStream
+    })
+    assert.equal(onStreamResult.verdict, 'BLOCKED')
+    assert.match(onStreamResult.blockers.join('\n'), /comments: Hide from stream was not on/)
+    assert.match(onStreamResult.blockers.join('\n'), /content protection was not on/)
 
     const markerPending = structuredClone(ready)
     markerPending.comments.captureProtectionMarkerInstalled = false

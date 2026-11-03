@@ -149,6 +149,27 @@ const stageItemIcon = (entry: OverlayStageItem): ElementType =>
   entry.kind === 'overlay' ? OVERLAY_ICONS[entry.item] : ImageIcon
 type StageGhost = GhostResult & { sourceId: string; crop?: StageCrop }
 
+/**
+ * Whether a gesture's frames go to the compositor as editor drafts: only
+ * where the native picture is showing (the live canvas, or the floating
+ * preview), with both RPCs wired, and never while a recording or a livestream
+ * runs (plan 215 D1): the compositor refuses them (plan 058 decision 4), so
+ * the outline is painted here and the outputs move on release.
+ */
+export function stageDraftsEnabled({
+  liveSurface,
+  previewFollowsGestures,
+  draftRpc,
+  draftsRefused
+}: {
+  liveSurface: boolean
+  previewFollowsGestures: boolean
+  draftRpc: boolean
+  draftsRefused: boolean
+}): boolean {
+  return !draftsRefused && (liveSurface || previewFollowsGestures) && draftRpc
+}
+
 /** What the stage is doing: a pointer gesture, a released commit still landing, or nothing. */
 export type StagePhase = 'idle' | 'dragging' | 'pending'
 
@@ -169,7 +190,13 @@ export type StagePhase = 'idle' | 'dragging' | 'pending'
  * With the preview floating in its own window instead (`previewFollowsGestures`),
  * the schematic is the canvas and the gesture's drafts still go out, so the
  * real picture over there follows the drag too; nothing is held between
- * gestures, so that window shows no selection at rest. */
+ * gestures, so that window shows no selection at rest.
+ *
+ * While a recording or a livestream runs (`draftsRefused`, plan 215 D1) the
+ * compositor refuses every draft (plan 058 decision 4: a draft never reaches
+ * an output), so nothing is drafted or held; the selection frame, its handles
+ * and the guides are painted over the live picture instead, the outline
+ * follows the drag, and the outputs move on release. */
 export function SceneStage({
   scene,
   selectedSourceId,
@@ -179,6 +206,7 @@ export function SceneStage({
   previewFollowsGestures = false,
   liveDocked = false,
   liveHint = null,
+  draftsRefused = false,
   slotRef,
   onPopOut,
   onShowLive,
@@ -222,6 +250,10 @@ export function SceneStage({
   liveDocked?: boolean
   /** Tertiary copy under the canvas while the docked surface is hidden. */
   liveHint?: string | null
+  /** A recording or livestream is running (plan 215 D1): the compositor
+   * refuses drafts, so none go out and the chrome is painted over the live
+   * picture. The outputs move on release. */
+  draftsRefused?: boolean
   /** Dock-slot reporter ref for the canvas rect (macOS live canvas only). */
   slotRef?: (element: HTMLElement | null) => void
   /** Present only where the live canvas is supported; the footer then offers
@@ -333,8 +365,18 @@ export function SceneStage({
   }, [edits, scene])
   // Gestures draft wherever the native picture is showing (here, or in the
   // floating preview); the idle selection is held only on the live canvas.
-  const draftEnabled = (liveSurface || previewFollowsGestures) && Boolean(onDraft && onDraftClear)
+  // A running session refuses every draft (plan 215 D1), so none go out.
+  const draftEnabled = stageDraftsEnabled({
+    liveSurface,
+    previewFollowsGestures,
+    draftRpc: Boolean(onDraft && onDraftClear),
+    draftsRefused
+  })
   const holdEnabled = liveSurface && draftEnabled
+  // The live canvas hides the chrome the compositor draws from the held or
+  // drafted frame; with drafts refused there is no such frame, so the
+  // selection, its handles and the guides are painted here instead.
+  const chromeHidden = liveSurface && !draftsRefused
   // Unmount needs no dispose: the mount effect's cleanup cancels the gesture,
   // which clears the channel, and an idle channel holds no timer.
   useLayoutEffect(() => {
@@ -1229,7 +1271,7 @@ export function SceneStage({
                 <line
                   key={`${guide.axis}-${guide.position}`}
                   data-videorc-stage-guide={guide.axis}
-                  className={cn('stroke-ring', liveSurface && 'invisible')}
+                  className={cn('stroke-ring', chromeHidden && 'invisible')}
                   strokeDasharray="4 3"
                   strokeWidth={1}
                   vectorEffect="non-scaling-stroke"
@@ -1247,7 +1289,7 @@ export function SceneStage({
                 stageH={stageH}
                 scale={pixelScale}
                 enabled={resizeEnabled && editable(selectedSource)}
-                hitOnly={liveSurface}
+                hitOnly={chromeHidden}
                 onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
               />
             ) : selectedOverlay ? (
@@ -1257,7 +1299,7 @@ export function SceneStage({
                 stageH={stageH}
                 scale={pixelScale}
                 enabled={Boolean(overlays?.editable)}
-                hitOnly={liveSurface}
+                hitOnly={chromeHidden}
                 onHandle={(handle, event) => beginOverlayGesture(selectedOverlay, handle, event)}
               />
             ) : null}

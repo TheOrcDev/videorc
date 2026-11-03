@@ -19,6 +19,7 @@ import { useAppIcons } from '@/hooks/use-app-icons'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset } from '@/lib/backend'
 import { layoutPresetOrientation } from '@/lib/capture'
+import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import { setFollowFrontApp, updateFollowSettings, useFollowSettings } from '@/lib/follow-settings'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { layoutPresetLabel } from '@/lib/layout-labels'
@@ -78,7 +79,12 @@ function FollowFrontAppSwitch(): ReactElement {
   )
 }
 
-export function SceneList(): ReactElement {
+export function SceneList({
+  onEditScene
+}: {
+  /** Plan 215 D4: the page's own Edit scene (the camera, the editor on). */
+  onEditScene: () => void
+}): ReactElement {
   const studio = useStudioCore()
   const {
     savedScenes,
@@ -96,7 +102,8 @@ export function SceneList(): ReactElement {
     applyCameraPreset,
     canSaveScene,
     wsStatus,
-    scene
+    scene,
+    sceneEditMode
   } = studio
   const dialogs = useSceneDialogs()
   const platform = runtimeInfo?.platform
@@ -168,6 +175,12 @@ export function SceneList(): ReactElement {
       action={
         <>
           {platform === 'darwin' ? <FollowFrontAppSwitch /> : null}
+          {/* Plan 215 D4: the editor's door on its own page, until it's on. */}
+          {sceneEditMode ? null : (
+            <Button data-testid="scene-edit" variant="outline" onClick={onEditScene}>
+              {EDIT_SCENE_LABEL}
+            </Button>
+          )}
           {saveButton()}
           <DisabledReason reason={readOnly ? READ_ONLY_REASON : null}>
             <Button

@@ -1550,6 +1550,7 @@ mod tests {
             duration_ms: None,
             message: None,
             replay_only,
+            accepts_live_scene_edits: None,
         };
         let live_and_recording = status(RecordingState::Recording, Some("rtmp://x/live/k"), false);
         assert_eq!(activity_word(&live_and_recording), "live");

@@ -4,7 +4,16 @@ import { describe, expect, it } from 'vitest'
 
 import { overlayEditsBlockedReason } from '@/components/scene/overlay-stage'
 import type { OverlayItem } from '@/lib/backend'
-import { OVERLAY_ITEM_OFF_LINES, OverlayItemInspector, OverlayItemSection } from './layout-tab'
+import {
+  LIVE_PLACEMENT_HINT,
+  OVERLAY_ITEM_OFF_LINES,
+  OverlayItemInspector,
+  OverlayItemSection,
+  SCENE_POSITION_LOCK_REASON,
+  SCENE_POSITION_UNAVAILABLE_REASON,
+  placementControls,
+  scenePositionLockReason
+} from './layout-tab'
 
 // Plan 174, C-6: overlay changes never fail silently. Without the backend the
 // controls are off, with one reason above them.
@@ -102,6 +111,97 @@ describe('the overlay section (plan 205 S3, D4)', () => {
       const markup = renderSection(item, { showOnStream: false, showInRecording: false })
       expect(markup).not.toContain('data-videorc-overlay-off-line')
       expect(markup).not.toContain('Viewers don&#x27;t see')
+    }
+  })
+})
+
+// Plan 215 D4 (B2): Edit scene turns the editor on, which wakes the arrows.
+// While recording or live it still opens the editor, and the line says why
+// the arrows stay off.
+describe('the Placement section (plan 215 B2)', () => {
+  const idle = { isSessionActive: false, acceptsLiveSceneEdits: null, stageDragging: false }
+
+  it('wakes the arrows once the editor is on', () => {
+    expect(placementControls({ ...idle, sceneEditMode: false }).nudgeDisabled).toBe(true)
+    expect(placementControls({ ...idle, sceneEditMode: true })).toEqual({
+      nudgeDisabled: false,
+      description:
+        'Click the source on the stage to edit it: drag it, or nudge it with the arrows.',
+      lockReason: null
+    })
+    expect(
+      placementControls({ ...idle, sceneEditMode: true, stageDragging: true }).nudgeDisabled
+    ).toBe(true)
+  })
+
+  it('keeps them off while a session has not said it takes a move, and says why', () => {
+    expect(
+      placementControls({
+        sceneEditMode: true,
+        isSessionActive: true,
+        acceptsLiveSceneEdits: null,
+        stageDragging: false
+      })
+    ).toEqual({
+      nudgeDisabled: true,
+      description: SCENE_POSITION_LOCK_REASON,
+      lockReason: SCENE_POSITION_LOCK_REASON
+    })
+  })
+})
+
+// Plan 215 D1: a source moves while recording or live once the session says
+// a commit reaches its picture (`recording.status.acceptsLiveSceneEdits`).
+// The outputs move on release, and the line says so; a session on the
+// legacy FFmpeg graph keeps the lock and says why.
+describe('a live session (plan 215 D1)', () => {
+  const live = { isSessionActive: true, stageDragging: false, sceneEditMode: true }
+
+  it('lifts the lock when the session takes a move, and says where a change lands', () => {
+    expect(scenePositionLockReason({ isSessionActive: true, acceptsLiveSceneEdits: true })).toBe(
+      null
+    )
+    expect(placementControls({ ...live, acceptsLiveSceneEdits: true })).toEqual({
+      nudgeDisabled: false,
+      description: LIVE_PLACEMENT_HINT,
+      lockReason: null
+    })
+    expect(LIVE_PLACEMENT_HINT).toBe('Changes apply to your stream when you let go.')
+    // A gesture in flight still parks the arrows, as it does idle.
+    expect(
+      placementControls({ ...live, acceptsLiveSceneEdits: true, stageDragging: true }).nudgeDisabled
+    ).toBe(true)
+    // The editor still has to be on (plan 215 B2).
+    expect(
+      placementControls({ ...live, acceptsLiveSceneEdits: true, sceneEditMode: false })
+        .nudgeDisabled
+    ).toBe(true)
+  })
+
+  it("keeps the lock on the legacy FFmpeg graph, with the backend's own reason", () => {
+    expect(scenePositionLockReason({ isSessionActive: true, acceptsLiveSceneEdits: false })).toBe(
+      SCENE_POSITION_UNAVAILABLE_REASON
+    )
+    expect(placementControls({ ...live, acceptsLiveSceneEdits: false })).toEqual({
+      nudgeDisabled: true,
+      description: SCENE_POSITION_UNAVAILABLE_REASON,
+      lockReason: SCENE_POSITION_UNAVAILABLE_REASON
+    })
+    // The same sentence the backend answers `scene-edit-refused` with.
+    expect(SCENE_POSITION_UNAVAILABLE_REASON).toBe(
+      "Moving and resizing isn't available on this recording. Stop and record again."
+    )
+  })
+
+  it('keeps the plain lock until the session has said (a start pending, an older backend)', () => {
+    expect(scenePositionLockReason({ isSessionActive: true, acceptsLiveSceneEdits: null })).toBe(
+      SCENE_POSITION_LOCK_REASON
+    )
+  })
+
+  it('never locks idle, whatever a stale flag says', () => {
+    for (const acceptsLiveSceneEdits of [true, false, null]) {
+      expect(scenePositionLockReason({ isSessionActive: false, acceptsLiveSceneEdits })).toBe(null)
     }
   })
 })

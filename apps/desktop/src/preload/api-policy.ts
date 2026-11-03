@@ -60,6 +60,8 @@ export const AUXILIARY_API_KEYS = {
     'moderateFromCommentsWindow',
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
+    // Hide from stream (plan 215 D6): the status bar's switch.
+    'setCommentsWindowHiddenFromStream',
     'setCommentsWindowHighlightAnchor',
     'setCommentsWindowAutoShowActivity',
     'onCommentsWindowState',

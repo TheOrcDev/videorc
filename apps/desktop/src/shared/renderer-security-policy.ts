@@ -30,6 +30,9 @@ export const IPC_INVOKE_ROLES = {
   'app:set-native-theme': MAIN_ONLY,
   'app:exit': MAIN_ONLY,
   'system:open-permissions': MAIN_ONLY,
+  // Videorc Camera (plan 214 E): System Settings, removal and setup are the
+  // Output page's and Health's, so the Studio renderer only.
+  'virtual-camera:action': MAIN_ONLY,
   'system:request-media-access': MAIN_ONLY,
   'system:request-screen-access': MAIN_ONLY,
   'system:recheck-permission-grants': MAIN_ONLY,
@@ -132,6 +135,7 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:toggle': MAIN_ONLY,
   'comments-window:get-state': MAIN_AND_COMMENTS,
   'comments-window:set-always-on-top': MAIN_AND_COMMENTS,
+  'comments-window:set-hidden-from-stream': MAIN_AND_COMMENTS,
   'comments-window:set-highlight-anchor': MAIN_AND_COMMENTS,
   'comments-window:set-auto-show-activity': MAIN_AND_COMMENTS,
   'comments-window:push-snapshot': MAIN_ONLY,

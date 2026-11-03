@@ -4,6 +4,9 @@ import type {
   SessionSources,
   ScreenHideParams,
   ScreenPrivacy,
+  VirtualCameraPlatformReportParams,
+  VirtualCameraSetParams,
+  VirtualCameraStatus,
   SourceSwitchParams,
   BackendHealth,
   ScheduledStreamEvent,
@@ -521,6 +524,16 @@ export interface BackendRpcMethodMap {
   'screen.show': BackendRpcDefinition<undefined, ScreenPrivacy>
   'screen.privacy.get': BackendRpcDefinition<undefined, ScreenPrivacy>
   // --- end Hide screen (plan 210 S7) ---
+  // --- Videorc Camera (plan 214 A4) ---
+  'virtualCamera.status': BackendRpcDefinition<undefined, VirtualCameraStatus>
+  /** The switch is saved (D4); the answer is the status it earns now. */
+  'virtualCamera.set': BackendRpcDefinition<VirtualCameraSetParams, VirtualCameraStatus>
+  /** Admin socket only: main's report of the extension or the Windows setup step. */
+  'virtualCamera.platform.report': BackendRpcDefinition<
+    VirtualCameraPlatformReportParams,
+    VirtualCameraStatus
+  >
+  // --- end Videorc Camera (plan 214 A4) ---
   'sounds.list': BackendRpcDefinition<undefined, SoundboardState>
   'sounds.import': BackendRpcDefinition<SoundImportParams, Sound>
   'sounds.update': BackendRpcDefinition<SoundUpdateParams, Sound>
@@ -677,6 +690,8 @@ export interface BackendEventMap {
   // --- Hide screen (plan 210 S7): the state, on every hide and show ---
   'remote.state': { screenHidden: boolean; [key: string]: unknown }
   'screen.privacy.changed': ScreenPrivacy
+  // --- Videorc Camera (plan 214 A4): the status, on every change ---
+  'virtualCamera.changed': VirtualCameraStatus
   'sounds.playback': SoundsPlayback
   // --- Buddy look (plan 169 D9) ---
   'cohost.avatar.progress': CohostAvatarProgressEvent
@@ -905,7 +920,9 @@ const recordingStatusSchema = objectSchema(
     pipeline: optionalSchema(boundedBackendPayloadSchema),
     durationMs: optionalSchema(numberSchema({ min: 0 })),
     message: optionalText,
-    replayOnly: optionalSchema(booleanSchema)
+    replayOnly: optionalSchema(booleanSchema),
+    // Plan 215 D1: the running session's word on live scene edits.
+    acceptsLiveSceneEdits: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<RecordingStatus>
@@ -3592,6 +3609,49 @@ const screenHideParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ScreenHideParams>
 // --- end Hide screen (plan 210 S7) ---
+// --- Videorc Camera (plan 214 A4) ---
+const virtualCameraStateSchema = enumSchema([
+  'off',
+  'installing',
+  'needs-approval',
+  'needs-setup',
+  'ready',
+  'streaming',
+  'unavailable'
+])
+const virtualCameraPlatformStepSchema = enumSchema([
+  'installing',
+  'needs-approval',
+  'needs-reboot',
+  'ready',
+  'failed',
+  'needs-setup',
+  'setting-up',
+  'unsupported'
+])
+const virtualCameraStatusSchema = objectSchema(
+  {
+    on: booleanSchema,
+    available: booleanSchema,
+    state: virtualCameraStateSchema,
+    viewers: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    platformStep: optionalSchema(virtualCameraPlatformStepSchema),
+    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<VirtualCameraStatus>
+const virtualCameraSetParamsSchema = objectSchema(
+  { on: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<VirtualCameraSetParams>
+const virtualCameraPlatformReportParamsSchema = objectSchema(
+  {
+    platformStep: virtualCameraPlatformStepSchema,
+    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<VirtualCameraPlatformReportParams>
+// --- end Videorc Camera (plan 214 A4) ---
 
 const soundboardStateSchema = objectSchema(
   {
@@ -5342,6 +5402,14 @@ const runtimeContracts = {
   'screen.show': { params: undefinedSchema, result: screenPrivacySchema },
   'screen.privacy.get': { params: undefinedSchema, result: screenPrivacySchema },
   // --- end Hide screen (plan 210 S7) ---
+  // --- Videorc Camera (plan 214 A4) ---
+  'virtualCamera.status': { params: undefinedSchema, result: virtualCameraStatusSchema },
+  'virtualCamera.set': { params: virtualCameraSetParamsSchema, result: virtualCameraStatusSchema },
+  'virtualCamera.platform.report': {
+    params: virtualCameraPlatformReportParamsSchema,
+    result: virtualCameraStatusSchema
+  },
+  // --- end Videorc Camera (plan 214 A4) ---
   'sounds.list': { params: undefinedSchema, result: soundboardStateSchema },
   'sounds.import': { params: soundImportParamsSchema, result: soundSchema },
   'sounds.update': { params: soundUpdateParamsSchema, result: soundSchema },
@@ -5560,6 +5628,7 @@ const runtimeEventSchemas = {
   'banners.changed': bannerListSchema,
   'sounds.changed': soundboardStateSchema,
   'screen.privacy.changed': screenPrivacySchema,
+  'virtualCamera.changed': virtualCameraStatusSchema,
   'remote.state': runtimeSchema<BackendEventMap['remote.state']>('remote state', (value, path) => {
     objectSchema({ screenHidden: booleanSchema }, { allowUnknown: true }).parse(value, path)
     return value as BackendEventMap['remote.state']

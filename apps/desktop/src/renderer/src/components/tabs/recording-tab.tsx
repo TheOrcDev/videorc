@@ -11,6 +11,7 @@ import { useEffect, useId, useState, useSyncExternalStore, type ReactElement } f
 import { findAcceleratorOwner } from '../../../../shared/accelerator'
 import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
+import { VideorcCameraSection } from '@/components/tabs/videorc-camera-section'
 import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
 import {
   CLIPS_LABEL,
@@ -69,13 +70,15 @@ export const SAVE_RECORDING_OFF =
 
 /**
  * The Output page (plan 174 S3.6, D5): the one home for the local file. Its
- * quality, then where it goes. Settings has no Recording tab any more.
+ * quality, Clips, then Videorc Camera for other apps (plan 214 D14), then
+ * where recordings go. Settings has no Recording tab any more.
  */
 export function RecordingTab(): ReactElement {
   return (
     <div className="flex flex-col">
       <LocalRecordingSection />
       <ClipsSection />
+      <VideorcCameraSection />
       <RecordingsFolderSection />
     </div>
   )

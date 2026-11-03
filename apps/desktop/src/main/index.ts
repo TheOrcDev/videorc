@@ -1,5 +1,16 @@
 import { createAppIconHandler } from './app-icons'
 import { createFrontAppMonitor, frontAppSenderIsMain, type FrontAppBinding } from './front-app'
+import {
+  cameraExtensionBindingFromModule,
+  cameraExtensionShouldActivateForSwitch,
+  createCameraExtensionController,
+  platformReportForCameraExtension,
+  shouldActivateCameraExtensionAtLaunch,
+  type CameraExtensionController,
+  type CameraExtensionState
+} from './camera-extension'
+import { runVirtualCameraAction } from './virtual-camera-action'
+import { runLinuxLoadModule } from './virtual-camera-linux-setup'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
@@ -31,7 +42,9 @@ import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
   SessionMediaGrantResult,
-  ShortcutRecorderArmResult
+  ShortcutRecorderArmResult,
+  VirtualCameraActionResult,
+  VirtualCameraStatus
 } from '../shared/backend'
 import {
   SESSION_MEDIA_HOST,
@@ -215,7 +228,8 @@ import {
   parseMainPreviewSurfaceStatus,
   parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatus,
-  parseMainRecordingStatusEvent
+  parseMainRecordingStatusEvent,
+  parseMainVirtualCameraChangedEvent
 } from './backend-event-message'
 import {
   fallbackPreviewSurfaceCanvas,
@@ -486,9 +500,15 @@ import {
 } from './window-glass'
 import {
   applyVideorcWindowCaptureProtection,
+  releaseVideorcWindowCaptureProtection,
+  streamManagerHideMethod,
   type VideorcWindowRole,
   WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
 } from './window-capture-protection'
+import {
+  COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION,
+  commentsWindowHiddenFromStreamPreference
+} from './comments-window-prefs'
 import {
   assessProofPresentationWatch,
   assessProofSourceFrame,
@@ -833,6 +853,8 @@ let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
 let commentsHighlightAnchorValue: CommentHighlightAnchor | undefined
 let commentsAutoShowActivityValue: boolean | undefined
+/** Hide from stream (plan 215 D6), loaded lazily from prefs like the anchor. */
+let commentsHiddenFromStreamValue: boolean | undefined
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
@@ -1043,42 +1065,55 @@ function installCaptureProtectionSmokeMarker(window: BrowserWindow, role: Videor
   captureProtectionMarkerStates.set(window, false)
   const color = WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS[role]
   window.webContents.on('did-finish-load', () => {
-    if (window.isDestroyed() || window.webContents.isDestroyed()) {
-      return
-    }
-    captureProtectionMarkerStates.set(window, false)
-    const markerId = `videorc-capture-protection-marker-${role}`
-    void window.webContents
-      .executeJavaScript(
-        `(() => {
-          const markerId = ${JSON.stringify(markerId)};
-          const role = ${JSON.stringify(role)};
-          const color = ${JSON.stringify(color)};
-          let marker = document.getElementById(markerId);
-          if (!marker) {
-            marker = document.createElement('div');
-            marker.id = markerId;
-            document.documentElement.appendChild(marker);
-          }
-          marker.dataset.videorcCaptureProtectionRole = role;
-          marker.style.cssText =
-            'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
-            color;
-          return { role, color, installed: true };
-        })()`,
-        true
-      )
-      .then((result) => {
-        captureProtectionMarkerStates.set(
-          window,
-          result?.installed === true && result?.role === role && result?.color === color
-        )
-      })
-      .catch((error) => {
-        captureProtectionMarkerStates.set(window, false)
-        safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
-      })
+    void paintCaptureProtectionSmokeMarker(window, role, color)
   })
+}
+
+/**
+ * Paints one window edge to edge in a marker colour the artifact gates look
+ * for: the Windows stream smoke's role colours at load (above), and the
+ * macOS invisibility smokes' red on request (plan 215 C5, the Stream
+ * Manager; Notes paints its own through `?smokeMarker=1`). Resolves whether
+ * the marker took, and remembers it for the window-state commands.
+ */
+async function paintCaptureProtectionSmokeMarker(
+  window: BrowserWindow,
+  role: VideorcWindowRole,
+  color: string
+): Promise<boolean> {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) {
+    return false
+  }
+  captureProtectionMarkerStates.set(window, false)
+  const markerId = `videorc-capture-protection-marker-${role}`
+  try {
+    const result = await window.webContents.executeJavaScript(
+      `(() => {
+        const markerId = ${JSON.stringify(markerId)};
+        const role = ${JSON.stringify(role)};
+        const color = ${JSON.stringify(color)};
+        let marker = document.getElementById(markerId);
+        if (!marker) {
+          marker = document.createElement('div');
+          marker.id = markerId;
+          document.documentElement.appendChild(marker);
+        }
+        marker.dataset.videorcCaptureProtectionRole = role;
+        marker.style.cssText =
+          'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
+          color;
+        return { role, color, installed: true };
+      })()`,
+      true
+    )
+    const installed = result?.installed === true && result?.role === role && result?.color === color
+    captureProtectionMarkerStates.set(window, installed)
+    return installed
+  } catch (error) {
+    captureProtectionMarkerStates.set(window, false)
+    safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
+    return false
+  }
 }
 
 const captureProtectionMarkerStates = new WeakMap<BrowserWindow, boolean>()
@@ -1399,6 +1434,164 @@ if (windowAppearanceLoad.unavailableReason && process.platform === 'darwin') {
   safeConsole.warn(
     `Window appearance pin unavailable; Preview paints the solid palette: ${windowAppearanceLoad.unavailableReason}`
   )
+}
+// Plan 214 B3: the Videorc Camera system extension, activated from this
+// process (macOS looks it up in the requester's bundle). The controller holds
+// the last state and reports every change to the backend
+// (`virtualCamera.platform.report`), whose status the Output page shows. The
+// camera switch itself is the backend's (plan 214 A4, D4): main reads it at
+// every backend READY (`reconcileCameraExtensionWithBackend`) and on
+// `virtualCamera.changed`, and activates the extension when it turns on.
+// Off never deactivates (D12).
+let cameraExtensionController: CameraExtensionController | undefined
+function cameraExtension(): CameraExtensionController {
+  if (!cameraExtensionController) {
+    let binding = null
+    if (process.platform === 'darwin' && nativePreviewInProcessModuleResolution.path) {
+      try {
+        binding = cameraExtensionBindingFromModule(
+          requireNativePreviewRealSurfaceModule(nativePreviewInProcessModuleResolution.path)
+        )
+      } catch (error) {
+        safeConsole.warn(`Videorc Camera extension binding unavailable: ${errorMessage(error)}`)
+      }
+    }
+    cameraExtensionController = createCameraExtensionController({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      binding,
+      log: (line) => logBackend('info', line),
+      onState: (state) => {
+        void reportCameraExtensionToBackend(state)
+      }
+    })
+  }
+  return cameraExtensionController
+}
+/** Plan 214 B3's last step: one extension state to the backend, never fatal. */
+async function reportCameraExtensionToBackend(state: CameraExtensionState): Promise<void> {
+  const report = platformReportForCameraExtension(state, {
+    platform: process.platform,
+    isPackaged: app.isPackaged
+  })
+  if (!report) {
+    return
+  }
+  try {
+    await requestBackendAdmin('virtualCamera.platform.report', { ...report })
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Videorc Camera's extension state did not reach the backend: ${errorMessage(error)}`
+    )
+  }
+}
+/**
+ * Plan 214 D1: Linux's Load module. Main says `setting-up` while polkit's
+ * dialog and modprobe run. On a refusal it hands the step back to the
+ * backend's probe (`needs-setup`), so the button stays and the Output page
+ * shows the refusal's words from this result. A `failed` report here would
+ * stand until the box changed (`ProbeMemory`): after a cancelled password
+ * prompt, the switch would lock with no way to retry. Once the device is
+ * there, the probe settles `ready` on its own.
+ */
+async function loadVideorcCameraModule(): Promise<VirtualCameraActionResult> {
+  await reportVirtualCameraPlatformStep('setting-up')
+  const result = await runLinuxLoadModule()
+  if (!result.ok) {
+    await reportVirtualCameraPlatformStep('needs-setup')
+  }
+  return result.message === undefined
+    ? { ok: result.ok }
+    : { ok: result.ok, message: result.message }
+}
+async function reportVirtualCameraPlatformStep(
+  platformStep: 'setting-up' | 'needs-setup'
+): Promise<void> {
+  try {
+    await requestBackendAdmin('virtualCamera.platform.report', { platformStep })
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Videorc Camera's setup step did not reach the backend: ${errorMessage(error)}`
+    )
+  }
+}
+/**
+ * Plan 214 D4: the saved camera switch lives in the backend's settings store;
+ * `virtualCamera.status` answers it once the backend is ready. False when the
+ * backend cannot answer (the extension then waits for `virtualCamera.changed`).
+ */
+async function cameraExtensionSwitchOnAtLaunch(): Promise<boolean> {
+  try {
+    const status = await requestBackendAdmin<VirtualCameraStatus>('virtualCamera.status')
+    return status.on === true
+  } catch (error) {
+    logBackend('warn', `Could not read the Videorc Camera switch: ${errorMessage(error)}`)
+    return false
+  }
+}
+/**
+ * The switch as main last saw it (null until the backend answered once).
+ * Only an off-to-on edge activates: `virtualCamera.changed` also fires for
+ * the extension's own reports and the sink's health, and a failed
+ * activation must not retry itself on its own `failed` report.
+ */
+let lastVirtualCameraSwitchOn: boolean | null = null
+/**
+ * At every backend READY (a launch or a backend restart): the backend learns
+ * where the extension is, and a switch saved on activates the extension when
+ * no request is live (Apple: as early as possible, so an update replaces the
+ * installed copy).
+ */
+async function reconcileCameraExtensionWithBackend(): Promise<void> {
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const controller = cameraExtension()
+  await reportCameraExtensionToBackend(controller.state())
+  if (!controller.availability().available) {
+    return
+  }
+  const switchOn = await cameraExtensionSwitchOnAtLaunch()
+  // A fresh backend is a fresh read of the switch: whatever main saw before
+  // its restart no longer counts as "already on".
+  const shouldActivate = cameraExtensionShouldActivateForSwitch(
+    { on: switchOn },
+    controller.state().phase,
+    null
+  )
+  lastVirtualCameraSwitchOn = switchOn
+  if (shouldActivate) {
+    logBackend('info', 'Videorc Camera is on in the saved settings; activating its extension.')
+    void controller.activate()
+  }
+}
+/** `virtualCamera.changed`: the switch turning on at runtime activates the extension. */
+function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
+  let status: VirtualCameraStatus
+  try {
+    status = parse()
+  } catch (error) {
+    logBackend('warn', `Main dropped a Videorc Camera status: ${errorMessageText(error)}`)
+    return
+  }
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const controller = cameraExtension()
+  const shouldActivate =
+    controller.availability().available &&
+    cameraExtensionShouldActivateForSwitch(
+      status,
+      controller.state().phase,
+      lastVirtualCameraSwitchOn
+    )
+  lastVirtualCameraSwitchOn = status.on
+  if (shouldActivate) {
+    logBackend('info', 'Videorc Camera switched on; activating its extension.')
+    void controller.activate()
+  }
 }
 type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
 const nativePreviewRealSurfaceDriverLoad = loadNativePreviewPrimaryDriver()
@@ -3403,8 +3596,11 @@ function restoreNotesWindowOnLaunch(): void {
 // --- Stream Manager window (code name: comments) ------------------------------
 // The live dashboard in its own OS window (plan 055): chat, activity, stats
 // and Buddy, relayed from the main renderer. Plain BrowserWindow with no
-// native surface. It is NOT capture-protected (owner call, 2026-08-19: only
-// Notes is), so Studio closes it during a recording that would capture it.
+// native surface. It is NOT capture-protected by default (owner call,
+// 2026-08-19: only Notes is), so Studio closes it during a recording that
+// would capture it. Plan 215 D6 adds the streamer's choice: with Hide from
+// stream on, macOS leaves it out of Videorc's own capture filter and Windows
+// turns content protection on; it is then part of the show no more.
 type CommentsWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
@@ -3412,6 +3608,9 @@ type CommentsWindowPrefs = {
   /** Auto-show Activity celebrations on stream (plan 156). Default off. */
   autoShowActivity?: boolean
   alwaysOnTopPreferenceVersion?: number
+  /** Hide from stream (plan 215 D6). Default off; counts only with its version. */
+  hiddenFromStream?: boolean
+  hiddenFromStreamPreferenceVersion?: number
   open?: boolean
   /** 2 once the frame moved off the old Chat default (plan 055, S8). */
   layoutVersion?: number
@@ -3513,6 +3712,51 @@ function setCommentsWindowAutoShowActivity(on: unknown): CommentsWindowState {
   return commentsWindowState()
 }
 
+// Hide from stream (plan 215 D6): read with the window closed too (the Studio
+// renderer builds the capture exclusion list from it, and ⌘K flips it), so it
+// loads lazily from prefs. A file from before the switch, or a forged value,
+// lands on OFF (`commentsWindowHiddenFromStreamPreference`).
+function commentsHiddenFromStream(): boolean {
+  commentsHiddenFromStreamValue ??=
+    commentsWindowHiddenFromStreamPreference(loadCommentsWindowPrefs())
+  return commentsHiddenFromStreamValue
+}
+
+// The switch applies live. Windows is the one platform where content
+// protection is how the window hides (`streamManagerHideMethod`), so the
+// open window's protection follows the value there and nowhere else: on
+// macOS our own capture filter leaves it out (the Studio renderer sends the
+// window's id with the next screen start), and Linux cannot hide it, which
+// the state says through `hideFromStreamMethod`.
+function setCommentsWindowHiddenFromStream(hidden: unknown): CommentsWindowState {
+  commentsHiddenFromStreamValue = hidden === true
+  applyCommentsWindowCaptureProtection()
+  saveCommentsWindowPrefs({
+    hiddenFromStream: commentsHiddenFromStreamValue,
+    hiddenFromStreamPreferenceVersion: COMMENTS_WINDOW_HIDDEN_FROM_STREAM_PREFERENCE_VERSION
+  })
+  emitCommentsWindowState()
+  return commentsWindowState()
+}
+
+function applyCommentsWindowCaptureProtection(): void {
+  const window = commentsWindow
+  if (!window || window.isDestroyed()) {
+    commentsWindowContentProtected = false
+    return
+  }
+  const hiddenFromStream = commentsHiddenFromStream()
+  const result = applyVideorcWindowCaptureProtection(window, 'comments', {
+    hiddenFromStream,
+    onFailure: (reason) =>
+      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
+  })
+  commentsWindowContentProtected =
+    result.state === 'not-required'
+      ? releaseVideorcWindowCaptureProtection(window)
+      : result.protected
+}
+
 function commentsWindowIsOpen(): boolean {
   return Boolean(commentsWindow && !commentsWindow.isDestroyed() && !commentsWindowClosing)
 }
@@ -3536,6 +3780,8 @@ function commentsWindowState(message?: string): CommentsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
+    hiddenFromStream: commentsHiddenFromStream(),
+    hideFromStreamMethod: streamManagerHideMethod(process.platform),
     highlightAnchor: commentsHighlightAnchor(),
     autoShowActivity: commentsAutoShowActivity(),
     protected: open ? commentsWindowContentProtected : false,
@@ -4085,10 +4331,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
-  commentsWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'comments', {
-    onFailure: (reason) =>
-      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
-  }).protected
+  applyCommentsWindowCaptureProtection()
   installCaptureProtectionSmokeMarker(window, 'comments')
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
   if (commentsWindowAlwaysOnTop) {
@@ -5846,6 +6089,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         let framePollingSuppressed = false;
         let framePollingIntervalMs = 40;
         let framePollingMaxWidth = 1920;
+        let framePollingCeilingWidth = 1920;
         let proofSurfaceSuspended = false;
         let animationFrameId = null;
         let compositorStatus = null;
@@ -5870,13 +6114,51 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           return String(next * 100) + '%';
         }
 
-        function profiledFrameUrl(url) {
+        // The device pixels a source layer's frame is actually drawn across:
+        // the <img> box (already widened by any crop) narrowed by its
+        // object-fit to the frame's aspect. Null while the layer has no
+        // laid-out box (hidden, not yet attached).
+        function displayedFramePixelWidth(image) {
+          if (!image || typeof image.getBoundingClientRect !== 'function') {
+            return null;
+          }
+          const box = image.getBoundingClientRect();
+          if (!(box.width > 0) || !(box.height > 0)) {
+            return null;
+          }
+          let width = box.width;
+          const naturalWidth = image.naturalWidth;
+          const naturalHeight = image.naturalHeight;
+          const fit = image.style.objectFit;
+          if (naturalWidth > 0 && naturalHeight > 0 && fit !== 'fill') {
+            const fitted = box.height * (naturalWidth / naturalHeight);
+            width = fit === 'cover' ? Math.max(box.width, fitted) : Math.min(box.width, fitted);
+          }
+          const dpr = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+            ? window.devicePixelRatio
+            : 1;
+          const pixels = Math.ceil(width * dpr);
+          return Number.isFinite(pixels) && pixels > 0 ? pixels : null;
+        }
+
+        // displayedWidth (source layers only): ask the backend for exactly the
+        // width the frame is drawn at, so Chromium shows its pixels 1:1. The
+        // profile width is quantized up in 160 px steps from a surface width
+        // main measured at its last geometry push, and the main process's
+        // hint is floored at 1280: a docked Preview grown from 941 to 1320 px
+        // kept asking for 960 and Chromium stretched it, blurring every pixel
+        // of a screen share. A measured layer is bounded only by the profile's
+        // own ceiling (1920).
+        function profiledFrameUrl(url, displayedWidth) {
           try {
             const parsed = new URL(url);
             const requested = Number(parsed.searchParams.get('maxWidth'));
-            const maxWidth = Number.isFinite(requested) && requested > 0
-              ? Math.min(requested, framePollingMaxWidth)
-              : framePollingMaxWidth;
+            const measured = typeof displayedWidth === 'number' && displayedWidth > 0;
+            const maxWidth = measured
+              ? Math.min(displayedWidth, framePollingCeilingWidth)
+              : Number.isFinite(requested) && requested > 0
+                ? Math.min(requested, framePollingMaxWidth)
+                : framePollingMaxWidth;
             parsed.searchParams.set('maxWidth', String(Math.max(1, Math.round(maxWidth))));
             return parsed.toString();
           } catch {
@@ -5884,11 +6166,18 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           }
         }
 
-        function frameRequestUrl(url, poller) {
-          const profiled = profiledFrameUrl(url);
+        function frameRequestUrl(url, poller, displayedWidth) {
+          const profiled = profiledFrameUrl(url, displayedWidth);
           try {
             const parsed = new URL(profiled);
+            // A new width needs the current frame resent even when the source
+            // has not advanced (a still screen sends no PipeWire frames), so a
+            // resized Preview never keeps the old size's pixels.
+            const maxWidth = parsed.searchParams.get('maxWidth');
+            const widthChanged = poller.requestedMaxWidth !== maxWidth;
+            poller.requestedMaxWidth = maxWidth;
             if (
+              !widthChanged &&
               typeof poller.generation === 'string' &&
               poller.generation.length > 0 &&
               Number.isSafeInteger(poller.sequence) &&
@@ -6056,6 +6345,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (Number.isFinite(maxWidth) && maxWidth >= 1) {
             framePollingMaxWidth = Math.round(maxWidth);
           }
+          const ceilingWidth = Number(profile?.ceilingWidth);
+          framePollingCeilingWidth = Number.isFinite(ceilingWidth) && ceilingWidth >= 1
+            ? Math.round(ceilingWidth)
+            : framePollingMaxWidth;
         }
 
         function startFramePolling(id, kind, image, url) {
@@ -6101,10 +6394,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             poller.abortController = abortController;
             try {
               markProofPollerRequestStarted(poller);
-              const response = await fetch(frameRequestUrl(url, poller), {
-                cache: 'no-store',
-                signal: abortController.signal
-              });
+              const response = await fetch(
+                frameRequestUrl(url, poller, displayedFramePixelWidth(poller.image)),
+                {
+                  cache: 'no-store',
+                  signal: abortController.signal
+                }
+              );
               if (poller.cancelled) {
                 return;
               }
@@ -10522,6 +10818,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
       }
+      if (process.platform === 'darwin') {
+        // Plan 214 B3: the camera switch turning on activates the extension.
+        includedEvents.push('virtualCamera.changed')
+      }
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
       }
@@ -10637,6 +10937,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         )
         return
       }
+      if (parsed.event === 'virtualCamera.changed') {
+        acceptVirtualCameraStatus(() => parseMainVirtualCameraChangedEvent(parsed.payload))
+        return
+      }
       if (parsed.event === 'preview.surface.status') {
         const status = parseMainPreviewSurfaceStatusEvent(parsed.payload)
         const authority = windowsD3d11BackendEventAuthority(status)
@@ -10715,6 +11019,9 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_background_path',
   'resource.admin.preview_surface_bounds',
   'overlays.layout.migrate_highlight_anchor',
+  // Plan 214 B3: the saved camera switch, and main's word on the extension.
+  'virtualCamera.status',
+  'virtualCamera.platform.report',
   // Plan 168 S-A3: register a pet pack folder main just copied.
   'cohost.pet.import',
   // Plan 170 D18: the videorc://buddy deep link syncs, uses and polls.
@@ -11073,6 +11380,7 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
           safeConsole.log(`[smoke] backend-ready ${publicBackendConnectionJson(backendConnection)}`)
         }
         connectBackendEventSocket(backendAdminConnection)
+        void reconcileCameraExtensionWithBackend()
         const rendererConnection = backendConnection
         const adminConnection = backendAdminConnection
         backendAuthorityReady = Promise.all([
@@ -12295,6 +12603,32 @@ async function runSmokePreviewMotionCommand(
     return {
       ...commentsWindowState(),
       ...smokeNativeWindowIdentity(commentsWindow)
+    }
+  }
+
+  // Hide from stream (plan 215 C5): the invisibility smoke flips the switch
+  // before and during a recording, exactly as the status bar does.
+  if (command === 'comments-window-set-hidden-from-stream') {
+    return setCommentsWindowHiddenFromStream(params.hidden === true)
+  }
+
+  // The invisibility smoke's marker: the window painted edge to edge in a
+  // colour the artifact gate looks for (red by default, the Notes smoke's).
+  if (command === 'comments-window-set-smoke-marker') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return commentsWindowState('Chat window is not open.')
+    }
+    const color =
+      typeof params.color === 'string' && /^#[0-9a-f]{6}$/i.test(params.color)
+        ? params.color
+        : '#ff0000'
+    const markerInstalled = await paintCaptureProtectionSmokeMarker(window, 'comments', color)
+    return {
+      ...commentsWindowState(),
+      ...smokeNativeWindowIdentity(window),
+      markerInstalled,
+      markerColor: color
     }
   }
 
@@ -13577,6 +13911,22 @@ async function runSmokePreviewMotionCommand(
   // Allocator-level memory attribution (PartitionAlloc/V8/mojo/cc per process)
   // via Chromium memory-infra dumps — the only window into renderer memory
   // that lives OUTSIDE the V8 heap. Probes diff two dumps to find leaks.
+  // Plan 214 B3: the extension's state for the packaged smoke (F1/F2); only a
+  // signed build in the Applications folder can activate.
+  if (command === 'camera-extension') {
+    const action = params.action
+    if (action === 'activate') {
+      return cameraExtension().activate()
+    }
+    if (action === 'deactivate') {
+      return cameraExtension().deactivate()
+    }
+    return {
+      availability: cameraExtension().availability(),
+      state: cameraExtension().state()
+    }
+  }
+
   if (command === 'memory-infra-dump') {
     const seconds = typeof params.seconds === 'number' ? Math.min(20, params.seconds) : 6
     await contentTracing.startRecording({
@@ -16257,6 +16607,19 @@ app.whenReady().then(async () => {
   }
 
   installRendererSessionPermissions(session.defaultSession)
+  // Plan 214 B3: Apple asks for the activation as early as possible so an
+  // update replaces the installed extension at launch. The saved switch is
+  // the backend's and arrives at its READY (`reconcileCameraExtensionWithBackend`);
+  // only the lab aid VIDEORC_CAMERA_EXTENSION_ACTIVATE_AT_LAUNCH=1 is known here.
+  if (
+    shouldActivateCameraExtensionAtLaunch({
+      availability: cameraExtension().availability(),
+      switchOn: false,
+      env: process.env
+    })
+  ) {
+    void cameraExtension().activate()
+  }
   moveLegacyBuddyAssetsOnce()
   scheduleStaleHttpCacheCleanup()
   // Plan 209 D20 and review #8: a Linux or Windows agent app runs the bridge
@@ -16338,6 +16701,20 @@ app.whenReady().then(async () => {
   })
   secureIpcHandle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
+  )
+  // Plan 214 E: Videorc Camera's actions. Linux's module load (D1) is
+  // `loadModule`; Windows' setup (C2) plugs in as `setUp` with the Windows
+  // follow-up PR, and until then answers "Not available on this computer."
+  secureIpcHandle('virtual-camera:action', (_event, action: unknown) =>
+    runVirtualCameraAction(action, {
+      platform: process.platform,
+      openExternal: (url) => shell.openExternal(url),
+      deactivateCameraExtension: () => cameraExtension().deactivate(),
+      loadModule: () => loadVideorcCameraModule(),
+      platformHidden: async () =>
+        (await requestBackendAdmin<VirtualCameraStatus>('virtualCamera.status')).platformStep ===
+        'unsupported'
+    })
   )
   secureIpcHandle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>
     requestMediaAccessNative(pane)
@@ -16517,6 +16894,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:get-state', () => commentsWindowState())
   secureIpcHandle('comments-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setCommentsWindowAlwaysOnTop(Boolean(alwaysOnTop))
+  )
+  secureIpcHandle('comments-window:set-hidden-from-stream', (_event, hidden: unknown) =>
+    setCommentsWindowHiddenFromStream(hidden)
   )
   secureIpcHandle('comments-window:set-highlight-anchor', (_event, anchor: unknown) =>
     setCommentsWindowHighlightAnchor(anchor)

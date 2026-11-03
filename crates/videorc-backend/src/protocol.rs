@@ -357,6 +357,14 @@ pub struct RecordingStatus {
     /// on the wire for every other session.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay_only: bool,
+    /// Plan 215 D1: whether a scene edit (a source's position, size or crop)
+    /// committed from now on reaches this session's picture. The compositor
+    /// paths read the installed scene every tick; the legacy FFmpeg graph is
+    /// static, so `scene.source.transform.update`, `.nudge` and `.reset` are
+    /// refused there (`scene-edit-refused`) and the Scene page keeps its
+    /// lock. Absent on the wire while nothing runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepts_live_scene_edits: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3966,7 +3974,7 @@ pub struct CompositorImageCacheStatus {
     pub evictions: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CompositorFramePipelineStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3995,6 +4003,21 @@ pub struct CompositorFramePipelineStatus {
     /// the wire, so a run without one sends exactly what it sent before.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub preview_synthetic_refused: u64,
+    /// Plan 214 A4: what Videorc Camera's output did this process: frames
+    /// pushed to the platform camera, pushes that repeated the previous frame
+    /// (the run was slower than 30 fps), and the slowest CPU fit in
+    /// milliseconds (0 on the zero-copy Metal path). 0 is left off the wire,
+    /// so a run with the camera off sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub virtual_camera_pushed: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub virtual_camera_repeated: u64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub virtual_camera_convert_ms_max: f64,
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -5198,6 +5221,98 @@ pub struct ScreenPrivacy {
 #[serde(rename_all = "camelCase")]
 pub struct ScreenHideParams {
     pub reason: ScreenPrivacyReason,
+}
+
+/// Videorc Camera (plan 214 A4): where the camera is, as every surface
+/// reads it. `off` is only ever a healthy camera that is off; a platform
+/// report (`needs-approval`, `needs-setup`, a failure) outranks the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VirtualCameraState {
+    Off,
+    /// The switch is on and the camera is starting (the extension is being
+    /// activated, the sink is connecting).
+    Installing,
+    /// macOS: the user must allow the Camera Extension in System Settings.
+    NeedsApproval,
+    /// Windows: the one-time elevated setup has not run (D8); Linux: the
+    /// v4l2loopback module is missing or not loaded (D9).
+    NeedsSetup,
+    /// On, connected, no app holds the camera yet.
+    Ready,
+    /// On and at least one app holds the camera.
+    Streaming,
+    /// Cannot run here, or the sink lost the device; `message` says why.
+    Unavailable,
+}
+
+/// What main reports about the platform's half of the camera (plan 214 A4):
+/// the macOS extension's activation (B3) or the Windows setup step (C2).
+/// Never guessed by the backend; absent until main reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VirtualCameraPlatformStep {
+    Installing,
+    NeedsApproval,
+    /// The extension replaces after a reboot (`willCompleteAfterReboot`).
+    NeedsReboot,
+    Ready,
+    /// Activation or setup failed; the report's `message` carries the reason.
+    Failed,
+    NeedsSetup,
+    SettingUp,
+    /// The platform cannot host a camera (Windows 10, no Camera Extensions).
+    Unsupported,
+}
+
+/// Videorc Camera's status (plan 214 A4). `virtualCamera.status` returns it,
+/// `virtualCamera.changed` carries it on every change. Absent fields are
+/// omitted, never `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraStatus {
+    /// The saved switch (D4).
+    pub on: bool,
+    /// Whether the camera can run on this computer at all.
+    pub available: bool,
+    pub state: VirtualCameraState,
+    /// Apps holding the camera, when the platform can count them (D13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewers: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_step: Option<VirtualCameraPlatformStep>,
+    /// Plain copy for the status line, present when there is something to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl Default for VirtualCameraStatus {
+    fn default() -> Self {
+        Self {
+            on: false,
+            available: true,
+            state: VirtualCameraState::Off,
+            viewers: None,
+            platform_step: None,
+            message: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraSetParams {
+    pub on: bool,
+}
+
+/// `virtualCamera.platform.report` (admin socket only): main's report of the
+/// platform step, with a plain reason when it failed or needs the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraPlatformReportParams {
+    pub platform_step: VirtualCameraPlatformStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7807,12 +7922,23 @@ mod tests {
     fn shared_high_risk_contract_fixture_matches_recording_status_defaults() {
         let wire = shared_high_risk_contract_fixture_value("/recordingStatus/wire");
         let status: RecordingStatus = serde_json::from_value(wire.clone()).unwrap();
+        // Plan 215 D1: a running session says whether a source moved now
+        // reaches its picture.
+        assert_eq!(status.accepts_live_scene_edits, Some(true));
         assert_eq!(serde_json::to_value(status).unwrap(), wire);
+
+        // A session on the legacy FFmpeg graph composes a fixed picture.
+        let fixed = shared_high_risk_contract_fixture_value("/recordingStatus/fixedSceneWire");
+        let status: RecordingStatus = serde_json::from_value(fixed.clone()).unwrap();
+        assert_eq!(status.accepts_live_scene_edits, Some(false));
+        assert_eq!(serde_json::to_value(status).unwrap(), fixed);
 
         let minimal = shared_high_risk_contract_fixture_value("/recordingStatus/minimalWire");
         let expected =
             shared_high_risk_contract_fixture_value("/recordingStatus/minimalNormalized");
         let status: RecordingStatus = serde_json::from_value(minimal).unwrap();
+        // Nothing running: no flag at all, on the wire or off it.
+        assert_eq!(status.accepts_live_scene_edits, None);
         assert_eq!(serde_json::to_value(status).unwrap(), expected);
 
         // Plan 069: the one mixed track reports its sources; an unmixed track
