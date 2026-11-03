@@ -641,12 +641,19 @@ function appImageBytes(appProfile, { magic = true } = {}) {
   return Buffer.concat([header, Buffer.from(JSON.stringify(appProfile))])
 }
 
-// A minimal app.asar holding package.json (the format readAsarPackageVersion reads).
-function asarWith(packageJson) {
+// A minimal app.asar holding package.json (the format readAsarPackageVersion
+// reads) and, when given, out/main/videorc-build-flags.json.
+function asarWith(packageJson, buildFlags = null) {
   const data = Buffer.from(JSON.stringify(packageJson))
-  const json = Buffer.from(
-    JSON.stringify({ files: { 'package.json': { size: data.length, offset: '0' } } })
-  )
+  const files = { 'package.json': { size: data.length, offset: '0' } }
+  let body = data
+  if (buildFlags) {
+    const flags = Buffer.from(JSON.stringify(buildFlags))
+    const entry = { size: flags.length, offset: String(data.length) }
+    files.out = { files: { main: { files: { 'videorc-build-flags.json': entry } } } }
+    body = Buffer.concat([data, flags])
+  }
+  const json = Buffer.from(JSON.stringify({ files }))
   const padded = Math.ceil(json.length / 4) * 4
   const header = Buffer.alloc(8 + padded)
   header.writeUInt32LE(4 + padded, 0)
@@ -655,7 +662,7 @@ function asarWith(packageJson) {
   const sizes = Buffer.alloc(8)
   sizes.writeUInt32LE(4, 0)
   sizes.writeUInt32LE(header.length, 4)
-  return Buffer.concat([sizes, header, data])
+  return Buffer.concat([sizes, header, body])
 }
 
 async function writeLinuxApp(dir, appProfile) {
@@ -675,9 +682,11 @@ async function writeLinuxApp(dir, appProfile) {
     )
   }
   if (appProfile.asarVersion) {
+    const buildFlags =
+      appProfile.testHooks === undefined ? null : { packagedTestHooks: appProfile.testHooks }
     await writeFile(
       join(dir, 'resources', 'app.asar'),
-      asarWith({ name: 'videorc', version: appProfile.asarVersion })
+      asarWith({ name: 'videorc', version: appProfile.asarVersion }, buildFlags)
     )
   }
 }
@@ -1108,7 +1117,10 @@ test('Linux local: copies an unpacked build and records it as local-build', posi
   const box = await linuxSandbox()
   try {
     const unpacked = join(box.root, 'repo', 'apps', 'desktop', 'release', 'linux-unpacked')
-    await writeLinuxApp(unpacked, linuxProfile({ desktop: false, asarVersion: '0.9.142' }))
+    await writeLinuxApp(
+      unpacked,
+      linuxProfile({ desktop: false, asarVersion: '0.9.142', testHooks: true })
+    )
     const { runner, calls } = fakeLinuxRunner()
     const lines = []
     const record = await linuxInstall(box, `local:${unpacked}`, {
@@ -1124,6 +1136,24 @@ test('Linux local: copies an unpacked build and records it as local-build', posi
     assert.equal(record.localDir, unpacked)
     assert.equal(record.sha, null)
     assert.ok(lines.filter((line) => /WARNING: local-build/.test(line)).length >= 2)
+
+    // A plain package:desktop:linux build never opens the harness's CDP port.
+    for (const [name, testHooks] of [
+      ['plain', false],
+      ['no-flags', undefined]
+    ]) {
+      const plain = join(box.root, name, 'linux-unpacked')
+      await writeLinuxApp(
+        plain,
+        linuxProfile({ marker: name, desktop: false, asarVersion: '0.9.143', testHooks })
+      )
+      await assert.rejects(linuxInstall(box, `local:${plain}`, { runner }), (error) => {
+        assert.equal(error.code, 'not-a-test-build')
+        assert.match(error.message, /VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop:linux/)
+        return true
+      })
+    }
+    assert.equal(await linuxMarker(box.appPath), 'new', 'a refused build is never swapped in')
 
     await rm(join(unpacked, 'resources', 'ffmpeg'), { recursive: true })
     await assertRefused(linuxInstall(box, `local:${unpacked}`, { runner }), 'app-incomplete')
@@ -1144,6 +1174,7 @@ test('Linux refuses candidate: (no Linux lab-candidate workflow)', posixOnly, as
     await assert.rejects(linuxInstall(box, `candidate:${RUN_ID}`, { runner }), (error) => {
       assert.equal(error.code, 'linux-candidate-unavailable')
       assert.match(error.message, /local:/)
+      assert.match(error.message, /VIDEORC_PACKAGED_TEST_HOOKS=1/)
       return true
     })
     assert.deepEqual(calls, [])

@@ -447,8 +447,9 @@ masked sleep targets and the stopped hypridle are what keep the box awake.
 # .sha256 (or release.json) next to it; else pass --sha256 <hex>:
 pnpm live:install --build file:~/Downloads/Videorc-<version>-linux-x64.AppImage
 
-# Or a branch built on this box:
-pnpm package:desktop:linux
+# Or a branch built on this box, as a test build (the harness drives the app
+# over CDP, which a plain packaged build never opens; live:install refuses one):
+VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop:linux
 pnpm live:install --build local:apps/desktop/release/linux-unpacked
 
 pnpm live:install --rollback
