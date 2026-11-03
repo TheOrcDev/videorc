@@ -167,6 +167,7 @@ mod usage_stats;
 mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
+mod virtual_camera;
 mod warm_microphone;
 #[allow(dead_code)]
 mod windows_capture_owner;

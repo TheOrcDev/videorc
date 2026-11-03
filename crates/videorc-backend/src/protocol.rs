@@ -5177,6 +5177,98 @@ pub struct ScreenHideParams {
     pub reason: ScreenPrivacyReason,
 }
 
+/// Videorc Camera (plan 214 A4): where the camera is, as every surface
+/// reads it. `off` is only ever a healthy camera that is off; a platform
+/// report (`needs-approval`, `needs-setup`, a failure) outranks the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VirtualCameraState {
+    Off,
+    /// The switch is on and the camera is starting (the extension is being
+    /// activated, the sink is connecting).
+    Installing,
+    /// macOS: the user must allow the Camera Extension in System Settings.
+    NeedsApproval,
+    /// Windows: the one-time elevated setup has not run (D8); Linux: the
+    /// v4l2loopback module is missing or not loaded (D9).
+    NeedsSetup,
+    /// On, connected, no app holds the camera yet.
+    Ready,
+    /// On and at least one app holds the camera.
+    Streaming,
+    /// Cannot run here, or the sink lost the device; `message` says why.
+    Unavailable,
+}
+
+/// What main reports about the platform's half of the camera (plan 214 A4):
+/// the macOS extension's activation (B3) or the Windows setup step (C2).
+/// Never guessed by the backend; absent until main reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VirtualCameraPlatformStep {
+    Installing,
+    NeedsApproval,
+    /// The extension replaces after a reboot (`willCompleteAfterReboot`).
+    NeedsReboot,
+    Ready,
+    /// Activation or setup failed; the report's `message` carries the reason.
+    Failed,
+    NeedsSetup,
+    SettingUp,
+    /// The platform cannot host a camera (Windows 10, no Camera Extensions).
+    Unsupported,
+}
+
+/// Videorc Camera's status (plan 214 A4). `virtualCamera.status` returns it,
+/// `virtualCamera.changed` carries it on every change. Absent fields are
+/// omitted, never `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraStatus {
+    /// The saved switch (D4).
+    pub on: bool,
+    /// Whether the camera can run on this computer at all.
+    pub available: bool,
+    pub state: VirtualCameraState,
+    /// Apps holding the camera, when the platform can count them (D13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewers: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_step: Option<VirtualCameraPlatformStep>,
+    /// Plain copy for the status line, present when there is something to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl Default for VirtualCameraStatus {
+    fn default() -> Self {
+        Self {
+            on: false,
+            available: true,
+            state: VirtualCameraState::Off,
+            viewers: None,
+            platform_step: None,
+            message: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraSetParams {
+    pub on: bool,
+}
+
+/// `virtualCamera.platform.report` (admin socket only): main's report of the
+/// platform step, with a plain reason when it failed or needs the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraPlatformReportParams {
+    pub platform_step: VirtualCameraPlatformStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenameScreenParams {

@@ -235,6 +235,12 @@ impl CompositorFrameExportHandle {
         })
     }
 
+    /// Plan 214: the texture lease ticket itself, for Videorc Camera's
+    /// staging readback (C3) whatever the role. `None` off Windows.
+    pub(crate) fn d3d11_texture_ticket(&self) -> Option<WindowsD3d11TextureLeaseTicket> {
+        self.d3d11_texture.clone()
+    }
+
     #[allow(dead_code)]
     pub(crate) fn d3d11_texture_for_role(
         &self,
