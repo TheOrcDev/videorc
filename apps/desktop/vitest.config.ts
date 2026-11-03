@@ -12,6 +12,13 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    // Node 25+ ships a global `localStorage` (Web Storage) that is undefined
+    // without `--localstorage-file` and shadows jsdom's, so every DOM test
+    // that touches storage throws. Turn it off in the workers; Node 24 accepts
+    // the flag too.
+    poolOptions: {
+      forks: { execArgv: ['--no-experimental-webstorage'] }
+    },
     include: ['src/main/**/*.test.ts', 'src/renderer/src/**/*.test.ts', 'src/shared/**/*.test.ts']
   }
 })
