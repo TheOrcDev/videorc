@@ -6116,6 +6116,13 @@ impl CompositorRuntime {
         Some(edit)
     }
 
+    /// The program scene the compositor composes right now, if one is
+    /// installed (plan 216 A2: a change that keeps a source the program
+    /// already composes never waits for that source).
+    pub(crate) fn composed_program_scene(&self) -> Option<&Scene> {
+        self.scene.as_ref()?.scene.as_ref()
+    }
+
     pub(crate) fn source_edit_snapshot(&self) -> Option<CompositorSourceEdit> {
         let primary = self.scene.clone()?;
         primary.scene.as_ref()?;

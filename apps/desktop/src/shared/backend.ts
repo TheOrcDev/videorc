@@ -490,6 +490,27 @@ export interface CameraSelectionDiagnostics {
   state: PreviewCameraState
 }
 
+/**
+ * Plan 216 A5: one user-facing error the renderer showed, so the support
+ * bundle explains the last toast. The backend redacts `raw` with the rest of
+ * the bundle (paths, URLs, secrets).
+ */
+export interface RendererUserErrorRecord {
+  /** When it was shown, ISO 8601. */
+  at: string
+  /** The verb the streamer asked for ("switch") and its object ("the scene"). */
+  action?: string
+  object?: string
+  /** The backend's error code, when the error carried one. */
+  code?: string
+  /** How the copy read it: a known cause, Videorc offline, or unknown. */
+  kind: 'offline' | 'known' | 'canceled' | 'unknown'
+  /** The toast title the streamer read. */
+  title: string
+  /** The raw text behind it. */
+  raw: string
+}
+
 export interface RendererDiagnosticsSnapshot {
   cameraSelection?: CameraSelectionDiagnostics
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
@@ -497,6 +518,8 @@ export interface RendererDiagnosticsSnapshot {
   runtimeInfo?: RuntimeInfo
   /** Plan 214 E3: Videorc Camera's line. */
   virtualCamera?: VirtualCameraBundleLine
+  /** Plan 216 A5: the newest user-facing errors, oldest first. */
+  recentUserErrors?: RendererUserErrorRecord[]
 }
 
 export type AudioTrackSource = 'microphone' | 'test-tone' | 'system-audio'

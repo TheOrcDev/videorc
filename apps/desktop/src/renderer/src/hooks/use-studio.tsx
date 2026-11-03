@@ -327,6 +327,12 @@ import {
   UserFacingError,
   type UserErrorContext
 } from '@/lib/user-error'
+import { recentUserErrors } from '@/lib/user-error-log'
+import {
+  layoutSwitchTarget,
+  pendingLayoutEvidence,
+  type LayoutSwitchTarget
+} from '@/lib/layout-switch-pending'
 import {
   INITIAL_ACCOUNT_READY_REFRESH_STATE,
   reduceAccountReadyRefresh,
@@ -1519,9 +1525,9 @@ export type StudioContextValue = {
    * to the leg live — the horizontal program is never touched.
    */
   applySimulcastLeg: (patch: SimulcastLegPatch) => void
-  // The layout preset a live switch is currently starting sources for, if any
-  // (drives the "Switching…" pending state; plan slice D2).
-  layoutSwitchPending: LayoutPreset | null
+  // The layout a switch is applying, if any: its preset and whether it lands
+  // in Freeform (drives the one "Switching…" label; plan slice D2, plan 216 A4).
+  layoutSwitchPending: LayoutSwitchTarget | null
   sourceDeviceSwitchPending: LiveSourceDeviceSwitchPending | null
   sourceSelectionState: LiveSourceSelectionState
   sourceSwitchReason: (kind: LiveSourceDeviceSwitchPending) => string | null
@@ -4857,7 +4863,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [autosaveSavedScene]
   )
 
-  const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutPreset | null>(null)
+  const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutSwitchTarget | null>(null)
   const [sourceSelectionState, setSourceSelectionState] = useState<LiveSourceSelectionState>({
     snapshot: null,
     pending: null,
@@ -10134,7 +10140,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Background-only commits keep the same preset; flashing the layout
       // controls into "Switching…" for them reads as an unrelated change.
       if (options?.pendingIndicator !== false) {
-        setLayoutSwitchPending(layout.layoutPreset)
+        setLayoutSwitchPending(layoutSwitchTarget(layout))
       }
 
       let commitReceiptSettled = false
@@ -12482,7 +12488,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
 
     try {
-      setLastError(null)
+      // Plan 216 A5: the last error stays; the bundle is meant to explain it.
       setSupportBundleExportPending(true)
       // Re-read runtime info at export time: backend crash records are
       // appended by main while the app runs, and the startup snapshot would
@@ -12505,7 +12511,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Plan 214 E3: the camera's state, never its words.
           virtualCamera: (await import('@/lib/virtual-camera-view')).virtualCameraBundleLine(
             virtualCamera.status
-          )
+          ),
+          // Plan 216 A5: the toasts this session showed, raw text included;
+          // the backend redacts them with the rest of the bundle.
+          recentUserErrors: recentUserErrors()
         }
       }
       const result = await client.request<SupportBundleExportResult>(
@@ -18528,7 +18537,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         scenes: value.savedScenes,
         activeId: value.activeSavedSceneId,
         pendingId: value.savedScenePendingId,
-        pendingLayout: value.layoutSwitchPending,
+        pendingLayout: pendingLayoutEvidence(value.layoutSwitchPending),
         modified: value.savedSceneModified,
         visual: workingVisual,
         diagnostics: {

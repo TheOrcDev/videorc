@@ -116,7 +116,14 @@ try {
   )
   const scene = probes.find((result) => result.label === 'LiveControl/scene')?.response
   assert.ok(
-    scene?.ok || ['invalid-params', 'layout-preview-failed'].includes(scene?.error?.code),
+    scene?.ok ||
+      [
+        'invalid-params',
+        'layout-preview-failed',
+        // Plan 216 A3: a source that never sent a frame names itself.
+        'layout-camera-not-ready',
+        'layout-screen-not-ready'
+      ].includes(scene?.error?.code),
     `scene change returned an unexpected domain outcome: ${JSON.stringify(scene)}`
   )
   for (const label of ['Observation', 'LiveControl/screens', 'LiveControl/captions', 'Stop']) {

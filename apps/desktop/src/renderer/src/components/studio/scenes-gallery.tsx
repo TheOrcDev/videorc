@@ -27,6 +27,7 @@ import {
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { presetSwitching } from '@/lib/layout-switch-pending'
 
 // Built-in layouts and named visual snapshots share the Scenes surface.
 // The gallery is MODE-SCOPED: horizontal and vertical are two disjoint scene
@@ -186,7 +187,7 @@ export function ScenesGallery(): ReactElement {
               key={preset.id}
               data-scene-preset={preset.id}
               disabled={gaps.length > 0}
-              label={layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+              label={presetSwitching(layoutSwitchPending, preset.id) ? 'Switching…' : preset.label}
               meta={
                 shortcut ? (
                   <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />

@@ -42,6 +42,7 @@ import {
 import { shortcutAriaKeys } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { presetSwitching } from '@/lib/layout-switch-pending'
 
 const READ_ONLY_REASON = 'Update Videorc to change your scenes.'
 
@@ -283,7 +284,7 @@ export function SceneList({
             key={layout.id}
             active={active.kind === 'layout' && active.preset === layout.id}
             blockedReason={layout.gaps.length > 0 ? layoutReason : null}
-            label={layoutSwitchPending === layout.id ? 'Switching…' : layout.label}
+            label={presetSwitching(layoutSwitchPending, layout.id) ? 'Switching…' : layout.label}
             platform={platform}
             preset={layout.id}
             shortcut={settings.globalShortcuts?.layouts?.[layout.id]}

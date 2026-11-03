@@ -11218,9 +11218,13 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::SceneLayoutApplyParams>(command.params) {
                 Ok(params) => match live_layout::apply_layout_live(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
-                    Err(error) => {
-                        ServerResponse::error(command.id, "layout-live-failed", error.to_string())
-                    }
+                    // Plan 216 A3: a switch that gave up on a source names it
+                    // in the code, so the toast can.
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        live_layout::layout_failure_code(&error, "layout-live-failed"),
+                        error.to_string(),
+                    ),
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -11233,7 +11237,7 @@ async fn handle_text_message_with_role(
                     Ok(status) => ServerResponse::ok(command.id, status),
                     Err(error) => ServerResponse::error(
                         command.id,
-                        "layout-preview-failed",
+                        live_layout::layout_failure_code(&error, "layout-preview-failed"),
                         error.to_string(),
                     ),
                 },

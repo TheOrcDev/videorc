@@ -103,6 +103,7 @@ import {
   SCENE_INSPECTOR_PAIR
 } from '@/lib/page-layout'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { freeformSwitching, presetSwitching } from '@/lib/layout-switch-pending'
 import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
 
 // The two real-world screen colors; the protocol takes any #RRGGBB so a
@@ -711,7 +712,9 @@ export function LayoutTab(): ReactElement {
                     value: preset.id,
                     label: (
                       <>
-                        {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+                        {presetSwitching(layoutSwitchPending, preset.id)
+                          ? 'Switching…'
+                          : preset.label}
                         {!preset.enabled ? <Badge variant="outline">Soon</Badge> : null}
                       </>
                     ),
@@ -744,7 +747,7 @@ export function LayoutTab(): ReactElement {
                 // Every click is an intent, as on the presets.
                 onPressedChange={enterFreeform}
               >
-                {layoutSwitchPending && isFreeform ? 'Switching…' : 'Freeform'}
+                {freeformSwitching(layoutSwitchPending) ? 'Switching…' : 'Freeform'}
               </Toggle>
             </div>
             {/* Devices are chosen on Sources (plan 174, C-21), so the hint
