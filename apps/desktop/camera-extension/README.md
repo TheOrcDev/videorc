@@ -18,10 +18,17 @@ program as "Videorc Camera" in Meet, Zoom, Teams, Discord and FaceTime.
   `4cc_vccc_glob_0000` property exposes the viewer count (D13).
 - `pnpm build:camera-extension` builds the arm64 executable with SwiftPM
   (deployment target 13.0), assembles
-  `apps/desktop/build/camera-extension/VideorcCamera.systemextension` with
-  its Info.plist and entitlements, and ad-hoc signs it. Packaging embeds and
-  re-signs it only when both provisioning profiles are configured; see
-  `docs/releases/macos-signing.md`, "Videorc Camera".
+  `apps/desktop/build/camera-extension/dev.theorcdev.videorc.camera.systemextension`
+  (bundle and executable named after the bundle id, `CFBundlePackageType`
+  `SYSX`, the `CMIOExtension` mach service and the usage description) with
+  its entitlements, ad-hoc signs it and reads the signature back. The
+  entitlements are exactly `com.apple.security.app-sandbox` and the app group
+  `C2PA37RB58.dev.theorcdev.videorc`; the extension embeds no provisioning
+  profile and must not claim `com.apple.application-identifier` or
+  `com.apple.developer.team-identifier` (spike P0a: without a profile those
+  get it killed at exec). Packaging embeds and re-signs it with Developer ID
+  only when `VIDEORC_MACOS_PROFILE_APP` (the one profile, for the app) is
+  configured; see `docs/releases/macos-signing.md`, "Videorc Camera".
 
 The extension activates only from a Developer ID signed, notarized Videorc.app
 in /Applications. The dev app cannot exercise it.
