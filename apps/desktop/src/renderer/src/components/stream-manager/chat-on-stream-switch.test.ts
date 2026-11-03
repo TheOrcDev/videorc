@@ -84,7 +84,12 @@ describe('Chat on stream in the Stream Manager (plan 215 G)', () => {
     await render({
       chatOnStream: true,
       onChatOnStream: () => undefined,
-      viewMode: { kind: 'history', sessionId: 's0' }
+      viewMode: {
+        kind: 'history',
+        sessionId: 's0',
+        title: 'Earlier stream',
+        startedAt: '2026-11-02T10:00:00Z'
+      }
     })
     await act(async () => {
       await import('@/components/stream-manager/chat-on-stream-switch')
