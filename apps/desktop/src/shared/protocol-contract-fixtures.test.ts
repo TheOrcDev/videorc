@@ -90,6 +90,7 @@ import type {
 } from './buddy-library'
 import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from './buddy-library'
 import {
+  DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT,
   validateBackendEventPayload,
   validateBackendRpcParams,
   validateBackendRpcResult,
@@ -824,10 +825,31 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.overlayLayout.defaults.chat.showOnStream).toBe(false)
     expect(fixtures.overlayLayout.defaults.chat.showInRecording).toBe(false)
     expect(fixtures.overlayLayout.defaults.chat.horizontal.y).toBeCloseTo(0.04, 6)
-    // The wire shape is exact: a layout without the chat box is refused here
-    // (the backend always writes it; `#[serde(default)]` is for stored rows).
-    const { chat: _chat, ...withoutChat } = fixtures.overlayLayout.defaults
-    expect(() => validateBackendRpcResult('overlays.layout.get', withoutChat)).toThrow()
+    // A layout saved before the chat box (plan 215 G) still validates: `chat`
+    // takes the shipped default, like the stored row's `#[serde(default)]`,
+    // and the placed highlight, captions and Buddy come through untouched.
+    const { chat: _chat, ...withoutChat } = fixtures.overlayLayout.placed
+    for (const method of ['overlays.layout.get', 'overlays.layout.set'] as const) {
+      const parsed = (
+        method === 'overlays.layout.get'
+          ? validateBackendRpcResult(method, withoutChat)
+          : validateBackendRpcParams(method, withoutChat)
+      ) as typeof fixtures.overlayLayout.placed
+      expect(parsed).toStrictEqual({ ...withoutChat, chat: fixtures.overlayLayout.defaults.chat })
+    }
+    expect(
+      validateBackendEventPayload('overlays.layout', withoutChat) as typeof withoutChat
+    ).toMatchObject(withoutChat)
+    expect(DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT).toStrictEqual(fixtures.overlayLayout.defaults.chat)
+    // Present, the chat box is exact; the other items stay required.
+    expect(() =>
+      validateBackendRpcResult('overlays.layout.get', {
+        ...withoutChat,
+        chat: { ...fixtures.overlayLayout.placed.chat, extra: true }
+      })
+    ).toThrow()
+    const { buddy: _buddy, ...withoutBuddy } = fixtures.overlayLayout.defaults
+    expect(() => validateBackendRpcResult('overlays.layout.get', withoutBuddy)).toThrow()
   })
 
   it('keeps the chat box RPCs strict (plan 215 G)', () => {
@@ -855,10 +877,12 @@ describe('shared high-risk protocol fixture', () => {
     ).toThrow()
     const info = { active: true, width: 640, height: 480, revision: 7, vertical: false }
     expect(validateBackendRpcResult('chat.overlay.set', info)).toStrictEqual(info)
-    expect(validateBackendRpcResult('chat.overlay.clear', { ...info, active: false })).toStrictEqual(
-      { ...info, active: false }
-    )
-    expect(() => validateBackendRpcResult('chat.overlay.set', { ...info, vertical: null })).toThrow()
+    expect(
+      validateBackendRpcResult('chat.overlay.clear', { ...info, active: false })
+    ).toStrictEqual({ ...info, active: false })
+    expect(() =>
+      validateBackendRpcResult('chat.overlay.set', { ...info, vertical: null })
+    ).toThrow()
     expect(validateBackendRpcResult('chat.overlay.canvases', {})).toStrictEqual({})
     expect(
       validateBackendRpcResult('chat.overlay.canvases', { vertical: { width: 1080, height: 1920 } })

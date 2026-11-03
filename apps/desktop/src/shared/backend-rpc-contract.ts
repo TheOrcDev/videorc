@@ -49,6 +49,7 @@ import type {
   BuddyReactionTable,
   MigrateHighlightAnchorParams,
   OverlayLayout,
+  OverlayItemLayout,
   ChatOverlayCanvases,
   ChatOverlayInfo,
   SetChatOverlayParams,
@@ -3457,15 +3458,36 @@ const overlayItemLayoutSchema = objectSchema(
   },
   { allowUnknown: false }
 )
-// Exact: the backend always serializes every item, `chat` (plan 215 G)
-// included (a stored row from before it loads with the default through
-// `#[serde(default)]` and is written back whole).
+/** `OverlayLayout::default().chat` (plan 215 D5): the chat box top-left and
+ * off for both outputs. Pinned to the renderer's `DEFAULT_OVERLAY_LAYOUT` and
+ * the shared fixture by the contract test. */
+export const DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT: Readonly<OverlayItemLayout> = Object.freeze({
+  horizontal: Object.freeze({ x: 0.0225, y: 0.04, w: 0.3, h: 0.44 }),
+  vertical: Object.freeze({ x: 0.071111, y: 0.08, w: 0.8, h: 0.3 }),
+  showOnStream: false,
+  showInRecording: false
+})
+// A layout from before the chat box (plan 215 G) has no `chat`: it takes the
+// default, as the stored row does through `#[serde(default)]`, and keeps its
+// highlight, captions and Buddy placement. Present, it is exact.
+const chatOverlayItemLayoutSchema = runtimeSchema<OverlayItemLayout>(
+  `${overlayItemLayoutSchema.description} or undefined (the default chat box)`,
+  (value, path) =>
+    value === undefined
+      ? {
+          ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT,
+          horizontal: { ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT.horizontal },
+          vertical: { ...DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT.vertical }
+        }
+      : overlayItemLayoutSchema.parse(value, path)
+)
+// The backend always serializes every item; the other three stay required.
 const overlayLayoutSchema = objectSchema(
   {
     highlight: overlayItemLayoutSchema,
     captions: overlayItemLayoutSchema,
     buddy: overlayItemLayoutSchema,
-    chat: overlayItemLayoutSchema
+    chat: chatOverlayItemLayoutSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<OverlayLayout>
