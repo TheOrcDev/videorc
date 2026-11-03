@@ -340,10 +340,6 @@ async function recordCommittedComposition() {
       .map((source) => ({ ...source, kind: 'test-pattern', deviceId: null })),
     outputs: committed.outputs.map((output) => ({ ...output, width, height, fps }))
   }
-  const resource = await command('authorize-smoke-resource', {
-    path: outputDirectory,
-    kind: 'output-directory'
-  })
   const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
   const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
   // Plan 215 D3: the camera moves and resizes mid-session, through the
@@ -352,6 +348,12 @@ async function recordCommittedComposition() {
   // is the aux compositor leg, so the file alone proves nothing about it).
   report.liveMove = { definition: LIVE_MOVE_DEFINITION, passes: [] }
   for (const streaming of [false, true]) {
+    // An output-directory capability is single-use: each session.start
+    // consumes one, so each pass gets its own.
+    const resource = await command('authorize-smoke-resource', {
+      path: outputDirectory,
+      kind: 'output-directory'
+    })
     report.liveMove.passes.push(
       await recordWithLiveMove({
         scene,
@@ -447,7 +449,17 @@ async function recordWithLiveMove({
         }
       : {})
   })
-  assert.equal(started.state, streaming ? 'streaming' : 'recording', JSON.stringify(started))
+  // A record+stream session reports `recording` with a record+stream message
+  // (as smoke:smart-scenes reads it); only a stream-only one says `streaming`.
+  if (streaming) {
+    assert.ok(
+      started.state === 'streaming' ||
+        (started.state === 'recording' && /record\+stream/i.test(started.message ?? '')),
+      JSON.stringify(started)
+    )
+  } else {
+    assert.equal(started.state, 'recording', JSON.stringify(started))
+  }
   const during = await request(backend, timeoutMs, 'scene.get')
   assertSceneTransforms(during, transforms)
   await draftRefusedWhileRecording()
