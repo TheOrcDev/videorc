@@ -14507,6 +14507,17 @@ async fn export_support_bundle_for_state(
     ffmpeg_path: &str,
 ) -> Result<support_bundle::SupportBundleExportResult> {
     let sessions = state.database.list_sessions(20)?;
+    // Plan 215 A6: the account the app shows, against the store it reads.
+    let account = {
+        let session = state.account_session.lock().await;
+        support_bundle::SupportBundleAccount::from_state(
+            &account::current_account(session.as_ref()),
+            &account::session_state(),
+        )
+    };
+    let live_chat = support_bundle::SupportBundleLiveChat::from_snapshot(
+        &live_chat::current_status(state).await,
+    );
     support_bundle::export_support_bundle(support_bundle::SupportBundleExportInput {
         output_directory: params.output_directory.map(PathBuf::from),
         app_version: params.app_version,
@@ -14531,6 +14542,8 @@ async fn export_support_bundle_for_state(
         sessions,
         performance_check: performance_check::current_state(state).await.result,
         metrics_journal: metrics_journal::support_bundle_lines(),
+        account,
+        live_chat,
     })
 }
 
