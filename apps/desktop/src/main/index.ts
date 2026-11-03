@@ -305,6 +305,7 @@ import {
   validateSmokeBackendRpcRequest,
   validateSmokeCommentsSnapshotParams,
   validateSmokeCommentsDeltaParams,
+  validateSmokeProofSurfaceInputEvents,
   validateSmokeResourceAuthorization
 } from './smoke-command-security'
 import { runTimedBoundsStorm, timeSmokeAction } from './smoke-window-bounds-storm'
@@ -419,7 +420,11 @@ import {
   type DockSlotReport,
   type PreviewWindowMode
 } from './preview-dock'
-import { InWindowProofSurface, type ProofSurfaceHost } from './in-window-proof-surface'
+import {
+  InWindowProofSurface,
+  proofSurfaceHostNote,
+  type ProofSurfaceHost
+} from './in-window-proof-surface'
 import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_FETCH_TIMEOUT_MS,
@@ -617,8 +622,11 @@ import {
   sanitizeRendererPreviewSurfaceStatus
 } from '../shared/native-preview-bounds'
 import {
+  previewDockedInsideMainWindow,
+  proofSurfaceHostedInWindowOn,
   proofSurfaceParentWindow,
-  withTrustedPreviewWindowStacking
+  withTrustedPreviewWindowStacking,
+  type NativePreviewRealSurfaceDriverKind
 } from './native-preview-window-stacking'
 import {
   accountCoalescedPreviewFrame,
@@ -1594,7 +1602,6 @@ function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
     void controller.activate()
   }
 }
-type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
 const nativePreviewRealSurfaceDriverLoad = loadNativePreviewPrimaryDriver()
 const NATIVE_PREVIEW_HANDOFF_SAMPLE_LIMIT = 900
 const NATIVE_PREVIEW_MAIN_SCENE_MISMATCH_MESSAGE_MS = 250
@@ -4791,17 +4798,20 @@ function dockVisibilityDecision(): ReturnType<typeof decideDockVisibility> {
 }
 
 // The docked surface lives INSIDE the main window, and the preview
-// BrowserWindow stays hidden and only owns the lifecycle: on Linux the proof
-// surface is a view in the window (in-window-proof-surface.ts); on macOS the
-// in-process CAMetalLayer is a sublayer of the main window's own view at the
-// slot (plan 213 D3), so there is one window, as in OBS, and nothing a tiling
-// window manager can move on its own. The helper-process and external drivers
-// still need the child window they order above.
+// BrowserWindow stays hidden and only owns the lifecycle: on Linux and macOS
+// the proof surface is a view in the window (in-window-proof-surface.ts); on
+// macOS the in-process CAMetalLayer is a sublayer of the main window's own
+// view at the slot (plan 213 D3), so there is one window, as in OBS, nothing a
+// tiling window manager can move on its own, and no window hit-testing between
+// the mouse and the Scene canvas (plan 216 D4). The helper-process and
+// external drivers still need the child window they order above
+// (native-preview-window-stacking.ts has the rule and its tests).
 function previewDockedInWindow(): boolean {
-  return (
-    currentPreviewWindowMode() === 'docked' &&
-    (proofSurfaceHostedInWindow || nativePreviewLayerHostedInMainWindow())
-  )
+  return previewDockedInsideMainWindow({
+    mode: currentPreviewWindowMode(),
+    platform: process.platform,
+    driverKind: nativePreviewRealSurfaceDriverKind
+  })
 }
 
 function nativePreviewLayerHostedInMainWindow(): boolean {
@@ -7149,11 +7159,16 @@ function syncProofSurfaceParent(surface: ProofSurfaceHost): void {
   }
 }
 
-// Linux hosts the proof surface inside its window (in-window-proof-surface.ts):
-// Wayland compositors ignore the absolute frames a separate surface window and
-// the docked preview window ask for, so both landed wherever the compositor
-// chose — centred over the app, or re-tiled under Hyprland.
-const proofSurfaceHostedInWindow = process.platform === 'linux'
+// Linux and macOS host the proof surface inside its window
+// (in-window-proof-surface.ts). Linux: Wayland compositors ignore the absolute
+// frames a separate surface window and the docked preview window ask for, so
+// both landed wherever the compositor chose — centred over the app, or
+// re-tiled under Hyprland. macOS (plan 216 D4): the separate fallback windows
+// over the Scene canvas were asked to ignore the mouse, and on a streamer's
+// macOS no press or drag crossed them while the arrow keys moved the source;
+// the in-window view forwards its mouse to the canvas instead. Windows keeps
+// the separate opaque window (native-preview-window-stacking.ts says why).
+const proofSurfaceHostedInWindow = proofSurfaceHostedInWindowOn(process.platform)
 
 function proofSurfaceWebPreferences(): Electron.WebPreferences {
   return {
@@ -7174,8 +7189,9 @@ function createProofSurfaceBrowserWindow(): BrowserWindow {
     // GPU process (Windows Insider builds) a transparent window composites
     // NOTHING and the preview reads as a blank canvas even though the <img>
     // polling underneath is fully software-safe. Off macOS the surface is
-    // opaque over a solid dark base; macOS keeps transparency (its real
-    // preview path is the CAMetalLayer helper anyway).
+    // opaque over a solid dark base; macOS kept transparency while it used
+    // this window (its docked fallback is an in-window view since plan 216
+    // D4; the branches stay for the helper-process diagnostic path).
     transparent: isMac,
     focusable: false,
     skipTaskbar: true,
@@ -7199,7 +7215,10 @@ function createProofSurfaceBrowserWindow(): BrowserWindow {
 
 // The docked surface sits in the main window over the Studio slot or Scene
 // canvas; the floating one sits in the preview window under its drag strip.
-// Content protection is a no-op on Linux, and the host window carries its own.
+// The proof-surface role never asks for content protection (the separate
+// window's call was a no-op for it on every platform, window-capture-
+// protection.ts), and the host window carries its own. The opaque base is
+// what the hidden lifecycle window's dark body gave the transparent window.
 function createInWindowProofSurface(): InWindowProofSurface {
   return new InWindowProofSurface({
     createView: () => {
@@ -7392,7 +7411,7 @@ async function createNativePreviewSurface(
     nativePreviewSurfaceScene
       ? 'Electron proof scene preview surface.'
       : 'Synthetic Electron proof preview surface.'
-  }${proofSurfaceHostedInWindow ? ' Hosted inside the app window (Wayland cannot place a separate surface window).' : ''}`
+  }${proofSurfaceHostedInWindow ? proofSurfaceHostNote(process.platform) : ''}`
   nativePreviewSurfaceStatus = {
     ...(preserveNativeSurface ? nativePreviewSurfaceStatus : {}),
     state: 'live',
@@ -12282,6 +12301,15 @@ async function runSmokePreviewMotionCommand(
       throw new Error('Preview window must be open before exercising proof fallback.')
     }
     await disableNativePreviewRealSurfaceDriver('Smoke requested explicit proof fallback.')
+    // Plan 216 C: a probe that drives a real mouse over the fallback needs it
+    // to outlast the retry cooldown, or the next host command brings the
+    // native presenter back mid-drag. `restore-native-preview-driver` ends
+    // the hold.
+    if (typeof params.holdMs === 'number' && Number.isFinite(params.holdMs) && params.holdMs > 0) {
+      const retryAtMs = Date.now() + Math.min(params.holdMs, 10 * 60_000)
+      nativePreviewPrimaryDriverRetryAtMs = retryAtMs
+      nativePreviewHelperDriverRetryAtMs = retryAtMs
+    }
     const window = nativePreviewSurfaceWindow
     return {
       exists: Boolean(window && !window.isDestroyed()),
@@ -12292,6 +12320,50 @@ async function runSmokePreviewMotionCommand(
         ? surfaceWindowPlacement(nativePreviewSurfaceStatus.bounds)
         : null,
       status: nativePreviewSurfaceStatus
+    }
+  }
+
+  // Plan 216 C: the presenting watchdog's `reset-native-path`, run on request.
+  // The retry cooldowns clear and the presenter is resolved again, so a probe
+  // that forced the proof fallback leaves the app back on its native path.
+  if (command === 'restore-native-preview-driver') {
+    if (!previewWindowIsOpenForSurface()) {
+      throw new Error('Preview window must be open before restoring the native presenter.')
+    }
+    await resetNativePreviewRealSurfaceDriver('Smoke restored the native presenter.')
+    return {
+      ...previewWindowState(),
+      realDriverActive: Boolean(nativePreviewRealSurfaceDriver),
+      realDriverKind: nativePreviewRealSurfaceDriverKind,
+      nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
+      transport: nativePreviewSurfaceStatus.transport
+    }
+  }
+
+  // Plan 216 C: drive the fallback surface through its own web contents, the
+  // way real mouse input reaches a view (Chromium input pipeline, then
+  // `before-mouse-event`), on a host that refuses HID posting (no
+  // Accessibility grant for the probe terminal). Points are surface-local.
+  if (command === 'send-input-to-proof-surface') {
+    const surface = nativePreviewSurfaceWindow
+    if (!surface || surface.isDestroyed() || surface.webContents.isDestroyed()) {
+      throw new Error('Proof surface is not open.')
+    }
+    const events = validateSmokeProofSurfaceInputEvents(params.events)
+    if (!events) {
+      throw new Error('Invalid proof-surface input events.')
+    }
+    for (const event of events) {
+      surface.webContents.sendInputEvent(event)
+      await delay(30)
+    }
+    return {
+      sent: events.length,
+      hostedInWindow: surface instanceof InWindowProofSurface,
+      forwardedInput:
+        surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
+      lastObserved: surface instanceof InWindowProofSurface ? surface.lastObservedInput() : null,
+      bounds: surface.getBounds()
     }
   }
 
@@ -12522,7 +12594,8 @@ async function runSmokePreviewMotionCommand(
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
         bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null,
-        // Linux: the surface is a view inside this window, not a window of its own.
+        // Linux and macOS: the surface is a view inside this window, not a
+        // window of its own (plan 216 C asserts 'main' on the proof fallback).
         hostedInWindow:
           surface instanceof InWindowProofSurface
             ? surface.hostWindow() === mainWindow
@@ -12531,6 +12604,8 @@ async function runSmokePreviewMotionCommand(
                 ? 'preview'
                 : 'detached'
             : null,
+        forwardedInput:
+          surface instanceof InWindowProofSurface ? surface.forwardedInputCounts() : null,
         ...smokeNativeWindowIdentity(surface instanceof BrowserWindow ? surface : null),
         captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(
           surface instanceof BrowserWindow ? surface : null
