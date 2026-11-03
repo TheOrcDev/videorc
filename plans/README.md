@@ -1,5 +1,18 @@
 # Implementation Plans
 
+- 2026-11-03: [Plan 216](216-freeform-screen-box-and-drag.md), a streamer's
+  bug report with a video and a support bundle (0.18.0, all three bugs still
+  on main). EXECUTING; the owner took D1 to D5 as recommended:
+  - A: a rearrangement (Freeform, a move, Fill/Fit) never waits for a source
+    already in the scene; their camera said "live" but sent no frames, so
+    Freeform failed after 15 s. One "Switching…" label, a named failure,
+    and the bundle keeps recent errors.
+  - B: in Freeform the screen's box is its picture (one picture-rect rule in
+    Rust and TypeScript), on top of plan 215 E and before 215 F.
+  - C: on macOS the fallback preview lives inside the main window, as on
+    Linux, so the canvas drags; a real-mouse probe gates it.
+  - D: why their Mac had a silent camera and a fallback preview (needs the
+    streamer).
 - 2026-11-03: [Plan 215](215-streamer-list-2026-11-02.md), a streamer's
   list from 2026-11-02. Seven workstreams, one PR each:
   - A: X chat names the missing Videorc sign-in, warns before Go Live, and
