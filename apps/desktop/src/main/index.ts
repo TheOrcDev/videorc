@@ -534,6 +534,7 @@ import {
   type PresentingWatchState,
   type WatchdogRunToken
 } from './native-preview-first-frame'
+import { FirstFrameDecisionLog, firstFrameSnapshotEvidence } from './first-frame-decisions'
 import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
 import { PREVIEW_SURFACE_STAGE_RUNTIME_SCRIPT } from './preview-surface-stage'
 import {
@@ -1674,6 +1675,9 @@ let firstFrameWatchdogMode: 'first-frame' | 'presenting-watch' = 'first-frame'
 let presentingWatch: PresentingWatchState = emptyPresentingWatch()
 let presentingWatchLastKind: PresentingAssessment['kind'] = 'presenting'
 let nativePreviewProofPendingStartedAtMs: number | null = null
+// Plan 216 D3: the watchdog's last decisions and what it saw, for the support
+// bundle (runtimeInfo.firstFrameDecisions); its log lines never reach it.
+const firstFrameDecisions = new FirstFrameDecisionLog()
 
 function startFirstFrameWatchdog(): void {
   stopFirstFrameWatchdog()
@@ -1960,6 +1964,7 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
         setFirstFrameStatus('met', reason)
         updatePreviewWindowWaitDetail(null)
         logBackend('info', '[proof-preview] presentation watchdog is live')
+        firstFrameDecisions.record({ watch: 'proof-preview', decision: 'met', reason })
       }
     } else if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
       const pendingElapsedMs = Math.max(0, nowMs - pendingStartedAtMs)
@@ -1971,6 +1976,16 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'fallback',
+        reason,
+        evidence: {
+          sourceFrameHistoryComplete,
+          sourceFrameAgeMs: sourceFrameAgeMs ?? null,
+          pendingElapsedMs
+        }
+      })
     }
 
     syncPreviewSupervisorSurface(
@@ -2074,6 +2089,11 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       case 'met':
         setFirstFrameStatus('met')
         updatePreviewWindowWaitDetail(null)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'met',
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         // Contract met ≠ done: keep ticking as the presenting watch so a
         // mid-session stall (dead pump, suspended helper, lost surface)
         // self-heals instead of showing the placeholder until relaunch.
@@ -2089,12 +2109,25 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
         setFirstFrameStatus('healing', assessment.reason)
         updatePreviewWindowWaitDetail(assessment.reason)
         logBackend('info', `[first-frame] healing: ${assessment.action}: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'heal',
+          action: assessment.action,
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         runFirstFrameHealingAction(assessment.action, compositor)
         return
       case 'fallback':
         setFirstFrameStatus('fallback', assessment.reason)
         updatePreviewWindowWaitDetail(`Preview could not start natively: ${assessment.reason}`)
         logBackend('warn', `[first-frame] contract failed: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'first-frame',
+          decision: 'fallback',
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
         stopFirstFrameWatchdog(watchdogRun)
         return
     }
@@ -2127,6 +2160,11 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
         setFirstFrameStatus('met')
         updatePreviewWindowWaitDetail(null)
         logBackend('info', '[preview-watch] presenting recovered')
+        firstFrameDecisions.record({
+          watch: 'presenting-watch',
+          decision: 'recovered',
+          evidence: firstFrameSnapshotEvidence(snapshot)
+        })
       }
       return
     case 'observing':
@@ -2137,6 +2175,16 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
       setFirstFrameStatus('healing', assessment.reason)
       updatePreviewWindowWaitDetail(assessment.reason)
       logBackend('info', `[preview-watch] healing: ${assessment.action}: ${assessment.reason}`)
+      firstFrameDecisions.record({
+        watch: 'presenting-watch',
+        decision: 'heal',
+        action: assessment.action,
+        reason: assessment.reason,
+        evidence: firstFrameSnapshotEvidence(snapshot, {
+          brokenTicks: watch.brokenTicks,
+          stallElapsedMs: watch.stallElapsedMs
+        })
+      })
       runFirstFrameHealingAction(assessment.action, null)
       return
     case 'stalled':
@@ -2144,6 +2192,15 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
         setFirstFrameStatus('fallback', assessment.reason)
         updatePreviewWindowWaitDetail(`Preview stalled: ${assessment.reason}`)
         logBackend('warn', `[preview-watch] stalled after healing exhausted: ${assessment.reason}`)
+        firstFrameDecisions.record({
+          watch: 'presenting-watch',
+          decision: 'stalled',
+          reason: assessment.reason,
+          evidence: firstFrameSnapshotEvidence(snapshot, {
+            brokenTicks: watch.brokenTicks,
+            stallElapsedMs: watch.stallElapsedMs
+          })
+        })
       }
       return
   }
@@ -7636,6 +7693,7 @@ async function setNativePreviewSurfacesVisible(visible: boolean): Promise<void> 
 // considered only when its explicit diagnostic fallback flag is enabled.
 async function disableNativePreviewRealSurfaceDriver(reason: string): Promise<void> {
   const driver = nativePreviewRealSurfaceDriver
+  const driverKind = nativePreviewRealSurfaceDriverKind
   nativePreviewRealSurfaceDriver = null
   nativePreviewRealSurfaceDriverKind = null
   nativePreviewRealSurfaceInvalidActivationCount = 0
@@ -7646,6 +7704,16 @@ async function disableNativePreviewRealSurfaceDriver(reason: string): Promise<vo
   nativePreviewHelperDriverRetryAtMs = retryAtMs
   nativePreviewNativeOwnsProofPollingSuppression = false
   nativePreviewNativeFailureFallbackActive = previewWindowIsOpenForSurface()
+  firstFrameDecisions.record({
+    watch: 'presenter',
+    decision: 'presenter-retired',
+    reason,
+    evidence: {
+      driverKind,
+      hadDriver: driver != null,
+      fallbackWindowShown: nativePreviewNativeFailureFallbackActive
+    }
+  })
   clearNativePreviewNativePlacementAuthority()
   try {
     driver?.stop?.()
@@ -8197,6 +8265,11 @@ async function presentNativePreviewSurfaceCompositor(
       setFirstFrameStatus('met', proofSourceLiveReason(process.platform))
       updatePreviewWindowWaitDetail(null)
       logBackend('info', '[proof-preview] source frame delivery is live')
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'met',
+        reason: proofSourceLiveReason(process.platform)
+      })
     }
   } else if (proofSourceAssessment === 'stalled') {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
@@ -8204,6 +8277,12 @@ async function presentNativePreviewSurfaceCompositor(
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowWaitDetail(reason)
       logBackend('warn', `[proof-preview] ${reason}`)
+      firstFrameDecisions.record({
+        watch: 'proof-preview',
+        decision: 'stalled',
+        reason,
+        evidence: { sourceFrameAgeMs: sourceFrameAgeMs ?? null }
+      })
     }
   }
   syncPreviewSupervisorSurface(
@@ -15142,6 +15221,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
       retryAttempts: gpuFallbackState?.retryAttempts ?? gpuFallbackLaunchState?.retryAttempts ?? 0
     },
     backendCrashes: backendCrashRecords,
+    firstFrameDecisions: firstFrameDecisions.snapshot(),
     windowGlass: mainWindowGlassInfo(),
     env: process.env
   })

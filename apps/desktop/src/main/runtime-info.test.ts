@@ -217,6 +217,30 @@ describe('runtime info helpers', () => {
     expect(info.backendCrashes).toEqual([])
   })
 
+  it('carries the Preview watchdog decisions into the bundle (plan 216 D3)', () => {
+    const decision = {
+      at: '2026-11-03T14:51:40.000Z',
+      watch: 'presenter' as const,
+      decision: 'presenter-retired' as const,
+      reason: 'Native preview presenting watchdog requested a clean presenter.',
+      evidence: { driverKind: 'helper-process', hadDriver: true, fallbackWindowShown: true }
+    }
+    const info = buildRuntimeInfo({
+      appVersion: '9.9.9-test',
+      execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+      firstFrameDecisions: [decision],
+      env: {}
+    })
+    expect(JSON.parse(JSON.stringify(info)).firstFrameDecisions).toEqual([decision])
+    expect(
+      buildRuntimeInfo({
+        appVersion: '9.9.9-test',
+        execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+        env: {}
+      }).firstFrameDecisions
+    ).toEqual([])
+  })
+
   it('surfaces the running app version', () => {
     const info = buildRuntimeInfo({
       appVersion: '1.2.3',

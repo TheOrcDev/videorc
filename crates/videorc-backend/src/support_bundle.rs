@@ -1068,6 +1068,48 @@ mod tests {
         assert_eq!(bundle.app.version, "0.9.16");
     }
 
+    // Plan 216 D3: main's record of the Preview watchdog's decisions rides in
+    // rendererDiagnostics.runtimeInfo; the bundle keeps it whole and redacts it.
+    #[test]
+    fn support_bundle_keeps_and_redacts_the_preview_watchdog_decisions() {
+        let mut input = minimal_input(None);
+        input.renderer_diagnostics = Some(json!({
+            "runtimeInfo": {
+                "firstFrameDecisions": [
+                    {
+                        "at": "2026-11-03T14:51:38.000Z",
+                        "watch": "presenting-watch",
+                        "decision": "heal",
+                        "action": "reset-native-path",
+                        "reason": "native presentation is not advancing",
+                        "evidence": { "brokenTicks": 9, "nativePresenting": true, "previewHold": null }
+                    },
+                    {
+                        "at": "2026-11-03T14:51:39.000Z",
+                        "watch": "presenter",
+                        "decision": "presenter-retired",
+                        "reason": "Presenter module failed: https://user:hunter2@example.test/helper",
+                        "evidence": { "driverKind": "helper-process", "fallbackWindowShown": true }
+                    }
+                ]
+            }
+        }));
+        let bundle = serde_json::to_value(build_support_bundle(input).unwrap()).unwrap();
+        let decisions = bundle["rendererDiagnostics"]["runtimeInfo"]["firstFrameDecisions"]
+            .as_array()
+            .expect("the decisions are kept");
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0]["action"], json!("reset-native-path"));
+        assert_eq!(decisions[0]["evidence"]["brokenTicks"], json!(9));
+        assert_eq!(
+            decisions[1]["evidence"]["driverKind"],
+            json!("helper-process")
+        );
+        let retired = decisions[1]["reason"].as_str().unwrap();
+        assert!(retired.starts_with("Presenter module failed: "));
+        assert!(!retired.contains("hunter2"), "{retired}");
+    }
+
     #[test]
     fn support_bundle_carries_metrics_journal_lines_only_when_the_journal_is_on() {
         let off = serde_json::to_value(build_support_bundle(minimal_input(None)).unwrap()).unwrap();

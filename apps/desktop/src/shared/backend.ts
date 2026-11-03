@@ -4539,6 +4539,26 @@ export interface RuntimeInfo {
    * supervisor restarts and app relaunches so a support bundle exported after
    * "Backend crashed, restarting" still names the exit and its last stderr. */
   backendCrashes?: BackendCrashRecord[]
+  /** Plan 216 D3: the Preview's first-frame watchdog's last decisions
+   * (oldest first, last 20), so a bundle says why the Preview fell back. */
+  firstFrameDecisions?: FirstFrameDecisionRecord[]
+}
+
+/** Flat evidence a watchdog decision saw: numbers, flags and short words. */
+export type FirstFrameDecisionEvidence = Record<string, string | number | boolean | null>
+
+/** One decision of the Preview's first-frame watchdog, kept in main (plan 216 D3). */
+export interface FirstFrameDecisionRecord {
+  /** ISO timestamp of the decision. */
+  at: string
+  /** Which watch decided: the first frame, the steady presenting watch, the
+   * Windows proof surface, or the presenter itself being retired. */
+  watch: 'first-frame' | 'presenting-watch' | 'proof-preview' | 'presenter'
+  decision: 'met' | 'heal' | 'fallback' | 'stalled' | 'recovered' | 'presenter-retired'
+  /** The healing action fired, for a heal. */
+  action?: 'present-kick' | 'resync-scene' | 'reset-native-path'
+  reason?: string
+  evidence?: FirstFrameDecisionEvidence
 }
 
 /** One backend process exit worth keeping: every non-intentional exit plus
