@@ -1,4 +1,4 @@
-import { join, resolve } from 'node:path'
+import { posix, resolve, win32 } from 'node:path'
 
 /** The FFmpeg the app ships on this platform: the staged macOS build, or the
  * pinned Windows or Linux archive. The camera look parity test must run
@@ -15,6 +15,9 @@ export function bundledFfmpegPath({
       : platform === 'linux'
         ? ['linux-x64', 'bin', 'ffmpeg']
         : ['current', 'bin', 'ffmpeg']
+  // Join with the target platform's separator, not the host's, so a path
+  // computed for another platform (the unit tests do) reads as that one.
+  const join = platform === 'win32' ? win32.join : posix.join
   return join(repoRoot, 'vendor', 'ffmpeg', ...bundle)
 }
 
