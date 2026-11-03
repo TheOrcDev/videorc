@@ -68,6 +68,13 @@ export interface VirtualCameraActionHost {
   setUp?: () => Promise<VirtualCameraActionResult>
   /** Linux's `pkexec modprobe` load (plan 214 D1), once it exists. */
   loadModule?: () => Promise<VirtualCameraActionResult>
+  /**
+   * Whether the backend hides the camera on this computer
+   * (`platformStep: unsupported`, the owner's hide rule). Asked before
+   * set-up or load-module runs anything elevated, so a hidden platform stays
+   * inert even if a renderer asks. An unanswered question counts as hidden.
+   */
+  platformHidden?: () => Promise<boolean>
 }
 
 const notAvailable = async (): Promise<VirtualCameraActionResult> => ({
@@ -101,9 +108,23 @@ const ACTIONS: Record<
       ? removalResult(await host.deactivateCameraExtension())
       : notAvailable(),
   'set-up': async (host) =>
-    host.platform === 'win32' && host.setUp ? host.setUp() : notAvailable(),
+    host.platform === 'win32' && host.setUp && !(await hiddenHere(host))
+      ? host.setUp()
+      : notAvailable(),
   'load-module': async (host) =>
-    host.platform === 'linux' && host.loadModule ? host.loadModule() : notAvailable()
+    host.platform === 'linux' && host.loadModule && !(await hiddenHere(host))
+      ? host.loadModule()
+      : notAvailable()
+}
+
+/** The hide rule for the elevated actions; no answer reads as hidden. */
+async function hiddenHere(host: VirtualCameraActionHost): Promise<boolean> {
+  if (!host.platformHidden) return true
+  try {
+    return await host.platformHidden()
+  } catch {
+    return true
+  }
 }
 
 /** Runs one action; anything unknown is refused before it reaches a platform. */

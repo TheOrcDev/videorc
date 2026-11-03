@@ -5,6 +5,7 @@ import {
   LOAD_MODULE_TERMINAL_LINE,
   LOAD_MODULE_TIMEOUT_MS,
   PKEXEC,
+  STDERR_DETAIL_MAX,
   classifyLoadModuleRun,
   createLinuxModuleLoader,
   runLinuxLoadModule,
@@ -138,6 +139,18 @@ describe('classifyLoadModuleRun', () => {
       outcome: 'failed',
       message: expect.stringContaining('modprobe exited with 3')
     })
+  })
+
+  it('caps a long stderr line so the message fits the IPC contract (512)', () => {
+    const long = `modprobe: ERROR: ${'x'.repeat(2000)}`
+    const result = classifyLoadModuleRun(run({ exitCode: 1, stderr: `${long}\n` }))
+    expect(result.outcome).toBe('failed')
+    expect(result.message?.startsWith('modprobe failed: modprobe: ERROR: x')).toBe(true)
+    expect(result.message?.endsWith('…')).toBe(true)
+    expect(result.message?.length).toBeLessThanOrEqual(
+      'modprobe failed: '.length + STDERR_DETAIL_MAX
+    )
+    expect(result.message?.length).toBeLessThanOrEqual(512)
   })
 })
 

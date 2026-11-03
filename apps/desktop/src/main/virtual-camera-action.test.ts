@@ -136,14 +136,46 @@ describe('Videorc Camera actions in main (plan 214 E)', () => {
   it('hands set-up and load-module to the platform functions once they exist', async () => {
     const setUp = vi.fn(async () => ({ ok: true }))
     const loadModule = vi.fn(async () => ({ ok: false, message: 'Secure Boot blocked it.' }))
+    const shown = async () => false
     await expect(
-      runVirtualCameraAction('set-up', host({ platform: 'win32', setUp }))
+      runVirtualCameraAction('set-up', host({ platform: 'win32', setUp, platformHidden: shown }))
     ).resolves.toEqual({ ok: true })
     await expect(
-      runVirtualCameraAction('load-module', host({ platform: 'linux', loadModule }))
+      runVirtualCameraAction(
+        'load-module',
+        host({ platform: 'linux', loadModule, platformHidden: shown })
+      )
     ).resolves.toEqual({ ok: false, message: 'Secure Boot blocked it.' })
     expect(setUp).toHaveBeenCalledTimes(1)
     expect(loadModule).toHaveBeenCalledTimes(1)
+  })
+
+  it('never runs set-up or load-module where the camera is hidden or the backend is silent', async () => {
+    // The owner's hide rule holds in main too: a hidden platform stays inert
+    // (no UAC prompt, no pkexec) even if a renderer asks.
+    const refusal = { ok: false, message: VIRTUAL_CAMERA_NOT_AVAILABLE }
+    const cases: Array<VirtualCameraActionHost['platformHidden']> = [
+      async () => true,
+      async () => {
+        throw new Error('backend offline')
+      },
+      undefined
+    ]
+    for (const platformHidden of cases) {
+      const setUp = vi.fn(async () => ({ ok: true }))
+      const loadModule = vi.fn(async () => ({ ok: true }))
+      await expect(
+        runVirtualCameraAction('set-up', host({ platform: 'win32', setUp, platformHidden }))
+      ).resolves.toEqual(refusal)
+      await expect(
+        runVirtualCameraAction(
+          'load-module',
+          host({ platform: 'linux', loadModule, platformHidden })
+        )
+      ).resolves.toEqual(refusal)
+      expect(setUp).not.toHaveBeenCalled()
+      expect(loadModule).not.toHaveBeenCalled()
+    }
   })
 
   it('refuses an unknown action before any platform sees it', async () => {
