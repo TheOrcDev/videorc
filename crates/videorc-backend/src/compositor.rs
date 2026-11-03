@@ -25541,6 +25541,9 @@ mod program_leg_tests {
                     buddy_on_primary,
                     buddy_on_aux: false,
                     buddy_on_program,
+                    chat_on_primary: false,
+                    chat_on_aux: false,
+                    chat_on_program: false,
                     presenting,
                 },
             )

@@ -504,6 +504,9 @@ mod tests {
             replay_only: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
+            chat_overlay_on_program: false,
         }
     }
 
@@ -524,6 +527,9 @@ mod tests {
             buddy_overlay_on_aux: false,
             highlight_overlay_on_program: false,
             buddy_overlay_on_program: false,
+            chat_overlay_on_primary: false,
+            chat_overlay_on_aux: false,
+            chat_overlay_on_program: false,
         }
     }
 
