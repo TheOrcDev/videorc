@@ -193,6 +193,56 @@ pub fn missing_sources(needs: SceneSourceNeeds, live: SourceLiveness) -> Vec<&'s
     missing
 }
 
+/// The target scene's sources the installed program scene already composes:
+/// visible, the same kind family (camera, or screen/window) and the same
+/// device id (plan 216 A2).
+fn already_composed_sources(installed: Option<&Scene>, target: &Scene) -> SceneSourceNeeds {
+    let Some(installed) = installed else {
+        return SceneSourceNeeds::default();
+    };
+    let composes = |screen_family: bool, device_id: &str| {
+        installed.sources.iter().any(|source| {
+            source.visible
+                && source.device_id.as_deref() == Some(device_id)
+                && match source.kind {
+                    SceneSourceKind::Camera => !screen_family,
+                    SceneSourceKind::Screen | SceneSourceKind::Window => screen_family,
+                    SceneSourceKind::TestPattern => false,
+                }
+        })
+    };
+    let mut composed = SceneSourceNeeds::default();
+    for source in target.sources.iter().filter(|source| source.visible) {
+        let Some(device_id) = source.device_id.as_deref() else {
+            continue;
+        };
+        match source.kind {
+            SceneSourceKind::Camera => composed.camera |= composes(false, device_id),
+            SceneSourceKind::Screen | SceneSourceKind::Window => {
+                composed.screen |= composes(true, device_id)
+            }
+            SceneSourceKind::TestPattern => {}
+        }
+    }
+    composed
+}
+
+/// What a transaction must see a fresh frame from before it commits: `needs`
+/// minus what the program already composes (plan 216 D1). A source the
+/// change ADDS waits for its first frame as always; one the program already
+/// shows is the recovery driver's problem when it stalls, so a rearrangement
+/// of the same sources (Freeform, a preset that keeps them, Fit/Fill) commits
+/// now instead of failing after its 15 s budget.
+fn readiness_needs(
+    needs: SceneSourceNeeds,
+    already_composed: SceneSourceNeeds,
+) -> SceneSourceNeeds {
+    SceneSourceNeeds {
+        camera: needs.camera && !already_composed.camera,
+        screen: needs.screen && !already_composed.screen,
+    }
+}
+
 /// Classify the swap through the LS1 model: hot when every needed source is live,
 /// warm otherwise (start, then swap on ready).
 pub fn plan_live_swap(
@@ -1013,6 +1063,15 @@ async fn apply_scene_transaction(
     )
     .await?;
     let session_active = state.recording.lock().await.is_some();
+    // Plan 216 D1: readiness covers only what this change adds. The full
+    // `needs` still owns the intent, retirement and the geometry resync below.
+    let readiness = {
+        let compositor = state.compositor.lock().await;
+        readiness_needs(
+            needs,
+            already_composed_sources(compositor.composed_program_scene(), &scene),
+        )
+    };
 
     // This explicit scene/config intent owns camera-recovery supersession from
     // this point, including a same-generation Hot layout commit that never
@@ -1022,7 +1081,7 @@ async fn apply_scene_transaction(
     // driver cannot cross the physical boundary in the meantime.
     run_explicit_camera_configuration_transaction(state, async {
         let live = source_liveness(state, target_sources).await;
-        match plan_live_swap(mutation_kind, needs, live) {
+        match plan_live_swap(mutation_kind, readiness, live) {
             ApplyMode::Hot => {
                 let status =
                     commit_scene_for_intent(state, intent_id, &scene, &params, None).await?;
@@ -1037,16 +1096,22 @@ async fn apply_scene_transaction(
                 ))
             }
             ApplyMode::Warm => {
-                let missing = missing_sources(needs, live);
-                let deadlines =
-                    start_missing_sources(state, intent_id, &params, needs, &missing, action_label)
-                        .await?;
+                let missing = missing_sources(readiness, live);
+                let deadlines = start_missing_sources(
+                    state,
+                    intent_id,
+                    &params,
+                    readiness,
+                    &missing,
+                    action_label,
+                )
+                .await?;
                 ensure_layout_intent_current(state, intent_id).await?;
                 wait_for_sources_ready(
                     state,
                     intent_id,
                     deadlines,
-                    needs,
+                    readiness,
                     target_sources,
                     action_label,
                 )
@@ -5895,6 +5960,66 @@ mod tests {
                 .map(|layout| layout.layout_preset.clone()),
             Some(LayoutPreset::ScreenOnly),
             "the previous scene stays the program"
+        );
+    }
+
+    /// Plan 216 A2: what the program already composes never counts toward
+    /// readiness; what a change adds, or changes the device of, still does.
+    #[test]
+    fn readiness_covers_only_the_sources_a_change_adds() {
+        let both = scene_from_capture_config(config(LayoutPreset::ScreenCamera, true, true));
+        let needs = required_scene_sources(&both);
+        assert_eq!(
+            needs,
+            SceneSourceNeeds {
+                camera: true,
+                screen: true
+            }
+        );
+
+        // The same two sources rearranged: nothing to wait for.
+        let same = readiness_needs(needs, already_composed_sources(Some(&both), &both));
+        assert_eq!(same, SceneSourceNeeds::default());
+
+        // No program scene yet (first install): everything waits.
+        assert_eq!(
+            readiness_needs(needs, already_composed_sources(None, &both)),
+            needs
+        );
+
+        // Screen only on program, Screen + camera asked for: the camera waits.
+        let screen_only = scene_from_capture_config(config(LayoutPreset::ScreenOnly, false, true));
+        assert_eq!(
+            readiness_needs(needs, already_composed_sources(Some(&screen_only), &both)),
+            SceneSourceNeeds {
+                camera: true,
+                screen: false
+            }
+        );
+
+        // Another camera device: a device change is an add.
+        let mut other_camera = config(LayoutPreset::ScreenCamera, true, true);
+        other_camera.sources.camera_id = Some("camera:avfoundation-native:7".to_string());
+        let other_camera = scene_from_capture_config(other_camera);
+        assert_eq!(
+            readiness_needs(needs, already_composed_sources(Some(&both), &other_camera)),
+            SceneSourceNeeds {
+                camera: true,
+                screen: false
+            }
+        );
+
+        // A camera the program composes hidden is not on program: showing it
+        // waits for its frame.
+        let mut hidden = config(LayoutPreset::ScreenCamera, true, true);
+        hidden.layout.source_visibility.camera = false;
+        let hidden = scene_from_capture_config(hidden);
+        assert_eq!(
+            readiness_needs(needs, already_composed_sources(Some(&hidden), &both)),
+            SceneSourceNeeds {
+                camera: true,
+                screen: false
+            }
         );
     }
 }
