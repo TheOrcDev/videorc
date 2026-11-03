@@ -1683,6 +1683,11 @@ export type StudioContextValue = {
   outputEnabled: boolean
   streamReady: boolean
   isSessionActive: boolean
+  /** The running session's word on a scene edit (plan 215 D1), from
+   * `recording.status.acceptsLiveSceneEdits`: true on every compositor
+   * path, false on the legacy FFmpeg graph (a fixed picture), null while it
+   * has not said (nothing runs, a start still pending, an older backend). */
+  acceptsLiveSceneEdits: boolean | null
   /** A recording, livestream or Clips ring has a running audio bus (plan 201). */
   audioBusActive: boolean
   /** Whether the active session mixes system audio, from `recording.status`
@@ -12546,6 +12551,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const isSessionActive =
     sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
   const transportSessionActive = isSessionActive
+  // Plan 215 D1: the Scene page unlocks a source's position and size only
+  // once the session says a commit reaches its picture.
+  const acceptsLiveSceneEdits = recording.acceptsLiveSceneEdits ?? null
   const mixingSessionActive =
     ['recording', 'streaming'].includes(recording.state) && Boolean(recording.sessionId)
   const systemAudioConfirmed = mixingSessionActive
@@ -18706,6 +18714,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      acceptsLiveSceneEdits,
       audioBusActive: mixingSessionActive,
       systemAudioConfirmed,
       systemAudioJoining,
@@ -18951,6 +18960,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      acceptsLiveSceneEdits,
       mixingSessionActive,
       systemAudioConfirmed,
       systemAudioJoining,
