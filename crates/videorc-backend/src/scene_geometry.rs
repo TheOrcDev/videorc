@@ -7,15 +7,110 @@ use crate::protocol::{
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
 const CAMERA_REFERENCE_HEIGHT: u32 = 720;
 
+/// The protocol's bounds for a scene source's box, as canvas fractions (plan
+/// 215 E3, owner decision D2): a source may be up to 400% of the canvas and
+/// sit anywhere from three canvases left or above the canvas to four right
+/// or below it. These are the coarse limits every render path tolerates
+/// (`scene::sanitize_transform_unsnapped` clamps to them); the editor keeps
+/// at least 5% of the canvas covered on each axis (the stage's
+/// `MIN_SOURCE_FRACTION`). Mirrored by `transform-fields-math.ts`,
+/// `stage-transform.ts` and the Windows D3D11 planner.
+pub const MAX_SOURCE_SIZE_FRACTION: f64 = 4.0;
+pub const MIN_SOURCE_POSITION_FRACTION: f64 = -3.0;
+pub const MAX_SOURCE_POSITION_FRACTION: f64 = 4.0;
+
 /// Backend-independent destination rectangle used by the FFmpeg recording and
 /// CPU/Metal compositor paths. Renderer-specific syntax and buffer handling
-/// deliberately stay in those consumers.
+/// deliberately stay in those consumers. Always on the canvas: a source's
+/// box before the canvas edge cuts it is a [`SignedPixelRect`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PixelRect {
     pub x: u32,
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+/// A source's box in canvas pixels before the canvas edge cuts it (plan 215
+/// E1): signed, so a box that starts left of or above the canvas keeps its
+/// true origin, and as big as its transform says, so one that runs past the
+/// right or bottom edge keeps its true size. Every render path fits the
+/// source into THIS box and lets the canvas edge cut what hangs off (the GPU
+/// paths clip the quad; the CPU path draws `intersect_canvas`); nothing
+/// squashes the box onto the canvas any more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedPixelRect {
+    pub x: i64,
+    pub y: i64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// What the canvas edge leaves of a [`SignedPixelRect`]: the part on the
+/// canvas, and how many pixels of the box's left and top the edge cut off
+/// (the right and bottom cuts follow from the sizes). A consumer that draws
+/// `visible` from a source window fitted to the whole box starts the window
+/// `cut_left` and `cut_top` box pixels in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanvasCut {
+    pub visible: PixelRect,
+    pub cut_left: u32,
+    pub cut_top: u32,
+}
+
+impl SignedPixelRect {
+    pub fn right(self) -> i64 {
+        self.x.saturating_add(i64::from(self.width))
+    }
+
+    pub fn bottom(self) -> i64 {
+        self.y.saturating_add(i64::from(self.height))
+    }
+
+    /// The box intersected with a `canvas_width`×`canvas_height` canvas, with
+    /// the amount cut off its left and top; `None` when nothing of it is on
+    /// the canvas (or the box is empty).
+    pub fn intersect_canvas(self, canvas_width: u32, canvas_height: u32) -> Option<CanvasCut> {
+        let left = self.x.max(0);
+        let top = self.y.max(0);
+        let right = self.right().min(i64::from(canvas_width));
+        let bottom = self.bottom().min(i64::from(canvas_height));
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(CanvasCut {
+            visible: PixelRect {
+                x: left as u32,
+                y: top as u32,
+                width: (right - left) as u32,
+                height: (bottom - top) as u32,
+            },
+            cut_left: (left - self.x) as u32,
+            cut_top: (top - self.y) as u32,
+        })
+    }
+
+    /// The whole box as an on-canvas rect, only when the canvas edge cuts
+    /// nothing off it.
+    pub fn whole_on_canvas(self, canvas_width: u32, canvas_height: u32) -> Option<PixelRect> {
+        let cut = self.intersect_canvas(canvas_width, canvas_height)?;
+        (cut.cut_left == 0
+            && cut.cut_top == 0
+            && cut.visible.width == self.width
+            && cut.visible.height == self.height)
+            .then_some(cut.visible)
+    }
+}
+
+impl From<PixelRect> for SignedPixelRect {
+    fn from(rect: PixelRect) -> Self {
+        Self {
+            x: i64::from(rect.x),
+            y: i64::from(rect.y),
+            width: rect.width,
+            height: rect.height,
+        }
+    }
 }
 
 /// A normalized crop in source coordinates. Values are clamped independently
@@ -132,25 +227,26 @@ pub fn scene_source_uses_background_stage(source_kind: &SceneSourceKind) -> bool
     )
 }
 
+/// A scene source's box in canvas pixels, uncut (plan 215 E1, D2): its true
+/// origin (signed, so a box that starts left of or above the canvas keeps
+/// it) and its true size (so a box past the right or bottom edge keeps it).
+/// What hangs off the canvas is the render path's to cut, never to squash:
+/// before this, the origin was clamped onto the canvas and the size shrunk
+/// to what was left, which squeezed the whole picture into the visible part.
+/// A box wholly on the canvas comes out exactly as it always did.
 pub fn scene_source_rect_pixels(
     transform: &SceneTransform,
     canvas_width: u32,
     canvas_height: u32,
-) -> Option<PixelRect> {
+) -> Option<SignedPixelRect> {
     if transform.width <= 0.0 || transform.height <= 0.0 {
         return None;
     }
-    let x = normalized_to_pixel(transform.x, canvas_width).min(canvas_width.saturating_sub(1));
-    let y = normalized_to_pixel(transform.y, canvas_height).min(canvas_height.saturating_sub(1));
-    let max_width = canvas_width.saturating_sub(x).max(1);
-    let max_height = canvas_height.saturating_sub(y).max(1);
-    let width = normalized_to_span(transform.width, canvas_width).min(max_width);
-    let height = normalized_to_span(transform.height, canvas_height).min(max_height);
-    Some(PixelRect {
-        x,
-        y,
-        width,
-        height,
+    Some(SignedPixelRect {
+        x: normalized_to_signed_pixel(transform.x, canvas_width),
+        y: normalized_to_signed_pixel(transform.y, canvas_height),
+        width: normalized_to_span(transform.width, canvas_width),
+        height: normalized_to_span(transform.height, canvas_height),
     })
 }
 
@@ -442,19 +538,29 @@ pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8,
     (r, g, b)
 }
 
-pub fn circle_geometry(rect: PixelRect) -> CircleGeometry {
+/// Mask geometry over a box that may hang off the canvas (plan 215 E2): the
+/// circle or corners belong to the whole box, so a source bigger than the
+/// canvas keeps its true shape and the canvas edge cuts the shape, not the
+/// other way round. An on-canvas [`PixelRect`] converts; the f64s are the
+/// same ones as before for it.
+pub fn circle_geometry(rect: impl Into<SignedPixelRect>) -> CircleGeometry {
+    let rect = rect.into();
     CircleGeometry {
-        center_x: f64::from(rect.x) + f64::from(rect.width) / 2.0,
-        center_y: f64::from(rect.y) + f64::from(rect.height) / 2.0,
+        center_x: rect.x as f64 + f64::from(rect.width) / 2.0,
+        center_y: rect.y as f64 + f64::from(rect.height) / 2.0,
         radius: f64::from(rect.width.min(rect.height)) / 2.0,
     }
 }
 
-pub fn rounded_rect_geometry(rect: PixelRect, radius_pct: u32) -> RoundedRectGeometry {
+pub fn rounded_rect_geometry(
+    rect: impl Into<SignedPixelRect>,
+    radius_pct: u32,
+) -> RoundedRectGeometry {
+    let rect = rect.into();
     let radius = f64::from(rect.width.min(rect.height)) * f64::from(radius_pct.min(50)) / 100.0;
     RoundedRectGeometry {
-        center_x: f64::from(rect.x) + f64::from(rect.width) / 2.0,
-        center_y: f64::from(rect.y) + f64::from(rect.height) / 2.0,
+        center_x: rect.x as f64 + f64::from(rect.width) / 2.0,
+        center_y: rect.y as f64 + f64::from(rect.height) / 2.0,
         radius,
         inner_half_width: (f64::from(rect.width) / 2.0 - radius).max(0.0),
         inner_half_height: (f64::from(rect.height) / 2.0 - radius).max(0.0),
@@ -464,7 +570,12 @@ pub fn rounded_rect_geometry(rect: PixelRect, radius_pct: u32) -> RoundedRectGeo
 /// The single-pixel mask test. Per-pixel loops build a `SceneMaskTester` once
 /// instead (plan 191); this is the same tester, so there is one rule.
 #[cfg(test)]
-pub fn scene_mask_allows(mask: SceneMask, rect: PixelRect, x: usize, y: usize) -> bool {
+pub fn scene_mask_allows(
+    mask: SceneMask,
+    rect: impl Into<SignedPixelRect>,
+    x: usize,
+    y: usize,
+) -> bool {
     SceneMaskTester::new(mask, rect).allows(x, y)
 }
 
@@ -480,7 +591,8 @@ pub enum SceneMaskTester {
 }
 
 impl SceneMaskTester {
-    pub fn new(mask: SceneMask, rect: PixelRect) -> Self {
+    pub fn new(mask: SceneMask, rect: impl Into<SignedPixelRect>) -> Self {
+        let rect = rect.into();
         match mask {
             SceneMask::None => Self::None,
             SceneMask::Circle => Self::Circle(circle_geometry(rect)),
@@ -726,12 +838,17 @@ pub fn side_by_side_widths(split: SideBySideSplit, total_width: u32) -> (u32, u3
     (screen_width, total_width - screen_width)
 }
 
-fn normalized_to_pixel(value: f64, span: u32) -> u32 {
-    (finite_or_zero(value).clamp(0.0, 1.0) * f64::from(span)).round() as u32
+/// A box origin in canvas pixels, signed, within the protocol's position
+/// bounds (so a malformed transform cannot ask for a box light-years off).
+fn normalized_to_signed_pixel(value: f64, span: u32) -> i64 {
+    (finite_or_zero(value).clamp(MIN_SOURCE_POSITION_FRACTION, MAX_SOURCE_POSITION_FRACTION)
+        * f64::from(span))
+    .round() as i64
 }
 
+/// A box side in canvas pixels, at least one and at most the protocol's 400%.
 fn normalized_to_span(value: f64, span: u32) -> u32 {
-    (finite_or_zero(value).clamp(0.0, 1.0) * f64::from(span))
+    (finite_or_zero(value).clamp(0.0, MAX_SOURCE_SIZE_FRACTION) * f64::from(span))
         .round()
         .max(1.0) as u32
 }
@@ -1266,7 +1383,7 @@ mod tests {
             let transform = preset_camera_transform(&layout, width, height);
             assert_eq!(
                 scene_source_rect_pixels(&transform, width, height),
-                Some(expected)
+                Some(SignedPixelRect::from(expected))
             );
         }
     }
@@ -1343,7 +1460,7 @@ mod tests {
         for (width, height) in [(1920, 1080), (3840, 2160)] {
             let transform = resolved_camera_transform(&layout, width, height);
             let rect = scene_source_rect_pixels(&transform, width, height).unwrap();
-            assert_eq!(rect.x + rect.width, width, "custom x clamps on-canvas");
+            assert_eq!(rect.right(), i64::from(width), "custom x clamps on-canvas");
             assert_eq!(rect.y, 0, "custom y clamps on-canvas");
             assert!((transform.crop_left - 0.233_333_333_333_333_34).abs() < 1e-9);
             assert!((transform.crop_right - 0.1).abs() < 1e-9);
@@ -1352,9 +1469,14 @@ mod tests {
         }
     }
 
+    /// Plan 215 E1 (D2): a box that runs past the canvas edge keeps its true
+    /// origin and size, so what hangs off is cut, never squashed. Before,
+    /// `scene_source_rect_pixels` clamped the origin onto the canvas and
+    /// shrank the size to what was left, which squeezed the whole picture
+    /// into the visible part.
     #[test]
-    fn transform_and_crop_table_clips_at_canvas_edges() {
-        let transform = SceneTransform {
+    fn transform_and_crop_table_cuts_at_canvas_edges_and_never_squashes() {
+        let past_the_corner = SceneTransform {
             x: 0.75,
             y: 0.8,
             width: 0.5,
@@ -1364,40 +1486,164 @@ mod tests {
             crop_right: 4.0,
             crop_bottom: 0.125,
         };
+        let left_of_the_canvas = SceneTransform {
+            x: -0.25,
+            y: 0.0,
+            width: 1.5,
+            height: 1.0,
+            ..past_the_corner.clone()
+        };
+        let four_hundred_percent = SceneTransform {
+            x: -1.5,
+            y: -1.5,
+            width: 4.0,
+            height: 4.0,
+            ..past_the_corner.clone()
+        };
+        // (transform, canvas) -> the uncut box: signed origin, full size.
         let cases = [
+            (&past_the_corner, (1920, 1080), (1440, 864, 960, 540)),
+            (&past_the_corner, (3840, 2160), (2880, 1728, 1920, 1080)),
+            (&left_of_the_canvas, (1920, 1080), (-480, 0, 2880, 1080)),
+            (&left_of_the_canvas, (3840, 2160), (-960, 0, 5760, 2160)),
             (
+                &four_hundred_percent,
                 (1920, 1080),
-                PixelRect {
-                    x: 1440,
-                    y: 864,
-                    width: 480,
-                    height: 216,
-                },
-            ),
-            (
-                (3840, 2160),
-                PixelRect {
-                    x: 2880,
-                    y: 1728,
-                    width: 960,
-                    height: 432,
-                },
+                (-2880, -1620, 7680, 4320),
             ),
         ];
-        for ((width, height), expected) in cases {
+        for (transform, (width, height), (x, y, w, h)) in cases {
+            let rect = scene_source_rect_pixels(transform, width, height).expect("a box");
             assert_eq!(
-                scene_source_rect_pixels(&transform, width, height),
-                Some(expected)
+                (
+                    i64::from(rect.x),
+                    i64::from(rect.y),
+                    rect.width,
+                    rect.height
+                ),
+                (x, y, w, h),
+                "{transform:?} on {width}x{height}"
             );
         }
         assert_eq!(
-            scene_crop_from_transform(&transform),
+            scene_crop_from_transform(&past_the_corner),
             SceneCrop {
                 left: 0.0,
                 top: 0.25,
                 right: 0.95,
                 bottom: 0.125,
             }
+        );
+    }
+
+    #[test]
+    fn signed_rect_intersects_the_canvas_and_reports_the_cut() {
+        let rect = |x, y, width, height| SignedPixelRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        let pixel = |x, y, width, height| PixelRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        // Past the bottom-right corner: the origin stays, the size is cut.
+        assert_eq!(
+            rect(1440, 864, 960, 540).intersect_canvas(1920, 1080),
+            Some(CanvasCut {
+                visible: pixel(1440, 864, 480, 216),
+                cut_left: 0,
+                cut_top: 0,
+            })
+        );
+        // Left of the canvas: the visible part starts at 0 and the source
+        // window starts 480 box pixels in.
+        assert_eq!(
+            rect(-480, 0, 2880, 1080).intersect_canvas(1920, 1080),
+            Some(CanvasCut {
+                visible: pixel(0, 0, 1920, 1080),
+                cut_left: 480,
+                cut_top: 0,
+            })
+        );
+        // A 400% box centred on the canvas covers it; three quarters of it
+        // hang off.
+        assert_eq!(
+            rect(-2880, -1620, 7680, 4320).intersect_canvas(1920, 1080),
+            Some(CanvasCut {
+                visible: pixel(0, 0, 1920, 1080),
+                cut_left: 2880,
+                cut_top: 1620,
+            })
+        );
+        // Nothing on the canvas: off every side, and an empty box.
+        assert_eq!(rect(1920, 0, 100, 100).intersect_canvas(1920, 1080), None);
+        assert_eq!(rect(-100, 0, 100, 100).intersect_canvas(1920, 1080), None);
+        assert_eq!(rect(0, 1080, 100, 100).intersect_canvas(1920, 1080), None);
+        assert_eq!(rect(0, -100, 100, 100).intersect_canvas(1920, 1080), None);
+        assert_eq!(rect(0, 0, 0, 100).intersect_canvas(1920, 1080), None);
+        // One pixel on the canvas still counts.
+        assert_eq!(
+            rect(-99, -99, 100, 100).intersect_canvas(1920, 1080),
+            Some(CanvasCut {
+                visible: pixel(0, 0, 1, 1),
+                cut_left: 99,
+                cut_top: 99,
+            })
+        );
+        assert_eq!(rect(-99, -99, 100, 100).whole_on_canvas(1920, 1080), None);
+        assert_eq!(
+            rect(0, 0, 1920, 1080).whole_on_canvas(1920, 1080),
+            Some(pixel(0, 0, 1920, 1080))
+        );
+    }
+
+    /// Plan 215 E2: a mask belongs to the whole box, so a circle on a box
+    /// that hangs off the canvas is centred where the box is centred (off
+    /// the canvas too), and the canvas edge cuts the circle. Squashing the
+    /// box onto the canvas would have drawn a smaller circle in the corner.
+    #[test]
+    fn masks_keep_their_geometry_on_a_box_that_hangs_off_the_canvas() {
+        let hanging = SignedPixelRect {
+            x: -100,
+            y: -100,
+            width: 200,
+            height: 200,
+        };
+        let circle = circle_geometry(hanging);
+        assert_eq!(
+            (circle.center_x, circle.center_y, circle.radius),
+            (0.0, 0.0, 100.0)
+        );
+        let tester = SceneMaskTester::new(SceneMask::Circle, hanging);
+        // Inside the quarter of the circle that is on the canvas...
+        assert!(tester.allows(10, 10));
+        assert!(tester.allows(70, 70));
+        // ...and outside it, still on the canvas and still inside the box.
+        assert!(!tester.allows(90, 90));
+        assert!(!tester.allows(99, 0));
+        // The same box as an on-canvas rect gives the same f64s.
+        let on_canvas = PixelRect {
+            x: 40,
+            y: 60,
+            width: 200,
+            height: 200,
+        };
+        assert_eq!(
+            circle_geometry(on_canvas),
+            circle_geometry(SignedPixelRect::from(on_canvas))
+        );
+        assert_eq!(
+            rounded_rect_geometry(on_canvas, 24),
+            rounded_rect_geometry(SignedPixelRect::from(on_canvas), 24)
+        );
+        let corners = rounded_rect_geometry(hanging, 50);
+        assert_eq!(
+            (corners.center_x, corners.center_y, corners.radius),
+            (0.0, 0.0, 100.0)
         );
     }
 
@@ -1634,5 +1880,50 @@ pub(crate) mod screen_crop_fixture {
             (point.0 * f64::from(width)).floor() as usize,
             (point.1 * f64::from(height)).floor() as usize,
         )
+    }
+}
+
+/// Plan 215 E2 (D2): the one bigger-than-canvas fixture every render path
+/// draws (CPU, Metal, the FFmpeg legacy graph, the aux leg and the D3D11
+/// planner): the crop fixture's screen picture, uncropped, in a 150% box
+/// with a quarter of it past every canvas edge. Cut, each visible stripe is
+/// three times its source width and the outer stripes are half off the
+/// canvas; squashed onto the canvas, the whole picture would show at twice
+/// its width, so the two differ at the points below.
+#[cfg(test)]
+pub(crate) mod screen_beyond_canvas_fixture {
+    use super::screen_crop_fixture::{BLUE, CYAN, GREEN, MAGENTA, RED, WHITE};
+    use crate::protocol::SceneTransform;
+
+    /// A 16:9 box (so Fit fills it exactly on a 16:9 canvas) at 150% of the
+    /// canvas, centred: 25% hangs off every edge.
+    pub fn transform() -> SceneTransform {
+        SceneTransform {
+            x: -0.25,
+            y: -0.25,
+            width: 1.5,
+            height: 1.5,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        }
+    }
+
+    /// Canvas points (fractions, so any 16:9 canvas) and the colour each
+    /// shows when the box is cut at the edge. With the box squashed onto the
+    /// canvas instead, the first four points would show red, white, magenta
+    /// and cyan.
+    pub fn expected_samples() -> [((f64, f64), [u8; 3]); 8] {
+        [
+            ((0.20, 0.50), GREEN),
+            ((0.80, 0.50), BLUE),
+            ((0.50, 0.18), BLUE),
+            ((0.50, 0.82), BLUE),
+            ((0.05, 0.50), RED),
+            ((0.95, 0.50), WHITE),
+            ((0.50, 0.05), MAGENTA),
+            ((0.50, 0.95), CYAN),
+        ]
     }
 }
