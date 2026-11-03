@@ -125,6 +125,7 @@ import {
   previewProofLayerFit
 } from '../../../../shared/native-preview-proof-geometry'
 import {
+  sceneFrameRect,
   scenePictureRect,
   screenBoxIsPicture,
   type FractionRect
@@ -613,7 +614,24 @@ export function LayoutTab(): ReactElement {
     if (!scene) {
       return
     }
-    applyCameraPreset(freeformEntryPatch(orientation, scene.sources))
+    // Plan 216 B6 (D2): a screen on Fit with a known size starts at its
+    // picture, the box the stage shows, stored as the frame it maps back
+    // to through the stage margin; nothing moves on entry.
+    applyCameraPreset(
+      freeformEntryPatch(orientation, scene.sources, (entry) => {
+        const source = scene.sources.find((candidate) => candidate.id === entry.id)
+        if (
+          !source ||
+          !screenBoxIsPicture(
+            source.kind,
+            previewProofLayerFit(source, captureConfig.layout),
+            sourcePictureSize(source, sourcePictureSizes)
+          )
+        )
+          return null
+        return sceneFrameRect(pictureBoxOf(source), source.kind, stageMargin)
+      })
+    )
   }
   // The orientation control re-enters each mode where it was left; the
   // orientation ⇄ canvas coupling in applyCameraPreset flips the output
