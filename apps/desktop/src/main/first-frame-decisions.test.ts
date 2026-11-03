@@ -41,6 +41,20 @@ describe('FirstFrameDecisionLog', () => {
     expect(entries.at(-1)?.at).toBe('2026-11-03T14:51:24.000Z')
   })
 
+  it('keeps a fallback when many routine first frames follow it', () => {
+    const log = new FirstFrameDecisionLog()
+    log.record({ watch: 'presenting-watch', decision: 'heal', action: 'reset-native-path' })
+    log.record({ watch: 'presenter', decision: 'presenter-retired', reason: 'reset' })
+    for (let index = 0; index < FIRST_FRAME_DECISION_LIMIT * 2; index += 1) {
+      log.record({ watch: 'proof-preview', decision: 'met', reason: `open ${index}` })
+    }
+    const entries = log.snapshot()
+    expect(entries).toHaveLength(FIRST_FRAME_DECISION_LIMIT)
+    expect(entries[0]?.action).toBe('reset-native-path')
+    expect(entries[1]?.decision).toBe('presenter-retired')
+    expect(entries.at(-1)?.reason).toBe(`open ${FIRST_FRAME_DECISION_LIMIT * 2 - 1}`)
+  })
+
   it('records the reason, the action and what the watchdog saw', () => {
     const log = new FirstFrameDecisionLog(20, () => new Date('2026-11-03T14:51:40.000Z'))
     log.record({

@@ -39,8 +39,14 @@ export class FirstFrameDecisionLog {
         : {}),
       ...(decision.evidence ? { evidence: { ...decision.evidence } } : {})
     })
-    if (this.entries.length > this.limit) {
-      this.entries.splice(0, this.entries.length - this.limit)
+    // A full log drops its oldest "met" or "recovered" first: every Preview
+    // open meets the contract again, and those must never push out the
+    // fallback a bundle exported later is meant to explain.
+    while (this.entries.length > this.limit) {
+      const routine = this.entries.findIndex(
+        (entry) => entry.decision === 'met' || entry.decision === 'recovered'
+      )
+      this.entries.splice(routine === -1 ? 0 : routine, 1)
     }
   }
 
