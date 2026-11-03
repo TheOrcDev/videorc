@@ -4,6 +4,15 @@
 // env would falsely fail the documented `pnpm dist:desktop:release` path.
 export const REQUIRED_RELEASE_ENV_VARS = ['APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD']
 
+// Plan 214 B0/B5: the two Developer ID provisioning profiles (base64 or a
+// path) that let the release embed the Videorc Camera extension. A release
+// without them ships no camera and fails the artifact validator, so the
+// preflight fails first and names them.
+export const REQUIRED_CAMERA_PROFILE_ENV_VARS = [
+  'VIDEORC_MACOS_PROFILE_APP',
+  'VIDEORC_MACOS_PROFILE_CAMERA'
+]
+
 export const REQUIRED_RELEASE_TOOLS = [
   { id: 'codesign', label: 'codesign' },
   { id: 'spctl', label: 'spctl' },
@@ -15,6 +24,10 @@ export const REQUIRED_RELEASE_PATHS = [
   {
     id: 'macEntitlements',
     label: 'apps/desktop/build-resources/entitlements.mac.plist'
+  },
+  {
+    id: 'macInheritEntitlements',
+    label: 'apps/desktop/build-resources/entitlements.mac.inherit.plist'
   },
   {
     id: 'releaseOutputDir',
@@ -45,6 +58,18 @@ export function evaluateMacosReleasePreflight({
       label: name,
       ok: present,
       detail: present ? 'present' : 'missing'
+    })
+  }
+
+  for (const name of REQUIRED_CAMERA_PROFILE_ENV_VARS) {
+    const present = typeof env[name] === 'string' && env[name].trim().length > 0
+    checks.push({
+      type: 'env',
+      label: name,
+      ok: present,
+      detail: present
+        ? 'present'
+        : 'missing: the Videorc Camera provisioning profile (plan 214 B0; see docs/releases/macos-signing.md)'
     })
   }
 

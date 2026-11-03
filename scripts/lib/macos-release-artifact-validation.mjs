@@ -1,5 +1,11 @@
 import { readFileSync } from 'node:fs'
-import { basename, relative } from 'node:path'
+import { basename, dirname, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import {
+  cameraExtensionBundleRelativePath,
+  loadCameraExtensionIdentifiers
+} from './camera-extension-identifiers.mjs'
 
 export function artifactKindFromPath(path) {
   if (String(path).endsWith('.app')) {
@@ -21,6 +27,125 @@ export const REQUIRED_CAPTURE_ENTITLEMENTS = [
 ]
 
 export const EXPECTED_MACOS_BUNDLE_IDENTIFIER = 'dev.theorcdev.videorc'
+
+// Plan 214 B5: the Videorc Camera extension. A release must embed it, signed
+// with its own profile and entitlements; the app must carry the restricted
+// system-extension key and the app group; no bare binary may carry either (it
+// cannot hold a profile, so AMFI would kill it). A release built without the
+// B0 profiles fails these checks by design: it must never ship.
+export const CAMERA_EXTENSION_IDENTIFIERS = loadCameraExtensionIdentifiers(
+  resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+)
+export const CAMERA_EXTENSION_RELATIVE_PATH = cameraExtensionBundleRelativePath(
+  CAMERA_EXTENSION_IDENTIFIERS
+)
+export const RESTRICTED_CAMERA_ENTITLEMENTS = [
+  CAMERA_EXTENSION_IDENTIFIERS.entitlements.systemExtensionInstall,
+  CAMERA_EXTENSION_IDENTIFIERS.entitlements.applicationGroups
+]
+export const CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS = [
+  CAMERA_EXTENSION_IDENTIFIERS.entitlements.appSandbox,
+  CAMERA_EXTENSION_IDENTIFIERS.entitlements.applicationGroups,
+  CAMERA_EXTENSION_IDENTIFIERS.appGroup,
+  `${CAMERA_EXTENSION_IDENTIFIERS.teamId}.${CAMERA_EXTENSION_IDENTIFIERS.extensionBundleId}`
+]
+
+/** The bare binaries that must never claim the restricted keys. */
+export function bareBinaryCheckTargets(appPath) {
+  return [
+    ...captureEntitlementCheckTargets(appPath).filter((target) => target.id !== 'app'),
+    {
+      id: 'native-preview-addon',
+      label: 'videorc_native_preview.node',
+      path: `${appPath}/Contents/Resources/videorc_native_preview.node`
+    }
+  ]
+}
+
+export function cameraExtensionCheckTargets(appPath) {
+  const identifiers = CAMERA_EXTENSION_IDENTIFIERS
+  const extension = `${appPath}/${CAMERA_EXTENSION_RELATIVE_PATH}`
+  const extensionInfoPlist = `${extension}/Contents/Info.plist`
+  const plutil = (key, expectation) => ({
+    command: 'plutil',
+    args: ['-extract', key, 'raw', '-expect', 'string', '-n', '-o', '-', extensionInfoPlist],
+    ...expectation
+  })
+  return [
+    {
+      id: 'camera-extension-bundle-identifier',
+      label: 'Videorc Camera extension Info.plist bundle identifier',
+      ...plutil('CFBundleIdentifier', { expectStdoutEquals: identifiers.extensionBundleId })
+    },
+    {
+      id: 'camera-extension-mach-service',
+      label: 'Videorc Camera extension CMIOExtensionMachServiceName',
+      ...plutil('CMIOExtension.CMIOExtensionMachServiceName', {
+        expectStdoutEquals: identifiers.machServiceName
+      })
+    },
+    {
+      id: 'camera-extension-usage-description',
+      label: 'Videorc Camera extension usage description',
+      ...plutil('NSSystemExtensionUsageDescription', { expectStdoutNonEmpty: true })
+    },
+    {
+      id: 'camera-extension-signature',
+      label: 'Videorc Camera extension signature',
+      command: 'codesign',
+      args: ['--verify', '--strict', '--verbose=2', extension]
+    },
+    {
+      id: 'camera-extension-entitlements',
+      label: 'Videorc Camera extension entitlements',
+      command: 'codesign',
+      args: ['-d', '--entitlements', ':-', extension],
+      expectOutputIncludes: CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS
+    },
+    {
+      id: 'camera-extension-profile',
+      label: 'Videorc Camera extension embedded profile',
+      command: 'security',
+      args: ['cms', '-D', '-i', `${extension}/Contents/embedded.provisionprofile`],
+      expectOutputIncludes: [
+        identifiers.teamId,
+        `${identifiers.teamId}.${identifiers.extensionBundleId}`
+      ]
+    },
+    {
+      id: 'app-profile',
+      label: 'app embedded profile (Videorc Camera)',
+      command: 'security',
+      args: ['cms', '-D', '-i', `${appPath}/Contents/embedded.provisionprofile`],
+      expectOutputIncludes: [
+        `${identifiers.teamId}.${identifiers.appBundleId}`,
+        identifiers.entitlements.systemExtensionInstall
+      ]
+    },
+    {
+      id: 'restricted-entitlements-app',
+      label: 'system extension entitlements (app)',
+      command: 'codesign',
+      args: ['-d', '--entitlements', ':-', appPath],
+      expectOutputIncludes: [...RESTRICTED_CAMERA_ENTITLEMENTS, identifiers.appGroup]
+    },
+    ...bareBinaryCheckTargets(appPath).map((target) => ({
+      id: `no-restricted-entitlements-${target.id}`,
+      label: `no system extension entitlement (${target.label})`,
+      command: 'codesign',
+      args: ['-d', '--entitlements', ':-', target.path],
+      expectOutputExcludes: RESTRICTED_CAMERA_ENTITLEMENTS
+    }))
+  ]
+}
+
+/** Pure. Lines for every forbidden needle a command printed. */
+export function outputExclusionFailures(check, output) {
+  const text = String(output ?? '')
+  return (check.expectOutputExcludes ?? [])
+    .filter((needle) => text.includes(needle))
+    .map((needle) => `forbidden entitlement present: ${needle}`)
+}
 
 // One shared entitlements plist signs the app and every bundled tool, so all of
 // them must carry the device entitlements (paths mirror
@@ -286,6 +411,7 @@ export function buildMacosReleaseArtifactChecks(path) {
           `${path}/Contents/Resources/videorc_native_preview.node`
         ]
       },
+      ...cameraExtensionCheckTargets(path),
       ...bundledXOauth1ConsumerCheckTargets(path),
       ...bundledYoutubeOauthCheckTargets(path),
       ...bundledKickSecretLeakCheckTargets(path)

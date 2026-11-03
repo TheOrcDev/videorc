@@ -2,8 +2,14 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  CAMERA_EXTENSION_RELATIVE_PATH,
+  CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS,
+  RESTRICTED_CAMERA_ENTITLEMENTS,
   artifactKindFromPath,
+  bareBinaryCheckTargets,
   buildMacosReleaseArtifactChecks,
+  cameraExtensionCheckTargets,
+  outputExclusionFailures,
   BUNDLED_X_OAUTH1_CONSUMER_ENVS,
   BUNDLED_YOUTUBE_OAUTH_ENVS,
   bundledXOauth1ConsumerCheckTargets,
@@ -56,6 +62,20 @@ describe('buildMacosReleaseArtifactChecks', () => {
         'capture entitlements (ffmpeg)',
         'capture entitlements (ffprobe)',
         'native preview addon signature',
+        'Videorc Camera extension Info.plist bundle identifier',
+        'Videorc Camera extension CMIOExtensionMachServiceName',
+        'Videorc Camera extension usage description',
+        'Videorc Camera extension signature',
+        'Videorc Camera extension entitlements',
+        'Videorc Camera extension embedded profile',
+        'app embedded profile (Videorc Camera)',
+        'system extension entitlements (app)',
+        'no system extension entitlement (videorc-backend)',
+        'no system extension entitlement (native_preview_host_helper)',
+        'no system extension entitlement (videorc-mcp)',
+        'no system extension entitlement (ffmpeg)',
+        'no system extension entitlement (ffprobe)',
+        'no system extension entitlement (videorc_native_preview.node)',
         'bundled X OAuth1 consumer key (videorc-backend)',
         'bundled X OAuth1 consumer secret (videorc-backend)',
         'bundled YouTube OAuth client ID (videorc-backend)',
@@ -368,6 +388,129 @@ describe('capture entitlement gate', () => {
         '/a/Videorc.app/Contents/Resources/videorc_native_preview.node'
       ]
     })
+  })
+})
+
+// Plan 214 B5: a release without the Videorc Camera profiles (B0) is red here.
+describe('Videorc Camera release gate', () => {
+  const app = '/a/Videorc.app'
+  const extension = `${app}/${CAMERA_EXTENSION_RELATIVE_PATH}`
+
+  it('places the extension where OSSystemExtensionRequest looks', () => {
+    assert.equal(
+      CAMERA_EXTENSION_RELATIVE_PATH,
+      'Contents/Library/SystemExtensions/VideorcCamera.systemextension'
+    )
+    assert.deepEqual(RESTRICTED_CAMERA_ENTITLEMENTS, [
+      'com.apple.developer.system-extension.install',
+      'com.apple.security.application-groups'
+    ])
+  })
+
+  it('checks the extension bundle, its Info.plist keys, signature, entitlements and profile', () => {
+    const checks = cameraExtensionCheckTargets(app)
+    const byId = Object.fromEntries(checks.map((check) => [check.id, check]))
+    assert.equal(
+      byId['camera-extension-bundle-identifier'].expectStdoutEquals,
+      'dev.theorcdev.videorc.camera'
+    )
+    assert.ok(
+      byId['camera-extension-bundle-identifier'].args.includes(`${extension}/Contents/Info.plist`)
+    )
+    assert.equal(
+      byId['camera-extension-mach-service'].expectStdoutEquals,
+      'C2PA37RB58.dev.theorcdev.videorc.camera'
+    )
+    assert.equal(byId['camera-extension-usage-description'].expectStdoutNonEmpty, true)
+    assert.deepEqual(byId['camera-extension-signature'].args, [
+      '--verify',
+      '--strict',
+      '--verbose=2',
+      extension
+    ])
+    assert.deepEqual(
+      byId['camera-extension-entitlements'].expectOutputIncludes,
+      CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS
+    )
+    assert.ok(CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS.includes('com.apple.security.app-sandbox'))
+    assert.ok(CAMERA_EXTENSION_REQUIRED_ENTITLEMENTS.includes('C2PA37RB58.dev.theorcdev.videorc'))
+    assert.deepEqual(byId['camera-extension-profile'].args, [
+      'cms',
+      '-D',
+      '-i',
+      `${extension}/Contents/embedded.provisionprofile`
+    ])
+    assert.deepEqual(byId['camera-extension-profile'].expectOutputIncludes, [
+      'C2PA37RB58',
+      'C2PA37RB58.dev.theorcdev.videorc.camera'
+    ])
+  })
+
+  it('requires the app profile and the restricted keys on the app only', () => {
+    const byId = Object.fromEntries(
+      cameraExtensionCheckTargets(app).map((check) => [check.id, check])
+    )
+    assert.deepEqual(byId['app-profile'].args, [
+      'cms',
+      '-D',
+      '-i',
+      `${app}/Contents/embedded.provisionprofile`
+    ])
+    assert.deepEqual(byId['app-profile'].expectOutputIncludes, [
+      'C2PA37RB58.dev.theorcdev.videorc',
+      'com.apple.developer.system-extension.install'
+    ])
+    assert.deepEqual(byId['restricted-entitlements-app'].args, ['-d', '--entitlements', ':-', app])
+    assert.deepEqual(byId['restricted-entitlements-app'].expectOutputIncludes, [
+      'com.apple.developer.system-extension.install',
+      'com.apple.security.application-groups',
+      'C2PA37RB58.dev.theorcdev.videorc'
+    ])
+  })
+
+  it('forbids the restricted keys on every bare binary, the addon included', () => {
+    assert.deepEqual(
+      bareBinaryCheckTargets(app).map((target) => target.id),
+      [
+        'videorc-backend',
+        'native-preview-host-helper',
+        'videorc-mcp',
+        'ffmpeg',
+        'ffprobe',
+        'native-preview-addon'
+      ]
+    )
+    const bare = cameraExtensionCheckTargets(app).filter((check) =>
+      check.id.startsWith('no-restricted-entitlements-')
+    )
+    assert.equal(bare.length, 6)
+    for (const check of bare) {
+      assert.deepEqual(check.expectOutputExcludes, RESTRICTED_CAMERA_ENTITLEMENTS)
+      assert.equal(check.args[0], '-d')
+    }
+    const backend = bare.find((check) => check.id === 'no-restricted-entitlements-videorc-backend')
+    assert.deepEqual(
+      outputExclusionFailures(backend, '<key>com.apple.security.device.camera</key><true/>'),
+      []
+    )
+    assert.deepEqual(
+      outputExclusionFailures(
+        backend,
+        '<key>com.apple.developer.system-extension.install</key><true/>'
+      ),
+      ['forbidden entitlement present: com.apple.developer.system-extension.install']
+    )
+    assert.deepEqual(outputExclusionFailures({ command: 'codesign', args: [] }, 'anything'), [])
+  })
+
+  it('leaves DMGs to the inner app', () => {
+    const labels = buildMacosReleaseArtifactChecks('/release/Videorc.dmg').map(
+      (check) => check.label
+    )
+    assert.equal(
+      labels.some((label) => label.includes('Videorc Camera')),
+      false
+    )
   })
 })
 

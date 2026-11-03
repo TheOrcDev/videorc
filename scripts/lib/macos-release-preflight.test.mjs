@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import {
+  REQUIRED_CAMERA_PROFILE_ENV_VARS,
   REQUIRED_RELEASE_ENV_VARS,
   evaluateMacosReleasePreflight,
   formatMacosReleasePreflightReport
@@ -11,6 +12,8 @@ function completeEnv(overrides = {}) {
   return {
     APPLE_ID: 'creator@example.test',
     APPLE_APP_SPECIFIC_PASSWORD: 'secret-apple-password',
+    VIDEORC_MACOS_PROFILE_APP: 'base64-app-profile-never-printed',
+    VIDEORC_MACOS_PROFILE_CAMERA: 'base64-camera-profile-never-printed',
     ...overrides
   }
 }
@@ -24,6 +27,7 @@ const completeTools = {
 
 const completePaths = {
   macEntitlements: true,
+  macInheritEntitlements: true,
   releaseOutputDir: true
 }
 
@@ -103,6 +107,44 @@ describe('evaluateMacosReleasePreflight', () => {
         new RegExp(`env: ${name} \\(missing\\)`)
       )
     }
+  })
+
+  it('requires both Videorc Camera provisioning profiles and points at B0 (plan 214)', () => {
+    assert.deepEqual(REQUIRED_CAMERA_PROFILE_ENV_VARS, [
+      'VIDEORC_MACOS_PROFILE_APP',
+      'VIDEORC_MACOS_PROFILE_CAMERA'
+    ])
+    for (const name of REQUIRED_CAMERA_PROFILE_ENV_VARS) {
+      const result = evaluateMacosReleasePreflight({
+        env: completeEnv({ [name]: '' }),
+        tools: completeTools,
+        paths: completePaths,
+        signing: keychainSigning
+      })
+      const report = formatMacosReleasePreflightReport(result)
+      assert.equal(result.ok, false, `${name} should be required`)
+      assert.match(
+        report,
+        new RegExp(
+          `env: ${name} \\(missing: the Videorc Camera provisioning profile \\(plan 214 B0`
+        )
+      )
+      assert.doesNotMatch(report, /never-printed/)
+    }
+  })
+
+  it('requires the inherit entitlements plist beside the app plist', () => {
+    const result = evaluateMacosReleasePreflight({
+      env: completeEnv(),
+      tools: completeTools,
+      paths: { ...completePaths, macInheritEntitlements: false },
+      signing: keychainSigning
+    })
+    assert.equal(result.ok, false)
+    assert.match(
+      formatMacosReleasePreflightReport(result),
+      /path: apps\/desktop\/build-resources\/entitlements\.mac\.inherit\.plist \(missing or not writable\)/
+    )
   })
 
   it('fails on non-macOS hosts', () => {

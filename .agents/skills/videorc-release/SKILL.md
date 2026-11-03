@@ -185,6 +185,8 @@ sync even when the primary is live. Use "complete" only under the contract below
   unless the runbook explicitly restores that requirement.
 - Verify the Developer ID identity `Uros Miric (C2PA37RB58)` is available in the
   keychain, or provide the documented `CSC_LINK` alternative.
+- Load `VIDEORC_MACOS_PROFILE_APP` and `VIDEORC_MACOS_PROFILE_CAMERA` from
+  `~/.videorc-release.env` (plan 214, Videorc Camera; see the section below).
 - Load `VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*`
   and `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` from `~/.videorc-release.env`
   (whichever origins are still configured). The upload publishes to **every
@@ -448,6 +450,28 @@ announcement (see section 6). Hold that post until then. Never print
   Alpha entry names both Windows and Linux, send that post only when every
   named platform is publicly live. Never print
   `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
+
+## Videorc Camera (plan 214)
+
+- **Secrets:** `VIDEORC_MACOS_PROFILE_APP` and `VIDEORC_MACOS_PROFILE_CAMERA`,
+  the two Developer ID provisioning profiles (base64 in GitHub, base64 or a
+  path in `~/.videorc-release.env`). Both or neither; one alone is an error.
+  `release:preflight:macos` fails without them.
+- **Renewal:** profiles expire with the portal date and with the Developer ID
+  certificate. The packaging hook warns 30 days ahead and refuses an expired
+  one. Regenerate both in the portal, re-set both secrets and the env file,
+  rebuild. See `docs/releases/macos-signing.md`, "Videorc Camera".
+- **The validator's lines:** `release:validate:macos` adds the
+  `Videorc Camera extension ...` checks (bundle identifier, mach service,
+  usage description, signature, entitlements, embedded profile), the
+  `app embedded profile (Videorc Camera)` and
+  `system extension entitlements (app)` checks, and one
+  `no system extension entitlement (...)` line per bare binary. A build log
+  that says `Videorc Camera skipped` is not a release.
+- **Rollback:** a build without the profiles never passes validation. Never
+  unset the secrets to ship without the camera; that is a reviewed PR that
+  removes the hook, the entitlements split and the validator checks together.
+  A shipped camera problem rolls forward with a higher version.
 
 ## Hard-won rules
 
