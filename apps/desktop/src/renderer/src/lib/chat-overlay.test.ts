@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { LiveChatMessage, SetChatOverlayParams } from '@/lib/backend'
+import type { ChatOverlayCanvases, LiveChatMessage, SetChatOverlayParams } from '@/lib/backend'
 import {
   CHAT_OVERLAY_MAX_MESSAGES,
   CHAT_OVERLAY_REPAINT_MS,
@@ -244,24 +244,29 @@ describe('chat on stream: coalescing', () => {
 })
 
 describe('chat on stream: the driver', () => {
-  function setup(vertical?: { width: number; height: number }) {
+  function setup(canvasesRead: ChatOverlayCanvases | null = {}) {
     const clock = fakeClock()
     const sets: SetChatOverlayParams[] = []
     const painted: string[][] = []
+    const paintedFor: ChatOverlayCanvas[] = []
     const deps = {
       set: vi.fn(async (params: SetChatOverlayParams) => {
         sets.push(params)
         return null
       }),
       clear: vi.fn(async () => null),
-      canvases: vi.fn(async () => (vertical ? { vertical } : {})),
+      canvases: vi.fn(async () => {
+        if (!canvasesRead) throw new Error('no backend')
+        return canvasesRead
+      }),
       paint: vi.fn(
         async (
           messages: readonly LiveChatMessage[],
-          _stream: ChatOverlayCanvas,
+          stream: ChatOverlayCanvas,
           verticalCanvas?: ChatOverlayCanvas
         ) => {
           painted.push(messages.map((entry) => entry.id))
+          paintedFor.push(stream)
           return verticalCanvas
             ? { pngBase64: 'h-png', verticalPngBase64: 'v-png' }
             : { pngBase64: 'h-png' }
@@ -279,7 +284,7 @@ describe('chat on stream: the driver', () => {
       canvas: { width: 1920, height: 1080 },
       ...patch
     })
-    return { clock, sets, painted, deps, driver, input }
+    return { clock, sets, painted, paintedFor, deps, driver, input }
   }
 
   it('paints the box with the placed rect and never repaints the same box', async () => {
@@ -315,7 +320,7 @@ describe('chat on stream: the driver', () => {
   })
 
   it('sends the portrait box when the session has a vertical leg, read once per livestream', async () => {
-    const { clock, sets, deps, driver, input } = setup({ width: 1080, height: 1920 })
+    const { clock, sets, deps, driver, input } = setup({ vertical: { width: 1080, height: 1920 } })
     driver.update(input())
     await flush()
     expect(sets[0]).toEqual({
@@ -328,6 +333,44 @@ describe('chat on stream: the driver', () => {
     clock.advance(CHAT_OVERLAY_REPAINT_MS)
     await flush()
     expect(deps.canvases).toHaveBeenCalledTimes(1)
+  })
+
+  // The dual-orientation fix: the horizontal stream rides the primary leg at
+  // the session's own size (1280x720 here), while the stream settings still
+  // say 1920x1080. A box painted for 1920 is wider than the rect on the
+  // 1280 leg and the backend crops its left edge off, so the landscape box
+  // is painted for the canvas the session names.
+  it('paints the landscape box for the canvas the session names, not the stream settings', async () => {
+    const { paintedFor, sets, driver, input } = setup({
+      horizontal: { width: 1280, height: 720 },
+      vertical: { width: 720, height: 1280 }
+    })
+    driver.update(input({ canvas: { width: 1920, height: 1080 } }))
+    await flush()
+    expect(paintedFor).toEqual([
+      { width: 1280, height: 720, rect: DEFAULT_OVERLAY_LAYOUT.chat.horizontal }
+    ])
+    expect(sets[0]?.verticalRect).toEqual(DEFAULT_OVERLAY_LAYOUT.chat.vertical)
+  })
+
+  it('falls back to the stream settings when the session names no canvas or the read fails', async () => {
+    for (const read of [{}, null]) {
+      const { paintedFor, driver, input } = setup(read)
+      driver.update(input({ canvas: { width: 1920, height: 1080 } }))
+      await flush()
+      expect(paintedFor).toEqual([
+        { width: 1920, height: 1080, rect: DEFAULT_OVERLAY_LAYOUT.chat.horizontal }
+      ])
+    }
+  })
+
+  it('takes the vertical rect for a portrait-only stream', async () => {
+    const { paintedFor, driver, input } = setup({ horizontal: { width: 720, height: 1280 } })
+    driver.update(input({ canvas: { width: 1920, height: 1080 } }))
+    await flush()
+    expect(paintedFor).toEqual([
+      { width: 720, height: 1280, rect: DEFAULT_OVERLAY_LAYOUT.chat.vertical }
+    ])
   })
 
   it('clears once when switched off or when the livestream ends, and stays quiet before', async () => {

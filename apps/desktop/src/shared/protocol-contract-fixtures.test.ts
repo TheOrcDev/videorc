@@ -884,11 +884,21 @@ describe('shared high-risk protocol fixture', () => {
       validateBackendRpcResult('chat.overlay.set', { ...info, vertical: null })
     ).toThrow()
     expect(validateBackendRpcResult('chat.overlay.canvases', {})).toStrictEqual({})
+    // A dual-orientation session: the horizontal stream rides the primary
+    // leg at the session's own size, the vertical leg has its own canvas.
+    const canvases = {
+      horizontal: { width: 1280, height: 720 },
+      vertical: { width: 720, height: 1280 }
+    }
+    expect(validateBackendRpcResult('chat.overlay.canvases', canvases)).toStrictEqual(canvases)
     expect(
-      validateBackendRpcResult('chat.overlay.canvases', { vertical: { width: 1080, height: 1920 } })
-    ).toStrictEqual({ vertical: { width: 1080, height: 1920 } })
-    // The serde null trap: an absent vertical canvas is omitted, never null.
+      validateBackendRpcResult('chat.overlay.canvases', {
+        horizontal: { width: 1920, height: 1080 }
+      })
+    ).toStrictEqual({ horizontal: { width: 1920, height: 1080 } })
+    // The serde null trap: an absent canvas is omitted, never null.
     expect(() => validateBackendRpcResult('chat.overlay.canvases', { vertical: null })).toThrow()
+    expect(() => validateBackendRpcResult('chat.overlay.canvases', { horizontal: null })).toThrow()
   })
 
   it('keeps the banner wire shape identical across languages, timer off or on (plan 186)', () => {
