@@ -660,6 +660,8 @@ export interface BackendEventMap {
   'scheduledStreams.changed': ScheduledStreamEvent
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
+  // Plan 215 A5: the account as the backend holds it, and why it changed.
+  'account.changed': import('./backend').AccountChangedEvent
   'noiseCleanup.status': NoiseCleanupJob
   'cleanCut.status': CleanCutJob
   'recording.finalization': RecordingFinalizationEvent
@@ -5595,6 +5597,14 @@ const runtimeEventSchemas = {
   'scheduledStreams.changed': boundedBackendPayloadSchema,
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,
+  // Plan 215 A5: the account as the backend holds it, and why it changed.
+  'account.changed': objectSchema(
+    {
+      account: accountSchema,
+      reason: enumSchema(['signed-in', 'signed-out', 'session-expired'])
+    },
+    { allowUnknown: false }
+  ),
   'noiseCleanup.status': noiseCleanupJobSchema,
   'cleanCut.status': cleanCutJobSchema,
   'recording.finalization': recordingFinalizationEventSchema,
@@ -5760,3 +5770,16 @@ export const cameraConnectionHistoryEntrySchema = objectSchema({
   connected: booleanSchema,
   timestamp
 })
+
+// Support bundle account section (plan 215 A6): the account the app shows,
+// the session token on disk, and whether the secrets store read at all.
+// Booleans only, never the token or the identity; bundle-only, never an event.
+export const supportBundleAccountSchema = objectSchema(
+  {
+    signedIn: booleanSchema,
+    tokenPresent: booleanSchema,
+    storeReadable: booleanSchema,
+    storeError: optionalText
+  },
+  { allowUnknown: false }
+)

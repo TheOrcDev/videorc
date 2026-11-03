@@ -14,6 +14,7 @@ import {
   BoundedLiveChatMessageBatch,
   chatNeedsConnectionAction,
   chatSetupToastWarnings,
+  chatVideorcSignInWarnings,
   commentAuthorIsMember,
   commentRowTint,
   emptyLiveChatSnapshot,
@@ -124,6 +125,25 @@ describe('chat setup warnings', () => {
     expect(chatNeedsConnectionAction([xStreamKey])).toBe(true)
     expect(liveChatProviderNotice([healthy, xStreamKey])).toBe(xStreamKey.message)
     expect(chatNeedsConnectionAction([healthy, xReceiveOnly])).toBe(false)
+  })
+
+  // Plan 215 A3: a connector parked on the Videorc sign-in is not "isn't
+  // connected" (X is fine); its own toast names the account.
+  it('keeps a connector parked on the Videorc sign-in apart from failures', () => {
+    const parked: LiveChatProviderState = {
+      ...provider('x', 'Sign in to Videorc to read X chat.', 'x-oauth'),
+      targetId: 'x-oauth',
+      state: 'waiting',
+      read: 'needs-videorc-sign-in',
+      write: 'ready'
+    }
+
+    expect(chatSetupToastWarnings([parked])).toEqual([])
+    expect(chatVideorcSignInWarnings([parked, provider('twitch', '')])).toEqual([
+      { id: 'x-oauth', platform: 'x', message: 'Sign in to Videorc to read X chat.' }
+    ])
+    // Sign in fixes it, so the empty chat keeps its call to action.
+    expect(chatNeedsConnectionAction([parked])).toBe(true)
   })
 })
 

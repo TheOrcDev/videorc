@@ -715,6 +715,21 @@ function CommentsWindowApp(): ReactElement {
       )
   }
 
+  // Plan 215 A3: "Sign in to Videorc" on a chat row the relay parked. Main
+  // shows the main window, which starts the account sign-in it owns; this
+  // window never sees the authorize URL.
+  const signInToVideorc = (): void => {
+    void window.videorc
+      ?.signInToVideorcFromCommentsWindow?.({ requestId: crypto.randomUUID() })
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: 'start', object: 'the Videorc sign-in' },
+          { id: 'sign-in-videorc' }
+        )
+      )
+  }
+
   // The behaviour chips (plan 174 S3.14a, D7) link to their one home: main
   // shows the main window and the shell opens Buddy → Chat.
   const openBuddyChatSettings = (): void => {
@@ -907,6 +922,7 @@ function CommentsWindowApp(): ReactElement {
           onBuddy={runBuddy}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onUseSignIn={openDestination}
+          onSignInToVideorc={signInToVideorc}
           onShowFollowNames={() => {
             void window.videorc
               ?.showFollowNamesFromCommentsWindow?.({

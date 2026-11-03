@@ -5,10 +5,13 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::account::SessionState;
+use crate::live_chat::{LiveChatProviderState, LiveChatSnapshot};
 use crate::protocol::{
-    AiArtifactKind, AiArtifactStatus, AudioMeterSampleSnapshot, BackendHealth, BackendLogEvent,
-    DeviceList, DiagnosticStats, EntitlementsSnapshot, HealthEvent, PreviewScreenSourceKind,
-    PreviewScreenState, PreviewScreenStatus, RecordingStatus, SessionLogEntry, SessionSummary,
+    AccountStatus, AiArtifactKind, AiArtifactStatus, AudioMeterSampleSnapshot, BackendHealth,
+    BackendLogEvent, DeviceList, DiagnosticStats, EntitlementsSnapshot, HealthEvent,
+    PreviewScreenSourceKind, PreviewScreenState, PreviewScreenStatus, RecordingStatus,
+    SessionLogEntry, SessionSummary, VideorcAccountSnapshot,
 };
 use crate::repair::GateStatus;
 use crate::screen_capture::DisplayFacts;
@@ -64,6 +67,61 @@ pub struct SupportBundleExportInput {
     pub performance_check: Option<crate::protocol::PerformanceCheckResult>,
     /// The last 2 h of metrics journal lines; `None` while the journal is off.
     pub metrics_journal: Option<Vec<Value>>,
+    /// The Videorc account as the desktop holds it, against the secrets store
+    /// (plan 215 A6).
+    pub account: SupportBundleAccount,
+    /// The chat provider rows as they stand (plan 215 A6).
+    pub live_chat: SupportBundleLiveChat,
+}
+
+/// The Videorc account as the support bundle sees it (plan 215 A6): whether
+/// the app shows a signed-in account, whether a session token is on disk, and
+/// whether the secrets store could be read at all. The first two disagree
+/// exactly when a streamer "is signed in" while chat says sign in; the third
+/// tells an unreadable store from a signed-out one. Booleans only: never the
+/// token, never the identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleAccount {
+    pub signed_in: bool,
+    pub token_present: bool,
+    pub store_readable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_error: Option<String>,
+}
+
+impl SupportBundleAccount {
+    pub fn from_state(account: &VideorcAccountSnapshot, session: &SessionState) -> Self {
+        Self {
+            signed_in: account.status == AccountStatus::SignedIn,
+            token_present: session.is_signed_in(),
+            store_readable: !matches!(session, SessionState::Unreadable(_)),
+            store_error: match session {
+                SessionState::Unreadable(error) => Some(error.clone()),
+                SessionState::SignedIn | SessionState::SignedOut => None,
+            },
+        }
+    }
+}
+
+/// The chat provider rows (plan 215 A6): which destination reads and sends,
+/// which waits on a sign-in, and the last error on file, with the session they
+/// belong to. Never the messages.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleLiveChat {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub providers: Vec<LiveChatProviderState>,
+}
+
+impl SupportBundleLiveChat {
+    pub fn from_snapshot(snapshot: &LiveChatSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id.clone(),
+            providers: snapshot.providers.clone(),
+        }
+    }
 }
 
 /// The Displays section (plan 213 F3): what macOS says of each display, the
@@ -150,6 +208,11 @@ pub struct SupportBundle {
     pub metrics_journal: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub windows_mf_probe: Option<Value>,
+    /// Plan 215 A6: `{ signedIn, tokenPresent, storeReadable }`, so a bundle
+    /// shows an app that says signed in over a store with no token.
+    pub account: Value,
+    /// Plan 215 A6: the chat provider rows.
+    pub live_chat: Value,
     pub redaction_summary: SupportBundleRedactionSummary,
 }
 
@@ -278,6 +341,8 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
     let mut renderer_diagnostics = input.renderer_diagnostics;
     let mut displays = serde_json::to_value(input.displays)?;
     let mut logs = serde_json::to_value(input.logs)?;
+    let mut account = serde_json::to_value(input.account)?;
+    let mut live_chat = serde_json::to_value(input.live_chat)?;
     let mut windows_mf_probe = match crate::windows_mf_probe::load_report(&input.database_path) {
         Ok(report) => report.map(serde_json::to_value).transpose()?,
         Err(_) => Some(
@@ -297,6 +362,10 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
     }
     redact_value(&mut displays, &mut redaction_summary);
     redact_value(&mut logs, &mut redaction_summary);
+    // Booleans pass the redactor untouched, so `tokenPresent` survives its
+    // "token" key; a store error is a message like any other.
+    redact_value(&mut account, &mut redaction_summary);
+    redact_value(&mut live_chat, &mut redaction_summary);
     let mut metrics_journal = input.metrics_journal.map(Value::Array);
     if let Some(lines) = metrics_journal.as_mut() {
         redact_value(lines, &mut redaction_summary);
@@ -332,6 +401,8 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
         performance_check: input.performance_check,
         metrics_journal,
         windows_mf_probe,
+        account,
+        live_chat,
         redaction_summary,
     })
 }
@@ -540,6 +611,8 @@ fn included_sections() -> Vec<String> {
         "logs",
         "sessions",
         "performanceCheck",
+        "account",
+        "liveChat",
     ]
     .iter()
     .map(|section| (*section).to_string())
@@ -938,6 +1011,11 @@ mod tests {
             sessions: vec![],
             performance_check: None,
             metrics_journal: None,
+            account: SupportBundleAccount::from_state(
+                &crate::account::signed_out_account(),
+                &SessionState::SignedOut,
+            ),
+            live_chat: SupportBundleLiveChat::default(),
         };
 
         let result = export_support_bundle(input).unwrap();
@@ -1208,6 +1286,139 @@ mod tests {
             sessions: vec![],
             performance_check: None,
             metrics_journal: None,
+            account: SupportBundleAccount::from_state(
+                &crate::account::signed_out_account(),
+                &SessionState::SignedOut,
+            ),
+            live_chat: SupportBundleLiveChat::default(),
         }
+    }
+
+    fn signed_in_account() -> VideorcAccountSnapshot {
+        VideorcAccountSnapshot {
+            status: AccountStatus::SignedIn,
+            username: Some("orc_dev".to_string()),
+            display_name: Some("Orc Dev".to_string()),
+            email: Some("orc@videorc.com".to_string()),
+            avatar_url: None,
+        }
+    }
+
+    /// Plan 215 A6: the bundle says whether the app shows a signed-in
+    /// account, whether a token is on disk and whether the store could be
+    /// read, as booleans that survive the redactor (`tokenPresent` carries a
+    /// "token" key). The streamer's case is the first row: signed in on
+    /// screen, no token on disk.
+    #[test]
+    fn the_account_section_tells_a_shown_sign_in_from_a_stored_token_plan_215_a6() {
+        let cases = [
+            (
+                signed_in_account(),
+                SessionState::SignedOut,
+                json!({ "signedIn": true, "tokenPresent": false, "storeReadable": true }),
+            ),
+            (
+                signed_in_account(),
+                SessionState::SignedIn,
+                json!({ "signedIn": true, "tokenPresent": true, "storeReadable": true }),
+            ),
+            (
+                crate::account::signed_out_account(),
+                SessionState::SignedOut,
+                json!({ "signedIn": false, "tokenPresent": false, "storeReadable": true }),
+            ),
+            (
+                crate::account::signed_out_account(),
+                SessionState::Unreadable(
+                    "Could not read secret store /Users/orcdev/Library/videorc-secrets.json: permission denied"
+                        .to_string(),
+                ),
+                json!({
+                    "signedIn": false,
+                    "tokenPresent": false,
+                    "storeReadable": false,
+                    "storeError": "Could not read secret store /Users/orcdev/Library/videorc-secrets.json: permission denied"
+                }),
+            ),
+        ];
+        for (account, session, expected) in cases {
+            let mut input = minimal_input(None);
+            input.account = SupportBundleAccount::from_state(&account, &session);
+            let bundle = build_support_bundle(input).unwrap();
+            let mut expected = expected;
+            // The redactor folds the home directory in a store error.
+            if let Some(Value::String(error)) = expected.get_mut("storeError")
+                && let Ok(home) = std::env::var("HOME")
+                && !home.is_empty()
+            {
+                *error = error.replace(&home, "~");
+            }
+            assert_eq!(bundle.account, expected, "{session:?}");
+            let text = serde_json::to_string(&bundle).unwrap();
+            assert!(
+                !text.contains("orc@videorc.com"),
+                "no identity in the bundle"
+            );
+            assert!(!text.contains("orc_dev"));
+        }
+        assert!(included_sections().contains(&"account".to_string()));
+    }
+
+    /// Plan 215 A6: the chat provider rows ride along, with the session they
+    /// belong to and never the messages; a row parked on the Videorc sign-in
+    /// is readable as such.
+    #[test]
+    fn the_live_chat_section_carries_the_provider_rows_plan_215_a6() {
+        use crate::live_chat::{
+            CommentsReadState, CommentsWriteState, LiveChatProviderConnectionState,
+        };
+        use crate::streaming::StreamPlatform;
+
+        let parked = LiveChatProviderState {
+            id: "x-target".to_string(),
+            platform: StreamPlatform::X,
+            target_id: Some("x-target".to_string()),
+            account_id: Some("742673143".to_string()),
+            account_label: Some("Ram".to_string()),
+            read: CommentsReadState::NeedsVideorcSignIn,
+            write: CommentsWriteState::Ready,
+            moderate: None,
+            state: LiveChatProviderConnectionState::Waiting,
+            message: crate::live_chat::X_CHAT_NEEDS_VIDEORC_SIGN_IN.to_string(),
+            last_connected_at: None,
+            last_message_at: None,
+            last_error: None,
+            retry_at: None,
+        };
+        let snapshot = LiveChatSnapshot {
+            session_id: Some("session-1".to_string()),
+            providers: vec![parked],
+            messages: Vec::new(),
+            unread_count: 0,
+            updated_at: "2026-11-03T12:00:00Z".to_string(),
+        };
+        let mut input = minimal_input(None);
+        input.live_chat = SupportBundleLiveChat::from_snapshot(&snapshot);
+
+        let bundle = build_support_bundle(input).unwrap();
+
+        assert_eq!(bundle.live_chat["sessionId"], json!("session-1"));
+        assert_eq!(bundle.live_chat["providers"].as_array().unwrap().len(), 1);
+        let row = &bundle.live_chat["providers"][0];
+        assert_eq!(row["platform"], json!("x"));
+        assert_eq!(row["read"], json!("needs-videorc-sign-in"));
+        assert_eq!(row["state"], json!("waiting"));
+        assert_eq!(
+            row["message"],
+            json!(crate::live_chat::X_CHAT_NEEDS_VIDEORC_SIGN_IN)
+        );
+        assert!(bundle.live_chat.get("messages").is_none());
+        // Between sessions: no session, the capability rows.
+        let between =
+            serde_json::to_value(build_support_bundle(minimal_input(None)).unwrap().live_chat)
+                .unwrap();
+        assert!(between.get("sessionId").is_none());
+        assert_eq!(between["providers"], json!([]));
+        assert!(included_sections().contains(&"liveChat".to_string()));
     }
 }

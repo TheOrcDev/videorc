@@ -357,6 +357,17 @@ export type VideorcAccountRefreshResult =
   | { outcome: 'refreshed'; snapshot: VideorcAccountSnapshot }
   | { outcome: 'deferred' }
 
+/** Why the desktop's Videorc account changed (plan 215 A5). */
+export type AccountChangeReason = 'signed-in' | 'signed-out' | 'session-expired'
+
+/** The `account.changed` event (plan 215 A5): the account as the backend now
+ * holds it, and why it changed. `session-expired` means the server refused
+ * the stored session and the desktop signed itself out. */
+export interface AccountChangedEvent {
+  account: VideorcAccountSnapshot
+  reason: AccountChangeReason
+}
+
 export type DeviceKind = 'screen' | 'window' | 'camera' | 'microphone' | 'system-audio'
 export type DeviceStatus = 'available' | 'unavailable' | 'permission-required'
 
@@ -5390,6 +5401,10 @@ export interface VideorcApi {
    * main shows the main window and opens that destination in Livestream →
    * Setup through `livestream:open-destination`. Resolves once sent. */
   openDestinationFromCommentsWindow: (command: OpenDestinationCommand) => Promise<boolean>
+  /** "Sign in to Videorc" on a chat row that waits on it (plan 215 A3): main
+   * shows the main window and asks it to start the sign-in it owns, through
+   * `account:sign-in-request`. Resolves once sent. */
+  signInToVideorcFromCommentsWindow: (command: SignInToVideorcCommand) => Promise<boolean>
   /** Chat removal relay (plan 140, S6): the Stream Manager's "Remove from
    * chat" and its removal-card answers. The MAIN renderer owns the backend
    * socket and makes the `liveChat.moderation.*` call; the reply is the
@@ -5605,6 +5620,11 @@ export interface VideorcApi {
    */
   onOpenDestination: (callback: (navigation: { targetId: string }) => void) => () => void
   /**
+   * Plan 215 A3: the Stream Manager asked for the Videorc sign-in. Main has
+   * shown the window; the shell starts the sign-in it owns.
+   */
+  onAccountSignInRequest: (callback: () => void) => () => void
+  /**
    * Main was asked to quit (⌘Q, the Dock) or to close the main window (⌘W)
    * while on air (plan 174 S3.1, D2). The shell asks "End livestream and
    * quit?" with "Keep streaming" focused, ends the livestream on a yes and
@@ -5734,6 +5754,10 @@ export type CommentsReadState =
   /** A stream-key destination whose platform shares chat only with apps you
    * sign in to (X): Sign in brings it. Not a failure (plan 213 J1). */
   | 'needs-sign-in'
+  /** The Videorc sign-in is missing or no longer accepted, so the relay that
+   * reads X and Kick chat has nothing to show (plan 215 A1). Not a failure:
+   * the connector parks and attaches again when you sign in (A4). */
+  | 'needs-videorc-sign-in'
 
 export type CommentsWriteState = 'ready' | 'missing-scope' | 'read-only' | 'failed' | 'unavailable'
 
@@ -7766,6 +7790,13 @@ export interface OpenBuddyTabCommand {
 export interface OpenDestinationCommand {
   requestId: string
   targetId: string
+}
+
+/** "Sign in to Videorc" from the Stream Manager (plan 215 A3): nothing but
+ * the request id. Main shows the main window, which starts the sign-in it
+ * owns; the Chat window never sees the authorize URL. */
+export interface SignInToVideorcCommand {
+  requestId: string
 }
 
 /** The part of `autoChat` the Stream Manager may change (plan 164 S-D6,

@@ -17239,6 +17239,27 @@ app.whenReady().then(async () => {
       return true
     }
   )
+  // Plan 215 A3: "Sign in to Videorc" on a chat row that waits on it. Main
+  // shows the main window and asks it to start the sign-in it owns (the same
+  // door as the sidebar's Sign in); the Chat window never sees the authorize
+  // URL or the intent.
+  secureIpcHandle(
+    'comments-window:sign-in-videorc',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can ask for the Videorc sign-in.')
+      }
+      commentsCommandRequestId(value)
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        return false
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'account:sign-in-request', undefined)
+      return true
+    }
+  )
   secureIpcHandle(
     'comments-window:cohost-enable-result-push',
     (event, resolution: CommentsCommandResolution<CohostWindowState>) => {

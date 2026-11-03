@@ -205,6 +205,27 @@ pub struct VideorcAccountSnapshot {
     pub avatar_url: Option<String>,
 }
 
+/// Why the desktop's Videorc account changed (plan 215 A5). `SessionExpired`
+/// is the sign-out the server made: a refresh answered 401, so the stored
+/// session was dropped. Mirrored in `shared/backend.ts` (`AccountChangeReason`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountChangeReason {
+    SignedIn,
+    SignedOut,
+    SessionExpired,
+}
+
+/// The `account.changed` event (plan 215 A5): the account as the backend now
+/// holds it, and why it changed. Mirrored in `shared/backend.ts`
+/// (`AccountChangedEvent`) and the `backend-rpc-contract.ts` event schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountChangedEvent {
+    pub account: VideorcAccountSnapshot,
+    pub reason: AccountChangeReason,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendLogEvent {

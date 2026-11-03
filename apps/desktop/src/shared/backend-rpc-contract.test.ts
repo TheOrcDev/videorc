@@ -33,6 +33,7 @@ import {
   parseBackendWireMessage,
   cameraSelectionDiagnosticsSchema,
   cameraConnectionHistoryEntrySchema,
+  supportBundleAccountSchema,
   runtimeValidatedBackendRpcMethods,
   validateMainOwnedPreviewSurfaceBoundsParams,
   validateBackendEventPayload,
@@ -498,6 +499,32 @@ describe('backend RPC contract', () => {
         limits: { ...snapshot.limits, recording: { maxWidth: 3840 } }
       })
     ).toThrow('maxHeight')
+  })
+
+  // Plan 215 A5: the backend says when the account changes, and why. A
+  // session-expired reason is the sign-out the server made.
+  it('strictly validates the account.changed event', () => {
+    const expired = { account: { status: 'signed-out' }, reason: 'session-expired' }
+    expect(validateBackendEventPayload('account.changed', expired)).toEqual(expired)
+    const signedIn = {
+      account: {
+        status: 'signed-in',
+        username: 'orc_dev',
+        displayName: 'Orc Dev',
+        email: 'orc@videorc.com'
+      },
+      reason: 'signed-in'
+    }
+    expect(validateBackendEventPayload('account.changed', signedIn)).toEqual(signedIn)
+    expect(() =>
+      validateBackendEventPayload('account.changed', { ...expired, reason: 'expired' })
+    ).toThrow('reason')
+    expect(() =>
+      validateBackendEventPayload('account.changed', { ...expired, token: 'never' })
+    ).toThrow('token must be a known field')
+    expect(() => validateBackendEventPayload('account.changed', { reason: 'signed-out' })).toThrow(
+      'account'
+    )
   })
 
   it('types and exactly validates provider OAuth callback completion', () => {
@@ -3666,6 +3693,26 @@ it('accepts disconnected camera status and the support camera story', () => {
   }
   expect(cameraConnectionHistoryEntrySchema.parse(edge)).toEqual(edge)
   expect(() => cameraConnectionHistoryEntrySchema.parse({ ...edge, timestamp: null })).toThrow()
+})
+
+// Plan 215 A6: the bundle tells a shown sign-in from a stored token, as
+// booleans; an unreadable store carries its error and nothing else.
+it('accepts the support bundle account section and refuses a token in it', () => {
+  const shownButNoToken = { signedIn: true, tokenPresent: false, storeReadable: true }
+  expect(supportBundleAccountSchema.parse(shownButNoToken)).toEqual(shownButNoToken)
+  const unreadable = {
+    signedIn: false,
+    tokenPresent: false,
+    storeReadable: false,
+    storeError: 'secrets store: permission denied'
+  }
+  expect(supportBundleAccountSchema.parse(unreadable)).toEqual(unreadable)
+  expect(() => supportBundleAccountSchema.parse({ ...shownButNoToken, token: 'never' })).toThrow(
+    'token must be a known field'
+  )
+  expect(() => supportBundleAccountSchema.parse({ signedIn: true, tokenPresent: false })).toThrow(
+    'storeReadable'
+  )
 })
 
 describe('Videorc Camera wire contract (plan 214 A4)', () => {
