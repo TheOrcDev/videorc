@@ -238,7 +238,13 @@ describe('StatusBarAction', () => {
     expect(action?.hasAttribute('title')).toBe(false)
     expect(action?.hasAttribute('data-base-ui-tooltip-trigger')).toBe(true)
     expect(action?.getAttribute('type')).toBe('button')
-    expect(action?.className).toContain(STATUS_BAR_ACTION_CLASS)
+    // The shared look, with an icon alone's narrower 22 px chip (plan 215 C).
+    const classes = action?.className.split(' ') ?? []
+    for (const token of STATUS_BAR_ACTION_CLASS.split(' ').filter((t) => t !== 'px-1.5')) {
+      expect(classes).toContain(token)
+    }
+    expect(classes).toContain('px-1')
+    expect(classes).not.toContain('px-1.5')
     act(() => action?.click())
     expect(onClick).toHaveBeenCalledTimes(1)
   })
