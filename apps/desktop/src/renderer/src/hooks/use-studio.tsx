@@ -27,6 +27,12 @@ import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, withoutSceneShortcut } from '../../../shared/global-shortcuts'
 import { screenHideAccelerator } from '@/lib/screen-privacy-view'
 import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
+import {
+  NO_SOURCE_PICTURE_SIZES,
+  sourcePictureSizesFromCapture,
+  sourcePictureSizesFromCompositor,
+  type SourcePictureSizes
+} from '@/lib/scene-source-sizes'
 import { acceleratorLabel } from '@/lib/accelerator'
 import {
   DEFAULT_CLIP_SECONDS,
@@ -1449,6 +1455,8 @@ export type StudioContextValue = {
   closeNotesWindow: () => Promise<void>
   setNotesWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
   scene: Scene | null
+  /** Plan 216 B2: each scene source's picture size, for the stage's box. */
+  sourcePictureSizes: SourcePictureSizes
   sceneEditMode: boolean
   selectedSceneSourceId: string | null
   setSceneEditMode: Dispatch<SetStateAction<boolean>>
@@ -4072,6 +4080,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Linux: the portal source whose share this run granted (Clips waits for it).
   const [portalShareGrantedSourceId, setPortalShareGrantedSourceId] = useState<string | null>(null)
   const [scene, setScene] = useState<Scene | null>(null)
+  // Plan 216 B2: changes only when a source's picture size does (a display
+  // swap, a camera format), never on a status tick.
+  const [sourcePictureSizes, setSourcePictureSizes] =
+    useState<SourcePictureSizes>(NO_SOURCE_PICTURE_SIZES)
   const transformSceneRef = useRef<Scene | null>(null)
   const [sceneEditMode, setSceneEditMode] = useState(false)
   const [selectedSceneSourceId, setSelectedSceneSourceId] = useState<string | null>(null)
@@ -6537,11 +6549,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const applyPreviewCameraStatus = useCallback((status: PreviewCameraStatus) => {
     previewCameraStatusRef.current = status
     setPreviewCameraStatus(status)
+    setSourcePictureSizes((current) => sourcePictureSizesFromCapture(current, 'camera', status))
   }, [])
 
   const applyPreviewScreenStatus = useCallback((status: PreviewScreenStatus) => {
     previewScreenStatusRef.current = status
     setPreviewScreenStatus(status)
+    setSourcePictureSizes((current) => sourcePictureSizesFromCapture(current, 'screen', status))
     setPortalShareGrantedSourceId((current) => nextPortalShareGrant(current, status))
   }, [])
 
@@ -8262,6 +8276,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const status = payload as CompositorStatus
         setLiveBackgroundStatus((current) =>
           nextLiveBackgroundStatusView(current, status.liveBackground)
+        )
+        // Plan 216 B2: the sizes the compositor fits each scene source at.
+        setSourcePictureSizes((current) =>
+          sourcePictureSizesFromCompositor(current, status.sceneSources ?? [])
         )
         // Backend-authored commits (live source switches) arrive only as this
         // event; advance committed truth so a later resync never re-presents
@@ -18785,6 +18803,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeNotesWindow,
       setNotesWindowAlwaysOnTop,
       scene,
+      sourcePictureSizes,
       sceneEditMode,
       selectedSceneSourceId,
       setSceneEditMode,
@@ -19034,6 +19053,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeNotesWindow,
       setNotesWindowAlwaysOnTop,
       scene,
+      sourcePictureSizes,
       sceneEditMode,
       selectedSceneSourceId,
       setSceneEditMode,
