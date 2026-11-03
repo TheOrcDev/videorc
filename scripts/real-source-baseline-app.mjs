@@ -74,8 +74,10 @@ import {
 } from './lib/startup-resolution-analyzer.mjs'
 import {
   analyzeNotesOverlayArtifact,
+  analyzeOverlayArtifactPhases,
   appendNotesOverlayFailures,
-  formatNotesOverlayArtifactSummary
+  formatNotesOverlayArtifactSummary,
+  formatOverlayArtifactPhasesSummary
 } from './lib/notes-overlay-artifact-gate.mjs'
 import { evaluateAcceptance, recordingPreviewAcceptanceGates } from './lib/acceptance-gate.mjs'
 import { classifyMediaQualityMode } from './lib/media-quality-mode.mjs'
@@ -184,6 +186,21 @@ const config = {
   notesOverlayMaxMarkerPixelRatio: Number(
     process.env.VIDEORC_BASELINE_NOTES_MAX_MARKER_RATIO ?? 0.002
   ),
+  // Plan 215 C5: the Stream Manager over the captured display with Hide from
+  // stream on, red edge to edge, toggled off and on again mid-recording.
+  streamManagerOverlay: process.env.VIDEORC_BASELINE_STREAM_MANAGER_OVERLAY === '1',
+  streamManagerOverlayMaxMarkerPixelRatio: Number(
+    process.env.VIDEORC_BASELINE_STREAM_MANAGER_MAX_MARKER_RATIO ?? 0.002
+  ),
+  // Clearly above the leak threshold while the switch is off: the proof
+  // that the gate can see the window at all.
+  streamManagerOverlayMinVisibleMarkerPixelRatio: Number(
+    process.env.VIDEORC_BASELINE_STREAM_MANAGER_MIN_VISIBLE_MARKER_RATIO ?? 0.02
+  ),
+  // The time a flip gets to reach the file before its span is judged.
+  streamManagerOverlaySettleMs: Number(
+    process.env.VIDEORC_BASELINE_STREAM_MANAGER_SETTLE_MS ?? 1500
+  ),
   microphoneSyncOffsetMs: Number(process.env.VIDEORC_BASELINE_MIC_SYNC_OFFSET_MS ?? 0),
   systemAudio: process.env.VIDEORC_BASELINE_SYSTEM_AUDIO === '1',
   screenMotionFocusIntervalMs: Number(process.env.VIDEORC_SCREEN_MOTION_FOCUS_INTERVAL_MS ?? 1000),
@@ -197,6 +214,7 @@ const config = {
   gate: process.argv.includes('--gate'),
   screenRecordingGate: process.argv.includes('--screen-recording-gate'),
   notesOverlayGate: process.argv.includes('--notes-overlay-gate'),
+  streamManagerOverlayGate: process.argv.includes('--stream-manager-overlay-gate'),
   packagedExecutable: process.env.VIDEORC_PERF_APP_EXECUTABLE
     ? resolve(process.env.VIDEORC_PERF_APP_EXECUTABLE)
     : null,
@@ -261,6 +279,9 @@ let motionStimulus
 let avSyncStimulus
 let notesOverlayState
 let notesOverlayBounds
+let streamManagerOverlayState
+let streamManagerOverlayBounds
+let streamManagerOverlayHidden = false
 const previewSurfaceOutputGuard = createPreviewSurfaceOutputGuard()
 const performanceLedgerPaths = ownedProcessLedgerPaths({
   appDataDir: join(config.outputDirectory, 'app-data'),
@@ -279,7 +300,10 @@ let performancePipeline = null
 try {
   verdict = await main()
   exitCode =
-    (config.gate || config.screenRecordingGate || config.notesOverlayGate) &&
+    (config.gate ||
+      config.screenRecordingGate ||
+      config.notesOverlayGate ||
+      config.streamManagerOverlayGate) &&
     verdict &&
     !verdict.pass
       ? 1
@@ -414,6 +438,7 @@ async function main() {
   const needsSmokeCommandServer =
     requiresPreviewHostCommandServer ||
     config.notesOverlay ||
+    config.streamManagerOverlay ||
     needsSmokeResourceAuthorization ||
     config.performanceReportRequested
   launched = await launchDevApp({
@@ -453,6 +478,14 @@ async function main() {
             VIDEORC_NOTES_WINDOW: '1',
             VIDEORC_NOTES_RECORDING_OVERLAY: '1',
             VIDEORC_NOTES_SMOKE_MARKER: '1'
+          }
+        : {}),
+      // The window must stay open and visible through the shown span, so
+      // Studio's close-for-the-recording rule is waived for this run.
+      ...(config.streamManagerOverlay
+        ? {
+            VIDEORC_COMMENTS_WINDOW: '1',
+            VIDEORC_COMMENTS_RECORDING_OVERLAY: '1'
           }
         : {}),
       // null means "let the backend's default selector decide" (the honest product
@@ -518,6 +551,19 @@ async function main() {
         'Notes overlay artifact smoke requires VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS=1 for controlled background colors.'
       )
     }
+    if (config.streamManagerOverlay && !sources.screen) {
+      throw new Error('Stream Manager overlay smoke requires a selected real screen source.')
+    }
+    if (config.streamManagerOverlay && !config.screenMotionStimulus) {
+      throw new Error(
+        'Stream Manager overlay smoke requires VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS=1 for controlled background colors.'
+      )
+    }
+    if (config.streamManagerOverlay && process.platform !== 'darwin') {
+      throw new Error(
+        'Stream Manager overlay smoke proves the macOS capture filter; Windows is the marker harness on a Windows box.'
+      )
+    }
     if (!sources.screen && !sources.camera) {
       throw new Error(
         'No real screen or camera available/selected — cannot run a real-source baseline.'
@@ -574,7 +620,13 @@ async function main() {
         `Notes overlay window ${notesOverlayBounds?.width ?? 'n/a'}x${notesOverlayBounds?.height ?? 'n/a'} @ ${notesOverlayBounds?.x ?? 'n/a'},${notesOverlayBounds?.y ?? 'n/a'} protected=${notesOverlayState.protected} windowId=${notesOverlayState.windowId ?? 'n/a'}.`
       )
     }
-    const protectedOverlayWindowIds = protectedOverlayWindowIdsFromNotesOverlay()
+    if (config.streamManagerOverlay) {
+      streamManagerOverlayState = await setupStreamManagerOverlay(sources.screen)
+      console.log(
+        `Stream Manager overlay window ${streamManagerOverlayBounds?.width ?? 'n/a'}x${streamManagerOverlayBounds?.height ?? 'n/a'} @ ${streamManagerOverlayBounds?.x ?? 'n/a'},${streamManagerOverlayBounds?.y ?? 'n/a'} hiddenFromStream=${streamManagerOverlayState.hiddenFromStream} method=${streamManagerOverlayState.hideFromStreamMethod} windowId=${streamManagerOverlayState.windowId ?? 'n/a'}.`
+      )
+    }
+    const protectedOverlayWindowIds = protectedOverlayWindowIdsFromOverlays()
     const screenPreviewParams = previewSourceParams(sourceSelection, { protectedOverlayWindowIds })
 
     // Mirror the UI: warm the real capturers, then use the compositor preview surface
@@ -701,6 +753,7 @@ async function main() {
     if (started.state !== 'recording') {
       throw new Error(`Expected recording state after start, got ${started.state}.`)
     }
+    const recordingStartedAt = Date.now()
     console.log(
       `Recording real sources for ${(config.recordingMs / 1000).toFixed(0)}s -> ${started.outputPath ?? '(pending)'}`
     )
@@ -709,7 +762,13 @@ async function main() {
     const stopCaptionOverlayStimulus = startCaptionOverlayStimulus(ws)
     let previewMeasurement
     let snapshots
+    let streamManagerToggles = null
     try {
+      const streamManagerTogglePromise = config.streamManagerOverlay
+        ? runStreamManagerToggleSchedule(ws, sourceSelection, recordingStartedAt).catch(
+            (error) => ({ error: error?.message ?? String(error), steps: [] })
+          )
+        : Promise.resolve(null)
       const previewMeasurementPromise = measureNativePreviewDuringRecording()
       const processEndurancePromise = config.performanceReportRequested
         ? collectProcessEndurance({
@@ -724,9 +783,10 @@ async function main() {
           })
         : Promise.resolve(null)
       snapshots = await sampleDuringRecording(ws, config.recordingMs)
-      ;[previewMeasurement, processEndurance] = await Promise.all([
+      ;[previewMeasurement, processEndurance, streamManagerToggles] = await Promise.all([
         previewMeasurementPromise,
-        processEndurancePromise
+        processEndurancePromise,
+        streamManagerTogglePromise
       ])
     } finally {
       if (stopCaptionOverlayStimulus) await stopCaptionOverlayStimulus()
@@ -800,6 +860,12 @@ async function main() {
           maxMarkerPixelRatio: config.notesOverlayMaxMarkerPixelRatio
         })
       : null
+    const streamManagerOverlay = config.streamManagerOverlay
+      ? await analyzeStreamManagerOverlayArtifact(outputPath, {
+          toggles: streamManagerToggles,
+          endMs: stopRequestedAt - recordingStartedAt
+        })
+      : null
     const claimsNative = claimsNativePreview({ previewTransport, diagnostics })
     const previewSurfaceOutputFailures = previewSurfaceOutputGuard.failures()
     // Full real-source acceptance gate: final-file verdict + recording repeats +
@@ -807,24 +873,27 @@ async function main() {
     // The Electron proof surface reports metrics, but only native-surface plus a real
     // CAMetalLayer backing is an OBS-native claim.
     const acceptance = appendNotesOverlayFailures(
-      appendPreviewSurfaceOutputFailures(
-        evaluateAcceptance(
-          {
-            analyzerVerdict: report.verdict,
-            startupVerdict: startupReport.verdict,
-            diagnostics,
-            claimsNative,
-            requireObsNativePreview: !config.noPreviewSurface,
-            requireGpuCompositor: true,
-            requestedOutput: requestedOutputSettings(),
-            require4kMediaEvidence: requires4kMediaEvidence(),
-            expectAudio: Boolean(sources.microphone)
-          },
-          acceptanceGates()
+      appendNotesOverlayFailures(
+        appendPreviewSurfaceOutputFailures(
+          evaluateAcceptance(
+            {
+              analyzerVerdict: report.verdict,
+              startupVerdict: startupReport.verdict,
+              diagnostics,
+              claimsNative,
+              requireObsNativePreview: !config.noPreviewSurface,
+              requireGpuCompositor: true,
+              requestedOutput: requestedOutputSettings(),
+              require4kMediaEvidence: requires4kMediaEvidence(),
+              expectAudio: Boolean(sources.microphone)
+            },
+            acceptanceGates()
+          ),
+          previewSurfaceOutputFailures
         ),
-        previewSurfaceOutputFailures
+        notesOverlay
       ),
-      notesOverlay
+      streamManagerOverlay
     )
     const qualityMode = classifyMediaQualityMode({
       diagnostics,
@@ -855,7 +924,8 @@ async function main() {
       ownership,
       qualityMode,
       previewSurfaceOutputFailures,
-      notesOverlay
+      notesOverlay,
+      streamManagerOverlay
     })
     const evidenceManifestPath = writeEvidenceManifest(outputPath, {
       sources,
@@ -869,7 +939,8 @@ async function main() {
       acceptance,
       qualityMode,
       previewSurfaceOutputFailures,
-      notesOverlay
+      notesOverlay,
+      streamManagerOverlay
     })
     const screenRecording = config.screenRecordingGate
       ? appendNotesOverlayFailures(
@@ -892,7 +963,8 @@ async function main() {
       ownership,
       qualityMode,
       screenRecording,
-      notesOverlay
+      notesOverlay,
+      streamManagerOverlay
     )
     const notesOverlayVerdict = notesOverlay ?? {
       pass: false,
@@ -901,6 +973,14 @@ async function main() {
       ],
       warnings: []
     }
+    const streamManagerOverlayVerdict = streamManagerOverlay ?? {
+      pass: false,
+      failures: [
+        'stream-manager: overlay gate was requested but no overlay evidence was produced'
+      ],
+      warnings: []
+    }
+    if (config.streamManagerOverlayGate) return streamManagerOverlayVerdict
     return config.notesOverlayGate ? notesOverlayVerdict : (screenRecording ?? acceptance)
   } finally {
     ws.close()
@@ -1107,8 +1187,179 @@ function notesOverlayBoundsForSource(screenSource) {
   }
 }
 
-function protectedOverlayWindowIdsFromNotesOverlay() {
-  return typeof notesOverlayState?.windowId === 'number' ? [notesOverlayState.windowId] : []
+/**
+ * Plan 215 C5: the Stream Manager over the captured display, red edge to
+ * edge, with Hide from stream on. The same bounds recipe as Notes, so the
+ * marker sits where the motion stimulus paints.
+ */
+async function setupStreamManagerOverlay(screenSource) {
+  const smoke = launched?.connections?.['preview-motion-ready']
+  if (!smoke) {
+    throw new Error('Stream Manager overlay smoke requires the main-process command server.')
+  }
+  await smokeCommand(smoke, 'comments-window-open')
+  streamManagerOverlayBounds = notesOverlayBoundsForSource(screenSource)
+  const placed = await smokeCommand(
+    smoke,
+    'comments-window-set-bounds',
+    streamManagerOverlayBounds
+  )
+  streamManagerOverlayBounds = placed.bounds ?? streamManagerOverlayBounds
+  if (!placed.enabled) {
+    throw new Error('Stream Manager overlay smoke could not enable the Stream Manager.')
+  }
+  const marked = await smokeCommand(smoke, 'comments-window-set-smoke-marker', {
+    color: '#ff0000'
+  })
+  if (marked.markerInstalled !== true) {
+    throw new Error('Stream Manager overlay smoke could not paint its marker.')
+  }
+  const state = await smokeCommand(smoke, 'comments-window-set-hidden-from-stream', {
+    hidden: true
+  })
+  if (state.hiddenFromStream !== true) {
+    throw new Error('Stream Manager overlay smoke could not turn Hide from stream on.')
+  }
+  if (state.hideFromStreamMethod !== 'capture-filter') {
+    throw new Error(
+      `Stream Manager overlay smoke expects the macOS capture filter, got ${state.hideFromStreamMethod}.`
+    )
+  }
+  if (state.protected) {
+    throw new Error(
+      'Stream Manager overlay smoke: content protection must stay off on macOS (it would hide the window from the streamer too).'
+    )
+  }
+  if (typeof state.windowId !== 'number') {
+    throw new Error('Stream Manager overlay smoke could not resolve a ScreenCaptureKit window ID.')
+  }
+  streamManagerOverlayHidden = true
+  return state
+}
+
+/** The exclusion list the Studio renderer would send: Notes, and the Stream
+ * Manager while its switch is on. */
+function protectedOverlayWindowIdsFromOverlays() {
+  const ids = []
+  if (typeof notesOverlayState?.windowId === 'number') ids.push(notesOverlayState.windowId)
+  if (streamManagerOverlayHidden && typeof streamManagerOverlayState?.windowId === 'number') {
+    ids.push(streamManagerOverlayState.windowId)
+  }
+  return ids
+}
+
+/**
+ * Off a third of the way in, on again at two thirds. Each flip is what the
+ * status bar does: main flips the switch, then the Studio renderer sends the
+ * same screen start with the new list, which the backend applies to the
+ * running capture in place (plan 215 C2). A restart, a deferred set or a
+ * non-live answer is a failure the artifact alone could hide.
+ */
+async function runStreamManagerToggleSchedule(ws, sourceSelection, recordingStartedAt) {
+  const smoke = launched?.connections?.['preview-motion-ready']
+  const steps = []
+  const elapsed = () => Date.now() - recordingStartedAt
+  const flip = async (hidden) => {
+    const before = await requestSafe(ws, 'preview.screen.status')
+    const state = await smokeCommand(smoke, 'comments-window-set-hidden-from-stream', { hidden })
+    streamManagerOverlayHidden = state.hiddenFromStream === true
+    const atMs = elapsed()
+    const status = await request(
+      ws,
+      config.timeoutMs,
+      'preview.screen.start',
+      previewSourceParams(sourceSelection, {
+        protectedOverlayWindowIds: protectedOverlayWindowIdsFromOverlays()
+      })
+    )
+    const step = {
+      hidden,
+      atMs,
+      appliedMs: elapsed() - atMs,
+      stateHidden: state.hiddenFromStream === true,
+      screenState: status?.state ?? null,
+      message: status?.message ?? null,
+      framesBefore: before?.framesCaptured ?? null,
+      framesAfter: status?.framesCaptured ?? null
+    }
+    steps.push(step)
+    console.log(
+      `Stream Manager Hide from stream -> ${hidden ? 'on' : 'off'} at ${atMs} ms: ${step.screenState} (${step.message ?? 'no message'}; ${step.appliedMs} ms).`
+    )
+    return atMs
+  }
+  await sleep(Math.max(0, Math.round(config.recordingMs / 3) - elapsed()))
+  const offAtMs = await flip(false)
+  await sleep(Math.max(0, Math.round((config.recordingMs * 2) / 3) - elapsed()))
+  const onAtMs = await flip(true)
+  return { offAtMs, onAtMs, steps }
+}
+
+/**
+ * Three spans of the one recording: hidden (the marker absent), shown (the
+ * marker clearly there, proving the gate sees the window), hidden again
+ * after the toggle. Plus the toggles' own evidence: in place, live, no
+ * restart.
+ */
+async function analyzeStreamManagerOverlayArtifact(outputPath, { toggles, endMs }) {
+  const failures = []
+  const settle = config.streamManagerOverlaySettleMs
+  const margin = 500
+  if (!toggles || toggles.error || !Number.isFinite(toggles.offAtMs) || !Number.isFinite(toggles.onAtMs)) {
+    failures.push(
+      `stream-manager: the mid-recording toggle did not run (${toggles?.error ?? 'no toggle timeline'})`
+    )
+  }
+  for (const step of toggles?.steps ?? []) {
+    const label = `Hide from stream ${step.hidden ? 'on' : 'off'} at ${step.atMs} ms`
+    if (step.stateHidden !== step.hidden) {
+      failures.push(`stream-manager: ${label} did not take in main`)
+    }
+    if (step.screenState !== 'live') {
+      failures.push(`stream-manager: ${label} left the capture ${step.screenState ?? 'unknown'}`)
+    }
+    if (!/applied to the running capture/.test(step.message ?? '')) {
+      failures.push(
+        `stream-manager: ${label} was not applied in place (${step.message ?? 'no message'})`
+      )
+    }
+    if (
+      Number.isFinite(step.framesBefore) &&
+      Number.isFinite(step.framesAfter) &&
+      step.framesAfter < step.framesBefore
+    ) {
+      failures.push(
+        `stream-manager: ${label} restarted the capture (frames ${step.framesBefore} -> ${step.framesAfter})`
+      )
+    }
+  }
+  const phases =
+    toggles && Number.isFinite(toggles.offAtMs) && Number.isFinite(toggles.onAtMs)
+      ? [
+          { name: 'hidden', fromMs: 0, toMs: toggles.offAtMs - margin, expect: 'absent' },
+          {
+            name: 'shown',
+            fromMs: toggles.offAtMs + settle,
+            toMs: toggles.onAtMs - margin,
+            expect: 'present'
+          },
+          { name: 'hidden again', fromMs: toggles.onAtMs + settle, toMs: endMs, expect: 'absent' }
+        ]
+      : [{ name: 'hidden', fromMs: 0, toMs: endMs, expect: 'absent' }]
+  const artifact = await analyzeOverlayArtifactPhases(outputPath, {
+    ffmpegPath: config.ffmpegPath,
+    phases,
+    maxMarkerPixelRatio: config.streamManagerOverlayMaxMarkerPixelRatio,
+    minPresentMarkerPixelRatio: config.streamManagerOverlayMinVisibleMarkerPixelRatio,
+    window: 'stream-manager'
+  })
+  const allFailures = [...failures, ...artifact.failures]
+  return {
+    ...artifact,
+    pass: allFailures.length === 0,
+    failures: allFailures,
+    toggles
+  }
 }
 
 async function waitForPreviewSourceReadiness(ws, sources, screenPreviewParams) {
@@ -1986,7 +2237,8 @@ function writeBaselineReport(
     ownership,
     qualityMode,
     previewSurfaceOutputFailures = [],
-    notesOverlay = null
+    notesOverlay = null,
+    streamManagerOverlay = null
   }
 ) {
   const base = outputPath
@@ -2062,6 +2314,11 @@ function writeBaselineReport(
       `- notesOverlay: true (windowId ${notesOverlayState?.windowId ?? 'n/a'}; bounds ${formatBounds(notesOverlayBounds)})`
     )
   }
+  if (config.streamManagerOverlay) {
+    lines.push(
+      `- streamManagerOverlay: true (windowId ${streamManagerOverlayState?.windowId ?? 'n/a'}; bounds ${formatBounds(streamManagerOverlayBounds)})`
+    )
+  }
   lines.push('')
   lines.push('## Final-file verdict (honest analyzer)')
   lines.push('')
@@ -2105,6 +2362,24 @@ function writeBaselineReport(
     )
     lines.push(`- Sampled frames: ${notesOverlay.metrics?.sampledFrames ?? 0}`)
     for (const failure of notesOverlay.failures ?? []) lines.push(`- FAIL: ${failure}`)
+    lines.push('')
+  }
+  if (streamManagerOverlay) {
+    lines.push('## Stream Manager artifact gate (Hide from stream, plan 215 C5)')
+    lines.push('')
+    lines.push(`**${streamManagerOverlay.pass ? 'PASS' : 'FAIL'}**`)
+    lines.push(`- ${formatOverlayArtifactPhasesSummary(streamManagerOverlay)}`)
+    for (const phase of streamManagerOverlay.metrics?.phases ?? []) {
+      lines.push(
+        `- ${phase.name} (${phase.fromMs}-${phase.toMs} ms, ${phase.expect}): max marker ${formatPercent(phase.maxMarkerPixelRatio)} over ${phase.sampledFrames} frames`
+      )
+    }
+    for (const step of streamManagerOverlay.toggles?.steps ?? []) {
+      lines.push(
+        `- toggle ${step.hidden ? 'on' : 'off'} at ${step.atMs} ms: ${step.screenState} in ${step.appliedMs} ms (${step.message ?? 'no message'}; frames ${step.framesBefore ?? 'n/a'} -> ${step.framesAfter ?? 'n/a'})`
+      )
+    }
+    for (const failure of streamManagerOverlay.failures ?? []) lines.push(`- FAIL: ${failure}`)
     lines.push('')
   }
   if (startupReport) {
@@ -2391,7 +2666,8 @@ function writeEvidenceManifest(
     acceptance,
     qualityMode,
     previewSurfaceOutputFailures = [],
-    notesOverlay = null
+    notesOverlay = null,
+    streamManagerOverlay = null
   }
 ) {
   const manifestPath = evidenceManifestPathForOutput(outputPath)
@@ -2402,7 +2678,8 @@ function writeEvidenceManifest(
       argv: process.argv.slice(2),
       gate: config.gate,
       screenRecordingGate: config.screenRecordingGate,
-      notesOverlayGate: config.notesOverlayGate
+      notesOverlayGate: config.notesOverlayGate,
+      streamManagerOverlayGate: config.streamManagerOverlayGate
     },
     request: realSourceGateRequest(),
     result: {
@@ -2413,6 +2690,8 @@ function writeEvidenceManifest(
       startupPass: startupReport?.verdict?.pass === true,
       notesOverlayPass: notesOverlay?.pass ?? null,
       notesOverlayFailures: notesOverlay?.failures ?? [],
+      streamManagerOverlayPass: streamManagerOverlay?.pass ?? null,
+      streamManagerOverlayFailures: streamManagerOverlay?.failures ?? [],
       mediaQualityMode: qualityMode?.mode ?? 'unknown',
       mediaQualityLabel: qualityMode?.label ?? 'unknown',
       mediaQualityReasons: qualityMode?.reasons ?? []
@@ -2434,7 +2713,8 @@ function writeEvidenceManifest(
       startupMetrics: startupReport?.metrics,
       previewTransport,
       previewSurfaceOutputFailures,
-      notesOverlay
+      notesOverlay,
+      streamManagerOverlay
     })
   }
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
@@ -2565,6 +2845,10 @@ function realSourceGateRequest() {
     avSyncStimulus: config.avSyncStimulus,
     notesOverlay: config.notesOverlay,
     notesOverlayMaxMarkerPixelRatio: config.notesOverlayMaxMarkerPixelRatio,
+    streamManagerOverlay: config.streamManagerOverlay,
+    streamManagerOverlayMaxMarkerPixelRatio: config.streamManagerOverlayMaxMarkerPixelRatio,
+    streamManagerOverlayMinVisibleMarkerPixelRatio:
+      config.streamManagerOverlayMinVisibleMarkerPixelRatio,
     microphoneSyncOffsetMs: config.microphoneSyncOffsetMs,
     systemAudio: config.systemAudio,
     noPreviewSurface: config.noPreviewSurface,
@@ -2628,7 +2912,8 @@ function gateDiagnosticsManifest(
     startupMetrics,
     previewTransport,
     previewSurfaceOutputFailures = [],
-    notesOverlay = null
+    notesOverlay = null,
+    streamManagerOverlay = null
   }
 ) {
   return {
@@ -2726,6 +3011,17 @@ function gateDiagnosticsManifest(
           metrics: notesOverlay.metrics,
           bounds: notesOverlayBounds,
           windowId: notesOverlayState?.windowId ?? null
+        }
+      : null,
+    streamManagerOverlayArtifact: streamManagerOverlay
+      ? {
+          pass: streamManagerOverlay.pass,
+          failures: streamManagerOverlay.failures,
+          thresholds: streamManagerOverlay.thresholds,
+          metrics: streamManagerOverlay.metrics,
+          toggles: streamManagerOverlay.toggles ?? null,
+          bounds: streamManagerOverlayBounds,
+          windowId: streamManagerOverlayState?.windowId ?? null
         }
       : null
   }
@@ -3151,7 +3447,8 @@ function printSummary(
   ownership,
   qualityMode,
   screenRecording,
-  notesOverlay
+  notesOverlay,
+  streamManagerOverlay = null
 ) {
   const fmtMs = (value) =>
     typeof value === 'number' && Number.isFinite(value) ? `${value}ms` : 'n/a'
@@ -3168,6 +3465,15 @@ function printSummary(
   if (notesOverlay) {
     console.log(formatNotesOverlayArtifactSummary(notesOverlay))
     for (const f of notesOverlay.failures) console.log(`  ✗ ${f}`)
+  }
+  if (streamManagerOverlay) {
+    console.log(formatOverlayArtifactPhasesSummary(streamManagerOverlay))
+    for (const step of streamManagerOverlay.toggles?.steps ?? []) {
+      console.log(
+        `  toggle ${step.hidden ? 'on' : 'off'} at ${step.atMs} ms: ${step.screenState} in ${step.appliedMs} ms (frames ${step.framesBefore ?? 'n/a'} -> ${step.framesAfter ?? 'n/a'})`
+      )
+    }
+    for (const f of streamManagerOverlay.failures) console.log(`  ✗ ${f}`)
   }
   console.log(`Media quality mode: ${qualityMode.mode} (${qualityMode.label})`)
   if (qualityMode.reasons.length) console.log(`Quality evidence: ${qualityMode.reasons.join('; ')}`)

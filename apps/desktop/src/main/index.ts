@@ -1051,42 +1051,56 @@ function installCaptureProtectionSmokeMarker(window: BrowserWindow, role: Videor
   captureProtectionMarkerStates.set(window, false)
   const color = WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS[role]
   window.webContents.on('did-finish-load', () => {
-    if (window.isDestroyed() || window.webContents.isDestroyed()) {
-      return
-    }
-    captureProtectionMarkerStates.set(window, false)
-    const markerId = `videorc-capture-protection-marker-${role}`
-    void window.webContents
-      .executeJavaScript(
-        `(() => {
-          const markerId = ${JSON.stringify(markerId)};
-          const role = ${JSON.stringify(role)};
-          const color = ${JSON.stringify(color)};
-          let marker = document.getElementById(markerId);
-          if (!marker) {
-            marker = document.createElement('div');
-            marker.id = markerId;
-            document.documentElement.appendChild(marker);
-          }
-          marker.dataset.videorcCaptureProtectionRole = role;
-          marker.style.cssText =
-            'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
-            color;
-          return { role, color, installed: true };
-        })()`,
-        true
-      )
-      .then((result) => {
-        captureProtectionMarkerStates.set(
-          window,
-          result?.installed === true && result?.role === role && result?.color === color
-        )
-      })
-      .catch((error) => {
-        captureProtectionMarkerStates.set(window, false)
-        safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
-      })
+    void paintCaptureProtectionSmokeMarker(window, role, color)
   })
+}
+
+/**
+ * Paints one window edge to edge in a marker colour the artifact gates look
+ * for: the Windows stream smoke's role colours at load (above), and the
+ * macOS invisibility smokes' red on request (plan 215 C5, the Stream
+ * Manager; Notes paints its own through `?smokeMarker=1`). Resolves whether
+ * the marker took, and remembers it for the window-state commands.
+ */
+async function paintCaptureProtectionSmokeMarker(
+  window: BrowserWindow,
+  role: VideorcWindowRole,
+  color: string
+): Promise<boolean> {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) {
+    return false
+  }
+  captureProtectionMarkerStates.set(window, false)
+  const markerId = `videorc-capture-protection-marker-${role}`
+  try {
+    const result = await window.webContents.executeJavaScript(
+      `(() => {
+        const markerId = ${JSON.stringify(markerId)};
+        const role = ${JSON.stringify(role)};
+        const color = ${JSON.stringify(color)};
+        let marker = document.getElementById(markerId);
+        if (!marker) {
+          marker = document.createElement('div');
+          marker.id = markerId;
+          document.documentElement.appendChild(marker);
+        }
+        marker.dataset.videorcCaptureProtectionRole = role;
+        marker.style.cssText =
+          'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
+          color;
+        return { role, color, installed: true };
+      })()`,
+      true
+    )
+    const installed =
+      result?.installed === true && result?.role === role && result?.color === color
+    captureProtectionMarkerStates.set(window, installed)
+    return installed
+  } catch (error) {
+    captureProtectionMarkerStates.set(window, false)
+    safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
+    return false
+  }
 }
 
 const captureProtectionMarkerStates = new WeakMap<BrowserWindow, boolean>()
@@ -12414,6 +12428,26 @@ async function runSmokePreviewMotionCommand(
   // before and during a recording, exactly as the status bar does.
   if (command === 'comments-window-set-hidden-from-stream') {
     return setCommentsWindowHiddenFromStream(params.hidden === true)
+  }
+
+  // The invisibility smoke's marker: the window painted edge to edge in a
+  // colour the artifact gate looks for (red by default, the Notes smoke's).
+  if (command === 'comments-window-set-smoke-marker') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return commentsWindowState('Chat window is not open.')
+    }
+    const color =
+      typeof params.color === 'string' && /^#[0-9a-f]{6}$/i.test(params.color)
+        ? params.color
+        : '#ff0000'
+    const markerInstalled = await paintCaptureProtectionSmokeMarker(window, 'comments', color)
+    return {
+      ...commentsWindowState(),
+      ...smokeNativeWindowIdentity(window),
+      markerInstalled,
+      markerColor: color
+    }
   }
 
   if (command === 'comments-window-push-snapshot') {
