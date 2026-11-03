@@ -77,8 +77,10 @@ describe('Electron IPC contract', () => {
     // 156: plan 210 S5 adds app icons for New scene… (S4 fills main's side).
     // 157: plan 213 J1 adds comments-window:open-destination ("Use Sign in"
     // opens the destination in the main window).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(157)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(157)
+    // 158: plan 214 E adds virtual-camera:action (Videorc Camera's System
+    // Settings, removal and setup).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(158)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(158)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -138,6 +140,32 @@ describe('Electron IPC contract', () => {
     ).toEqual({ added: true, message: 'Added.' })
     expect(() =>
       validateElectronInvokeResult('agents:add-to-app', { added: true, message: 'x', path: '/' })
+    ).toThrow()
+  })
+
+  it('takes one named Videorc Camera action and answers ok with an optional sentence (plan 214 E)', () => {
+    for (const action of ['open-approval-settings', 'remove', 'set-up', 'load-module']) {
+      expect(validateElectronInvokeArgs('virtual-camera:action', [action])).toEqual([action])
+    }
+    expect(() => validateElectronInvokeArgs('virtual-camera:action', ['install'])).toThrow()
+    expect(() => validateElectronInvokeArgs('virtual-camera:action', [])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('virtual-camera:action', ['remove', '/Applications'])
+    ).toThrow()
+    expect(validateElectronInvokeResult('virtual-camera:action', { ok: true })).toEqual({
+      ok: true
+    })
+    expect(
+      validateElectronInvokeResult('virtual-camera:action', {
+        ok: false,
+        message: 'Not available on this computer.'
+      })
+    ).toEqual({ ok: false, message: 'Not available on this computer.' })
+    expect(() =>
+      validateElectronInvokeResult('virtual-camera:action', { ok: true, message: '' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('virtual-camera:action', { ok: true, path: '/tmp' })
     ).toThrow()
   })
 

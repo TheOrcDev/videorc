@@ -244,6 +244,7 @@ export const electronInvokeApiMethods = {
   'captions-window:push-lines': 'pushCaptionLines',
   'captions-window:get-lines': 'getCaptionLines',
   'system:open-permissions': 'openSystemPermissions',
+  'virtual-camera:action': 'virtualCameraAction',
   'system:media-access-status': 'getMediaAccessStatus',
   'system:request-media-access': 'requestMediaAccess',
   'system:request-screen-access': 'requestScreenAccess',
@@ -1766,6 +1767,18 @@ const specificRuntimeInvokeContracts = {
     ]),
     objectSchema(
       { added: booleanSchema, message: stringSchema({ minLength: 1, maxLength: 512 }) },
+      { allowUnknown: false }
+    )
+  ),
+  // Plan 214 E: one named Videorc Camera action in; whether it ran and, when
+  // it didn't, a plain sentence.
+  'virtual-camera:action': invokeContract(
+    tupleSchema([enumSchema(['open-approval-settings', 'remove', 'set-up', 'load-module'])]),
+    objectSchema(
+      {
+        ok: booleanSchema,
+        message: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 }))
+      },
       { allowUnknown: false }
     )
   ),

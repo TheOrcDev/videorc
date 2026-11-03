@@ -6,6 +6,7 @@ import {
   shouldActivateCameraExtensionAtLaunch,
   type CameraExtensionController
 } from './camera-extension'
+import { runVirtualCameraAction } from './virtual-camera-action'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
@@ -16394,6 +16395,15 @@ app.whenReady().then(async () => {
   })
   secureIpcHandle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
+  )
+  // Plan 214 E: Videorc Camera's actions. Windows' setup (C2) and Linux's
+  // module load (D1) plug in here as `setUp` and `loadModule`.
+  secureIpcHandle('virtual-camera:action', (_event, action: unknown) =>
+    runVirtualCameraAction(action, {
+      platform: process.platform,
+      openExternal: (url) => shell.openExternal(url),
+      deactivateCameraExtension: () => cameraExtension().deactivate()
+    })
   )
   secureIpcHandle('system:request-media-access', (_event, pane: 'camera' | 'microphone') =>
     requestMediaAccessNative(pane)

@@ -476,6 +476,8 @@ export interface RendererDiagnosticsSnapshot {
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
   nativePreviewSurfaceStatus?: PreviewSurfaceStatus
   runtimeInfo?: RuntimeInfo
+  /** Plan 214 E3: Videorc Camera's line. */
+  virtualCamera?: VirtualCameraBundleLine
 }
 
 export type AudioTrackSource = 'microphone' | 'test-tone' | 'system-audio'
@@ -4414,6 +4416,30 @@ export interface VirtualCameraPlatformReportParams {
   platformStep: VirtualCameraPlatformStep
   message?: string
 }
+
+/**
+ * Plan 214 E: what the Output page and Health ask main to do for the camera.
+ * `open-approval-settings` and `remove` are macOS's (B3); `set-up` is
+ * Windows' one elevated setup (C2) and `load-module` Linux's `pkexec`
+ * load (D1).
+ */
+export type VirtualCameraAction = 'open-approval-settings' | 'remove' | 'set-up' | 'load-module'
+
+/**
+ * Videorc Camera in the support bundle (plan 214 E3): the switch, the state,
+ * the platform's step and the count of apps. Never the message: a platform's
+ * words can carry a path. The counters ride in the backend's own diagnostics.
+ */
+export type VirtualCameraBundleLine = Pick<
+  VirtualCameraStatus,
+  'on' | 'available' | 'state' | 'platformStep' | 'viewers'
+>
+
+/** Main's answer to one action; `message` is plain copy when it refused or failed. */
+export interface VirtualCameraActionResult {
+  ok: boolean
+  message?: string
+}
 // --- end Videorc Camera (plan 214 A4) ---
 
 export interface RenameScreenParams {
@@ -5471,6 +5497,8 @@ export interface VideorcApi {
   destroyNativePreviewSurface: (generation?: number) => Promise<PreviewSurfaceStatus>
   getNativePreviewSurfaceStatus: () => Promise<PreviewSurfaceStatus>
   openSystemPermissions: (pane?: SystemPermissionPane) => Promise<void>
+  /** Plan 214 E: one Videorc Camera action in main (System Settings, removal, setup). */
+  virtualCameraAction: (action: VirtualCameraAction) => Promise<VirtualCameraActionResult>
   /** The OS's real camera/microphone access state (Electron
    * getMediaAccessStatus — supported on macOS AND Windows). Lets the UI show a
    * truthful chip on Windows, where the audio meter has no capture backend and
