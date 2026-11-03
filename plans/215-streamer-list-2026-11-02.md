@@ -810,6 +810,10 @@ Windows CI for D3D11.
     Chat on stream switch in the chat pane's filter bar (its own chunk).
     It rides the Buddy's relay as `chat-show-on-stream`, and Studio relays
     `chatOnStream`.
+  - Since `chat` is in `OVERLAY_ITEMS`, the Scene stage and the agents'
+    scene tools (`get_scene_layout`, `move_on_scene`, `set_scene_item`)
+    list the box like the Buddy, so an agent can switch it on. That is an
+    owner call (D5 is off by default, for privacy).
   - The smoke's chat-box assertion is written but not run. It skips the
     top-right split scenario, where the box would sit in the highlight
     gate's mirrored corner.
