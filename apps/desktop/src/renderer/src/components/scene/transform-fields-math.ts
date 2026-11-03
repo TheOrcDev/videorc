@@ -1,3 +1,9 @@
+import type { SceneSourceKind } from '@/lib/backend'
+import {
+  sceneFrameRect,
+  sceneStageRect,
+  type PixelSize
+} from '../../../../shared/scene-picture-geometry'
 import {
   MAX_SOURCE_FRACTION,
   MAX_SOURCE_POSITION,
@@ -164,6 +170,94 @@ export function cropFieldPatch(
 ): Partial<StageCrop> {
   const most = Math.max(0, 1 - MIN_CROP_KEPT - committed[OPPOSITE_CROP_SIDE[field]])
   return { [field]: round4(Math.min(Math.max(value, 0), most)) }
+}
+
+export type TransformPatch = { x?: number; y?: number; width?: number; height?: number }
+
+/**
+ * A field edit made on the PICTURE (plan 216 B5: the Inspector's X, Y, W, H
+ * describe the picture the stage shows), as the frame patch the backend
+ * stores: each present field back through the scene background's stage
+ * margin (`sceneFrameRect`), which is affine per axis, so a partial patch
+ * maps field by field. No margin, or a camera, leaves the patch as it is.
+ */
+export function pictureEditToFrame(
+  patch: TransformPatch,
+  kind: SceneSourceKind,
+  stageMargin: number
+): TransformPatch {
+  const frame = sceneFrameRect(
+    {
+      x: patch.x ?? 0,
+      y: patch.y ?? 0,
+      width: patch.width ?? 0,
+      height: patch.height ?? 0
+    },
+    kind,
+    stageMargin
+  )
+  const result: TransformPatch = {}
+  for (const key of TRANSFORM_FIELD_IDS)
+    if (patch[key] !== undefined) result[key] = round4(frame[key])
+  return result
+}
+
+/**
+ * The frame patch a field edit on the picture commits (plan 216 B5). While
+ * the box is the frame (Fill, an unknown size: the picture is the frame
+ * rounded to pixels), the edited fields alone go back through the margin.
+ * Once the picture differs from the frame (Fit with a known size, before
+ * the first edit), the whole picture goes with the edit, so that first
+ * edit makes the frame the picture (D3) and the typed number lands where
+ * it was typed.
+ */
+export function pictureEditFramePatch(
+  patch: TransformPatch,
+  box: StageRect,
+  frame: StageRect,
+  kind: SceneSourceKind,
+  stageMargin: number,
+  canvas: PixelSize
+): TransformPatch {
+  const staged = sceneStageRect(frame, kind, stageMargin)
+  const boxIsFrame = TRANSFORM_FIELD_IDS.every(
+    (key) =>
+      Math.abs(box[key] - staged[key]) *
+        (key === 'x' || key === 'width' ? canvas.width : canvas.height) <=
+      1
+  )
+  return pictureEditToFrame(boxIsFrame ? patch : { ...box, ...patch }, kind, stageMargin)
+}
+
+/**
+ * A typed crop while the box is the picture (plan 216 D2): the crop, and
+ * the box the kept picture now fills, in picture (stage) coordinates. The
+ * uncropped picture stays where it is, so what stays on screen does not
+ * move or scale, exactly as an Alt-drag crop on the stage cuts it. The
+ * caller maps the box back to a frame with `pictureEditToFrame`.
+ */
+export function cropEditOnPicture(
+  patch: Partial<StageCrop>,
+  picture: StageRect,
+  committed: StageCrop
+): Partial<StageCrop> & StageRect {
+  const next: StageCrop = { ...committed, ...patch }
+  const keptX = Math.max(MIN_CROP_KEPT, 1 - committed.cropLeft - committed.cropRight)
+  const keptY = Math.max(MIN_CROP_KEPT, 1 - committed.cropTop - committed.cropBottom)
+  // The whole picture, from the part the box shows now.
+  const fullWidth = picture.width / keptX
+  const fullHeight = picture.height / keptY
+  const fullX = picture.x - committed.cropLeft * fullWidth
+  const fullY = picture.y - committed.cropTop * fullHeight
+  const nextKeptX = Math.max(MIN_CROP_KEPT, 1 - next.cropLeft - next.cropRight)
+  const nextKeptY = Math.max(MIN_CROP_KEPT, 1 - next.cropTop - next.cropBottom)
+  return {
+    ...patch,
+    x: round4(fullX + next.cropLeft * fullWidth),
+    y: round4(fullY + next.cropTop * fullHeight),
+    width: round4(fullWidth * nextKeptX),
+    height: round4(fullHeight * nextKeptY)
+  }
 }
 
 /** Pixel readout for the committed box on the output canvas. */

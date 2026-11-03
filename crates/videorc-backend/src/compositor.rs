@@ -70,8 +70,8 @@ use crate::protocol::{
 use crate::scene_geometry::{
     ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, SceneMaskTester, SignedPixelRect,
     background_stage_margin, background_zoom_crop, camera_chroma_key, camera_mask,
-    chroma_key_alpha, chroma_key_despill, scene_crop_from_transform, scene_source_fit,
-    scene_source_rect_pixels, scene_source_render_transform,
+    chroma_key_alpha, chroma_key_despill, contain_rect_pixels, scene_crop_from_transform,
+    scene_source_fit, scene_source_rect_pixels, scene_source_render_transform,
 };
 #[cfg_attr(target_os = "windows", allow(unused_imports))]
 pub use crate::source_mask::SourceMask;
@@ -5816,6 +5816,17 @@ async fn update_compositor_scene_with_selection_and_prepare_hook(
             active_image_source.as_ref(),
             background_image_source.as_ref(),
         );
+        {
+            // Plan 216 B2: the last known capture sizes, until the next tick
+            // refreshes them.
+            let status = &mut compositor.status;
+            fill_scene_source_sizes(
+                &mut status.scene_sources,
+                &status.sources,
+                status.width,
+                status.height,
+            );
+        }
         compositor.status.image_cache = compositor.image_sources.status();
         compositor.status.updated_at = Utc::now().to_rfc3339();
         compositor.carry_source_edit_proof(state, &snapshot, false);
@@ -11929,6 +11940,16 @@ fn try_update_compositor_status(
         metrics.metal_target_handoff,
     );
     compositor.status.sources = metrics.sources;
+    {
+        // Plan 216 B2: every scene source carries its picture size.
+        let status = &mut compositor.status;
+        fill_scene_source_sizes(
+            &mut status.scene_sources,
+            &status.sources,
+            status.width,
+            status.height,
+        );
+    }
     // Plan 214 A4: what Videorc Camera's output did (0 while off).
     let camera = state.virtual_camera.counters().unwrap_or_default();
     compositor.status.frame_pipeline = CompositorFramePipelineStatus {
@@ -13277,20 +13298,15 @@ fn source_fit(
     let source_aspect = source_w / source_h;
     let rect_aspect = f64::from(rect.width) / f64::from(rect.height);
     if contain {
-        let (width, height) = if source_aspect > rect_aspect {
-            let width = rect.width;
-            let height = (f64::from(width) / source_aspect).round().max(1.0) as u32;
-            (width, height.min(rect.height))
-        } else {
-            let height = rect.height;
-            let width = (f64::from(height) * source_aspect).round().max(1.0) as u32;
-            (width.min(rect.width), height)
-        };
+        // Plan 216 B1: the one contain rule, shared with the Scene stage
+        // through `scene_geometry::scene_picture_rect_pixels`, so the box the
+        // stage draws is the picture this draws.
+        let fitted = contain_rect_pixels(source_w, source_h, rect);
         Some(SourceFit {
-            x: rect.x + i64::from((rect.width - width) / 2),
-            y: rect.y + i64::from((rect.height - height) / 2),
-            width,
-            height,
+            x: fitted.x,
+            y: fitted.y,
+            width: fitted.width,
+            height: fitted.height,
             source_x,
             source_y,
             source_width: source_w,
@@ -13620,6 +13636,50 @@ fn compositor_scene_sources(
         });
     }
     sources
+}
+
+/// Plan 216 B2: the scene sources' picture sizes, so the Scene stage can
+/// draw each source's box on its picture (`scene_picture_rect_pixels`). A
+/// live source's size is its capture's frame size (`CompositorSourceStatus`,
+/// from the latest frame or the capture status); the test pattern is drawn
+/// at the canvas size. A capture that has not reported a size yet leaves
+/// the last known one; the image entries (a screen image, a background)
+/// carry their own.
+fn fill_scene_source_sizes(
+    scene_sources: &mut [CompositorSceneSourceStatus],
+    sources: &[CompositorSourceStatus],
+    canvas_width: u32,
+    canvas_height: u32,
+) {
+    let size_of = |wanted: &dyn Fn(&CompositorSourceKind) -> bool| {
+        sources
+            .iter()
+            .find(|source| wanted(&source.kind))
+            .and_then(|source| Some((source.width?, source.height?)))
+    };
+    for scene_source in scene_sources {
+        let size = match scene_source.kind {
+            CompositorSceneSourceKind::Camera => {
+                size_of(&|kind| matches!(kind, CompositorSourceKind::Camera))
+            }
+            CompositorSceneSourceKind::Screen | CompositorSceneSourceKind::Window => {
+                size_of(&|kind| {
+                    matches!(
+                        kind,
+                        CompositorSourceKind::Screen | CompositorSourceKind::Window
+                    )
+                })
+            }
+            CompositorSceneSourceKind::TestPattern => Some((canvas_width, canvas_height)),
+            CompositorSceneSourceKind::ScreenImage | CompositorSceneSourceKind::BackgroundImage => {
+                continue;
+            }
+        };
+        if let Some((width, height)) = size {
+            scene_source.width = Some(width);
+            scene_source.height = Some(height);
+        }
+    }
 }
 
 fn image_file_revision(path: &Path) -> Option<String> {
@@ -20991,6 +21051,89 @@ mod tests {
             status.message.as_deref(),
             Some("Background exceeds a decode limit.")
         );
+    }
+
+    /// Plan 216 B2: the streamer's 2228x1440 display reaches the stage as
+    /// the screen source's own size; the camera gets its frame size, the
+    /// test pattern the canvas, and the image entries keep their own.
+    #[test]
+    fn scene_source_statuses_carry_the_capture_sizes() {
+        let scene_source =
+            |id: &str, kind: CompositorSceneSourceKind| CompositorSceneSourceStatus {
+                id: id.to_string(),
+                name: id.to_string(),
+                kind,
+                state: "referenced".to_string(),
+                device_id: None,
+                visible: true,
+                transform: full_frame_transform(),
+                fit: CompositorSceneSourceFit::Contain,
+                mirror: false,
+                shape: None,
+                image_path: None,
+                file_revision: None,
+                width: None,
+                height: None,
+                message: None,
+            };
+        let capture =
+            |kind: CompositorSourceKind, size: Option<(u32, u32)>| CompositorSourceStatus {
+                kind,
+                state: "live".to_string(),
+                source_id: None,
+                sequence: None,
+                width: size.map(|(width, _)| width),
+                height: size.map(|(_, height)| height),
+                source_fps: None,
+                frame_age_ms: None,
+                message: None,
+            };
+        let mut scene_sources = vec![
+            scene_source("source:base", CompositorSceneSourceKind::Screen),
+            scene_source("source:camera", CompositorSceneSourceKind::Camera),
+            scene_source("source:pattern", CompositorSceneSourceKind::TestPattern),
+            CompositorSceneSourceStatus {
+                width: Some(7680),
+                height: Some(4320),
+                ..scene_source(
+                    "background-image:1",
+                    CompositorSceneSourceKind::BackgroundImage,
+                )
+            },
+        ];
+        fill_scene_source_sizes(
+            &mut scene_sources,
+            &[
+                capture(CompositorSourceKind::Camera, Some((1280, 720))),
+                capture(CompositorSourceKind::Screen, Some((2228, 1440))),
+            ],
+            2560,
+            1440,
+        );
+        let size = |id: &str| {
+            let source = scene_sources.iter().find(|source| source.id == id).unwrap();
+            (source.width, source.height)
+        };
+        assert_eq!(size("source:base"), (Some(2228), Some(1440)));
+        assert_eq!(size("source:camera"), (Some(1280), Some(720)));
+        assert_eq!(size("source:pattern"), (Some(2560), Some(1440)));
+        assert_eq!(size("background-image:1"), (Some(7680), Some(4320)));
+
+        // A capture without a size yet keeps the last known one; a window
+        // capture sizes a window source.
+        let mut again = scene_sources.clone();
+        again[0].kind = CompositorSceneSourceKind::Window;
+        fill_scene_source_sizes(
+            &mut again,
+            &[
+                capture(CompositorSourceKind::Camera, None),
+                capture(CompositorSourceKind::Window, Some((1200, 1600))),
+            ],
+            2560,
+            1440,
+        );
+        assert_eq!((again[0].width, again[0].height), (Some(1200), Some(1600)));
+        assert_eq!((again[1].width, again[1].height), (Some(1280), Some(720)));
     }
 
     #[test]

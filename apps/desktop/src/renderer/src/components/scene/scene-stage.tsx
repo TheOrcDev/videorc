@@ -30,6 +30,7 @@ import type {
   CameraCorner,
   CameraShape,
   EffectiveSceneBackground,
+  LayoutSettings,
   OverlayItem,
   Scene,
   SceneEditorDraftParams,
@@ -77,6 +78,16 @@ import {
   type StageHandleId,
   type StageRect
 } from './stage-transform'
+import {
+  previewProofBackgroundStageMargin,
+  previewProofLayerFit
+} from '../../../../shared/native-preview-proof-geometry'
+import {
+  sceneFrameRect,
+  scenePictureRect,
+  screenBoxIsPicture,
+  type PixelSize
+} from '../../../../shared/scene-picture-geometry'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /** The invisible outline that drags a selected overlay item (CSS px). */
@@ -177,6 +188,15 @@ export type StagePhase = 'idle' | 'dragging' | 'pending'
 /** A schematic editor: pointer samples never start capture; the only IPC a
  * gesture crosses is the live draft below, and only over the live canvas.
  *
+ * The box is the PICTURE (plan 216 B3, owner decision D2): every source is
+ * drawn, hit, snapped to and held where the compositor draws its picture
+ * (`scenePictureRect`: its frame on the scene background's stage margin,
+ * and on Fit the picture's own box inside it), never its frame. A gesture
+ * starts from the picture and ends with a commit of the frame that picture
+ * maps back to (`sceneFrameRect`), so a Freeform screen's frame becomes its
+ * picture the first time it is edited and never before (D3: a display swap
+ * writes nothing).
+ *
  * Live canvas (plan 058): on macOS the docked native preview glues itself over
  * the canvas rect (`slotRef`, `data-videorc-dock-slot="scene"`) and the SVG
  * runs in HIT-ONLY mode while `liveSurface` is true — every painted element is
@@ -214,6 +234,9 @@ export function SceneStage({
   onDraft,
   onDraftClear,
   outputWidth,
+  outputHeight,
+  layout,
+  sourceSizes,
   cameraShape = 'rectangle',
   cameraCornerRadiusPct = 12,
   dragEnabled = false,
@@ -266,8 +289,17 @@ export function SceneStage({
   onDraft?: (params: SceneEditorDraftParams) => Promise<unknown>
   onDraftClear?: () => Promise<unknown>
   /** Output width in pixels: sizes the compositor-drawn chrome so a hairline is
-   * a hairline on screen at every slot size. */
+   * a hairline on screen at every slot size, and with `outputHeight` rounds the
+   * picture to canvas pixels as the compositor does (plan 216 B3). */
   outputWidth?: number
+  outputHeight?: number
+  /** The layout, for how the compositor fits each source into its box (plan
+   * 216 B3: the stage draws the PICTURE, not the frame). Without it every
+   * source is drawn as its frame, on the stage margin. */
+  layout?: LayoutSettings
+  /** Each source's picture size in pixels, by source id, when known (plan
+   * 216 B2: the compositor's status, else the capture status). */
+  sourceSizes?: Readonly<Record<string, PixelSize>>
   cameraShape?: CameraShape
   cameraCornerRadiusPct?: number
   dragEnabled?: boolean
@@ -303,6 +335,42 @@ export function SceneStage({
   const sources = scene?.sources ?? []
   const stageH =
     STAGE_W / (Number.isFinite(outputAspect) && outputAspect > 0 ? outputAspect : 16 / 9)
+  // The output canvas in pixels: the picture rounds to it like the
+  // compositor's fit (plan 216 B3). Without an output size, a 1920-wide
+  // canvas of the stage's shape stands in.
+  const canvasWidth = outputWidth && outputWidth > 0 ? outputWidth : 1920
+  const canvasHeight =
+    outputHeight && outputHeight > 0
+      ? outputHeight
+      : Math.max(1, Math.round((canvasWidth * stageH) / STAGE_W))
+  const stageMargin = previewProofBackgroundStageMargin(background)
+  const sourceFit = (source: SceneSource): 'contain' | 'cover' =>
+    layout ? previewProofLayerFit(source, layout) : 'cover'
+  const sourceSize = (source: SceneSource): PixelSize | null => sourceSizes?.[source.id] ?? null
+  /** Where the source's picture is for `frame` (its transform, a draft, a
+   * corner drop), in canvas fractions: what the stage draws and edits. */
+  const pictureOf = (
+    source: SceneSource,
+    frame: StageRect,
+    crop?: Partial<StageCrop> | null
+  ): StageRect =>
+    scenePictureRect({
+      frame,
+      kind: source.kind,
+      fit: sourceFit(source),
+      source: sourceSize(source),
+      crop: crop ?? source.transform,
+      stageMargin,
+      canvas: { width: canvasWidth, height: canvasHeight }
+    })
+  /** The frame a box on the stage commits as: back through the stage margin. */
+  const frameOf = (source: SceneSource, picture: StageRect): StageRect =>
+    sceneFrameRect(picture, source.kind, stageMargin)
+  /** The box follows the picture's shape (plan 216 D2): a Freeform screen
+   * on Fit with a known size. Its aspect is forced in a resize, like a
+   * shaped camera's, and crop is how its shape changes. */
+  const boxIsPicture = (source: SceneSource): boolean =>
+    freeform && screenBoxIsPicture(source.kind, sourceFit(source), sourceSize(source))
   const svgRef = useRef<SVGSVGElement | null>(null)
   const clipId = useId()
   const gutterClipId = useId()
@@ -400,6 +468,10 @@ export function SceneStage({
         `${source.id}:${source.kind}:${source.deviceId}:${source.locked}:${source.visible}`
     )
     .join('|')
+  // A source's picture size arriving or changing under a gesture (a camera
+  // that starts as it is grabbed, a display swap) never ends it: the ghost
+  // is already in picture coordinates and the release commits the frame it
+  // maps back to; the new size shapes the box from the next render on.
   useLayoutEffect(() => {
     cancelGesture()
     edits.invalidate()
@@ -488,14 +560,17 @@ export function SceneStage({
 
   const editable = (source: SceneSource): boolean =>
     !source.locked && (freeform || source.transform.width < 1 || source.transform.height < 1)
+  // The box the stage shows for a source: the ghost (already the picture)
+  // during its gesture, else the picture of the frame still landing, of a
+  // corner drop, or of the committed transform.
   const displayed = (source: SceneSource): StageRect =>
     ghost?.sourceId === source.id
       ? ghost.rect
       : edits.draft?.sourceId === source.id
-        ? edits.draft.rect
+        ? pictureOf(source, edits.draft.rect, edits.draft.crop)
         : cornerDrop?.sourceId === source.id
-          ? cornerDrop.rect
-          : source.transform
+          ? pictureOf(source, cornerDrop.rect)
+          : pictureOf(source, source.transform)
   /** Output pixels per CSS pixel of the canvas, as estimated from the session's
    * output width (the schema caps it at 64; a canvas that small has no visible
    * chrome anyway). Only a fallback: the compositor sizes the chrome from
@@ -511,8 +586,11 @@ export function SceneStage({
     const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
     const kind = gesture.motion.kind
     const crop = gesture.item ? null : gesture.motion.crop
+    // The draft's transform is the frame the ghost's picture maps back to;
+    // its chrome sits on the picture, where the handles are.
+    const transform = gesture.item || !source ? ghost.rect : frameOf(source, ghost.rect)
     return {
-      transform: ghost.rect,
+      transform,
       ...(crop ? { crop } : {}),
       chrome: {
         selected: ghost.rect,
@@ -562,8 +640,8 @@ export function SceneStage({
     : null
   const heldRect = selectedSource
     ? edits.draft?.sourceId === selectedSource.id
-      ? edits.draft.rect
-      : selectedSource.transform
+      ? pictureOf(selectedSource, edits.draft.rect, edits.draft.crop)
+      : pictureOf(selectedSource, selectedSource.transform)
     : selectedOverlay
       ? displayedOverlay(selectedOverlay)
       : null
@@ -651,7 +729,10 @@ export function SceneStage({
       stageSnapTargets(sources.filter((other) => other.id !== source.id).map(displayed)),
       effectiveSnap,
       aspectLocked,
-      source.kind === 'camera' && cameraAspectLocked,
+      // The aspect is law for a shaped camera (the mask), and for a Freeform
+      // screen whose box is its picture (plan 216 D2): the key never
+      // stretches it, and the crop changes its shape instead.
+      (source.kind === 'camera' && cameraAspectLocked) || boxIsPicture(source),
       crop
     )
     // Initial modifiers establish ownership without changing the grabbed point.
@@ -762,8 +843,11 @@ export function SceneStage({
       !gesture.item && gesture.motion.kind === 'move' && onSnapCorner
         ? snapCornerOf(gesture.motion.rect)
         : null
-    if (gesture.corner && cornerDropRect)
-      next = { sourceId: next.sourceId, rect: cornerDropRect(gesture.corner), guides: [] }
+    if (gesture.corner && cornerDropRect) {
+      const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
+      const box = cornerDropRect(gesture.corner)
+      next = { sourceId: next.sourceId, rect: source ? pictureOf(source, box) : box, guides: [] }
+    }
     setGhost(next)
     if (draft) channel.sample(draftOf(gesture, next))
     return next
@@ -811,16 +895,25 @@ export function SceneStage({
     // preset's box, held (`cornerDrop`) until the preset's scene shows it;
     // without that box the draft is cleared with the gesture.
     const crop = final.crop
+    // What is committed is the FRAME (plan 216 B3): the released picture
+    // back through the stage margin, or the preset's box for a corner snap.
+    const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
+    const frame =
+      corner && cornerDropRect
+        ? cornerDropRect(corner)
+        : source
+          ? frameOf(source, final.rect)
+          : final.rect
     if (changed && (!corner || cornerDropRect))
-      channel.release(roundRectForCommit(final.rect), crop && roundCropForCommit(crop))
+      channel.release(roundRectForCommit(frame), crop && roundCropForCommit(crop))
     cancelGesture()
     if (!changed) return
     if (corner) {
-      if (cornerDropRect) setCornerDrop({ sourceId: gesture.motion.sourceId, rect: final.rect })
+      if (cornerDropRect) setCornerDrop({ sourceId: gesture.motion.sourceId, rect: frame })
       onSnapCorner?.(corner)
       return
     }
-    edits.submit(gesture.motion.sourceId, final.rect, crop)
+    edits.submit(gesture.motion.sourceId, frame, crop)
   }
   const gutter = 28 / pixelScale
   const canvasRadius = Math.min(CANVAS_RADIUS_PX / pixelScale, stageH / 2)
