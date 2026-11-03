@@ -689,8 +689,17 @@ pub trait VirtualCameraSink: Send {
     /// after an error that disconnected the sink.
     fn connect(&mut self) -> Result<(), VirtualCameraSinkError>;
 
-    /// Close the device. Called on off, on a disconnecting error and at exit.
+    /// Close the device. Called on off and on a disconnecting error.
     fn disconnect(&mut self);
+
+    /// Close the device because Videorc is quitting with the switch still
+    /// on (the output is dropped, not stopped). Defaults to `disconnect`;
+    /// macOS tells the extension nothing then, so its still says "Videorc
+    /// isn't running" rather than "off" (D12), and the switch comes back on
+    /// at the next launch (D4).
+    fn disconnect_at_exit(&mut self) {
+        self.disconnect();
+    }
 
     /// Hand one frame to the device at `pts`. Returns inside the frame's
     /// lifetime: a GPU sink blits before returning.
@@ -727,6 +736,7 @@ impl VirtualCameraUnavailable {
 
     /// Owner, 2026-11-03: a platform whose camera hasn't passed its on-device
     /// spike stays hidden.
+    #[allow(dead_code)] // The Windows and Linux arms of `platform_sink` use it.
     pub fn hidden_until_proven(platform: &str) -> Self {
         Self {
             reason: format!("Videorc Camera isn't available on {platform} yet."),
@@ -740,11 +750,19 @@ impl VirtualCameraUnavailable {
 /// Windows (C) and Linux (D) land hidden and flip to their sink once each
 /// machine passes its spike: `if PROVEN { sink() } else { hidden_until_proven(..) }`.
 pub fn platform_sink() -> Result<Box<dyn VirtualCameraSink>, VirtualCameraUnavailable> {
+    // `cargo test` on a Mac with the extension installed must never start
+    // its sink stream: a unit test that turns the switch on gets no sink,
+    // and a test that wants one injects a fake through
+    // `VirtualCameraService::with_sink_factory`. The lab aids that do touch
+    // CoreMediaIO are `#[ignore]` and build their transport directly.
+    if cfg!(test) {
+        return Err(VirtualCameraUnavailable::new(
+            "Videorc Camera isn't available in unit tests (the sink is injected).",
+        ));
+    }
     #[cfg(target_os = "macos")]
     {
-        Err(VirtualCameraUnavailable::new(
-            "Videorc Camera isn't available on macOS yet (the Camera Extension sink, plan 214 B4, hasn't shipped).",
-        ))
+        Ok(Box::new(crate::virtual_camera_macos::CmioSink::system()))
     }
     #[cfg(target_os = "windows")]
     {
@@ -874,6 +892,9 @@ pub struct OutputShared {
     demanded: AtomicBool,
     viewers: AtomicI64,
     health: StdMutex<SinkHealth>,
+    /// The output was dropped with the switch on (Videorc is quitting), not
+    /// stopped by the switch: the sink disconnects "at exit".
+    exiting: AtomicBool,
 }
 
 impl Default for OutputShared {
@@ -885,6 +906,7 @@ impl Default for OutputShared {
             demanded: AtomicBool::new(false),
             viewers: AtomicI64::new(VIEWERS_UNCHECKED),
             health: StdMutex::new(SinkHealth::default()),
+            exiting: AtomicBool::new(false),
         }
     }
 }
@@ -1282,7 +1304,11 @@ impl OutputEngine {
         self.demand_guard = None;
         self.shared.demanded.store(false, Ordering::Release);
         if self.connected {
-            self.sink.disconnect();
+            if self.shared.exiting.load(Ordering::Acquire) {
+                self.sink.disconnect_at_exit();
+            } else {
+                self.sink.disconnect();
+            }
             self.connected = false;
         }
         self.shared.set_health(SinkHealth {
@@ -1351,7 +1377,8 @@ impl VirtualCameraOutput {
         &self.shared
     }
 
-    /// Stop the thread and join it (at most one tick late).
+    /// The switch turned off: stop the thread and join it (at most one tick
+    /// late). The sink disconnects as "off".
     pub fn stop(mut self) {
         self.stop_and_join();
     }
@@ -1365,7 +1392,12 @@ impl VirtualCameraOutput {
 }
 
 impl Drop for VirtualCameraOutput {
+    /// Dropped with the switch on: Videorc is quitting. `stop` joined the
+    /// thread already when the switch turned off, and this is a no-op then.
     fn drop(&mut self) {
+        if self.thread.is_some() {
+            self.shared.exiting.store(true, Ordering::Release);
+        }
         self.stop_and_join();
     }
 }
@@ -1537,6 +1569,8 @@ pub(crate) mod test_support {
         pub pushes: Vec<FakePush>,
         pub connects: u32,
         pub disconnects: u32,
+        /// `disconnect_at_exit` calls (the output dropped, not stopped).
+        pub exit_disconnects: u32,
         pub viewers: Option<u32>,
         pub connect_error: Option<String>,
         pub push_result: Option<Result<VirtualCameraPush, VirtualCameraSinkError>>,
@@ -1577,6 +1611,10 @@ pub(crate) mod test_support {
 
         fn disconnect(&mut self) {
             self.state.lock().unwrap().disconnects += 1;
+        }
+
+        fn disconnect_at_exit(&mut self) {
+            self.state.lock().unwrap().exit_disconnects += 1;
         }
 
         fn push(
@@ -2198,9 +2236,32 @@ mod tests {
         output.stop();
         assert!(!demand.demanded(), "stop releases the demand");
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.disconnects, 1);
+        assert_eq!(seen.disconnects, 1, "the switch turned off");
+        assert_eq!(seen.exit_disconnects, 0);
         let counters = store.lock().unwrap().stats();
         assert!(counters.buffer_count >= 1);
+    }
+
+    /// D12: an output dropped with the switch on (Videorc quitting) tells
+    /// the sink it is exiting, never that the camera is off.
+    #[test]
+    fn an_output_dropped_with_the_switch_on_disconnects_at_exit() {
+        let (sink, seen) = FakeSink::new(Some(1));
+        let store = cpu_store();
+        publish_cpu_frame(&store, 1, 16, 8, 100);
+        let demand = PixelDemand::new();
+        let engine = engine_with(sink, store, &demand);
+        let output = VirtualCameraOutput::spawn(engine).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().connects < 1 {
+            assert!(Instant::now() < deadline, "the output never connected");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(output);
+        assert!(!demand.demanded(), "exit releases the demand");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.exit_disconnects, 1);
+        assert_eq!(seen.disconnects, 0, "never off");
     }
 
     // --- never list yourself ---

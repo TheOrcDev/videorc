@@ -168,6 +168,7 @@ mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
 mod virtual_camera;
+mod virtual_camera_macos;
 mod virtual_camera_service;
 mod warm_microphone;
 #[allow(dead_code)]
@@ -16831,9 +16832,9 @@ mod tests {
         let event = events.recv().await.unwrap();
         assert_eq!(event.event, "virtualCamera.changed");
         assert_eq!(event.payload, payload);
-        // The switch is saved on (D4). This build has no platform sink yet,
-        // which outranks the platform's report: the status says so, never
-        // a silent success.
+        // The switch is saved on (D4). `platform_sink` hands unit tests no
+        // sink (the host's camera is never touched), which outranks the
+        // platform's report: the status says so, never a silent success.
         let set = json!({ "id": "set", "method": "virtualCamera.set", "params": { "on": true } })
             .to_string();
         let response = handle_text_message_with_role(&state, &set, BackendRole::Renderer).await;
