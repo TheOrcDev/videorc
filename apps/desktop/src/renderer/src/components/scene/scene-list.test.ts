@@ -119,9 +119,7 @@ afterEach(async () => {
 })
 
 async function render(): Promise<void> {
-  await act(async () =>
-    root.render(createElement(SceneList, { onEditScene: mocked.editScene }))
-  )
+  await act(async () => root.render(createElement(SceneList, { onEditScene: mocked.editScene })))
 }
 const actions = () => mocked.core.sceneLibraryActions as Record<string, ReturnType<typeof vi.fn>>
 const rowButton = (name: string) =>
