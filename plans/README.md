@@ -2,7 +2,8 @@
 
 - 2026-11-03: [Plan 216](216-freeform-screen-box-and-drag.md), a streamer's
   bug report with a video and a support bundle (0.18.0, all three bugs still
-  on main). EXECUTING; the owner took D1 to D5 as recommended:
+  on main). BUILT 2026-11-03 (#1100, #1102, #1098, #1097); the owner took
+  D1 to D5 as recommended:
   - A: a rearrangement (Freeform, a move, Fill/Fit) never waits for a source
     already in the scene; their camera said "live" but sent no frames, so
     Freeform failed after 15 s. One "Switching…" label, a named failure,
@@ -11,8 +12,9 @@
     Rust and TypeScript), on top of plan 215 E and before 215 F.
   - C: on macOS the fallback preview lives inside the main window, as on
     Linux, so the canvas drags; a real-mouse probe gates it.
-  - D: why their Mac had a silent camera and a fallback preview (needs the
-    streamer).
+  - D: a camera that sends no video says so, and the bundle keeps the
+    watchdog's decisions; why their Mac fell back still needs the streamer.
+  - Owed: by eye in both themes, a real-mouse probe, D1's streamer answers.
 - 2026-11-03: [Plan 215](215-streamer-list-2026-11-02.md), a streamer's
   list from 2026-11-02. Seven workstreams, one PR each:
   - A: X chat names the missing Videorc sign-in, warns before Go Live, and

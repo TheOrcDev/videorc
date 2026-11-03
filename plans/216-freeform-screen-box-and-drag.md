@@ -18,10 +18,11 @@
 
 ## Status
 
-- **Status:** EXECUTING since 2026-11-03. Owner, 2026-11-03: "Yes I pick
-  all recommended decisions execute the entire plan and create PRs for
-  each of these things". So D1 to D5 are all taken as recommended, and
-  every workstream below is written to them.
+- **Status:** BUILT 2026-11-03: A to D are all merged (see "As built").
+  Owner, 2026-11-03: "Yes I pick all recommended decisions execute the
+  entire plan and create PRs for each of these things". So D1 to D5 were
+  all taken as recommended, and every workstream below is written to them.
+  Owed: the by-eye and real-mouse checks, and D1's streamer answers.
 - **Source:** a streamer's report, relayed by the owner on 2026-11-03,
   with a 105 s screen video (`~/Downloads/bug_video_orc.mp4`, edited, music
   only, no narration) and a support bundle
@@ -549,7 +550,71 @@ investigation; escalate to `fable-5.1` if a native fix appears.
 
 ## As built
 
-- A: _not started_
-- B: _not started_
-- C: _not started_
-- D: _not started_
+- **A (a rearrangement never waits for a source that's already on):
+  MERGED #1100, `decb46279`.**
+  - The readiness gate skips a source the composed program already shows
+    while its capture is Starting or Live (`composed_and_running` in
+    `live_layout.rs`). A stopped, failed or missing source is still started
+    and waited for, because a rearrangement may be the only thing that
+    starts it.
+  - A source that never sends a frame fails with `layout-camera-not-ready`
+    or `layout-screen-not-ready`, which `user-error.ts` names ("Your camera
+    isn't sending video…"). The lanes smoke accepts both codes.
+  - One "Switching…" label: `layout-switch-pending.ts` keys it by the
+    preset and the arrangement mode, so Freeform no longer shows two.
+  - The bundle keeps the last 50 user-facing errors
+    (`rendererDiagnostics.recentUserErrors`, `user-error-log.ts`).
+- **B (in Freeform, the box is the picture): MERGED #1102, `c7e221bf2`.**
+  - One picture-rect rule: `scene-picture-geometry.ts` and
+    `scene_picture_rect_pixels` in `scene_geometry.rs`, held together by
+    `protocol-fixtures/scene-picture-geometry.json`. The compositor's
+    contain fit moved into `contain_rect_pixels` unchanged, so recorded
+    and streamed pixels are identical.
+  - Every scene source's status carries its picture size
+    (`fill_scene_source_sizes`, existing contract fields).
+  - The stage draws, hits and snaps the picture. Freeform gestures keep box
+    = picture, the inspector's X, Y, W, H and Zoom describe it, and
+    Freeform starts a screen at its picture. A size change never cancels a
+    gesture in progress.
+  - It merged after plan 215 E, as planned; 215 F's mask goes on this
+    picture rect.
+- **C (the canvas drags on the fallback preview): MERGED #1098,
+  `09e35f3b4`.**
+  - macOS hosts the fallback preview inside the main window, as Linux did
+    (`previewDockedInsideMainWindow`). The helper-process and external
+    drivers keep their child window.
+  - A second bug: Electron 39's `before-mouse-event` drops the button-down
+    modifiers on forwarded moves, so a forwarded drag ended after its first
+    move. The forwarder tracks held buttons (`heldButtonsAfter`,
+    `withHeldButtons`). This fixes Linux too.
+  - Dev-only smoke commands `restore-native-preview-driver` and
+    `send-input-to-proof-surface`, and a new `probe:preview-window`
+    scenario.
+- **D (why this Mac had a silent camera and a fallback): MERGED #1097,
+  `5d1e6a511`.**
+  - A camera that says Live but sends no frames reports `noVideo`. Sources
+    says "<camera> isn't sending video", and Health's Camera check reads
+    "No video".
+  - `runtimeInfo.firstFrameDecisions` keeps the watchdog's last 20
+    decisions with the evidence it saw. A full log drops routine "met" or
+    "recovered" entries first, so the fallback survives.
+  - D1's questions are still for the streamer: their macOS version,
+    whether the MacBook camera works in Photo Booth with Videorc closed,
+    whether Continuity Camera or another app holds it, and a fresh bundle.
+- **Fixes that landed alongside:**
+  - #1099 (`ae1871b6d`) made `whole_on_canvas` Windows-only outside tests,
+    because plan 215 E had broken main's macOS and Linux clippy.
+  - #1103 (`82d7dc4cf`, owner-approved) raised the eager renderer gzip
+    budget to 475,000. A and plan 215 G together put main at 470,565, and B
+    measures 471,209.
+- **Owed:**
+  - B and C by eye in light and dark: a screen that isn't 16:9, Fit and
+    Fill, the preview docked and floating.
+  - C's real-mouse run: `pnpm probe:preview-window` from a terminal with
+    the Accessibility grant (a T3 session has none, so those cases
+    skipped), and a Linux run.
+  - A sized synthetic screen for the smokes, so B's picture rect is
+    exercised off 16:9.
+  - The pre-existing smoke reds: `smoke:freeform-editor` reuses a
+    single-use capability at its last step (since plan 215 D), and
+    `smoke:scene-item-drag` hits `screen-import-busy` at setup under load.
