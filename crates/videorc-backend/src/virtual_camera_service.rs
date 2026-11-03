@@ -324,6 +324,9 @@ fn camera_arm_params(state: &AppState, canvas: (u32, u32)) -> CompositorArmParam
         buddy_overlay_on_aux: overlays.buddy_on_aux,
         highlight_overlay_on_program: overlays.highlight_on_program,
         buddy_overlay_on_program: overlays.buddy_on_program,
+        chat_overlay_on_primary: overlays.chat_on_primary,
+        chat_overlay_on_aux: overlays.chat_on_aux,
+        chat_overlay_on_program: overlays.chat_on_program,
     }
 }
 

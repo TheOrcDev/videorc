@@ -4390,6 +4390,9 @@ pub async fn release_compositor_capture_lease(
                 buddy_overlay_on_aux: idle_overlays.buddy_on_aux,
                 highlight_overlay_on_program: idle_overlays.highlight_on_program,
                 buddy_overlay_on_program: idle_overlays.buddy_on_program,
+                chat_overlay_on_primary: idle_overlays.chat_on_primary,
+                chat_overlay_on_aux: idle_overlays.chat_on_aux,
+                chat_overlay_on_program: idle_overlays.chat_on_program,
             };
             let config_sent = compositor
                 .loop_config_tx
