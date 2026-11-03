@@ -70,6 +70,7 @@ mod buddy_pet_build;
 mod buddy_pet_create;
 mod h264_profile;
 mod host_pressure;
+mod incident_tone;
 mod kick;
 mod kick_chat;
 #[cfg(any(test, target_os = "linux"))]

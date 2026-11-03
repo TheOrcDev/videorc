@@ -387,9 +387,14 @@ runner-owned fixture flags. Its CoreAudio-prefixed synthetic device ID does not
 represent a physical CoreAudio device on Windows. The fixture keeps an anchored
 sample clock after delayed scheduling, catches up at most one second, and reports
 any skipped expired samples. `--audio ffmpeg-control` selects a separate debug and
-smoke gated lavfi 880 Hz source, requires no selected microphone, and bypasses the
-native PCM bus. Both modes keep the same strict artifact gates and retain separate
-reports; the FFmpeg control does not replace failed native PCM evidence.
+smoke gated 880 Hz source, requires no selected microphone, and bypasses the
+native PCM bus: its own writer feeds a session PCM FIFO from the video epoch at
+wall-clock pace, the input shape every real microphone has. It is no longer an
+FFmpeg lavfi source: FFmpeg generates that faster than real time, and `-shortest`
+then let 117-267 ms of tone outlast the video on every stream leg (#1008); pacing
+it inside FFmpeg instead raced into a 10 s startup freeze. Both modes keep the
+same strict artifact gates and retain separate reports; the FFmpeg control does
+not replace failed native PCM evidence.
 An absent microphone would
 produce intentional silence and is not used as tone evidence. A named case can be run:
 

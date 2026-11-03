@@ -2203,6 +2203,9 @@ pub struct ActiveRecording {
     native_audio_silent_drain: bool,
     capture_notice: Option<String>,
     pub native_audio: Option<NativeAudioCaptureSession>,
+    /// The debug FFmpeg-tone incident control's writer (#1008); always None
+    /// outside that opted-in smoke session.
+    _incident_tone: Option<crate::incident_tone::IncidentToneWriter>,
     /// Reduced evidence from this process's final arguments, never an argv or
     /// destination cache. Only the authenticated debug disconnect can read it.
     #[cfg(debug_assertions)]
@@ -2378,6 +2381,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         native_audio_silent_drain: false,
         capture_notice: None,
         native_audio: None,
+        _incident_tone: None,
         #[cfg(debug_assertions)]
         source_switch_output_audio_timing: None,
         system_audio: None,
@@ -4428,7 +4432,8 @@ async fn start_session_with_timeline(
         authorize_session_start_publication(&state, &session_id, &params, has_native_audio).await?;
     // Input topology is fixed for the lifetime of this output process. An empty
     // selection has a real paced zero-PCM producer. The separately opted-in
-    // debug control below deliberately bypasses that bus with FFmpeg tone.
+    // debug control below deliberately bypasses that bus: its own writer
+    // feeds an 880 Hz tone through the same paced PCM FIFO shape (#1008).
     let diagnostic_ffmpeg_tone = incident_ffmpeg_tone_allowed(
         cfg!(debug_assertions),
         std::env::var("VIDEORC_ENABLE_SMOKE_RPC").as_deref() == Ok("1"),
@@ -4436,16 +4441,25 @@ async fn start_session_with_timeline(
         params.sources.microphone_id.is_some(),
         capture.microphone.is_some(),
     );
-    if diagnostic_ffmpeg_tone {
+    let incident_tone_fifo = if diagnostic_ffmpeg_tone {
         emit_health_event(
             &state,
             Some(&session_id),
             HealthLevel::Info,
             "incident-ffmpeg-tone-enabled",
-            "Diagnostic control: FFmpeg lavfi 880 Hz tone; native PCM and physical microphone capture are not used.",
+            "Diagnostic control: 880 Hz tone on a paced PCM FIFO of its own; the native audio bus and physical microphone capture are not used.",
         )?;
-    }
-    let silent_audio_fifo = if capture.microphone.is_none() && !diagnostic_ffmpeg_tone {
+        let path = native_audio_fifo_path(&session_id);
+        create_native_audio_fifo(&path)?;
+        startup_resources.track_fifo(&path);
+        capture.microphone = Some(MicrophoneInput::SessionPcm {
+            fifo_path: path.clone(),
+        });
+        Some(path)
+    } else {
+        None
+    };
+    let silent_audio_fifo = if capture.microphone.is_none() {
         let path = native_audio_fifo_path(&session_id);
         create_native_audio_fifo(&path)?;
         startup_resources.track_fifo(&path);
@@ -6159,6 +6173,18 @@ async fn start_session_with_timeline(
                 )
             })
         });
+    // The debug tone attaches at the same point as the bus and waits on the
+    // same video epoch, so FFmpeg's audio input starts exactly as it does
+    // for a microphone.
+    let incident_tone = incident_tone_fifo
+        .map(|path| {
+            crate::incident_tone::IncidentToneWriter::spawn(
+                path,
+                use_encoder_bridge.then(|| video_epoch.clone()),
+            )
+        })
+        .transpose()
+        .context("Could not start the diagnostic tone writer")?;
     if let (Some(audio), Some(taps)) = (attached_native_audio.as_ref(), source_iso_taps.as_ref()) {
         audio.set_source_taps(taps.clone());
     }
@@ -6904,6 +6930,7 @@ async fn start_session_with_timeline(
             encoder_bridge.is_some(),
         ),
         native_audio: attached_native_audio,
+        _incident_tone: incident_tone,
         #[cfg(debug_assertions)]
         source_switch_output_audio_timing,
         system_audio: session_system_audio,
@@ -32593,6 +32620,7 @@ mod tests {
             native_audio_silent_drain: false,
             capture_notice: None,
             native_audio: None,
+            _incident_tone: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
             system_audio: None,
@@ -41634,6 +41662,7 @@ mod tests {
             native_audio_silent_drain: false,
             capture_notice: None,
             native_audio: None,
+            _incident_tone: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
             system_audio: None,
