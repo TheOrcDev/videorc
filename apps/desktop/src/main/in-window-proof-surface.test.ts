@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import {
   InWindowProofSurface,
   forwardedMouseEvent,
+  proofSurfaceHostNote,
   viewRectInParent,
   type ObservedInputEvent
 } from './in-window-proof-surface'
@@ -324,5 +325,68 @@ describe('InWindowProofSurface', () => {
     expect(surface.isDestroyed()).toBe(true)
     expect(main.children).toEqual([])
     expect(closed).toEqual(['closed'])
+  })
+})
+
+describe('InWindowProofSurface on a macOS host (plan 216 C)', () => {
+  // AppKit reports real screen frames: the main window sits at (120, 160)
+  // with its content below a 28px title strip. The docked slot rect arrives
+  // in screen coordinates, as the placement pipeline computes it.
+  function macHarness(): {
+    surface: InWindowProofSurface
+    view: FakeView
+    main: FakeWindow
+    emitMouse: (input: ObservedInputEvent) => void
+  } {
+    const view = new FakeView()
+    const main = new FakeWindow({ x: 120, y: 188, width: 1180, height: 752 })
+    const surface = new InWindowProofSurface({
+      createView: () => view as unknown as WebContentsView,
+      resolveParent: () => main as unknown as BrowserWindow,
+      cornerRadius: () => 12
+    })
+    const emitMouse = (input: ObservedInputEvent): void => {
+      view.webContents.emit('before-mouse-event', { preventDefault: () => {} }, input)
+    }
+    return { surface, view, main, emitMouse }
+  }
+
+  it('is a view in the main window at the canvas rect, with the panel radius', () => {
+    const { surface, view, main } = macHarness()
+    surface.setBounds({ x: 420, y: 300, width: 640, height: 360 })
+    surface.showInactive()
+
+    expect(surface.hostWindow()).toBe(main)
+    expect(main.children).toEqual([view])
+    expect(view.bounds).toEqual({ x: 300, y: 112, width: 640, height: 360 })
+    expect(view.radius).toBe(12)
+    expect(surface.isVisible()).toBe(true)
+  })
+
+  it('replays a press, a drag with the button held, and the release on the host', () => {
+    // The streamer's drag: the press lands on the view, AppKit keeps sending
+    // the dragged events to it, and every one reaches the host window's Scene
+    // canvas at the same screen point, button state included.
+    const { surface, main, emitMouse } = macHarness()
+    surface.setBounds({ x: 420, y: 300, width: 640, height: 360 })
+    surface.showInactive()
+
+    emitMouse({ type: 'mouseDown', x: 100, y: 80, button: 'left', clickCount: 1 })
+    emitMouse({ type: 'mouseMove', x: 116, y: 89, modifiers: ['leftbuttondown'] })
+    emitMouse({ type: 'mouseMove', x: 164, y: 116, modifiers: ['leftbuttondown'] })
+    emitMouse({ type: 'mouseUp', x: 164, y: 116, button: 'left', clickCount: 1 })
+
+    expect(main.webContents.sent).toEqual([
+      { type: 'mouseDown', x: 400, y: 192, button: 'left', clickCount: 1, modifiers: [] },
+      { type: 'mouseMove', x: 416, y: 201, modifiers: ['leftbuttondown'] },
+      { type: 'mouseMove', x: 464, y: 228, modifiers: ['leftbuttondown'] },
+      { type: 'mouseUp', x: 464, y: 228, button: 'left', clickCount: 1, modifiers: [] }
+    ])
+  })
+
+  it('names the host in the surface message on macOS and Linux, never on Windows', () => {
+    expect(proofSurfaceHostNote('darwin')).toContain('Hosted inside the app window')
+    expect(proofSurfaceHostNote('linux')).toContain('Hosted inside the app window')
+    expect(proofSurfaceHostNote('win32')).toBe('')
   })
 })

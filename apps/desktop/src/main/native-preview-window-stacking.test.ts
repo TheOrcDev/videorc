@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { PreviewSurfaceBounds } from '../shared/backend'
 import {
+  previewDockedInsideMainWindow,
+  proofSurfaceHostedInWindowOn,
   proofSurfaceParentWindow,
   withTrustedPreviewWindowStacking
 } from './native-preview-window-stacking'
@@ -195,5 +197,62 @@ describe('proof surface parent window', () => {
         previewWindow: live('preview')
       })
     ).toBeNull()
+  })
+})
+
+describe('docked preview host (plan 216 C)', () => {
+  const live = (name: string) => ({ name, isDestroyed: () => false })
+  const docked = (
+    platform: NodeJS.Platform,
+    driverKind: Parameters<typeof previewDockedInsideMainWindow>[0]['driverKind']
+  ) => previewDockedInsideMainWindow({ mode: 'docked', platform, driverKind })
+
+  it('draws the macOS in-process layer inside the main window', () => {
+    expect(docked('darwin', 'in-process')).toBe(true)
+  })
+
+  it('keeps the proof fallback inside the main window after a driver reset', () => {
+    // The watchdog's reset-native-path leaves no driver; the Electron proof
+    // surface takes the dock, and its host must stay the main window, not a
+    // second window the mouse has to cross.
+    expect(docked('darwin', null)).toBe(true)
+    expect(
+      proofSurfaceParentWindow({
+        dockedInMainWindow: docked('darwin', null),
+        mainWindow: live('main'),
+        previewWindow: live('preview')
+      })?.name
+    ).toBe('main')
+  })
+
+  it('keeps the child window for the macOS helper-process and external drivers', () => {
+    expect(docked('darwin', 'helper-process')).toBe(false)
+    expect(docked('darwin', 'external-module')).toBe(false)
+    expect(
+      proofSurfaceParentWindow({
+        dockedInMainWindow: docked('darwin', 'helper-process'),
+        mainWindow: live('main'),
+        previewWindow: live('preview')
+      })?.name
+    ).toBe('preview')
+  })
+
+  it('leaves Linux in the window and Windows in its own, whatever the driver', () => {
+    expect(docked('linux', null)).toBe(true)
+    expect(docked('linux', 'external-module')).toBe(true)
+    expect(docked('win32', null)).toBe(false)
+    expect(docked('win32', 'in-process')).toBe(false)
+    expect(proofSurfaceHostedInWindowOn('darwin')).toBe(true)
+    expect(proofSurfaceHostedInWindowOn('linux')).toBe(true)
+    expect(proofSurfaceHostedInWindowOn('win32')).toBe(false)
+  })
+
+  it('never applies to a floating Preview, which keeps its own window', () => {
+    expect(
+      previewDockedInsideMainWindow({ mode: 'floating', platform: 'darwin', driverKind: null })
+    ).toBe(false)
+    expect(
+      previewDockedInsideMainWindow({ mode: 'floating', platform: 'linux', driverKind: null })
+    ).toBe(false)
   })
 })
