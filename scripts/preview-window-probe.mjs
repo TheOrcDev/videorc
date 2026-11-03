@@ -49,6 +49,19 @@ const expectWindowsD3d11 = process.env.VIDEORC_EXPECT_WINDOWS_D3D11 === '1'
 if (expectWindowsD3d11 && process.platform !== 'win32') {
   throw new Error('VIDEORC_EXPECT_WINDOWS_D3D11=1 requires a physical Windows host.')
 }
+// The placement oracles here are macOS (CGWindowList through `swift`, the
+// native CAMetalLayer host) and the Windows D3D11 surface. Linux has neither:
+// its docked Preview is the Electron proof surface drawn inside the main
+// window (docs/linux-dev-loop.md), gated by `pnpm probe:preview-lifecycle:linux`.
+// Say so instead of failing on a CoreGraphics import halfway through.
+if (process.platform === 'linux') {
+  console.log(
+    'SKIP probe:preview-window: its placement oracles are macOS CGWindowList and the native ' +
+      'CAMetalLayer host (or Windows D3D11); the Linux docked Preview is the in-window Electron ' +
+      'proof surface, gated by pnpm probe:preview-lifecycle:linux.'
+  )
+  process.exit(0)
+}
 const expectInProcessNative =
   process.platform === 'darwin' && process.env.VIDEORC_NATIVE_PREVIEW_HELPER_FALLBACK !== '1'
 const outputDirectory = join(tmpdir(), `videorc-preview-window-probe-${Date.now()}`)
