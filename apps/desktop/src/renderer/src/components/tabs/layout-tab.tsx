@@ -9,7 +9,15 @@ import {
   LayoutIcon,
   MobileIcon
 } from '@/components/icons'
-import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState
+} from 'react'
 import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { LockAlert } from '@/components/lock-alert'
@@ -81,6 +89,7 @@ import { BANNER_SHOWN_LIMIT_REASON, bannerOrderAfterMove } from '@/lib/banners'
 import { bannerSizeAdvice } from '@/lib/banner-size'
 import { rememberFocus } from '@/lib/focus-retention'
 import { freeformEntryPatch, peekLayoutUndo, sourceCroppable } from '@/lib/freeform-memory'
+import { scenePictureSizes } from '@/lib/scene-source-sizes'
 import {
   SCENE_VISIBILITY_LOCK_REASON,
   cameraShapePatch,
@@ -305,6 +314,7 @@ export function LayoutTab(): ReactElement {
     nativePreviewSurfaceEnabled,
     runtimeInfo,
     scene,
+    sourcePictureSizes,
     sceneEditMode,
     setSceneGesturePending,
     selectedSceneSourceId,
@@ -416,6 +426,13 @@ export function LayoutTab(): ReactElement {
       setSceneGesturePending(phase !== 'idle')
     },
     [setSceneGesturePending]
+  )
+  // Plan 216 B3: each source's picture size, so the stage draws its box on
+  // the picture the compositor fits, not on its frame.
+  const sceneSources = scene?.sources
+  const sourceSizes = useMemo(
+    () => scenePictureSizes(sceneSources ?? [], sourcePictureSizes),
+    [sceneSources, sourcePictureSizes]
   )
   const sceneSwitchPending = layoutSwitchPending !== null || savedScenePendingId !== null
   const [preciseEditPending, setPreciseEditPending] = useState(false)
@@ -921,6 +938,9 @@ export function LayoutTab(): ReactElement {
                 liveCanvasSupported && !isSessionActive ? clearSceneEditorDraft : undefined
               }
               outputWidth={captureConfig.video.width}
+              outputHeight={captureConfig.video.height}
+              layout={layout}
+              sourceSizes={sourceSizes}
               onCommitTransform={setSceneSourceTransform}
               // Arrows on the focused canvas (C-31) ride the same one-at-a-time
               // precise edit as the inspector's d-pad.
