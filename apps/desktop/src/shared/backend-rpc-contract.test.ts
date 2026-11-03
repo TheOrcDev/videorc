@@ -3705,10 +3705,10 @@ it('accepts the support bundle account section and refuses a token in it', () =>
     storeError: 'secrets store: permission denied'
   }
   expect(supportBundleAccountSchema.parse(unreadable)).toEqual(unreadable)
-  expect(() =>
-    supportBundleAccountSchema.parse({ ...shownButNoToken, token: 'never' })
-  ).toThrow('token must be a known field')
-  expect(() =>
-    supportBundleAccountSchema.parse({ signedIn: true, tokenPresent: false })
-  ).toThrow('storeReadable')
+  expect(() => supportBundleAccountSchema.parse({ ...shownButNoToken, token: 'never' })).toThrow(
+    'token must be a known field'
+  )
+  expect(() => supportBundleAccountSchema.parse({ signedIn: true, tokenPresent: false })).toThrow(
+    'storeReadable'
+  )
 })
