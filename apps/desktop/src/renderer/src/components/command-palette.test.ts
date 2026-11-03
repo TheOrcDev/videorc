@@ -33,7 +33,8 @@ const mocked = vi.hoisted(() => ({
   agentsActions: {
     stop: vi.fn(async () => undefined),
     openConnect: vi.fn()
-  }
+  },
+  camera: {} as Record<string, unknown>
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
@@ -42,6 +43,7 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioReplay: () => mocked.replay
 }))
 vi.mock('@/hooks/use-soundboard', () => ({ useSoundboard: () => mocked.soundboard }))
+vi.mock('@/hooks/use-virtual-camera', () => ({ useVirtualCamera: () => mocked.camera }))
 vi.mock('@/hooks/use-agents', () => ({
   useAgents: () => mocked.agents,
   useAgentsActions: () => mocked.agentsActions
@@ -108,6 +110,14 @@ beforeEach(() => {
   }
   for (const fn of Object.values(nav)) fn.mockClear()
   mocked.agents = { status: null }
+  // Videorc Camera unknown (no status yet): the palette leaves it out.
+  mocked.camera = {
+    status: null,
+    connected: true,
+    platform: 'darwin',
+    osRelease: '25.5.0',
+    setOn: vi.fn(async () => ({ ok: true }))
+  }
   mocked.agentsActions.stop.mockClear()
   mocked.agentsActions.openConnect.mockClear()
 })
@@ -388,16 +398,58 @@ describe('CommandPalette windows (plan 174 S2.3a, A-11)', () => {
     }
     mocked.core.captionsWindow = { open: false, enabled: true }
     mocked.core.notesWindow = { open: true }
+    mocked.core.commentsWindow = {
+      open: false,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'capture-filter'
+    }
     await render()
     expect(groupValues('Windows')).toEqual([
       'Open Preview',
       'Close Notes',
       'Open Stream Manager',
+      'Hide Stream Manager from stream',
       'Open Captions reader'
     ])
     await act(async () => item('Close Notes').click())
     expect(mocked.core.closeNotesWindow).toHaveBeenCalledOnce()
     expect(mocked.core.openNotesWindow).not.toHaveBeenCalled()
+  })
+
+  // Plan 215 D6: Hide from stream, reachable with the window closed; on a
+  // platform that cannot hide a window the row stays, disabled, with the
+  // reason.
+  it('flips Hide from stream for the Stream Manager, and says why Linux cannot', async () => {
+    mocked.core.runtimeInfo = { platform: 'darwin', commentsWindowEnabled: true }
+    mocked.core.setCommentsWindowHiddenFromStream = vi.fn(async () => undefined)
+    mocked.core.commentsWindow = {
+      open: false,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'capture-filter'
+    }
+    await render()
+    await act(async () => item('Hide Stream Manager from stream').click())
+    expect(mocked.core.setCommentsWindowHiddenFromStream).toHaveBeenCalledWith(true)
+
+    mocked.core.commentsWindow = {
+      open: true,
+      hiddenFromStream: true,
+      hideFromStreamMethod: 'content-protection'
+    }
+    await render()
+    await act(async () => item('Show Stream Manager on stream').click())
+    expect(mocked.core.setCommentsWindowHiddenFromStream).toHaveBeenLastCalledWith(false)
+
+    mocked.core.runtimeInfo = { platform: 'linux', commentsWindowEnabled: true }
+    mocked.core.commentsWindow = {
+      open: true,
+      hiddenFromStream: false,
+      hideFromStreamMethod: 'unsupported'
+    }
+    await render()
+    const row = item('Hide Stream Manager from stream')
+    expect(row.getAttribute('aria-disabled')).toBe('true')
+    expect(row.textContent).toContain('This system cannot hide a window from screen capture.')
   })
 })
 
@@ -543,6 +595,61 @@ describe('CommandPalette agents (plan 209 S7, D12)', () => {
     await render()
     await search('claude')
     expect(values()).toEqual(expect.arrayContaining(['Stop agents', 'Connect an agent…']))
+  })
+})
+
+describe('CommandPalette Videorc Camera (plan 214 E2)', () => {
+  it('turns Videorc Camera on and off from Session, a mirror of Output', async () => {
+    mocked.camera.status = { on: false, available: true, state: 'off' }
+    await render()
+    expect(groupValues('Session')).toContain('Turn Videorc Camera on')
+    expect(item('Turn Videorc Camera on').textContent).toContain('Output')
+    await act(async () => item('Turn Videorc Camera on').click())
+    expect(mocked.camera.setOn).toHaveBeenCalledExactlyOnceWith(true, { toastFailure: true })
+
+    mocked.camera.status = { on: true, available: true, state: 'streaming', viewers: 1 }
+    await render()
+    expect(values()).not.toContain('Turn Videorc Camera on')
+    await act(async () => item('Turn Videorc Camera off').click())
+    expect(mocked.camera.setOn).toHaveBeenLastCalledWith(false, { toastFailure: true })
+  })
+
+  it("stays listed but off while the camera can't run, or Videorc reconnects", async () => {
+    mocked.camera.status = { on: false, available: false, state: 'unavailable' }
+    await render()
+    expect(item('Turn Videorc Camera on').getAttribute('aria-disabled')).toBe('true')
+    mocked.camera.status = { on: false, available: true, state: 'off' }
+    mocked.camera.connected = false
+    await render()
+    expect(item('Turn Videorc Camera on').getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('leaves it out where the camera is hidden, and before its status arrives', async () => {
+    await render()
+    expect(values().some((value) => value.includes('Videorc Camera'))).toBe(false)
+    for (const platform of ['win32', 'linux']) {
+      mocked.camera.platform = platform
+      mocked.camera.status = {
+        on: false,
+        available: false,
+        state: 'unavailable',
+        platformStep: 'unsupported'
+      }
+      await render()
+      expect(
+        values().some((value) => value.includes('Videorc Camera')),
+        platform
+      ).toBe(false)
+    }
+  })
+
+  it('finds it by what people call a camera for meetings', async () => {
+    mocked.camera.status = { on: false, available: true, state: 'off' }
+    for (const word of ['zoom', 'meet', 'webcam']) {
+      await render()
+      await search(word)
+      expect(values(), word).toContain('Turn Videorc Camera on')
+    }
   })
 })
 

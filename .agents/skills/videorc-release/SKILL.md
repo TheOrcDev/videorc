@@ -185,6 +185,9 @@ sync even when the primary is live. Use "complete" only under the contract below
   unless the runbook explicitly restores that requirement.
 - Verify the Developer ID identity `Uros Miric (C2PA37RB58)` is available in the
   keychain, or provide the documented `CSC_LINK` alternative.
+- Load `VIDEORC_MACOS_PROFILE_APP` from `~/.videorc-release.env` (plan 214,
+  Videorc Camera, the one profile; see the section below). If the file still
+  has `VIDEORC_MACOS_PROFILE_CAMERA`, remove that line: the preflight fails on it.
 - Load `VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*`
   and `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` from `~/.videorc-release.env`
   (whichever origins are still configured). The upload publishes to **every
@@ -448,6 +451,40 @@ announcement (see section 6). Hold that post until then. Never print
   Alpha entry names both Windows and Linux, send that post only when every
   named platform is publicly live. Never print
   `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
+
+## Videorc Camera (plan 214)
+
+- **Secret:** `VIDEORC_MACOS_PROFILE_APP`, the one Developer ID provisioning
+  profile, for the app (base64 in GitHub, base64 or a path in
+  `~/.videorc-release.env`; the owner's copy is
+  `~/.videorc-signing/videorc-app.provisionprofile`). The extension embeds no
+  profile (spike P0a). `release:preflight:macos` fails without it, and fails
+  on the retired `VIDEORC_MACOS_PROFILE_CAMERA` when it is still set.
+- **Renewal:** the profile embeds the Developer ID Application certificate,
+  which expires 2027-02-01; renewing the certificate (`CSC_LINK`, the keychain
+  identity) means regenerating the profile too, or the packaging hook stops
+  with "does not embed the Developer ID Application certificate signing this
+  build". The recipe (a development-signed `xcodebuild archive` with
+  `-allowProvisioningUpdates -allowProvisioningDeviceRegistration`, then
+  `xcodebuild -exportArchive` with method `developer-id`, which creates the
+  profile) is in `docs/releases/macos-signing.md`, "Renewal". The hook also
+  warns 30 days before the profile's own date and refuses an expired one.
+- **Approval:** the user approves the extension in System Settings → General
+  → Login Items & Extensions → Camera Extensions (macOS 15 to 26); an update
+  replaces it without re-approval or a reboot.
+- **The validator's lines:** `release:validate:macos` adds the
+  `Videorc Camera extension ...` checks (bundle identifier, package type SYSX,
+  mach service, usage description, signature, exactly sandbox + app group,
+  embeds no profile), `app embedded profile (Videorc Camera)`,
+  `one embedded profile, in the app only`,
+  `system extension entitlements (app)`, and one
+  `inherit entitlements only (...)` line per other executable (bare tools,
+  helpers, crashpad, ShipIt). A build log that says `Videorc Camera skipped`
+  is not a release.
+- **Rollback:** a build without the profile never passes validation. Never
+  unset the secret to ship without the camera; that is a reviewed PR that
+  removes the hook, the entitlements split and the validator checks together.
+  A shipped camera problem rolls forward with a higher version.
 
 ## Hard-won rules
 

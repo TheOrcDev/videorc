@@ -1005,6 +1005,9 @@ pub struct AppState {
     /// Hide screen (plan 210 S7): the gate every screen capture publishes
     /// through. In memory only; a launch starts visible.
     pub screen_privacy: Arc<crate::screen_privacy::ScreenPrivacyGate>,
+    /// Videorc Camera (plan 214): the saved switch, the output and the weak
+    /// lease over the preview run.
+    pub virtual_camera: Arc<crate::virtual_camera_service::VirtualCameraService>,
     pub preview_surface: PreviewSurfaceSlot,
     /// Serializes preview-surface create/update/destroy transactions. The
     /// compositor lifecycle lock only protects worker ownership; it does not
@@ -1357,6 +1360,9 @@ impl AppState {
             preview_camera: Arc::new(tokio::sync::Mutex::new(initial_preview_camera_state())),
             preview_screen: Arc::new(tokio::sync::Mutex::new(initial_preview_screen_state())),
             screen_privacy: Arc::new(crate::screen_privacy::ScreenPrivacyGate::default()),
+            virtual_camera: Arc::new(
+                crate::virtual_camera_service::VirtualCameraService::default(),
+            ),
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
             preview_surface_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             windows_d3d11_media: Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new())),

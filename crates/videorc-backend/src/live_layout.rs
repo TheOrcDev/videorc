@@ -2663,6 +2663,87 @@ mod tests {
             && health.health == crate::live_source_switch::SourceHealth::Unavailable));
     }
 
+    /// Plan 215 D1: a source moved while a session runs lands "hot" through
+    /// the same commit a live preset swap rides. The compositor's installed
+    /// scene carries the new box, and the session is untouched: the same
+    /// session id, no stop, and the same compositor run (no restart).
+    #[tokio::test]
+    async fn transform_commit_mid_session_lands_hot_without_touching_the_session() {
+        let state = test_state();
+        let params = config(LayoutPreset::ScreenCamera, true, true);
+        let scene = scene_from_capture_config(params.clone());
+        commit_scene_with_layout(&state, &scene, params.layout, None)
+            .await
+            .unwrap();
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("live-move"));
+        let (revision_before, run_before) = {
+            let compositor = state.compositor.lock().await;
+            (
+                compositor.status.scene_revision,
+                compositor.status.run_id.clone(),
+            )
+        };
+
+        let moved = {
+            let mut guard = state.scene.lock().await;
+            crate::scene::update_source_transform(
+                &mut guard,
+                crate::protocol::SceneTransformUpdateParams {
+                    source_id: "source:camera".to_string(),
+                    transform: crate::protocol::SceneTransformPatch {
+                        x: Some(0.1),
+                        y: Some(0.2),
+                        width: Some(0.3),
+                        height: Some(0.3),
+                        crop_left: None,
+                        crop_top: None,
+                        crop_right: None,
+                        crop_bottom: None,
+                    },
+                    snap: crate::protocol::SceneTransformSnap::None,
+                },
+            )
+            .unwrap()
+        };
+        let status = commit_scene_with_current_layout(&state, &moved)
+            .await
+            .expect("a move commits while the session runs");
+        assert!(status.applied);
+        assert_eq!(status.mode, "hot");
+        assert!(status.scene_revision > revision_before.unwrap_or(0));
+
+        let camera = status
+            .compositor_status
+            .scene_sources
+            .iter()
+            .find(|source| source.id == "source:camera")
+            .expect("the camera is installed");
+        for (actual, expected) in [
+            (camera.transform.x, 0.1),
+            (camera.transform.y, 0.2),
+            (camera.transform.width, 0.3),
+            (camera.transform.height, 0.3),
+        ] {
+            assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+        }
+        {
+            let compositor = state.compositor.lock().await;
+            assert_eq!(
+                compositor.status.scene_revision,
+                Some(status.scene_revision)
+            );
+            assert_eq!(
+                compositor.status.run_id, run_before,
+                "no compositor restart"
+            );
+        }
+        let recording = state.recording.lock().await;
+        let active = recording.as_ref().expect("the session is still running");
+        assert_eq!(active.session_id, "live-move");
+        assert!(!active.stop_requested);
+    }
+
     #[tokio::test]
     async fn primary_selected_intent_is_latest_owned_and_atomic_with_the_scene_commit() {
         use std::future::Future;

@@ -4181,6 +4181,7 @@ mod tests {
             CompositorArmParams {
                 benchmark: false,
                 target_fps: 30,
+                lease: crate::compositor::CompositorLeaseKind::Capture,
                 width: 640,
                 height: 360,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
@@ -4355,6 +4356,7 @@ mod tests {
             CompositorArmParams {
                 benchmark: false,
                 target_fps: 30,
+                lease: crate::compositor::CompositorLeaseKind::Capture,
                 width: 640,
                 height: 360,
                 frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,

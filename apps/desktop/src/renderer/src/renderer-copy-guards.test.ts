@@ -253,7 +253,9 @@ const CAPITALIZED_NAMES = new Set([
   'OBS',
   'Finder',
   'macOS',
-  'Windows'
+  'Windows',
+  // Plan 214 D2: "Videorc Camera", the camera other apps see, is a name.
+  'Camera'
 ])
 
 /**

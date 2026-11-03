@@ -56,6 +56,9 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-set-theme',
   'comments-window-set-highlight-anchor',
   'comments-window-set-auto-show-activity',
+  // Hide from stream and the marker of the invisibility smoke (plan 215 C5).
+  'comments-window-set-hidden-from-stream',
+  'comments-window-set-smoke-marker',
   'comments-window-set-view-mode',
   'comments-window-state',
   'comments-window-submit-message',
@@ -283,6 +286,10 @@ export const PACKAGED_SMOKE_COMMAND_NAMES = new Set([
   'captions-window-set-bounds',
   'comments-window-open',
   'comments-window-set-bounds',
+  // Hide from stream for the Windows stream smoke, and the marker of the
+  // packaged invisibility smoke (plan 215 C3, C5).
+  'comments-window-set-hidden-from-stream',
+  'comments-window-set-smoke-marker',
   'destroy-native-preview-surface',
   'drain-native-preview-host-commands',
   'exercise-main-present-pump-reconnect',

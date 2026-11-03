@@ -4345,6 +4345,25 @@ fn selected_camera_source(camera_id: &str) -> Option<SelectedCameraSource> {
             crate::linux_v4l2_camera::parse_linux_v4l2_camera_id(camera_id)
                 .map(|device_path| SelectedCameraSource::LinuxV4l2 { device_path })
         })
+        // Plan 214 A5: a saved id naming Videorc Camera resolves to nothing
+        // (no silent substitute, plan 213 E): the camera never captures itself.
+        .filter(|source| !source.is_videorc_camera())
+}
+
+impl SelectedCameraSource {
+    fn is_videorc_camera(&self) -> bool {
+        match self {
+            Self::MacAvFoundation { unique_id } => {
+                crate::virtual_camera::is_videorc_camera_macos(unique_id, "")
+            }
+            Self::WindowsDshow { device_name } => {
+                crate::virtual_camera::is_videorc_camera_windows(None, device_name)
+            }
+            Self::LinuxV4l2 { device_path } => {
+                crate::virtual_camera::is_videorc_camera_linux_path(device_path)
+            }
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -9946,6 +9965,25 @@ Error opening input file video=HP HD Camera."#;
     fn rejects_unsupported_camera_source_ids() {
         assert!(selected_camera_source("camera:avfoundation:0").is_none());
         assert!(selected_camera_source("camera:windows-dshow:not-hex").is_none());
+        // Plan 214 A5: a saved id naming Videorc Camera resolves to nothing.
+        assert!(
+            selected_camera_source(&crate::camera_capture::native_camera_device_id(
+                crate::virtual_camera::VIRTUAL_CAMERA_MACOS_DEVICE_UUID
+            ))
+            .is_none()
+        );
+        assert!(
+            selected_camera_source(&crate::camera_capture::windows_dshow_camera_device_id(
+                "Videorc Camera Windows Virtual Camera"
+            ))
+            .is_none()
+        );
+        assert!(
+            selected_camera_source(&crate::linux_v4l2_camera::linux_v4l2_camera_id(
+                "/dev/video42"
+            ))
+            .is_none()
+        );
     }
 
     #[cfg(target_os = "macos")]

@@ -25,7 +25,9 @@ import type {
   AudienceSnapshot,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
-  StreamTargetsSnapshot
+  StreamTargetsSnapshot,
+  VirtualCameraPlatformStep,
+  VirtualCameraStatus
 } from './backend'
 import {
   parseBackendWireMessage,
@@ -3664,4 +3666,112 @@ it('accepts disconnected camera status and the support camera story', () => {
   }
   expect(cameraConnectionHistoryEntrySchema.parse(edge)).toEqual(edge)
   expect(() => cameraConnectionHistoryEntrySchema.parse({ ...edge, timestamp: null })).toThrow()
+})
+
+describe('Videorc Camera wire contract (plan 214 A4)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/virtual-camera.json', import.meta.url),
+      'utf8'
+    )
+  ) as {
+    off: unknown
+    unavailableNoSink: unknown
+    unavailableHidden: unknown
+    needsApproval: unknown
+    needsSetup: unknown
+    ready: unknown
+    streaming: unknown
+    streamingUnknownViewers: unknown
+    setParams: unknown
+    platformReportParams: unknown
+    platformReportParamsBare: unknown
+    rejected: unknown[]
+  }
+
+  it('accepts every fixture state on the RPC results and the event, field for field', () => {
+    for (const state of [
+      fixture.off,
+      fixture.unavailableNoSink,
+      fixture.unavailableHidden,
+      fixture.needsApproval,
+      fixture.needsSetup,
+      fixture.ready,
+      fixture.streaming,
+      fixture.streamingUnknownViewers
+    ]) {
+      expect(validateBackendRpcResult('virtualCamera.status', state)).toEqual(state)
+      expect(validateBackendRpcResult('virtualCamera.set', state)).toEqual(state)
+      expect(validateBackendRpcResult('virtualCamera.platform.report', state)).toEqual(state)
+      expect(validateBackendEventPayload('virtualCamera.changed', state)).toEqual(state)
+    }
+    // Owner, 2026-11-03: a hidden platform is exactly `platformStep: unsupported`;
+    // the Output page shows no section on it.
+    expect(fixture.unavailableHidden).toMatchObject({
+      available: false,
+      state: 'unavailable',
+      platformStep: 'unsupported'
+    })
+    expect(validateBackendRpcParams('virtualCamera.set', fixture.setParams)).toEqual(
+      fixture.setParams
+    )
+    expect(validateBackendRpcParams('virtualCamera.set', { on: false })).toEqual({ on: false })
+    expect(
+      validateBackendRpcParams('virtualCamera.platform.report', fixture.platformReportParams)
+    ).toEqual(fixture.platformReportParams)
+    expect(
+      validateBackendRpcParams('virtualCamera.platform.report', fixture.platformReportParamsBare)
+    ).toEqual(fixture.platformReportParamsBare)
+  })
+
+  it('rejects a null field, an unknown state, a forged field and a missing flag', () => {
+    for (const bad of fixture.rejected) {
+      expect(() => validateBackendRpcResult('virtualCamera.status', bad)).toThrow()
+      expect(() => validateBackendEventPayload('virtualCamera.changed', bad)).toThrow()
+    }
+    expect(() =>
+      validateBackendRpcResult('virtualCamera.status', {
+        on: false,
+        available: true,
+        state: 'off',
+        extra: 1
+      })
+    ).toThrow()
+    for (const bad of [{}, { on: 'yes' }, { on: null }, { on: true, extra: true }]) {
+      expect(() => validateBackendRpcParams('virtualCamera.set', bad)).toThrow()
+    }
+    for (const bad of [{}, { platformStep: 'done' }, { platformStep: 'ready', message: null }]) {
+      expect(() => validateBackendRpcParams('virtualCamera.platform.report', bad)).toThrow()
+    }
+  })
+
+  it('keeps the camera counters inside the bounded framePipeline payload', () => {
+    const pinned = JSON.parse(
+      readFileSync(
+        new URL('../../../../protocol-fixtures/high-risk-contracts.json', import.meta.url),
+        'utf8'
+      )
+    ) as { compositorStatus: { stoppedWire: Record<string, unknown> } }
+    const stopped = pinned.compositorStatus.stoppedWire
+    const status = {
+      ...stopped,
+      framePipeline: {
+        ...(stopped.framePipeline as Record<string, unknown>),
+        virtualCameraPushed: 300,
+        virtualCameraRepeated: 12,
+        virtualCameraConvertMsMax: 2.5
+      }
+    }
+    expect(validateBackendEventPayload('compositor.status', status)).toEqual(status)
+  })
+
+  it('types the three methods and the event', () => {
+    expectTypeOf<BackendRpcParams<'virtualCamera.set'>>().toEqualTypeOf<{ on: boolean }>()
+    expectTypeOf<BackendRpcResult<'virtualCamera.status'>>().toEqualTypeOf<VirtualCameraStatus>()
+    expectTypeOf<BackendRpcParams<'virtualCamera.platform.report'>>().toEqualTypeOf<{
+      platformStep: VirtualCameraPlatformStep
+      message?: string
+    }>()
+    expectTypeOf<BackendEventMap['virtualCamera.changed']>().toEqualTypeOf<VirtualCameraStatus>()
+  })
 })

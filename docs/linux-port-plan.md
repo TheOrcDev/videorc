@@ -18,6 +18,7 @@ packaging, or release are supported yet.
 | Preview | CPU composition and JPEG transport | L5 |
 | H.264 encode | VAAPI hardware, OpenH264 software fallback | L1.5 implemented; hardware proof pending |
 | Packaging | AppImage | L6 |
+| Videorc Camera (plan 214 D) | v4l2loopback: the user installs the module, the app loads it with `pkexec modprobe … exclusive_caps=1 card_label="Videorc Camera" video_nr=42` and writes YUYV 1080p30 to the device found by name | Written and compiled by the Linux CI job; hidden (`PROVEN = false` in `virtual_camera_linux.rs`) until spike P0c passes on a named box |
 
 The Ubuntu 24.04 row is the packaging and support baseline that L6 must prove
 on. The encoder contract in L1.5 is distribution-independent and is accepted
@@ -151,6 +152,25 @@ pnpm smoke:linux-encoder-acceptance
 `--backend=openh264` or `--backend=vaapi` may be used to diagnose one path,
 but only the default two-backend run emits `complete: true` evidence and clears
 the L1.5 hardware gate. CI runners and virtual machines are not substitutes.
+
+### Videorc Camera (plan 214 D)
+
+The Linux camera is v4l2loopback (`docs/linux-dev-loop.md` has the tester
+steps). No Mac compiles its `cfg(target_os = "linux")` writer, so the Linux
+CI job is its compile gate and spike P0c on a named box is its behaviour
+gate: `ffmpeg -f v4l2 -i /dev/video42` reads 30 fps for 10 s and Chrome
+Meet lists the camera only while the switch is on. Until P0c passes,
+`virtual_camera_linux::PROVEN` is `false`, `platform_sink` answers
+`hidden_until_proven("Linux")`, the status reports `platformStep:
+unsupported` and the Output page shows no section; flipping that one
+constant turns it on. The pure half (module detection, the state table,
+the V4L2 ABI mirror) is tested on every platform. The `needs-setup`
+message is the distribution's install command alone (the page shows it as
+one copyable line; absent when the distribution is unknown); a load the
+kernel refuses under Secure Boot comes back as a `failed` step with the
+Machine Owner Key words. No kernel module is bundled, built or signed
+(D9). STOP (plan 214): if the baseline box cannot load the module under
+Secure Boot, Linux ships guidance only.
 
 ### Hardware stop before L2
 

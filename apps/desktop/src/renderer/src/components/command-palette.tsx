@@ -6,10 +6,12 @@ import {
   DarkModeIcon,
   DesktopIcon,
   EditIcon,
+  HiddenFromStreamIcon,
   ImageIcon,
   LightModeIcon,
   LivestreamIcon,
   BuddyIcon,
+  CameraIcon,
   NoteIcon,
   PreviewIcon,
   RecordIcon,
@@ -59,6 +61,8 @@ import {
 import { useAgents, useAgentsActions } from '@/hooks/use-agents'
 import { useEditScene } from '@/hooks/use-edit-scene'
 import { useSoundboard } from '@/hooks/use-soundboard'
+import { useVirtualCamera } from '@/hooks/use-virtual-camera'
+import { VIDEORC_CAMERA_COPY, virtualCameraView } from '@/lib/virtual-camera-view'
 import { CONNECT_AGENT_COMMAND, STOP_AGENTS_COMMAND } from '@/lib/agents-view'
 import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import {
@@ -67,6 +71,7 @@ import {
   useStudioRecordingState,
   useStudioReplay
 } from '@/hooks/use-studio'
+import { CAPTURE_PROTECTION_UNSUPPORTED_REASON } from '../../../shared/capture-protection'
 import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 
@@ -158,6 +163,7 @@ export function CommandPalette({
     closeNotesWindow,
     commentsWindow,
     toggleCommentsWindow,
+    setCommentsWindowHiddenFromStream,
     captionsWindow,
     toggleCaptionsWindow
   } = useStudioCore()
@@ -165,6 +171,9 @@ export function CommandPalette({
   const replayBuffer = useStudioReplay()
   const { banners, showBanner, hideBanner } = useStudioBanners()
   const soundboard = useSoundboard()
+  const camera = useVirtualCamera()
+  const cameraView = virtualCameraView(camera)
+  const cameraLabel = cameraView.checked ? VIDEORC_CAMERA_COPY.turnOff : VIDEORC_CAMERA_COPY.turnOn
   const agents = useAgents()
   const agentsActions = useAgentsActions()
   const platform = runtimeInfo?.platform
@@ -263,6 +272,32 @@ export function CommandPalette({
             {screenPrivacy.hidden ? 'Show screen' : 'Hide screen'}
             {shortcut(settings.globalShortcuts?.screenHideToggle ?? DEFAULT_SCREEN_HIDE_SHORTCUT)}
           </CommandItem>
+          {/* Plan 214 E2: a mirror of Output → Videorc Camera, never where the
+              camera is hidden (the hide rule), off while it can't run. */}
+          {cameraView.hidden ? null : (
+            <CommandItem
+              value={cameraLabel}
+              keywords={[
+                'camera',
+                'virtual camera',
+                'webcam',
+                'meet',
+                'zoom',
+                'teams',
+                'discord',
+                'facetime',
+                'other apps'
+              ]}
+              disabled={cameraView.disabled}
+              onSelect={() =>
+                run(() => void camera.setOn(!cameraView.checked, { toastFailure: true }))
+              }
+            >
+              <CameraIcon className="size-4" />
+              {cameraLabel}
+              <Context>Output</Context>
+            </CommandItem>
+          )}
           <CommandItem
             value={muteLabel}
             keywords={['mic', 'microphone', 'audio', 'mute', 'silence']}
@@ -414,6 +449,32 @@ export function CommandPalette({
                 ? `Close ${WINDOW_NAMES.streamManager}`
                 : `Open ${WINDOW_NAMES.streamManager}`}
               {shortcut(shortcutAccelerator('comments-window'))}
+            </CommandItem>
+          ) : null}
+          {/* Hide from stream (plan 215 D6): the Stream Manager's switch,
+              reachable with the window closed too (main remembers it). A
+              platform that can't hide a window keeps the row, disabled, with
+              the reason as its context. */}
+          {runtimeInfo?.commentsWindowEnabled ? (
+            <CommandItem
+              value={
+                commentsWindow.hiddenFromStream
+                  ? `Show ${WINDOW_NAMES.streamManager} on stream`
+                  : `Hide ${WINDOW_NAMES.streamManager} from stream`
+              }
+              keywords={['chat', 'window', 'capture', 'hidden', 'private', 'pin']}
+              disabled={commentsWindow.hideFromStreamMethod === 'unsupported'}
+              onSelect={() =>
+                run(() => void setCommentsWindowHiddenFromStream(!commentsWindow.hiddenFromStream))
+              }
+            >
+              <HiddenFromStreamIcon className="size-4" />
+              {commentsWindow.hiddenFromStream
+                ? `Show ${WINDOW_NAMES.streamManager} on stream`
+                : `Hide ${WINDOW_NAMES.streamManager} from stream`}
+              {commentsWindow.hideFromStreamMethod === 'unsupported' ? (
+                <Context>{CAPTURE_PROTECTION_UNSUPPORTED_REASON}</Context>
+              ) : null}
             </CommandItem>
           ) : null}
           {captionsWindow.enabled || captionsWindow.open ? (

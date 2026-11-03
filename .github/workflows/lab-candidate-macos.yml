@@ -104,6 +104,9 @@ jobs:
           pnpm ffmpeg:build:macos
           pnpm package:preflight:macos
         env:
+          # Plan 214 B2: the preflight requires the built extension only when
+          # the app profile is configured; the build step below embeds it.
+          VIDEORC_MACOS_PROFILE_APP: ${{ secrets.VIDEORC_MACOS_PROFILE_APP }}
           VIDEORC_BUNDLED_TWITCH_CLIENT_ID: ${{ secrets.VIDEORC_BUNDLED_TWITCH_CLIENT_ID }}
           VIDEORC_BUNDLED_KICK_CLIENT_ID: ${{ secrets.VIDEORC_BUNDLED_KICK_CLIENT_ID }}
           VIDEORC_BUNDLED_KICK_CLIENT_SECRET: ${{ secrets.VIDEORC_BUNDLED_KICK_CLIENT_SECRET }}
@@ -124,6 +127,10 @@ jobs:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           CSC_IDENTITY_AUTO_DISCOVERY: 'true'
+          # Plan 214 B2: a lab candidate with the app profile carries the Videorc
+          # Camera extension, so the lab Mac can run F2; without it, it is the
+          # pre-camera build and the log says "Videorc Camera skipped".
+          VIDEORC_MACOS_PROFILE_APP: ${{ secrets.VIDEORC_MACOS_PROFILE_APP }}
 
       - name: Verify signature and write the sidecar
         shell: bash

@@ -16,6 +16,38 @@
 
   **PLANNED** 2026-11-03; the owner took D1 to D7 as recommended.
 
+- 2026-11-02: [Plan 214](214-videorc-camera-in-meet-and-zoom.md), Videorc
+  Camera in Meet and Zoom. Owner ask: a virtual camera like OBS's, so the
+  program shows up as a camera in Google Meet, Zoom, Teams and Discord, on
+  macOS, Windows 11 and Linux. Three spikes outside the tree, then six
+  workstreams:
+  - A: the output tap, reading the program as the Preview shows it,
+    converting off the compositor tick, and asking for pixels at idle on
+    Windows and Linux.
+  - B: the macOS Camera Extension in the bundle, with the restricted
+    entitlement, one Developer ID provisioning profile for the app, split
+    entitlements, activation from Electron main, the backend's CMIO sink,
+    and the release validator.
+  - C: the Windows media-source DLL, a cross-session shared ring, and a
+    one-time elevated setup.
+  - D: the Linux v4l2loopback writer with install guidance.
+  - E: the Output page switch, the approval guidance, ⌘K and the agents'
+    mirror, Health.
+  - F: a packaged read-back smoke that compares the camera with a
+    recording and proves Hide screen.
+
+  No audio (a virtual microphone is a separate, harder project).
+
+  **EXECUTING** 2026-11-03: the owner said "execute the entire plan and
+  create a pr", so D1 to D14 are as recommended.
+  - P0a is a go on macOS 26: Xcode issued the one profile, a notarized test
+    camera showed a pushed picture in Chrome, and a re-signed app launched
+    with no AMFI kill.
+  - PR 1 carries A, B, D, E and F. Linux is hidden until P0c. Windows (C)
+    follows in its own PR, hidden until P0b.
+  - Owner rule: no smokes or app runs before main. The PR lists them as
+    owed.
+
 - 2026-11-01: [Plan 213](213-new-streamer-feedback.md), a new streamer's
   feedback (macOS, AeroSpace, a 16:9 virtual display on an ultrawide,
   Continuity Camera). Ten workstreams, one PR each:

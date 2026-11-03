@@ -222,7 +222,13 @@
           }
         ]
       },
-      "durationMs": 12345
+      "durationMs": 12345,
+      "acceptsLiveSceneEdits": true
+    },
+    "fixedSceneWire": {
+      "state": "recording",
+      "sessionId": "session-legacy-graph",
+      "acceptsLiveSceneEdits": false
     },
     "minimalWire": {
       "state": "idle"

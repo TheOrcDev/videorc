@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime};
 
@@ -233,6 +233,12 @@ impl CompositorFrameExportHandle {
             fence_value: metadata.synchronization.fence_value,
             role: metadata.role,
         })
+    }
+
+    /// Plan 214: the texture lease ticket itself, for Videorc Camera's
+    /// staging readback (C3) whatever the role. `None` off Windows.
+    pub(crate) fn d3d11_texture_ticket(&self) -> Option<WindowsD3d11TextureLeaseTicket> {
+        self.d3d11_texture.clone()
     }
 
     #[allow(dead_code)]
@@ -480,6 +486,12 @@ pub struct CompositorRuntime {
     /// composes CPU pixels once and hands them over. Lives for the runtime,
     /// not per run, so a stale render cache still shares it.
     program_picture_waiters: ProgramPictureWaiters,
+    /// Plan 214 A2: holders who need pixels from the metadata-only preview
+    /// (Videorc Camera while an app holds it, D13). While it is non-zero the
+    /// no-GPU native-preview tick composes CPU pixels every tick, as it does
+    /// once for a picture waiter; the Metal path changes nothing. Lives for
+    /// the runtime, like the waiters, so a stale render cache shares it.
+    pixel_demand: Arc<AtomicU32>,
     /// Plan 157: Screen/Camera ISO stores while a separate-source capture runs.
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     preview_frame_lease_capacity: Arc<tokio::sync::Semaphore>,
@@ -782,11 +794,22 @@ pub struct CompositorLoopConfig {
     pub chat_overlay_on_program: bool,
 }
 
+/// Who holds the preview run (plan 214 A3). A capture (a session, Clips, a
+/// performance check) is strong: nothing arms over it. Videorc Camera's lease
+/// is weak: a capture arm replaces it in place, and the camera re-arms when
+/// that capture releases while a viewer still holds the camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorLeaseKind {
+    Capture,
+    VirtualCamera,
+}
+
 /// Capture ownership of the preview compositor run.
 #[derive(Debug)]
 struct CompositorCaptureLease {
     session_id: String,
     run_id: String,
+    kind: CompositorLeaseKind,
     /// A buffer-only session's lease (plan 181): drafts keep following the run.
     replay_only: bool,
     /// The preview run's writable dimensions, parked here so bounds updates
@@ -806,6 +829,8 @@ pub struct CompositorArmParams {
     pub width: u32,
     pub height: u32,
     pub frame_consumer: CompositorFrameConsumer,
+    /// Plan 214 A3: a capture's strong lease, or Videorc Camera's weak one.
+    pub lease: CompositorLeaseKind,
     /// Plan 212 S1: the session is a performance check's benchmark
     /// (`SessionPurpose::PerformanceCheck`). See `CompositorCaptureLease`.
     pub benchmark: bool,
@@ -1025,7 +1050,13 @@ pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> b
 /// run from a session's, under the same lock the arm takes.
 pub async fn update_idle_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
     let compositor = state.compositor.lock().await;
-    if compositor.capture_lease.is_some() {
+    // Plan 214 A3: Videorc Camera's lease is the idle run at the camera's
+    // canvas; the program it shows follows the stored layout like idle does.
+    if compositor
+        .capture_lease
+        .as_ref()
+        .is_some_and(|lease| lease.kind != CompositorLeaseKind::VirtualCamera)
+    {
         return false;
     }
     send_overlay_flags(&compositor, flags)
@@ -1493,6 +1524,8 @@ struct CompositorRenderCache {
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     program_frame_store: CompositorFrameStore,
     program_picture_waiters: ProgramPictureWaiters,
+    /// Plan 214 A2: see `CompositorRuntime::pixel_demand`.
+    pixel_demand: Arc<AtomicU32>,
     source_iso_frame_stores: Option<CompositorSourceIsoFrameStores>,
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
@@ -1585,6 +1618,7 @@ impl CompositorRenderCache {
             stream_frame_store: compositor.stream_frame_store.clone(),
             program_frame_store: compositor.program_frame_store.clone(),
             program_picture_waiters: compositor.program_picture_waiters.clone(),
+            pixel_demand: compositor.pixel_demand.clone(),
             source_iso_frame_stores: compositor.source_iso_frame_stores.clone(),
             snapshot: snapshot.cloned(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
@@ -3146,6 +3180,7 @@ mod editor_draft_tests {
         CompositorCaptureLease {
             session_id: "session".to_string(),
             run_id: "run".to_string(),
+            kind: CompositorLeaseKind::Capture,
             replay_only,
             benchmark: false,
             render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(1280, 720))),
@@ -3682,6 +3717,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         stream_frame_store: None,
         program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         program_picture_waiters: Arc::default(),
+        pixel_demand: Arc::default(),
         source_iso_frame_stores: None,
         preview_frame_lease_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
         frame_evidence: VecDeque::new(),
@@ -4177,23 +4213,40 @@ pub async fn arm_compositor_for_capture(
         {
             return Err(CompositorArmRefusal::NoLiveRun);
         }
-        if compositor.capture_lease.is_some() {
-            return Err(CompositorArmRefusal::AlreadyLeased);
-        }
-        let Some(preview_config) = compositor
+        // Plan 214 A3: a capture arms over Videorc Camera's weak lease in
+        // place; the camera's lease never arms over anything.
+        let replaced_camera_lease = match compositor.capture_lease.as_ref() {
+            None => None,
+            Some(lease)
+                if lease.kind == CompositorLeaseKind::VirtualCamera
+                    && params.lease == CompositorLeaseKind::Capture =>
+            {
+                Some((lease.preview_config, lease.render_dimensions.clone()))
+            }
+            Some(_) => return Err(CompositorArmRefusal::AlreadyLeased),
+        };
+        let Some(current_config) = compositor
             .loop_config_tx
             .as_ref()
             .map(|config_tx| *config_tx.borrow())
         else {
             return Err(CompositorArmRefusal::NotPreviewOwned);
         };
-        if preview_config.frame_consumer != CompositorFrameConsumer::NativePreview
+        // What the release restores: the preview's own config, which the
+        // camera's lease parked when it armed.
+        let preview_config = replaced_camera_lease
+            .as_ref()
+            .map_or(current_config, |(config, _)| *config);
+        if current_config.frame_consumer != CompositorFrameConsumer::NativePreview
             || compositor.stream_frame_store.is_some()
             || compositor.source_iso_frame_stores.is_some()
-            || compositor.preview_render_dimensions.is_none()
+            || (replaced_camera_lease.is_none() && compositor.preview_render_dimensions.is_none())
         {
             return Err(CompositorArmRefusal::NotPreviewOwned);
         }
+        // The camera's lease is idle for drafts and the program shape: a
+        // buffer, never a recording or a stream (plan 181's rule).
+        let replay_only = params.replay_only || params.lease == CompositorLeaseKind::VirtualCamera;
         let next = CompositorLoopConfig {
             target_fps: params.target_fps.clamp(30, 120),
             frame_consumer: params.frame_consumer,
@@ -4216,10 +4269,13 @@ pub async fn arm_compositor_for_capture(
         if !config_sent {
             return Err(CompositorArmRefusal::NoLiveRun);
         }
-        let render_dimensions = compositor
-            .preview_render_dimensions
-            .take()
-            .expect("checked above");
+        let render_dimensions = match replaced_camera_lease {
+            Some((_, render_dimensions)) => render_dimensions,
+            None => compositor
+                .preview_render_dimensions
+                .take()
+                .expect("checked above"),
+        };
         render_dimensions.store(
             pack_render_dimensions(params.width.max(1), params.height.max(1)),
             Ordering::Relaxed,
@@ -4228,12 +4284,13 @@ pub async fn arm_compositor_for_capture(
         compositor.capture_lease = Some(CompositorCaptureLease {
             session_id: session_id.to_string(),
             run_id: run_id.clone(),
-            replay_only: params.replay_only,
+            kind: params.lease,
+            replay_only,
             render_dimensions,
             preview_config,
             benchmark: params.benchmark,
         });
-        if !params.replay_only {
+        if !replay_only {
             // Decision 4 (plan 058): a draft never reaches a recording or a
             // stream. With the ring on by default (plan 181) a draft may be
             // live on the run this session takes over, so it ends here; the
@@ -4246,12 +4303,18 @@ pub async fn arm_compositor_for_capture(
         compositor.status.target_fps = next.target_fps;
         compositor.status.frame_pipeline.consumer = Some(params.frame_consumer.label().to_string());
         compositor.status.updated_at = Utc::now().to_rfc3339();
-        compositor.status.message = Some("Preview compositor armed for capture.".to_string());
+        compositor.status.message = Some(match params.lease {
+            CompositorLeaseKind::Capture => "Preview compositor armed for capture.".to_string(),
+            CompositorLeaseKind::VirtualCamera => {
+                "Preview compositor armed for Videorc Camera.".to_string()
+            }
+        });
         (compositor.status.clone(), run_id)
     };
     crate::preview_surface::detach_preview_run_for_capture_lease(state, &run_id).await;
     tracing::info!(
-        "compositor {run_id} armed in place for session {session_id}: {}x{} @ {} fps, consumer {}",
+        "compositor {run_id} armed in place for session {session_id} ({:?}): {}x{} @ {} fps, consumer {}",
+        params.lease,
         status.width,
         status.height,
         status.target_fps,
@@ -4308,9 +4371,68 @@ pub async fn release_compositor_capture_lease(
         if lease.benchmark {
             compositor.benchmark_scene = None;
         }
-        let surface_live = surface.state == PreviewSurfaceState::Live
-            && compositor.render_task.is_some()
-            && compositor.stop_tx.is_some();
+        let run_alive = compositor.render_task.is_some() && compositor.stop_tx.is_some();
+        // Plan 214 A3: a capture's release hands the run to Videorc Camera
+        // when a viewer still holds the camera, in place and at the camera's
+        // canvas, instead of back to the surface and then to the camera.
+        let camera_canvas = (lease.kind != CompositorLeaseKind::VirtualCamera && run_alive)
+            .then(|| crate::virtual_camera_service::lease_wanted(state))
+            .flatten();
+        if let Some((camera_width, camera_height)) = camera_canvas {
+            let camera_config = CompositorLoopConfig {
+                target_fps: lease.preview_config.target_fps.clamp(30, 120),
+                frame_consumer: CompositorFrameConsumer::NativePreview,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: idle_overlays.highlight_on_primary,
+                highlight_overlay_on_aux: idle_overlays.highlight_on_aux,
+                buddy_overlay_on_primary: idle_overlays.buddy_on_primary,
+                buddy_overlay_on_aux: idle_overlays.buddy_on_aux,
+                highlight_overlay_on_program: idle_overlays.highlight_on_program,
+                buddy_overlay_on_program: idle_overlays.buddy_on_program,
+            };
+            let config_sent = compositor
+                .loop_config_tx
+                .as_ref()
+                .is_some_and(|config_tx| config_tx.send(camera_config).is_ok());
+            if config_sent {
+                lease.render_dimensions.store(
+                    pack_render_dimensions(camera_width.max(1), camera_height.max(1)),
+                    Ordering::Relaxed,
+                );
+                compositor.preview_resize_revision = None;
+                compositor.capture_lease = Some(CompositorCaptureLease {
+                    session_id: crate::virtual_camera::VIRTUAL_CAMERA_LEASE_SESSION_ID.to_string(),
+                    run_id: lease.run_id.clone(),
+                    kind: CompositorLeaseKind::VirtualCamera,
+                    replay_only: true,
+                    render_dimensions: lease.render_dimensions,
+                    preview_config: lease.preview_config,
+                    benchmark: false,
+                });
+                compositor.status.width = camera_width.max(1);
+                compositor.status.height = camera_height.max(1);
+                compositor.status.target_fps = camera_config.target_fps;
+                compositor.status.frame_pipeline.consumer =
+                    Some(camera_config.frame_consumer.label().to_string());
+                compositor.status.updated_at = Utc::now().to_rfc3339();
+                compositor.status.message =
+                    Some("Preview compositor armed for Videorc Camera.".to_string());
+                let status = compositor.status.clone();
+                drop(compositor);
+                prepare_idle_buddy(state, idle_overlays, (status.width, status.height));
+                tracing::info!(
+                    "compositor {} handed to Videorc Camera after session {session_id}: {}x{} @ {} fps",
+                    status.run_id.as_deref().unwrap_or("unknown-run"),
+                    status.width,
+                    status.height,
+                    status.target_fps
+                );
+                state.emit_event("compositor.status", status.clone());
+                return Some(status);
+            }
+        }
+        let surface_live = surface.state == PreviewSurfaceState::Live && run_alive;
         if !surface_live {
             CompositorLeaseRelease::Stop(lease.run_id)
         } else {
@@ -4563,6 +4685,17 @@ fn end_preview_hold_if_releasing(compositor: &mut CompositorRuntime) -> bool {
 #[cfg(test)]
 pub(crate) async fn compositor_preview_hold_active(state: &AppState) -> bool {
     state.compositor.lock().await.preview_hold.is_some()
+}
+
+/// Plan 214 A3: whether Videorc Camera's weak lease holds the run now.
+pub async fn compositor_virtual_camera_lease_active(state: &AppState) -> bool {
+    state
+        .compositor
+        .lock()
+        .await
+        .capture_lease
+        .as_ref()
+        .is_some_and(|lease| lease.kind == CompositorLeaseKind::VirtualCamera)
 }
 
 /// Run id currently leased to a capture, if any.
@@ -4984,6 +5117,14 @@ pub(crate) struct ProgramPicture {
     pub width: u32,
     pub height: u32,
     pub rgb: Vec<u8>,
+}
+
+/// Plan 214 A2: the runtime's pixel-demand counter, for a holder that needs
+/// the metadata-only preview to compose pixels (Videorc Camera). The counter
+/// lives for the runtime, so one handle serves every run.
+pub(crate) async fn pixel_demand(state: &AppState) -> crate::virtual_camera::PixelDemand {
+    let compositor = state.compositor.lock().await;
+    crate::virtual_camera::PixelDemand::from_counter(compositor.pixel_demand.clone())
 }
 
 /// The newest program frame's sequence, without reading its pixels.
@@ -10168,6 +10309,9 @@ async fn publish_compositor_frame(
     let mut metadata_only_preview = false;
     // Agents waiting for this metadata-only preview to compose pixels once.
     let mut picture_waiters = Vec::new();
+    // Plan 214 A2: Videorc Camera (or another holder) needs pixels from the
+    // metadata-only preview every tick while an app holds the camera.
+    let mut pixel_demanded = false;
     {
         let inputs = CompositorRenderInputs {
             sequence,
@@ -10250,6 +10394,7 @@ async fn publish_compositor_frame(
                             .lock()
                             .unwrap_or_else(|p| p.into_inner()),
                     );
+                    pixel_demanded = render_cache.pixel_demand.load(Ordering::Acquire) > 0;
                     let _ = reason;
                 } else if cfg!(target_os = "macos") {
                     compositor_fallback_reason = Some(reason.to_string());
@@ -10257,7 +10402,9 @@ async fn publish_compositor_frame(
                     let _ = reason;
                 }
                 if !retain_previous_native_frame
-                    && (frame_consumer.composes_cpu_pixels() || !picture_waiters.is_empty())
+                    && (frame_consumer.composes_cpu_pixels()
+                        || !picture_waiters.is_empty()
+                        || pixel_demanded)
                 {
                     bytes = {
                         let mut store = frame_store
@@ -11757,8 +11904,13 @@ fn try_update_compositor_status(
         metrics.metal_target_handoff,
     );
     compositor.status.sources = metrics.sources;
+    // Plan 214 A4: what Videorc Camera's output did (0 while off).
+    let camera = state.virtual_camera.counters().unwrap_or_default();
     compositor.status.frame_pipeline = CompositorFramePipelineStatus {
         preview_synthetic_refused: compositor.preview_backstop.refused(),
+        virtual_camera_pushed: camera.pushed,
+        virtual_camera_repeated: camera.repeated,
+        virtual_camera_convert_ms_max: camera.convert_us_max as f64 / 1000.0,
         ..metrics.frame_pipeline
     };
     // Plan 190: how the live background draws, and what it holds (0 while off).
@@ -13908,6 +14060,7 @@ mod tests {
                 stream_frame_store: None,
                 program_frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
                 program_picture_waiters: Arc::default(),
+                pixel_demand: Arc::default(),
                 source_iso_frame_stores: Some(stores.clone()),
                 snapshot: Some(snapshot),
                 simulcast_snapshot: None,
@@ -16594,6 +16747,43 @@ mod tests {
         publish_native_preview_tick_without_gpu(&state, 3, &mut live_sources, &mut render_cache)
             .await;
         assert_eq!(latest_frame_bytes_len(&store), 0);
+    }
+
+    /// Plan 214 A2: while Videorc Camera (or another holder) holds the pixel
+    /// demand, the no-GPU native preview composes CPU pixels every tick, as
+    /// it does once for a picture waiter; released, it is metadata-only
+    /// again (the Linux plan-0014 idle cost stays zero with the camera off).
+    #[tokio::test]
+    async fn metadata_only_preview_composes_pixels_while_demand_is_held() {
+        let state = test_state();
+        let mut live_sources = CompositorLiveSources::default();
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+        publish_native_preview_tick_without_gpu(&state, 1, &mut live_sources, &mut render_cache)
+            .await;
+        let store = compositor_frame_store(&state).await;
+        assert_eq!(latest_frame_bytes_len(&store), 0);
+
+        let demand = pixel_demand(&state).await;
+        let guard = demand.hold();
+        publish_native_preview_tick_without_gpu(&state, 2, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(latest_frame_bytes_len(&store), raw_yuv420p_len(16, 8));
+        publish_native_preview_tick_without_gpu(&state, 3, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(
+            latest_frame_bytes_len(&store),
+            raw_yuv420p_len(16, 8),
+            "every tick while the demand is held, not once"
+        );
+
+        drop(guard);
+        publish_native_preview_tick_without_gpu(&state, 4, &mut live_sources, &mut render_cache)
+            .await;
+        assert_eq!(
+            latest_frame_bytes_len(&store),
+            0,
+            "released: metadata frames again"
+        );
     }
 
     #[tokio::test]
@@ -19305,6 +19495,7 @@ mod tests {
             width,
             height,
             frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            lease: CompositorLeaseKind::Capture,
             replay_only: false,
             caption_overlay_on_primary: true,
             caption_overlay_on_aux: false,
@@ -25381,6 +25572,7 @@ mod program_leg_tests {
             compositor.capture_lease = Some(CompositorCaptureLease {
                 session_id: "clips".to_string(),
                 run_id: "test-run".to_string(),
+                kind: CompositorLeaseKind::Capture,
                 replay_only: true,
                 benchmark: false,
                 render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(WIDTH, HEIGHT))),

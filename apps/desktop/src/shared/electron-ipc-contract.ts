@@ -185,6 +185,7 @@ export const electronInvokeApiMethods = {
   'comments-window:toggle': 'toggleCommentsWindow',
   'comments-window:get-state': 'getCommentsWindowState',
   'comments-window:set-always-on-top': 'setCommentsWindowAlwaysOnTop',
+  'comments-window:set-hidden-from-stream': 'setCommentsWindowHiddenFromStream',
   'comments-window:set-highlight-anchor': 'setCommentsWindowHighlightAnchor',
   'comments-window:set-auto-show-activity': 'setCommentsWindowAutoShowActivity',
   'comments-window:push-snapshot': 'pushCommentsSnapshot',
@@ -244,6 +245,7 @@ export const electronInvokeApiMethods = {
   'captions-window:push-lines': 'pushCaptionLines',
   'captions-window:get-lines': 'getCaptionLines',
   'system:open-permissions': 'openSystemPermissions',
+  'virtual-camera:action': 'virtualCameraAction',
   'system:media-access-status': 'getMediaAccessStatus',
   'system:request-media-access': 'requestMediaAccess',
   'system:request-screen-access': 'requestScreenAccess',
@@ -1642,6 +1644,8 @@ const specificRuntimeInvokeContracts = {
   ),
   // Plan 156: the Activity auto-show switch is one boolean, nothing else.
   'comments-window:set-auto-show-activity': invokeContract(tupleSchema([booleanSchema])),
+  // Plan 215 D6: Hide from stream is one boolean, nothing else.
+  'comments-window:set-hidden-from-stream': invokeContract(tupleSchema([booleanSchema])),
   // Plan 140, S5: the window names a platform and nothing else. Main picks
   // the scopes, so a forged command can never widen what is requested.
   'comments-window:reconnect-scopes': invokeContract(
@@ -1766,6 +1770,18 @@ const specificRuntimeInvokeContracts = {
     ]),
     objectSchema(
       { added: booleanSchema, message: stringSchema({ minLength: 1, maxLength: 512 }) },
+      { allowUnknown: false }
+    )
+  ),
+  // Plan 214 E: one named Videorc Camera action in; whether it ran and, when
+  // it didn't, a plain sentence.
+  'virtual-camera:action': invokeContract(
+    tupleSchema([enumSchema(['open-approval-settings', 'remove', 'set-up', 'load-module'])]),
+    objectSchema(
+      {
+        ok: booleanSchema,
+        message: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 }))
+      },
       { allowUnknown: false }
     )
   ),

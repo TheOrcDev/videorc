@@ -157,6 +157,7 @@ import type { AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentStudioLink } from '@/lib/agent-studio-link'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
 import { useScreenPrivacy } from './use-screen-privacy'
+import { VirtualCameraContext, useVirtualCameraController } from './use-virtual-camera'
 import type { FollowFrontAppHost, FollowSceneApply } from './use-follow-front-app'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
 import type {
@@ -654,7 +655,8 @@ import {
 } from '@/lib/studio-bootstrap'
 import {
   deviceListWithoutProtectedOverlayWindows,
-  protectedOverlayWindowIdsFromOverlayWindows
+  protectedOverlayWindowIdsFromOverlayWindows,
+  streamManagerProtectedOverlayWindow
 } from '@/lib/protected-overlay-windows'
 
 export type { GoLivePartialSetup, GoLiveSetupFailure } from '@/lib/go-live-flow'
@@ -1339,6 +1341,8 @@ export type StudioContextValue = {
   closeCommentsWindow: () => Promise<void>
   toggleCommentsWindow: () => Promise<void>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
+  /** Hide from stream (plan 215 D6), flipped from ⌘K with the window closed too. */
+  setCommentsWindowHiddenFromStream: (hidden: boolean) => Promise<void>
   openSessionCommentsWindow: (sessionId: string, title: string, startedAt: string) => Promise<void>
   highlightedCommentId: string | null
   commentHighlightState: CommentHighlightState
@@ -1684,6 +1688,14 @@ export type StudioContextValue = {
   outputEnabled: boolean
   streamReady: boolean
   isSessionActive: boolean
+  /** The running session's word on a scene edit (plan 215 D1), from
+   * `recording.status.acceptsLiveSceneEdits`: true on every compositor
+   * path, false on the legacy FFmpeg graph (a fixed picture), null while it
+   * has not said (nothing runs, a start still pending, an older backend).
+   * Read it only while `isSessionActive`: a replay-only Clips ring reports
+   * its own word, but the page never locks for a ring and the backend
+   * never refuses an idle edit for one. */
+  acceptsLiveSceneEdits: boolean | null
   /** A recording, livestream or Clips ring has a running audio bus (plan 201). */
   audioBusActive: boolean
   /** Whether the active session mixes system audio, from `recording.status`
@@ -2281,6 +2293,8 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   visible: false,
   bounds: null,
   alwaysOnTop: false,
+  hiddenFromStream: false,
+  hideFromStreamMethod: 'unsupported',
   highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   autoShowActivity: false,
   protected: false,
@@ -2311,12 +2325,20 @@ const idlePreviewSupervisorState = (): PreviewSupervisorState => ({
 })
 
 async function currentProtectedOverlayWindowIds(): Promise<number[]> {
-  // Only Notes is capture-protected: it is a private teleprompter. Comments
-  // and Captions are part of the show and stay visible in recordings (owner
+  // Notes is capture-protected: it is a private teleprompter. Comments and
+  // Captions are part of the show and stay visible in recordings (owner
   // call, 2026-08-19), so they are neither excluded from capture nor hidden
-  // from the source picker.
-  const latestNotesWindow = await window.videorc?.getNotesWindowState?.().catch(() => null)
-  return protectedOverlayWindowIdsFromOverlayWindows(latestNotesWindow ?? idleNotesWindowState())
+  // from the source picker. The one choice (plan 215 D6): the Stream Manager
+  // joins the list while its Hide from stream switch is on. The backend
+  // applies a changed list to a running capture in place (C2).
+  const [latestNotesWindow, latestCommentsWindow] = await Promise.all([
+    window.videorc?.getNotesWindowState?.().catch(() => null),
+    window.videorc?.getCommentsWindowState?.().catch(() => null)
+  ])
+  return protectedOverlayWindowIdsFromOverlayWindows(
+    latestNotesWindow ?? idleNotesWindowState(),
+    streamManagerProtectedOverlayWindow(latestCommentsWindow ?? idleCommentsWindowState())
+  )
 }
 
 export function useStudioCore(): StudioCoreContextValue {
@@ -3795,6 +3817,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const setCommentsWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     await window.videorc?.setCommentsWindowAlwaysOnTop?.(alwaysOnTop)
   }, [])
+  const setCommentsWindowHiddenFromStream = useCallback(async (hidden: boolean) => {
+    await window.videorc?.setCommentsWindowHiddenFromStream?.(hidden)
+  }, [])
   const openSessionCommentsWindowRef = useRef<
     ((sessionId: string, title: string, startedAt: string) => Promise<void>) | null
   >(null)
@@ -3898,6 +3923,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [goLivePartialSetup, setGoLivePartialSetup] = useState<GoLivePartialSetup | null>(null)
   const [suppressCaptionsChoice, setSuppressCaptionsForSession] = useState(false)
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
+  // Plan 214 E: Videorc Camera's status, switch and actions, in its own context.
+  const virtualCamera = useVirtualCameraController(client, wsStatus, runtimeInfo)
   // Linux can't caption at all (no native microphone path): every session
   // skips captions there, as if "Continue without captions" were chosen.
   const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
@@ -12003,12 +12030,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await window.videorc?.setNotesWindowAlwaysOnTop?.(alwaysOnTop)
   }, [])
 
-  const notesProtectedOverlayKey = useMemo(
+  // The exclusion list's identity: Notes while open, and the Stream Manager
+  // while open and hidden from stream (plan 215 C2). A change re-sends the
+  // screen start, which the backend applies to the running capture in place.
+  const protectedOverlayKey = useMemo(
     () =>
-      notesWindow.open && typeof notesWindow.windowId === 'number'
-        ? String(notesWindow.windowId)
-        : '',
-    [notesWindow.open, notesWindow.windowId]
+      protectedOverlayWindowIdsFromOverlayWindows(
+        notesWindow,
+        streamManagerProtectedOverlayWindow(commentsWindow)
+      ).join(','),
+    [notesWindow, commentsWindow]
   )
 
   useEffect(() => {
@@ -12027,10 +12058,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
   }, [notesWindow.open, recording.state, runtimeInfo?.notesWindowRecordingOverlayAllowed])
 
+  // Plan 215 D6: with Hide from stream on, the window is out of the capture
+  // (macOS: our filter; Windows: content protection, which `protected`
+  // already says), so it stays open through the recording.
+  const commentsWindowHiddenFromStream =
+    commentsWindow.hiddenFromStream && commentsWindow.hideFromStreamMethod !== 'unsupported'
   useEffect(() => {
     if (
       !commentsWindow.open ||
       commentsWindow.protected ||
+      commentsWindowHiddenFromStream ||
       !isActiveRecordingState(recording.state) ||
       runtimeInfo?.commentsWindowRecordingOverlayAllowed
     ) {
@@ -12052,6 +12089,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [
     commentsWindow.open,
     commentsWindow.protected,
+    commentsWindowHiddenFromStream,
     recording.state,
     runtimeInfo?.commentsWindowRecordingOverlayAllowed
   ])
@@ -12063,7 +12101,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     nativePreviewScreenKeyRef.current = null
     void ensureNativePreviewScreen()
-  }, [ensureNativePreviewScreen, notesProtectedOverlayKey])
+  }, [ensureNativePreviewScreen, protectedOverlayKey])
 
   // The preview window is locked to the OUTPUT aspect ratio — the user can never
   // squeeze or stretch what they will record/stream.
@@ -12414,7 +12452,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ),
           automaticSourceFallbacks: automaticSourceFallbacks.current,
           nativePreviewSurfaceStatus: previewSurfaceStatus,
-          runtimeInfo: freshRuntimeInfo ?? undefined
+          runtimeInfo: freshRuntimeInfo ?? undefined,
+          // Plan 214 E3: the camera's state, never its words.
+          virtualCamera: (await import('@/lib/virtual-camera-view')).virtualCameraBundleLine(
+            virtualCamera.status
+          )
         }
       }
       const result = await client.request<SupportBundleExportResult>(
@@ -12446,7 +12488,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [client, previewSurfaceStatus, reportError, runtimeInfo, supportBundleExportPending])
+  }, [
+    client,
+    previewSurfaceStatus,
+    reportError,
+    runtimeInfo,
+    supportBundleExportPending,
+    virtualCamera.status
+  ])
   // Plan 174 A-20: a toast whose raw details were withheld offers this export
   // (latest-value hand-off, like the ref mirrors above; idempotent per render).
   registerSupportBundleExport(() => void exportSupportBundle())
@@ -12553,6 +12602,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const isSessionActive =
     sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
   const transportSessionActive = isSessionActive
+  // Plan 215 D1: the Scene page unlocks a source's position and size only
+  // once the session says a commit reaches its picture.
+  const acceptsLiveSceneEdits = recording.acceptsLiveSceneEdits ?? null
   const mixingSessionActive =
     ['recording', 'streaming'].includes(recording.state) && Boolean(recording.sessionId)
   const systemAudioConfirmed = mixingSessionActive
@@ -17568,9 +17620,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     !isActiveRecordingState(recording.state) && !startRequestPending && !stopRequestPending
       ? (recordBlockedReason ?? liveStreamBlockedReason)
       : null
+  // The window picker never offers Notes, nor the Stream Manager while it is
+  // hidden from stream (plan 215 C2).
   const visibleDeviceList = useMemo(
-    () => deviceListWithoutProtectedOverlayWindows(deviceList, notesWindow),
-    [deviceList, notesWindow]
+    () =>
+      deviceListWithoutProtectedOverlayWindows(
+        deviceList,
+        notesWindow,
+        streamManagerProtectedOverlayWindow(commentsWindow)
+      ),
+    [deviceList, notesWindow, commentsWindow]
   )
   const selectedCaptureDevice = findDevice(
     visibleDeviceList.devices,
@@ -17918,6 +17977,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchVideo,
       setSettings,
       setReplayEnabled,
+      virtualCamera,
       sessions,
       deleteSessions,
       refreshSessions,
@@ -18536,6 +18596,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeCommentsWindow,
       toggleCommentsWindow,
       setCommentsWindowAlwaysOnTop,
+      setCommentsWindowHiddenFromStream,
       openSessionCommentsWindow,
       highlightedCommentId,
       commentHighlightState,
@@ -18713,6 +18774,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      acceptsLiveSceneEdits,
       audioBusActive: mixingSessionActive,
       systemAudioConfirmed,
       systemAudioJoining,
@@ -18783,6 +18845,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeCommentsWindow,
       toggleCommentsWindow,
       setCommentsWindowAlwaysOnTop,
+      setCommentsWindowHiddenFromStream,
       openSessionCommentsWindow,
       highlightedCommentId,
       commentHighlightState,
@@ -18958,6 +19021,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputEnabled,
       streamReady,
       isSessionActive,
+      acceptsLiveSceneEdits,
       mixingSessionActive,
       systemAudioConfirmed,
       systemAudioJoining,
@@ -18980,20 +19044,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   return (
     <StudioShellContext.Provider value={shellValue}>
       <StudioBannersContext.Provider value={bannersValue}>
-        <StudioContextProviders
-          audio={audioValue}
-          captions={captionsValue}
-          chat={chatValue}
-          core={value}
-          diagnostics={diagnosticsValue}
-          preview={previewValue}
-          recording={recordingValue}
-          recordingState={recordingStateValue}
-          replay={replayBufferControls}
-        >
-          {children}
-          {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
-        </StudioContextProviders>
+        <VirtualCameraContext.Provider value={virtualCamera}>
+          <StudioContextProviders
+            audio={audioValue}
+            captions={captionsValue}
+            chat={chatValue}
+            core={value}
+            diagnostics={diagnosticsValue}
+            preview={previewValue}
+            recording={recordingValue}
+            recordingState={recordingStateValue}
+            replay={replayBufferControls}
+          >
+            {children}
+            {FollowFrontApp ? <FollowFrontApp {...followFrontAppHost} /> : null}
+          </StudioContextProviders>
+        </VirtualCameraContext.Provider>
       </StudioBannersContext.Provider>
     </StudioShellContext.Provider>
   )

@@ -122,6 +122,7 @@ interface HighRiskContractFixtures {
   scene: { wire: Scene }
   recordingStatus: {
     wire: RecordingStatus
+    fixedSceneWire: RecordingStatus
     minimalWire: RecordingStatus
     minimalNormalized: RecordingStatus
     mixedAudioWire: RecordingStatus
@@ -487,6 +488,21 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendRpcResult('recording.status', mixed))).toEqual(mixed)
     expect(mixed.audioTracks?.[0]?.mixSources).toEqual(['microphone', 'system-audio'])
     expect(fixtures.recordingStatus.wire.audioTracks?.[0]).not.toHaveProperty('mixSources')
+  })
+
+  it("carries the running session's word on live scene edits (plan 215 D1)", () => {
+    // A compositor session takes a source moved now; the legacy FFmpeg graph
+    // composes a fixed picture and says so; nothing running says nothing.
+    expect(fixtures.recordingStatus.wire.acceptsLiveSceneEdits).toBe(true)
+    const fixed = fixtures.recordingStatus.fixedSceneWire
+    expect(jsonShape(validateBackendRpcResult('recording.status', fixed))).toEqual(fixed)
+    expect(fixed.acceptsLiveSceneEdits).toBe(false)
+    expect(fixtures.recordingStatus.minimalWire).not.toHaveProperty('acceptsLiveSceneEdits')
+    // Main parses the same status off the event socket (strict contract).
+    expect(jsonShape(validateBackendEventPayload('recording.status', fixed))).toEqual(fixed)
+    expect(() =>
+      validateBackendRpcResult('recording.status', { ...fixed, acceptsLiveSceneEdits: 'yes' })
+    ).toThrow()
   })
 
   it('accepts the Rust stopped compositor wire shape without nullable metrics', () => {
