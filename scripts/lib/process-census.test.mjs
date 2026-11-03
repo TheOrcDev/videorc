@@ -13,6 +13,7 @@ import {
   ownedProcessLedgerPaths,
   parseProcessTable,
   parseWindowsProcessTable,
+  processGroupTreeRows,
   processTreeRows,
   pruneDeadOwnedProcessRecords,
   readOwnedProcessLedgers,
@@ -325,6 +326,38 @@ test('collectProcessCensus reports alive and dead ledger records without killing
   )
   assert.equal(census.processGroupRows.length, 2)
   assert.deepEqual(summarizeRows(census.processRows).cargo, { count: 1, rssKb: 2048 })
+})
+
+test('a pgid census follows pnpm 11 scripts into their own process groups', async () => {
+  // `pnpm dev` on Linux with pnpm 11 (2026-11-03): the launched group 500 only
+  // holds the outer pnpm; electron-vite, Electron and the backend sit in 520.
+  const table = parseProcessTable(`
+  500     1 500 20000 pnpm /usr/bin/pnpm dev
+  510   500 510 30000 node-MainThread /home/u/.local/share/pnpm/exe/pnpm dev
+  511   500 511  1000 sh sh -c trap '' INT TERM HUP
+  520   510 520 40000 node-MainThread node /repo/apps/desktop/node_modules/.bin/../electron-vite/bin/electron-vite.js dev
+  530   520 520 90000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron .
+  531   530 520  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote --no-zygote-sandbox
+  532   530 520  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  533   532 520  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  534   533 520 70000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  540   530 520 50000 videorc-backend target/debug/videorc-backend
+  600     1 600  9999 electron /opt/other-app/electron .
+`)
+
+  assert.deepEqual(
+    processGroupTreeRows(table, 500).map((row) => row.pid),
+    [500, 510, 511, 520, 530, 531, 532, 533, 534, 540]
+  )
+  const census = await collectProcessCensus({
+    ledgerPaths: [],
+    pgid: 500,
+    readProcessTable: async () => table
+  })
+  assert.equal(census.summary['electron-main']?.count, 1)
+  assert.equal(census.summary['electron-renderer']?.count, 1)
+  assert.equal(census.summary.backend?.count, 1)
+  assert.ok(!census.processRows.some((row) => row.pid === 600))
 })
 
 test('processTreeRows and rootPid census include the complete Windows app tree', async () => {

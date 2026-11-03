@@ -58,7 +58,7 @@ export async function collectProcessCensus({
   const interestingPids = new Set([...records.map((record) => record.pid), ...extraPids])
   const processGroupRows =
     typeof pgid === 'number'
-      ? processTable.filter((row) => row.pgid === pgid)
+      ? processGroupTreeRows(processTable, pgid)
       : Number.isInteger(rootPid) && rootPid > 1
         ? processTreeRows(processTable, rootPid)
         : []
@@ -94,6 +94,25 @@ export function processTreeRows(processTable, rootPid) {
   if (!Number.isInteger(rootPid) || rootPid <= 1) {
     return []
   }
+  return descendantRows(processTable, [rootPid])
+}
+
+/**
+ * Every member of POSIX process group `pgid` plus all of their descendants.
+ * pnpm 11 starts each script it runs in a process group of its own, so in
+ * `pnpm dev` the launched group holds only the outer pnpm while Electron,
+ * its renderers and the backend sit in a nested group. Following ancestry
+ * from the launched group keeps them in the census (a pgid-only filter
+ * counted no Electron main or renderer on Linux).
+ */
+export function processGroupTreeRows(processTable, pgid) {
+  const rootPids = (processTable ?? [])
+    .filter((row) => Number.isInteger(row?.pid) && row.pid > 1 && row.pgid === pgid)
+    .map((row) => row.pid)
+  return descendantRows(processTable, rootPids)
+}
+
+function descendantRows(processTable, rootPids) {
   const childrenByParent = new Map()
   for (const row of processTable ?? []) {
     if (!Number.isInteger(row?.pid) || !Number.isInteger(row?.ppid)) {
@@ -104,11 +123,9 @@ export function processTreeRows(processTable, rootPid) {
     childrenByParent.set(row.ppid, children)
   }
   const rowsByPid = new Map((processTable ?? []).map((row) => [row.pid, row]))
-  if (!rowsByPid.has(rootPid)) {
-    return []
-  }
-  const seen = new Set([rootPid])
-  const queue = [rootPid]
+  const roots = rootPids.filter((pid) => rowsByPid.has(pid))
+  const seen = new Set(roots)
+  const queue = [...roots]
   while (queue.length > 0) {
     const parentPid = queue.shift()
     for (const child of childrenByParent.get(parentPid) ?? []) {
