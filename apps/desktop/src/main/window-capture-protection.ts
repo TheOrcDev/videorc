@@ -1,8 +1,10 @@
 import type { BrowserWindow } from 'electron'
 
 import type { StreamManagerHideMethod } from '../shared/backend'
+import { CAPTURE_PROTECTION_UNSUPPORTED_REASON } from '../shared/capture-protection'
 
 export type { StreamManagerHideMethod }
+export { CAPTURE_PROTECTION_UNSUPPORTED_REASON }
 
 export type VideorcWindowRole =
   | 'main'
@@ -100,9 +102,6 @@ export function videorcWindowRequiresCaptureProtection(
 export function platformSupportsCaptureProtection(platform: NodeJS.Platform): boolean {
   return platform === 'darwin' || platform === 'win32'
 }
-
-export const CAPTURE_PROTECTION_UNSUPPORTED_REASON =
-  'This system cannot hide a window from screen capture.'
 
 /**
  * Applies Electron's exact BrowserWindow capture exclusion once per window

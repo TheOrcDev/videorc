@@ -4,7 +4,14 @@ import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platfo
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { HIGHLIGHT_ANCHOR_LABELS, HighlightAnchorOptions } from '@/components/comments-header'
 import { providerBadgeTitle } from '@/components/comments-destination-status'
-import { ClipIcon, FrameIcon, HiddenIcon, MoreIcon, PreviewIcon } from '@/components/icons'
+import {
+  ClipIcon,
+  FrameIcon,
+  HiddenFromStreamIcon,
+  HiddenIcon,
+  MoreIcon,
+  PreviewIcon
+} from '@/components/icons'
 import { PIN_WINDOW_LABEL, PinWindowButton } from '@/components/pin-window-button'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarAction } from '@/components/status-bar-action'
@@ -34,8 +41,10 @@ import type {
   ClipContext,
   ClipLength,
   CommentHighlightAnchor,
-  LiveChatProviderState
+  LiveChatProviderState,
+  StreamManagerHideMethod
 } from '@/lib/backend'
+import { CAPTURE_PROTECTION_UNSUPPORTED_REASON } from '../../../../shared/capture-protection'
 import { clipLastWords, clipLengthLabel } from '../../../../shared/clip-lengths'
 import type { ScreenPrivacyContext } from '../../../../shared/session-markers'
 import { shortcutLabel } from '@/lib/platform'
@@ -238,10 +247,51 @@ function screenPrivacyAction(
   }
 }
 
+/** The control's one name, in the status bar, the ⋯ menu and ⌘K. */
+export const HIDE_FROM_STREAM_LABEL = 'Hide from stream'
+/** What the footer says while the window is out of the capture, as Notes does. */
+export const HIDDEN_FROM_STREAM_FOOTER = 'Hidden from your stream'
+
+/**
+ * Hide from stream (plan 215 D6): the switch beside Keep on top, with the
+ * platform's own promise in its hint. On macOS Videorc's capture filter
+ * leaves the window out and nothing else changes; on Windows content
+ * protection hides it from every capture app and screenshot too, and the
+ * hint says so; Linux can't, so the switch is disabled with the reason.
+ */
+export function hideFromStreamAction(
+  hidden: boolean,
+  method: StreamManagerHideMethod,
+  onToggle: (() => void) | undefined
+): { label: string; hint: string; disabledReason: string | null; run: () => void } | null {
+  if (!onToggle) return null
+  const base = 'Keep this window out of your recordings and streams.'
+  return {
+    label: HIDE_FROM_STREAM_LABEL,
+    hint:
+      method === 'content-protection'
+        ? `${base} Other capture apps and screenshots lose it too.`
+        : `${base} Your own screenshots and other apps still see it.`,
+    disabledReason: method === 'unsupported' ? CAPTURE_PROTECTION_UNSUPPORTED_REASON : null,
+    run: onToggle
+  }
+}
+
+/** The footer line while the window is out of the capture; nothing elsewhere. */
+export function hiddenFromStreamFooter(
+  hidden: boolean,
+  method: StreamManagerHideMethod
+): string | null {
+  return hidden && method !== 'unsupported' ? HIDDEN_FROM_STREAM_FOOTER : null
+}
+
 export function StreamManagerStatusBar({
   providers,
   audience,
   alwaysOnTop,
+  hiddenFromStream = false,
+  hideFromStreamMethod = 'unsupported',
+  onToggleHiddenFromStream,
   highlightAnchor,
   onToggleAlwaysOnTop,
   onHighlightAnchorChange,
@@ -264,6 +314,12 @@ export function StreamManagerStatusBar({
   providers: readonly LiveChatProviderState[]
   audience: AudienceSnapshot | null
   alwaysOnTop: boolean
+  /** Hide from stream (plan 215 D6): the switch's state and how this
+   * platform hides the window, from main's window state. The switch
+   * shows only with a relay. */
+  hiddenFromStream?: boolean
+  hideFromStreamMethod?: StreamManagerHideMethod
+  onToggleHiddenFromStream?: () => void
   highlightAnchor?: CommentHighlightAnchor
   onToggleAlwaysOnTop?: () => void
   onHighlightAnchorChange?: (anchor: CommentHighlightAnchor) => void
@@ -314,6 +370,12 @@ export function StreamManagerStatusBar({
   // go, so the menu's focus return never dismisses what it opened.
   const soundsAfterMenu = useRef(false)
   const privacy = screenPrivacyAction(screen, onScreenPrivacy)
+  const hideFromStream = hideFromStreamAction(
+    hiddenFromStream,
+    hideFromStreamMethod,
+    onToggleHiddenFromStream
+  )
+  const hiddenFooter = hiddenFromStreamFooter(hiddenFromStream, hideFromStreamMethod)
   const bannerItems = onBanner ? (
     <BannerMenuItems banners={banners} onBanner={(action) => void onBanner(action)} />
   ) : null
@@ -422,6 +484,16 @@ export function StreamManagerStatusBar({
                 </HoverCard>
               )
             })}
+            {/* Out of the capture (plan 215 D6), said where Notes says it:
+                in the footer, quietly, while it holds. */}
+            {hiddenFooter ? (
+              <span
+                className={cn('truncate', ABOVE_NARROW)}
+                data-testid="stream-manager-capture-hidden"
+              >
+                {hiddenFooter}
+              </span>
+            ) : null}
           </span>
         }
       >
@@ -471,6 +543,26 @@ export function StreamManagerStatusBar({
                   variant="status-bar"
                   onPinnedChange={() => onToggleAlwaysOnTop()}
                 />
+              ) : null}
+              {/* Next to Keep on top (plan 215 D6): pinned and off the stream
+                  are the two things the window can be at once. */}
+              {hideFromStream ? (
+                <DisabledReason reason={hideFromStream.disabledReason} side="top">
+                  <StatusBarAction
+                    data-testid="hide-from-stream-button"
+                    disabled={hideFromStream.disabledReason !== null}
+                    hint={hideFromStream.disabledReason ? undefined : hideFromStream.hint}
+                    icon={
+                      <HiddenFromStreamIcon
+                        aria-hidden
+                        weight={hiddenFromStream ? 'fill' : 'regular'}
+                      />
+                    }
+                    label={hideFromStream.label}
+                    pressed={hiddenFromStream}
+                    onClick={hideFromStream.run}
+                  />
+                </DisabledReason>
               ) : null}
               {anchorControl ? (
                 <DropdownMenu>
@@ -634,6 +726,22 @@ export function StreamManagerStatusBar({
                     >
                       {PIN_WINDOW_LABEL}
                     </DropdownMenuCheckboxItem>
+                  ) : null}
+                  {hideFromStream ? (
+                    <DisabledReason
+                      focusable={false}
+                      reason={hideFromStream.disabledReason}
+                      side="left"
+                    >
+                      <DropdownMenuCheckboxItem
+                        checked={hiddenFromStream}
+                        closeOnClick
+                        disabled={hideFromStream.disabledReason !== null}
+                        onCheckedChange={() => hideFromStream.run()}
+                      >
+                        {hideFromStream.label}
+                      </DropdownMenuCheckboxItem>
+                    </DisabledReason>
                   ) : null}
                   {onMarkClip
                     ? clipButtons(clip).map((button) => (
