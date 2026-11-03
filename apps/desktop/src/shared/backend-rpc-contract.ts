@@ -3521,19 +3521,19 @@ const chatOverlayInfoSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<ChatOverlayInfo>
-// `vertical` is omitted, never null, when the session has no portrait leg
-// (`skip_serializing_if` on the Rust side).
+// A canvas is omitted, never null, when the session has no such leg (no
+// session, or no portrait leg; `skip_serializing_if` on the Rust side).
+const chatOverlayCanvasSchema = objectSchema(
+  {
+    width: numberSchema({ integer: true, min: 1 }),
+    height: numberSchema({ integer: true, min: 1 })
+  },
+  { allowUnknown: false }
+)
 const chatOverlayCanvasesSchema = objectSchema(
   {
-    vertical: optionalSchema(
-      objectSchema(
-        {
-          width: numberSchema({ integer: true, min: 1 }),
-          height: numberSchema({ integer: true, min: 1 })
-        },
-        { allowUnknown: false }
-      )
-    )
+    horizontal: optionalSchema(chatOverlayCanvasSchema),
+    vertical: optionalSchema(chatOverlayCanvasSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<ChatOverlayCanvases>

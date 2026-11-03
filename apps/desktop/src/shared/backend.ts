@@ -4884,10 +4884,18 @@ export interface ChatOverlayInfo {
   vertical: boolean
 }
 
-/** `chat.overlay.canvases`: the extra canvas the running session has (the
- *  vertical simulcast leg's), whatever the chat switches say; the same shape
- *  as `comments.highlight.canvases`. */
-export type ChatOverlayCanvases = CommentHighlightCanvases
+/** `chat.overlay.canvases`: the canvases of the running session the box is
+ *  rasterized for, whatever the chat switches say. Mirrors Rust
+ *  `ChatOverlayCanvases`. Both absent without a session, or off the
+ *  compositor bridge. */
+export interface ChatOverlayCanvases {
+  /** The landscape leg the box lands on: with a vertical leg the horizontal
+   *  stream is the primary leg at the session's own size, not the stream
+   *  profile's, and a box painted for the wrong width is cropped. */
+  horizontal?: { width: number; height: number }
+  /** The vertical simulcast leg's portrait canvas, for its own box. */
+  vertical?: { width: number; height: number }
+}
 // --- end chat on stream (plan 215 G) -----------------------------------------
 
 export interface CommentsCommandResolution<T> {

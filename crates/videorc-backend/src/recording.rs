@@ -2273,6 +2273,13 @@ pub struct ActiveRecording {
     /// second chat box for it, whatever the chat switches say at start, so a
     /// switch flipped mid-session lands on the next repaint.
     pub simulcast_vertical_canvas: Option<(u32, u32)>,
+    /// Landscape canvas `(width, height)` the renderer rasterizes the chat
+    /// box for (plan 215 G): the smallest landscape leg of the session. The
+    /// box is exactly its rect's width and the blit keeps pixel size, so a
+    /// box painted for a wider canvas than the leg it lands on is cropped
+    /// (the dual-orientation fix). None off the compositor bridge, where no
+    /// leg draws it.
+    pub chat_overlay_horizontal_canvas: Option<(u32, u32)>,
     /// The session shape the overlay leg plan was built for (plan 164), kept
     /// so a layout saved mid-session can re-plan the compositor flags. None
     /// on paths without the compositor bridge (nothing draws overlays there).
@@ -2423,6 +2430,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
         simulcast_vertical_canvas: None,
+        chat_overlay_horizontal_canvas: None,
         overlay_session_shape: None,
         accepts_banners: true,
         accepts_live_scene_edits: true,
@@ -7057,6 +7065,12 @@ async fn start_session_with_timeline(
         ),
         comment_highlight_vertical_canvas,
         simulcast_vertical_canvas: simulcast_vertical_canvas(encoder_bridge_stream_output.as_ref()),
+        chat_overlay_horizontal_canvas: use_encoder_bridge.then(|| {
+            chat_overlay_horizontal_canvas(
+                (params.output.video.width, params.output.video.height),
+                encoder_bridge_stream_output.as_ref(),
+            )
+        }),
         overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
         accepts_banners,
         accepts_live_scene_edits,
@@ -24538,6 +24552,25 @@ fn simulcast_vertical_canvas(
         .map(|output| (output.width, output.height))
 }
 
+/// The landscape canvas the renderer rasterizes the chat box for (plan 215
+/// G): the primary leg's, or a split stream leg's when that is smaller. The
+/// box is exactly its rect's width and every leg blits it at pixel size, so
+/// one landscape raster can only be complete on both legs when it is painted
+/// for the smaller one (on the larger it then hugs the rect's edge, whole).
+/// The vertical simulcast leg has its own portrait raster and never counts.
+/// Fixed for the run: leg sizes never change mid-session, so the renderer
+/// reads it once per livestream, whatever the chat switches say at start.
+fn chat_overlay_horizontal_canvas(
+    primary: (u32, u32),
+    stream_output: Option<&CompositorAuxiliaryOutput>,
+) -> (u32, u32) {
+    stream_output
+        .filter(|output| !output.composes_simulcast_scene)
+        .map(|output| (output.width, output.height))
+        .filter(|aux| aux.0 * aux.1 < primary.0 * primary.1)
+        .unwrap_or(primary)
+}
+
 #[cfg(test)]
 fn recording_compositor_stream_output(
     params: &StartSessionParams,
@@ -32784,6 +32817,7 @@ mod tests {
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
             simulcast_vertical_canvas: None,
+            chat_overlay_horizontal_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
             accepts_live_scene_edits: true,
@@ -41833,6 +41867,7 @@ mod tests {
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
             simulcast_vertical_canvas: None,
+            chat_overlay_horizontal_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
             accepts_live_scene_edits: true,
@@ -46202,6 +46237,50 @@ mod tests {
             None
         );
         assert_eq!(comment_highlight_vertical_canvas(None, (true, false)), None);
+    }
+
+    /// Plan 215 G, the dual-orientation fix: the chat box is painted for the
+    /// landscape leg it lands on. With a vertical leg the horizontal stream
+    /// rides the primary (the session's own size, not the stream profile's);
+    /// a smaller split stream leg wins over the recording; a larger one does
+    /// not, so the raster is never wider than the rect of any leg.
+    #[test]
+    fn chat_overlay_horizontal_canvas_is_the_smallest_landscape_leg() {
+        let vertical = CompositorAuxiliaryOutput {
+            width: 720,
+            height: 1280,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            composes_simulcast_scene: true,
+        };
+        let smaller_split = CompositorAuxiliaryOutput {
+            composes_simulcast_scene: false,
+            width: 1280,
+            height: 720,
+            ..vertical
+        };
+        let larger_split = CompositorAuxiliaryOutput {
+            composes_simulcast_scene: false,
+            width: 2560,
+            height: 1440,
+            ..vertical
+        };
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1280, 720), Some(&vertical)),
+            (1280, 720),
+            "the dual-orientation horizontal stream is the primary leg"
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), None),
+            (1920, 1080)
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), Some(&smaller_split)),
+            (1280, 720)
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), Some(&larger_split)),
+            (1920, 1080)
+        );
     }
 
     #[test]
