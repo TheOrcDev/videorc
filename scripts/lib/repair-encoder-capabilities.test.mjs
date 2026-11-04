@@ -42,10 +42,15 @@ const CLEAN_CUT_FILTER_LINES = [
   ' ... asetpts          A->A       Set PTS for the output audio frame.',
   ' ... format           V->V       Convert the input video to one of the specified pixel formats.'
 ]
+const CAMERA_LOOK_FILTER_LINES = [
+  ' ... scale            V->V       Scale the input video size and/or convert the image format.',
+  ' TS. lutyuv           V->V       Compute and apply a lookup table to the YUV input video.'
+]
 const FILTERS_WITH_NOISE_CLEANUP = [
   'Filters:',
   ' TS afftdn A->A Denoise audio samples using FFT.',
-  ...CLEAN_CUT_FILTER_LINES
+  ...CLEAN_CUT_FILTER_LINES,
+  ...CAMERA_LOOK_FILTER_LINES
 ].join('\n')
 
 test('parses encoder names out of -encoders output', () => {
@@ -117,7 +122,9 @@ test('the macOS bundle requires every filter the Clean cut render uses (plan 119
     'asplit',
     'setpts',
     'asetpts',
-    'format'
+    'format',
+    'scale',
+    'lutyuv'
   ])
   const withoutConcat = assessMacosFfmpegCapabilities({
     protocolsOutput: PROTOCOLS_WITH_TLS,
@@ -138,6 +145,27 @@ test('the macOS bundle requires PCM for MKV Noise Cleanup outputs', () => {
   assert.deepEqual(result.missing, ['encoder:pcm_s16le'])
 })
 
+test('the macOS bundle requires every filter the legacy camera look chain uses (plan 213 I)', () => {
+  const withoutLutyuv = assessMacosFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_LGPL_MACOS,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
+      .filter((line) => !/ lutyuv /.test(line))
+      .join('\n')
+  })
+  assert.deepEqual(withoutLutyuv.missing, ['filter:lutyuv'])
+  // The 0.18.0 bundle: every LGPL filter the chain needs, plus no `eq`. A
+  // policy that still needed `eq` would reject the very bundle that ships.
+  assert.ok(!REQUIRED_MACOS_FFMPEG_FILTERS.includes('eq'))
+  assert.ok(!/ eq /.test(FILTERS_WITH_NOISE_CLEANUP))
+  const lgplBundle = assessMacosFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_LGPL_MACOS,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP
+  })
+  assert.deepEqual(lgplBundle, { ok: true, missing: [] })
+})
+
 test('the macOS bundle requires the model-free noise cleanup filter', () => {
   assert.ok(REQUIRED_MACOS_FFMPEG_FILTERS.includes('afftdn'))
   const result = assessMacosFfmpegCapabilities({
@@ -146,7 +174,8 @@ test('the macOS bundle requires the model-free noise cleanup filter', () => {
     filtersOutput: [
       'Filters:',
       ' T. loudnorm A->A EBU R128 loudness normalization',
-      ...CLEAN_CUT_FILTER_LINES
+      ...CLEAN_CUT_FILTER_LINES,
+      ...CAMERA_LOOK_FILTER_LINES
     ].join('\n')
   })
   assert.deepEqual(result.missing, ['filter:afftdn'])

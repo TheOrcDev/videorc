@@ -138,6 +138,21 @@ describe('Windows stream performance matrix', () => {
     assert.equal(command.stdout.trim(), expected)
   })
 
+  it('returns exit 2 with BLOCKED on non-Windows hosts instead of failing the runner', () => {
+    if (process.platform === 'win32') {
+      return
+    }
+    const outputDirectory = join(tmpdir(), `videorc-stream-blocked-${Date.now()}`)
+    const command = spawnSync(
+      process.execPath,
+      ['scripts/smoke-windows-stream-performance.mjs', '--output', outputDirectory],
+      { cwd: new URL('../..', import.meta.url), encoding: 'utf8' }
+    )
+    assert.equal(command.status, 2, command.stdout)
+    assert.match(command.stderr, /windows-stream-performance: BLOCKED:/)
+    assert.match(command.stderr, /Windows 11 x64/)
+  })
+
   it('matches the active D3D11 budget contract context for context', () => {
     const projection = buildWindowsStreamPerformanceMatrix().map((scenario) => ({
       id: scenario.id,
@@ -1910,6 +1925,9 @@ describe('Windows capture-protection pixel evidence', () => {
         }
       ])
     )
+    // Plan 215 C3: the Stream Manager counts only with Hide from stream on.
+    ready.comments.hiddenFromStream = true
+    ready.comments.protected = true
     ready['proof-surface'] = {
       exists: true,
       visible: true,
@@ -1931,6 +1949,17 @@ describe('Windows capture-protection pixel evidence', () => {
       evaluateWindowsCaptureProtectionPlacement({ placement, states: absent }).verdict,
       'BLOCKED'
     )
+
+    const onStream = structuredClone(ready)
+    onStream.comments.hiddenFromStream = false
+    onStream.comments.protected = false
+    const onStreamResult = evaluateWindowsCaptureProtectionPlacement({
+      placement,
+      states: onStream
+    })
+    assert.equal(onStreamResult.verdict, 'BLOCKED')
+    assert.match(onStreamResult.blockers.join('\n'), /comments: Hide from stream was not on/)
+    assert.match(onStreamResult.blockers.join('\n'), /content protection was not on/)
 
     const markerPending = structuredClone(ready)
     markerPending.comments.captureProtectionMarkerInstalled = false

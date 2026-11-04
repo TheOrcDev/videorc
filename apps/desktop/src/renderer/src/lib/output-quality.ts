@@ -7,7 +7,9 @@ import {
   type LayoutOrientation,
   type VideoPresetOption
 } from './capture'
+import { recordOnlyBridgeEnvelopeFits } from './bridge-envelope'
 import { formatVideoQuality } from './format-video'
+import { isWindowsPlatform } from './platform'
 
 // The one video spelling (plan 174 S1.4): "1080p · 30 fps", never "Full HD".
 export const streamQualityOptions: { value: VideoPreset; label: string }[] = [
@@ -79,15 +81,21 @@ export function pickRecordingResolution(
  * that fit the scene's orientation, never the streaming ones. A preset picked
  * some other way (the performance check's 1080p60 rung, an older app's
  * streaming preset) joins the list while it is the setting, so the field
- * never reads blank. Custom is the select's own last item.
+ * never reads blank. Custom is the select's own last item. On Windows a
+ * preset outside the encoder bridge's envelope (4K60) is not offered: the
+ * backend refuses it (issue #1062), and a saved one stays only while it is
+ * the setting, with the Output page saying why.
  */
 export function recordingPresetOptions(
   current: VideoPreset,
-  orientation: LayoutOrientation
+  orientation: LayoutOrientation,
+  platform?: string
 ): VideoPresetOption[] {
   const fits = recordingVideoPresetOptions.filter(({ value }) => {
-    const { width, height } = videoPresets[value]
-    return orientation === 'vertical' ? height > width : width >= height
+    const video = videoPresets[value]
+    const { width, height } = video
+    const orientationFits = orientation === 'vertical' ? height > width : width >= height
+    return orientationFits && (!isWindowsPlatform(platform) || recordOnlyBridgeEnvelopeFits(video))
   })
   if (current === 'custom' || fits.some(({ value }) => value === current)) return fits
   const named = [

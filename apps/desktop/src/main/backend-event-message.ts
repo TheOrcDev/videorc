@@ -6,7 +6,8 @@ import type {
   PreviewSurfaceStatus,
   RecordingStatus,
   ServerEvent,
-  ServerResponse
+  ServerResponse,
+  VirtualCameraStatus
 } from '../shared/backend'
 import {
   parseBackendWireMessage,
@@ -23,7 +24,10 @@ import {
  */
 export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set([
   'banners.changed',
-  'overlays.layout'
+  'overlays.layout',
+  // Plan 214 B3: the camera switch activates the extension; a bad status
+  // is dropped with a warning, never the socket.
+  'virtualCamera.changed'
 ])
 
 /** The privileged main-process socket uses the same bounded wire contract as the renderer. */
@@ -82,4 +86,12 @@ export function parseMainOverlayLayout(payload: unknown): OverlayLayout {
 /** `overlays.layout` event: the whole layout, strictly validated. */
 export function parseMainOverlayLayoutEvent(payload: unknown): OverlayLayout {
   return validateBackendEventPayload('overlays.layout', payload) as OverlayLayout
+}
+
+export function parseMainVirtualCameraStatus(payload: unknown): VirtualCameraStatus {
+  return validateBackendRpcResult('virtualCamera.status', payload) as VirtualCameraStatus
+}
+
+export function parseMainVirtualCameraChangedEvent(payload: unknown): VirtualCameraStatus {
+  return validateBackendEventPayload('virtualCamera.changed', payload) as VirtualCameraStatus
 }

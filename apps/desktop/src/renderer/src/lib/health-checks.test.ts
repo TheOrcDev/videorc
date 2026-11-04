@@ -4,6 +4,8 @@ import type { DiagnosticStats, StreamTargetRuntime } from '@/lib/backend'
 
 import {
   RECORDING_AT_RISK_ADVICE,
+  cameraCheck,
+  cameraNoVideoAdvice,
   checkNeedsAttention,
   destinationsCheck,
   encoderCheck,
@@ -20,6 +22,7 @@ import {
   previewSourceCheck,
   slowdownAdvice,
   slowdownCheck,
+  sourcesCheck,
   type HealthCheck
 } from './health-checks'
 
@@ -123,6 +126,27 @@ describe('Health check words', () => {
     expect(pipelineStateWords('failed')).toEqual({ value: 'Failed', tone: 'error' })
   })
 
+  it('names a camera that is on but sends no video (plan 216 D2)', () => {
+    // The streamer's bundle: Live, no frame ever, past the grace.
+    const silent = { state: 'live' as const, noVideo: true }
+    expect(cameraCheck(silent)).toEqual({ value: 'No video', tone: 'warn' })
+    expect(cameraCheck({ state: 'live' })).toEqual(previewSourceCheck('live'))
+    expect(cameraCheck({ state: 'starting', noVideo: true })).toEqual(
+      previewSourceCheck('starting')
+    )
+    expect(cameraNoVideoAdvice(silent, 'MacBook Pro Camera')).toBe(
+      "MacBook Pro Camera isn't sending video. Close other apps that use it, or choose another camera in Sources."
+    )
+    expect(cameraNoVideoAdvice(silent, undefined)).toMatch(/^Your camera isn't sending video\./)
+    expect(cameraNoVideoAdvice({ state: 'live' }, 'MacBook Pro Camera')).toBeNull()
+    const verdict = healthVerdict({
+      checks: [{ id: 'camera', label: 'Camera', ...cameraCheck(silent) }],
+      advice: cameraNoVideoAdvice(silent, 'MacBook Pro Camera')
+    })
+    expect(verdict.title).toBe('1 thing needs attention: Camera')
+    expect(verdict.description).toContain("MacBook Pro Camera isn't sending video.")
+  })
+
   it('counts destinations in glossary words', () => {
     const target = (state: StreamTargetRuntime['state']): StreamTargetRuntime => ({
       targetId: state,
@@ -189,5 +213,47 @@ describe('permissionWarnings', () => {
     expect(
       permissionWarnings(events, (pane) => pane !== 'screen-recording', new Set(['c']))
     ).toEqual([{ pane: 'camera', eventIds: ['a', 'b'], createdAt: '2026-10-11T10:05:00Z' }])
+  })
+})
+
+// #981: "Dropping frames" is present tense. It reads the drop window, never
+// the run totals, so a static screen's idle frames and one old drop never
+// keep Sources amber.
+describe('sourcesCheck', () => {
+  const healthy = {
+    deviceDisconnected: false,
+    duplicateCaptureSources: [],
+    previewCameraDroppedFrames: 0,
+    previewScreenDroppedFrames: 5_065,
+    captureFps: 30,
+    targetFps: 30
+  } as unknown as DiagnosticStats
+
+  it('is healthy on run totals alone', () => {
+    expect(sourcesCheck(healthy, { capture: false })).toEqual({ value: 'Healthy', tone: 'good' })
+  })
+
+  it('says Dropping frames while the window says so', () => {
+    expect(sourcesCheck(healthy, { capture: true })).toEqual({
+      value: 'Dropping frames',
+      tone: 'warn'
+    })
+  })
+
+  it('keeps the device and duplicate-capture words ahead of drops', () => {
+    expect(sourcesCheck({ ...healthy, deviceDisconnected: true }, { capture: true })).toEqual({
+      value: 'Device disconnected',
+      tone: 'error'
+    })
+    expect(
+      sourcesCheck({ ...healthy, duplicateCaptureSources: ['Screen'] }, { capture: true })
+    ).toEqual({ value: 'Captured twice', tone: 'warn' })
+  })
+
+  it('still says Capture slow from the frame rate', () => {
+    expect(sourcesCheck({ ...healthy, captureFps: 20 }, { capture: false })).toEqual({
+      value: 'Capture slow',
+      tone: 'warn'
+    })
   })
 })

@@ -860,14 +860,18 @@ mod runtime {
     /// The Buddy's pet atlas per leg (plan 168 S-B4).
     const BUDDY_SPRITE_PRIMARY_SOURCE_ID: u64 = 16;
     const BUDDY_SPRITE_AUXILIARY_SOURCE_ID: u64 = 17;
-    /// Overlay stacking (plan 164 owner answer 7, plan 168 D9): captions,
-    /// then the Buddy (pet, then bubble), then the highlight card on top.
-    /// `build_windows_d3d11_scene_plan` sorts layers by z, so the numbers are
-    /// the order.
+    /// The chat box per leg (plan 215 G).
+    const CHAT_PRIMARY_SOURCE_ID: u64 = 18;
+    const CHAT_AUXILIARY_SOURCE_ID: u64 = 19;
+    /// Overlay stacking (plan 164 owner answer 7, plan 168 D9, plan 215 G):
+    /// captions, then the chat box, then the Buddy (pet, then bubble), then
+    /// the highlight card on top. `build_windows_d3d11_scene_plan` sorts
+    /// layers by z, so the numbers are the order.
     const CAPTION_Z_INDEX: i32 = 10;
-    const BUDDY_SPRITE_Z_INDEX: i32 = 11;
-    const BUDDY_Z_INDEX: i32 = 12;
-    const HIGHLIGHT_Z_INDEX: i32 = 13;
+    const CHAT_Z_INDEX: i32 = 11;
+    const BUDDY_SPRITE_Z_INDEX: i32 = 12;
+    const BUDDY_Z_INDEX: i32 = 13;
+    const HIGHLIGHT_Z_INDEX: i32 = 14;
     /// Banners per leg (plan 186 S4): `banners::BANNER_MAX_SHOWN` plus room
     /// for the ones still fading out. Ids 40.. are the primary leg's, 48.. the
     /// auxiliary's; z 6 to 9 sits under the captions.
@@ -1076,6 +1080,10 @@ mod runtime {
     pub(crate) struct WindowsD3d11OverlayInput {
         pub(crate) captions: CaptionOverlaySlots,
         pub(crate) highlight: CaptionOverlaySlot,
+        /// The chat box (plan 215 G): the landscape raster, drawn on every
+        /// leg its plan carries like the card (the Windows session, like the
+        /// card's path here, has no portrait slot yet).
+        pub(crate) chat: CaptionOverlaySlot,
         /// The Buddy's bubble, one raster per target like captions (plan 164;
         /// the bubble only since plan 168).
         pub(crate) buddy: CaptionOverlaySlots,
@@ -1085,15 +1093,18 @@ mod runtime {
         pub(crate) caption_on_auxiliary: bool,
         pub(crate) highlight_on_primary: bool,
         pub(crate) highlight_on_auxiliary: bool,
+        pub(crate) chat_on_primary: bool,
+        pub(crate) chat_on_auxiliary: bool,
         pub(crate) buddy_on_primary: bool,
         pub(crate) buddy_on_auxiliary: bool,
-        /// Plan 205 S8: the program carries the highlight card / the Buddy
-        /// (`program_shows` over the layout at session start, like the leg
-        /// flags above; mid-session switches apply at the next start, as the
-        /// log says). It differs from "some leg burns it" only for a
-        /// buffer-only session, whose ring keeps the recording plan (D2)
-        /// while its Preview shows the idle program.
+        /// Plan 205 S8: the program carries the highlight card / the Buddy /
+        /// the chat box (`program_shows` over the layout at session start,
+        /// like the leg flags above; mid-session switches apply at the next
+        /// start, as the log says). It differs from "some leg burns it" only
+        /// for a buffer-only session, whose ring keeps the recording plan
+        /// (D2) while its Preview shows the idle program.
         pub(crate) highlight_in_program: bool,
+        pub(crate) chat_in_program: bool,
         pub(crate) buddy_in_program: bool,
         /// The banners' leg plan shape (plan 186 S4): each banner's switches
         /// pick its legs through `banners::banner_leg_carries`, live, so a
@@ -1549,6 +1560,7 @@ mod runtime {
             if plan.auxiliary.is_none()
                 && (overlays.caption_on_auxiliary
                     || overlays.highlight_on_auxiliary
+                    || overlays.chat_on_auxiliary
                     || overlays.buddy_on_auxiliary)
             {
                 return Err(
@@ -1960,6 +1972,18 @@ mod runtime {
         )
     }
 
+    /// Plan 215 G: the chat box's layers this tick, planned like the card's.
+    fn chat_targets(
+        plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
+    ) -> super::WindowsD3d11ItemTargets {
+        super::windows_d3d11_item_targets(
+            input.chat_on_primary,
+            plan.auxiliary.is_some() && input.chat_on_auxiliary,
+            input.chat_in_program,
+        )
+    }
+
     /// Plan 205 S8: the Buddy's layers (pet and bubble) this tick.
     fn buddy_targets(
         plan: &WindowsD3d11SessionPlan,
@@ -2255,9 +2279,11 @@ mod runtime {
     ) -> Result<Vec<WindowsD3d11OverlayFrame>, String> {
         let captions = current_caption_overlays(&input.captions);
         let highlight = current_caption_overlay(&input.highlight);
+        let chat = current_caption_overlay(&input.chat);
         let buddy = current_caption_overlays(&input.buddy);
         let caption_on = caption_targets(plan, input);
         let highlight_on = highlight_targets(plan, input);
+        let chat_on = chat_targets(plan, input);
         let buddy_on = buddy_targets(plan, input);
         let primary_dimensions =
             WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
@@ -2267,7 +2293,7 @@ mod runtime {
             .map(|video| WindowsD3d11OutputDimensions::new(video.width, video.height))
             .transpose()
             .map_err(|error| error.to_string())?;
-        let mut frames = Vec::with_capacity(6);
+        let mut frames = Vec::with_capacity(8);
 
         if let (Some(output_targets), Some(caption)) = (caption_on.primary_canvas, captions.primary)
         {
@@ -2307,6 +2333,34 @@ mod runtime {
                 output_dimensions,
                 safe_inset,
                 z_index: CAPTION_Z_INDEX,
+                bubble_anchor: None,
+            });
+        }
+        // Plan 215 G: the chat box, after the bars and under the Buddy and the
+        // card, inside its own rect (no safe inset: it yields to nothing).
+        if let (Some(output_targets), Some(overlay)) = (chat_on.primary_canvas, chat.clone()) {
+            frames.push(WindowsD3d11OverlayFrame {
+                source_id: CHAT_PRIMARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::ChatOverlay,
+                overlay,
+                output_targets,
+                output_dimensions: primary_dimensions,
+                safe_inset: 0,
+                z_index: CHAT_Z_INDEX,
+                bubble_anchor: None,
+            });
+        }
+        if let (Some(output_targets), Some(overlay), Some(output_dimensions)) =
+            (chat_on.auxiliary_canvas, chat, auxiliary_dimensions)
+        {
+            frames.push(WindowsD3d11OverlayFrame {
+                source_id: CHAT_AUXILIARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::ChatOverlay,
+                overlay,
+                output_targets,
+                output_dimensions,
+                safe_inset: 0,
+                z_index: CHAT_Z_INDEX,
                 bubble_anchor: None,
             });
         }
@@ -4005,6 +4059,7 @@ mod runtime {
         let input = WindowsD3d11OverlayInput {
             captions: crate::captions::new_caption_overlay_slots(),
             highlight: crate::captions::new_caption_overlay_slot(),
+            chat: crate::captions::new_caption_overlay_slot(),
             buddy: crate::captions::new_caption_overlay_slots(),
             buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
                 &crate::cohost::CohostPersona::default(),
@@ -4015,9 +4070,12 @@ mod runtime {
             caption_on_auxiliary: false,
             highlight_on_primary: false,
             highlight_on_auxiliary: false,
+            chat_on_primary: false,
+            chat_on_auxiliary: false,
             buddy_on_primary: true,
             buddy_on_auxiliary: true,
             highlight_in_program: false,
+            chat_in_program: false,
             buddy_in_program: true,
             banner_shape: crate::overlay_layout::OverlaySessionShape {
                 record_enabled: true,
@@ -4110,6 +4168,7 @@ mod runtime {
         let input = WindowsD3d11OverlayInput {
             captions: crate::captions::new_caption_overlay_slots(),
             highlight: crate::captions::new_caption_overlay_slot(),
+            chat: crate::captions::new_caption_overlay_slot(),
             buddy: crate::captions::new_caption_overlay_slots(),
             buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
                 &crate::cohost::CohostPersona::default(),
@@ -4120,9 +4179,12 @@ mod runtime {
             caption_on_auxiliary: true,
             highlight_on_primary: true,
             highlight_on_auxiliary: true,
+            chat_on_primary: true,
+            chat_on_auxiliary: true,
             buddy_on_primary: true,
             buddy_on_auxiliary: true,
             highlight_in_program: true,
+            chat_in_program: true,
             buddy_in_program: true,
             banner_shape: crate::overlay_layout::OverlaySessionShape {
                 record_enabled: true,
@@ -4153,6 +4215,13 @@ mod runtime {
             CaptionOverlayPosition::Top,
         )
         .unwrap();
+        // Plan 215 G: the chat box at its placed rect, like the card.
+        let chat_rect = OverlayRect::new(0.6, 0.1, 0.3, 0.44);
+        crate::captions::install_prepared_caption_overlay(
+            &input.chat,
+            crate::captions::prepare_caption_overlay(&png).unwrap(),
+            crate::chat_overlay::chat_overlay_placement(Some(chat_rect)),
+        );
         let buddy_rect = OverlayRect::new(0.15, 0.25, 0.25, 0.2);
         crate::buddy_overlay::install_buddy_overlay(
             &input.buddy,
@@ -4184,6 +4253,16 @@ mod runtime {
                     WindowsD3d11SceneSourceKind::CaptionOverlay
                 ),
                 (
+                    CHAT_PRIMARY_SOURCE_ID,
+                    CHAT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::ChatOverlay
+                ),
+                (
+                    CHAT_AUXILIARY_SOURCE_ID,
+                    CHAT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::ChatOverlay
+                ),
+                (
                     BUDDY_PRIMARY_SOURCE_ID,
                     BUDDY_Z_INDEX,
                     WindowsD3d11SceneSourceKind::BuddyOverlay
@@ -4206,20 +4285,44 @@ mod runtime {
             ]
         );
         assert!(
-            CAPTION_Z_INDEX < BUDDY_SPRITE_Z_INDEX
+            CAPTION_Z_INDEX < CHAT_Z_INDEX
+                && CHAT_Z_INDEX < BUDDY_SPRITE_Z_INDEX
                 && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
                 && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
         );
+        // Plan 215 G: the chat box lands in its placed rect on both legs, with
+        // no safe inset; the same geometry oracle as the CPU and Metal paths
+        // hugs the rect's right edge (its centre is right of the middle) and
+        // its top: a 200 px raster in 768..1152 lands at (952, 72).
+        let chat_primary = &frames[2];
+        assert_eq!(chat_primary.overlay.blit_rect(1280, 720), chat_rect);
+        assert_eq!(chat_primary.safe_inset, 0);
+        assert_eq!(
+            chat_primary.output_targets,
+            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
+        );
+        assert_eq!(
+            frames[3].output_targets,
+            WindowsD3d11SceneOutputTargets::AUXILIARY
+        );
+        let (chat_transform, _) = super::windows_d3d11_overlay_layer_geometry(
+            (200, 100),
+            (1280, 720),
+            chat_primary.overlay.blit_rect(1280, 720),
+            0,
+        );
+        assert_eq!(chat_transform.x, 952.0 / 1280.0);
+        assert_eq!(chat_transform.y, 72.0 / 720.0);
         // Plan 205 S8: both legs burn the Buddy, so the Preview draws it once,
         // from the primary's layer (the Preview's canvas and sources are the
         // primary's); the stream leg's layer is the stream's alone.
-        let buddy_primary = &frames[2];
+        let buddy_primary = &frames[4];
         assert_eq!(
             buddy_primary.output_targets,
             WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
         );
         assert_eq!(
-            frames[3].output_targets,
+            frames[5].output_targets,
             WindowsD3d11SceneOutputTargets::AUXILIARY
         );
         assert_eq!(buddy_primary.overlay.blit_rect(1280, 720), buddy_rect);
@@ -4259,6 +4362,8 @@ mod runtime {
             vec![
                 CAPTION_PRIMARY_SOURCE_ID,
                 CAPTION_AUXILIARY_SOURCE_ID,
+                CHAT_PRIMARY_SOURCE_ID,
+                CHAT_AUXILIARY_SOURCE_ID,
                 BUDDY_PRIMARY_SOURCE_ID,
                 BUDDY_AUXILIARY_SOURCE_ID,
                 HIGHLIGHT_PRIMARY_SOURCE_ID,
@@ -4275,6 +4380,11 @@ mod runtime {
                     CAPTION_PRIMARY_SOURCE_ID,
                     CAPTION_Z_INDEX,
                     WindowsD3d11SceneSourceKind::CaptionOverlay
+                ),
+                (
+                    CHAT_PRIMARY_SOURCE_ID,
+                    CHAT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::ChatOverlay
                 ),
                 (
                     BUDDY_PRIMARY_SOURCE_ID,
@@ -4401,6 +4511,7 @@ mod runtime {
             let input = WindowsD3d11OverlayInput {
                 captions: crate::captions::new_caption_overlay_slots(),
                 highlight: crate::captions::new_caption_overlay_slot(),
+                chat: crate::captions::new_caption_overlay_slot(),
                 buddy: crate::captions::new_caption_overlay_slots(),
                 buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
                     &crate::cohost::CohostPersona::default(),
@@ -4411,9 +4522,12 @@ mod runtime {
                 caption_on_auxiliary: false,
                 highlight_on_primary: false,
                 highlight_on_auxiliary: false,
+                chat_on_primary: false,
+                chat_on_auxiliary: false,
                 buddy_on_primary: false,
                 buddy_on_auxiliary: shape.stream_enabled && shape.aux_leg == OverlayAuxLeg::Stream,
                 highlight_in_program: false,
+                chat_in_program: false,
                 buddy_in_program: crate::overlay_layout::program_shows(program_shape, true, false),
                 banner_shape: shape,
                 program_shape,
@@ -4891,11 +5005,13 @@ mod tests {
         let zs: Vec<i32> = (0..6).map(windows_d3d11_banner_z_index).collect();
         assert_eq!(zs, vec![6, 7, 8, 9, 9, 9]);
         assert!(zs.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0);
-        assert!(
-            WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
-            "captions draw at z 10"
-        );
+        const { assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0) };
+        const {
+            assert!(
+                WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
+                "captions draw at z 10"
+            )
+        };
     }
 
     fn draws_on(
@@ -5793,8 +5909,9 @@ mod tests {
     }
 
     /// D7: the pet hanging off the canvas edge is clipped by the rasterizer
-    /// (its square stays whole), where an ordinary layer is squashed into
-    /// the canvas by the planner.
+    /// (its square stays whole). Since plan 215 E an ordinary layer is cut
+    /// the same way: the planner keeps its uncut box and never squashes it
+    /// into the canvas.
     #[test]
     fn windows_d3d11_buddy_sprite_clips_at_the_canvas_edge_instead_of_squashing() {
         use crate::windows_d3d11_compositor::{
@@ -5825,12 +5942,15 @@ mod tests {
             x + w > 1.0,
             "it hangs off the right edge; the rasterizer clips it"
         );
-        let mut squashed = layer;
-        squashed.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
-        squashed.effects.sprite = None;
-        let ordinary = plan_one_layer(squashed, (1280, 720));
+        let mut plain = layer;
+        plain.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
+        plain.effects.sprite = None;
+        let ordinary = plan_one_layer(plain, (1280, 720));
+        let [ordinary_x, _, ordinary_w, _] = ordinary.destination_normalized;
+        assert!((ordinary_x - 1200.0 / 1280.0).abs() < 1e-6);
         assert!(
-            ordinary.destination_normalized[0] + ordinary.destination_normalized[2] <= 1.0 + 1e-6
+            (ordinary_w - 120.0 / 1280.0).abs() < 1e-6,
+            "an ordinary layer is cut at the edge, never squashed (plan 215 E)"
         );
         // A sprite transform on any other kind is refused.
         let mut stray = layer;

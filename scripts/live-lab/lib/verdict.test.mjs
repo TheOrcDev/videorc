@@ -14,6 +14,7 @@ import {
   droppedFrameWindows,
   loadThresholds,
   longestBadRunMs,
+  lostFramesBetween,
   normalizeRole,
   parseCensusCsv,
   readRunFolder,
@@ -284,6 +285,128 @@ test('a reconnect gap ends a slow or low-bitrate run instead of counting toward 
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('observer polls that never read the stream check nothing: the YouTube signals skip with the reason', async () => {
+  const dir = await fixtureCopy('clean')
+  try {
+    const run = await readRunFolder(dir)
+    const thresholds = await loadThresholds()
+    const failedRead = (snapshot) => ({
+      ...snapshot,
+      broadcast: null,
+      stream: null,
+      errors: [
+        { call: 'liveBroadcasts.list', message: 'The broadcaster role is not authorized.' },
+        { call: 'liveStreams.list', message: 'The broadcaster role is not authorized.' }
+      ],
+      incidents: []
+    })
+    const verdictFor = async (overrides) =>
+      (await computeVerdict({ ...run, ...overrides }, thresholds, { runFrames: false })).verdict
+
+    const unread = await verdictFor({ observer: run.observer.map(failedRead) })
+    for (const id of ['stream:noData-while-live', 'youtube:health']) {
+      assert.equal(byId(unread, id).status, 'skipped', id)
+      assert.match(
+        byId(unread, id).summary,
+        /not checked: none of \d+ observer polls read the stream \(The broadcaster role is not authorized/
+      )
+    }
+
+    const off = 'the broadcaster role is not authorized (pnpm live:hookup --role broadcaster)'
+    const offVerdict = await verdictFor({
+      observer: [],
+      manifest: {
+        ...run.manifest,
+        session: { ...run.manifest.session, youtube: { unavailable: off } }
+      }
+    })
+    assert.equal(byId(offVerdict, 'youtube:health').status, 'skipped')
+    assert.equal(byId(offVerdict, 'youtube:health').summary, `not checked: ${off}`)
+    assert.equal(byId(offVerdict, 'stream:noData-while-live').summary, `not checked: ${off}`)
+
+    // One unreadable poll among good ones still passes, and says so.
+    const mixed = await verdictFor({
+      observer: [failedRead(run.observer[0]), ...run.observer.slice(1)]
+    })
+    const readable = run.observer.length - 1
+    assert.equal(byId(mixed, 'youtube:health').status, 'pass')
+    assert.equal(byId(mixed, 'youtube:health').value, readable)
+    assert.match(
+      byId(mixed, 'youtube:health').summary,
+      new RegExp(
+        `over ${readable} readable polls \\(1 of ${run.observer.length} polls unreadable\\)`
+      )
+    )
+    assert.equal(byId(mixed, 'stream:noData-while-live').status, 'pass')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a low bitrate with fps, speed and frames on target is content-limited, not a stream fault', async () => {
+  const dir = await fixtureCopy('clean')
+  try {
+    const run = await readRunFolder(dir)
+    const thresholds = await loadThresholds()
+    const T0 = Date.parse('2026-10-12T06:00:00.000Z')
+    // Run 2026-11-04-first-light-03021b: OpenH264 at 6000k on the mostly
+    // static card held ~1000 kbps for six minutes at 30 fps and 1.0x.
+    const journalOf = (leg) =>
+      Array.from({ length: 25 }, (_, i) => ({
+        kind: 'sample',
+        tsMs: T0 + i * 5000,
+        legs: [{ targetId: 'yt', state: 'live', bitrateKbps: 1000, ...leg(i) }]
+      }))
+    const verdictFor = async (journal, extra = {}) =>
+      (await computeVerdict({ ...run, journal, ...extra }, thresholds, { runFrames: false }))
+        .verdict
+    const steady = () => ({ fps: 30.1, speed: 1, droppedFrames: 0, duplicatedFrames: 0 })
+
+    const still = byId(await verdictFor(journalOf(steady)), 'stream:bitrate')
+    assert.equal(still.status, 'pass')
+    assert.match(
+      still.summary,
+      /median bitrate 1000 kbps against a 6000 kbps target: content-limited/
+    )
+
+    // Any sign of starvation through the low stretch keeps the warning.
+    const starved = {
+      'frames under the profile rate': (i) => ({ ...steady(i), fps: 25 }),
+      'slower than realtime': (i) => ({ ...steady(i), speed: 0.9 }),
+      'frames dropped every sample': (i) => ({ ...steady(i), droppedFrames: i * 3 }),
+      'no speed reported': (i) => ({ ...steady(i), speed: undefined })
+    }
+    for (const [why, leg] of Object.entries(starved)) {
+      const bitrate = byId(await verdictFor(journalOf(leg)), 'stream:bitrate')
+      assert.equal(bitrate.status, 'warn', why)
+      assert.match(bitrate.summary, /bitrate under 70% of 6000 kbps for 120 s/, why)
+    }
+
+    // Without a profile fps nothing proves the frame rate held.
+    const noProfile = await verdictFor(journalOf(steady), {
+      features: run.features.filter((feature) => feature.kind !== 'profile')
+    })
+    assert.equal(byId(noProfile, 'stream:bitrate').status, 'warn')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('lost frames: a dropped or duplicated frame on a known leg between two samples', () => {
+  const at = (legs) => ({ kind: 'sample', legs })
+  const leg = (targetId, droppedFrames, duplicatedFrames = 0) => ({
+    targetId,
+    droppedFrames,
+    duplicatedFrames
+  })
+  assert.equal(lostFramesBetween(at([leg('a', 2)]), at([leg('a', 2)])), false)
+  assert.equal(lostFramesBetween(at([leg('a', 2)]), at([leg('a', 3)])), true)
+  assert.equal(lostFramesBetween(at([leg('a', 2, 0)]), at([leg('a', 2, 1)])), true)
+  assert.equal(lostFramesBetween(at([leg('a', 2)]), at([leg('a', 2), leg('b', 9)])), false)
+  assert.equal(lostFramesBetween(at([{ targetId: 'a' }]), at([leg('a', 4)])), false)
+  assert.equal(lostFramesBetween(null, at([leg('a', 4)])), false)
 })
 
 test('a synthetic renderer leak over a long run warns in report mode and fails in gate mode', async () => {

@@ -40,6 +40,12 @@ describe('renderer security policy', () => {
       expect(roleCanInvokeChannel(role, 'scheduled-streams:import-thumbnail')).toBe(false)
     }
   })
+  it('lets only the Studio renderer run a Videorc Camera action (plan 214 E)', () => {
+    expect(roleCanInvokeChannel('main', 'virtual-camera:action')).toBe(true)
+    for (const role of ['notes', 'comments', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'virtual-camera:action')).toBe(false)
+    }
+  })
   it('derives only known preload roles from main-owned process arguments', () => {
     expect(rendererRoleFromArguments(['electron', '--videorc-renderer-role=comments'])).toBe(
       'comments'
@@ -492,6 +498,26 @@ describe('renderer security policy', () => {
     expect(handler.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
     expect(handler.slice(0, 1000)).toContain(
       "sendElectronEvent(mainWindow.webContents, 'livestream:open-destination'"
+    )
+  })
+
+  it('lets only the Chat window ask for the Videorc sign-in, checked by sender (plan 215 A3)', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:sign-in-videorc')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:sign-in-videorc')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:sign-in-videorc')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('signInToVideorcFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('signInToVideorcFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('signInToVideorcFromCommentsWindow')
+    // The sign-in itself stays with the main window: no auxiliary window can
+    // start it, and only the main window hears the ask.
+    for (const keys of Object.values(AUXILIARY_API_KEYS)) {
+      expect(keys).not.toContain('beginAccountSignIn')
+      expect(keys).not.toContain('onAccountSignInRequest')
+    }
+    const handler = source('./index.ts').split("'comments-window:sign-in-videorc',")[1] ?? ''
+    expect(handler.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
+    expect(handler.slice(0, 1000)).toContain(
+      "sendElectronEvent(mainWindow.webContents, 'account:sign-in-request'"
     )
   })
 

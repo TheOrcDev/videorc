@@ -4,6 +4,8 @@ import {
   applyVideorcWindowCaptureProtection,
   CAPTURE_PROTECTION_UNSUPPORTED_REASON,
   platformSupportsCaptureProtection,
+  releaseVideorcWindowCaptureProtection,
+  streamManagerHideMethod,
   videorcWindowRequiresCaptureProtection,
   type VideorcWindowRole,
   WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
@@ -19,14 +21,84 @@ describe('window capture protection policy', () => {
     'proof-surface'
   ]
 
-  it('protects ONLY the notes teleprompter, on every platform', () => {
+  it('protects ONLY the notes teleprompter by default, on every platform', () => {
     // Owner call, 2026-08-19: comments and captions are part of the show and
     // must stay visible in recordings; notes is the one private window.
     for (const platform of ['darwin', 'win32', 'linux'] as const) {
       for (const role of everyRole) {
         expect(videorcWindowRequiresCaptureProtection(role, platform)).toBe(role === 'notes')
+        expect(
+          videorcWindowRequiresCaptureProtection(role, platform, { hiddenFromStream: false })
+        ).toBe(role === 'notes')
       }
     }
+  })
+
+  // Plan 215 D6: Hide from stream. Windows hides the Stream Manager through
+  // content protection, the one route its monitor capture has. macOS never
+  // does: Videorc's own capture filter leaves the window out, and content
+  // protection would also hide it from the streamer's screenshots and Zoom.
+  // Linux cannot hide it at all. Every other window ignores the switch.
+  it('protects the Stream Manager with Hide from stream on, on Windows only', () => {
+    expect(streamManagerHideMethod('darwin')).toBe('capture-filter')
+    expect(streamManagerHideMethod('win32')).toBe('content-protection')
+    expect(streamManagerHideMethod('linux')).toBe('unsupported')
+    expect(streamManagerHideMethod('freebsd')).toBe('unsupported')
+    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+      for (const role of everyRole) {
+        expect(
+          videorcWindowRequiresCaptureProtection(role, platform, { hiddenFromStream: true })
+        ).toBe(role === 'notes' || (role === 'comments' && platform === 'win32'))
+      }
+    }
+    const window = { setContentProtection: vi.fn() }
+    expect(
+      applyVideorcWindowCaptureProtection(window, 'comments', {
+        platform: 'darwin',
+        hiddenFromStream: true
+      })
+    ).toEqual({ state: 'not-required', protected: false })
+    expect(
+      applyVideorcWindowCaptureProtection(window, 'comments', {
+        platform: 'win32',
+        hiddenFromStream: true
+      })
+    ).toEqual({ state: 'protected', protected: true })
+    expect(window.setContentProtection).toHaveBeenCalledTimes(1)
+    expect(window.setContentProtection).toHaveBeenCalledWith(true)
+  })
+
+  it('releases the Stream Manager when the switch goes off, and never a window it did not protect', () => {
+    const window = { setContentProtection: vi.fn() }
+    expect(releaseVideorcWindowCaptureProtection(window)).toBe(false)
+    expect(window.setContentProtection).not.toHaveBeenCalled()
+
+    applyVideorcWindowCaptureProtection(window, 'comments', {
+      platform: 'win32',
+      hiddenFromStream: true
+    })
+    expect(releaseVideorcWindowCaptureProtection(window)).toBe(false)
+    expect(window.setContentProtection).toHaveBeenLastCalledWith(false)
+    // Off then on again protects again: the release forgot the instance.
+    expect(
+      applyVideorcWindowCaptureProtection(window, 'comments', {
+        platform: 'win32',
+        hiddenFromStream: true
+      })
+    ).toEqual({ state: 'protected', protected: true })
+    expect(window.setContentProtection).toHaveBeenCalledTimes(3)
+
+    // A release that Electron refuses leaves the window reported protected.
+    const stuck = {
+      setContentProtection: vi.fn().mockImplementation((enabled: boolean) => {
+        if (!enabled) throw new Error('refused')
+      })
+    }
+    applyVideorcWindowCaptureProtection(stuck, 'comments', {
+      platform: 'win32',
+      hiddenFromStream: true
+    })
+    expect(releaseVideorcWindowCaptureProtection(stuck)).toBe(true)
   })
 
   it('is idempotent for one window instance', () => {

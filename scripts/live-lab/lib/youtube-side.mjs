@@ -14,7 +14,12 @@ import { DEFAULT_INTERVAL_MS, createYoutubeObserver } from './youtube-observer.m
 // clipPull: true AND the broadcaster API confirms the video is the lab
 // channel's own; otherwise every pull is recorded as skipped. Every API call
 // is charged to the quota ledger before it goes out (U8); quota.json records
-// what this run spent.
+// what this run spent. Without a broadcaster token the observer stays off for
+// the whole run (observer.unavailable says why): a poll could never read
+// anything, and the YouTube-side steps skip instead of waiting it out.
+
+export const BROADCASTER_NOT_AUTHORIZED =
+  'the broadcaster role is not authorized (pnpm live:hookup --role broadcaster)'
 
 export const CLIP_INTERVAL_MS = 15 * 60 * 1000
 export const DEFAULT_CLIP_SECONDS = 120
@@ -43,6 +48,7 @@ export function createYoutubeSide({
   log = () => {},
   clock = systemClock,
   getToken = createAccessTokenSource({ config }),
+  broadcasterAuthorized = Boolean(config?.roles?.broadcaster?.refreshToken),
   createObserver = createYoutubeObserver,
   createViewer = createViewerBot,
   pull = defaultPullClip,
@@ -63,6 +69,7 @@ export function createYoutubeSide({
   const clipResults = []
   const abort = new AbortController()
   const clipPull = policy?.clipPull === true
+  const unavailable = broadcasterAuthorized ? null : BROADCASTER_NOT_AUTHORIZED
   let watching = null
   let clipTimer = null
   let pulling = false
@@ -108,6 +115,8 @@ export function createYoutubeSide({
       let result
       if (!clipPull) {
         result = { status: 'skipped', reason: 'clip-pull-disabled', videoId: videoId() }
+      } else if (unavailable) {
+        result = { status: 'skipped', reason: 'broadcaster-not-authorized' }
       } else if (!url) {
         result = { status: 'skipped', reason: 'no-broadcast-yet' }
       } else {
@@ -151,6 +160,8 @@ export function createYoutubeSide({
     attach({ onStudioEnded } = {}) {
       if (typeof onStudioEnded === 'function') hooks.onStudioEnded = onStudioEnded
     },
+    /** Why the observer is off for this run, or null when it watches. */
+    unavailable,
     incidents: () => [...incidents],
     snapshots: () => [...snapshots],
     latest,
@@ -162,6 +173,7 @@ export function createYoutubeSide({
     pullClip: pullClipNow,
     /** One extra poll now (charged), recorded like the scheduled ones. */
     async poll() {
+      if (unavailable) throw new Error(`The YouTube observer is off: ${unavailable}.`)
       const snapshot = await observerApi.poll()
       await recordSnapshot(snapshot)
       for (const incident of snapshot.incidents ?? []) recordIncident(incident)
@@ -179,6 +191,10 @@ export function createYoutubeSide({
   }
 
   async function start() {
+    if (unavailable) {
+      log(`YouTube observer off: ${unavailable}. YouTube-side checks are skipped.`)
+      return
+    }
     watching = observerApi
       .watch({
         intervalMs,
@@ -213,6 +229,7 @@ export function createYoutubeSide({
     const summary = {
       polls: watched?.polls ?? 0,
       stoppedBy: watched?.stoppedBy ?? 'never-started',
+      unavailable,
       incidents: incidents.map((incident) => incident.signature),
       videoId: videoId(),
       clipPull,

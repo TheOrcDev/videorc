@@ -95,6 +95,13 @@ export function isNoData(stream) {
  * Pure incident rules. `state` carries the streaks between polls and is
  * returned updated; `snapshot.appOnAir` is what the app reported at poll time.
  */
+/** Pure: did this poll read the stream? A failed read is unknown, not noData. */
+export function isStreamReadable(snapshot) {
+  return !(snapshot?.errors ?? []).some((error) =>
+    ['liveStreams.list', 'liveBroadcasts.list'].includes(error.call)
+  )
+}
+
 export function evaluateSnapshot(snapshot, state = initialRuleState()) {
   const next = {
     noDataStreak: state.noDataStreak,
@@ -111,9 +118,7 @@ export function evaluateSnapshot(snapshot, state = initialRuleState()) {
     incidents.push({ type, signature: type, severity, at, detail })
 
   // A failed stream read is unknown, not noData: it neither counts nor resets.
-  const streamKnown = !snapshot.errors.some((error) =>
-    ['liveStreams.list', 'liveBroadcasts.list'].includes(error.call)
-  )
+  const streamKnown = isStreamReadable(snapshot)
 
   if (streamKnown) {
     if (snapshot.appOnAir === true && isNoData(snapshot.stream)) {

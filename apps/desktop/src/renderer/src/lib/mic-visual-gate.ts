@@ -47,7 +47,9 @@ export function micVisualAnalyserEnabled(input: MicVisualGateInput): boolean {
  * The meter's state beside the bars, for its data attribute and the probes.
  * `live` = a session is running and the signal path is up; `monitoring` =
  * idle and the analyser is actually delivering; `muted` = the microphone is
- * muted, so flat bars are the mute and not a dead microphone; `idle` = off
+ * muted, so flat bars are the mute and not a dead microphone; `silent` = the
+ * running bus reads digital silence from an unmuted microphone (issue 1064:
+ * the recording gets nothing, whatever the room sounds like); `idle` = off
  * or unavailable, the honest state when nothing is being read. The words a
  * streamer hears come from `micSignalLabel` (plan 174 C-38: "Receiving",
  * never "Live" or "Monitoring").
@@ -56,9 +58,14 @@ export function audioMixerMonitorState(input: {
   sessionActive: boolean
   signalLive: boolean
   muted?: boolean
+  /** The backend's silence watchdog reports the captured microphone silent. */
+  silent?: boolean
 }): MicMonitorState {
   if (input.muted) {
     return 'muted'
+  }
+  if (input.silent) {
+    return 'silent'
   }
   if (!input.signalLive) {
     return 'idle'

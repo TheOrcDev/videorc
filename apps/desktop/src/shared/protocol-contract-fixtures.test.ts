@@ -93,6 +93,7 @@ import type {
 } from './buddy-library'
 import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from './buddy-library'
 import {
+  DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT,
   validateBackendEventPayload,
   validateBackendRpcParams,
   validateBackendRpcResult,
@@ -133,6 +134,7 @@ interface HighRiskContractFixtures {
   scene: { wire: Scene }
   recordingStatus: {
     wire: RecordingStatus
+    fixedSceneWire: RecordingStatus
     minimalWire: RecordingStatus
     minimalNormalized: RecordingStatus
     mixedAudioWire: RecordingStatus
@@ -500,6 +502,21 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.recordingStatus.wire.audioTracks?.[0]).not.toHaveProperty('mixSources')
   })
 
+  it("carries the running session's word on live scene edits (plan 215 D1)", () => {
+    // A compositor session takes a source moved now; the legacy FFmpeg graph
+    // composes a fixed picture and says so; nothing running says nothing.
+    expect(fixtures.recordingStatus.wire.acceptsLiveSceneEdits).toBe(true)
+    const fixed = fixtures.recordingStatus.fixedSceneWire
+    expect(jsonShape(validateBackendRpcResult('recording.status', fixed))).toEqual(fixed)
+    expect(fixed.acceptsLiveSceneEdits).toBe(false)
+    expect(fixtures.recordingStatus.minimalWire).not.toHaveProperty('acceptsLiveSceneEdits')
+    // Main parses the same status off the event socket (strict contract).
+    expect(jsonShape(validateBackendEventPayload('recording.status', fixed))).toEqual(fixed)
+    expect(() =>
+      validateBackendRpcResult('recording.status', { ...fixed, acceptsLiveSceneEdits: 'yes' })
+    ).toThrow()
+  })
+
   it('accepts the Rust stopped compositor wire shape without nullable metrics', () => {
     expect(
       jsonShape(
@@ -811,10 +828,88 @@ describe('shared high-risk protocol fixture', () => {
       })
     ).toThrow()
     // The shipped defaults: highlight bottom-left on both outputs, captions
-    // off (today's burnTarget default), the Buddy bottom-right.
+    // off (today's burnTarget default), the Buddy bottom-right, the chat box
+    // (plan 215 D5) top-left and off for both outputs.
     expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
     expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
     expect(fixtures.overlayLayout.defaults.buddy.horizontal.x).toBeCloseTo(0.7975, 6)
+    expect(fixtures.overlayLayout.defaults.chat.showOnStream).toBe(false)
+    expect(fixtures.overlayLayout.defaults.chat.showInRecording).toBe(false)
+    expect(fixtures.overlayLayout.defaults.chat.horizontal.y).toBeCloseTo(0.04, 6)
+    // A layout saved before the chat box (plan 215 G) still validates: `chat`
+    // takes the shipped default, like the stored row's `#[serde(default)]`,
+    // and the placed highlight, captions and Buddy come through untouched.
+    const { chat: _chat, ...withoutChat } = fixtures.overlayLayout.placed
+    for (const method of ['overlays.layout.get', 'overlays.layout.set'] as const) {
+      const parsed = (
+        method === 'overlays.layout.get'
+          ? validateBackendRpcResult(method, withoutChat)
+          : validateBackendRpcParams(method, withoutChat)
+      ) as typeof fixtures.overlayLayout.placed
+      expect(parsed).toStrictEqual({ ...withoutChat, chat: fixtures.overlayLayout.defaults.chat })
+    }
+    expect(
+      validateBackendEventPayload('overlays.layout', withoutChat) as typeof withoutChat
+    ).toMatchObject(withoutChat)
+    expect(DEFAULT_CHAT_OVERLAY_ITEM_LAYOUT).toStrictEqual(fixtures.overlayLayout.defaults.chat)
+    // Present, the chat box is exact; the other items stay required.
+    expect(() =>
+      validateBackendRpcResult('overlays.layout.get', {
+        ...withoutChat,
+        chat: { ...fixtures.overlayLayout.placed.chat, extra: true }
+      })
+    ).toThrow()
+    const { buddy: _buddy, ...withoutBuddy } = fixtures.overlayLayout.defaults
+    expect(() => validateBackendRpcResult('overlays.layout.get', withoutBuddy)).toThrow()
+  })
+
+  it('keeps the chat box RPCs strict (plan 215 G)', () => {
+    const png = 'iVBORw0KGgo='
+    const rect = fixtures.overlayLayout.placed.chat.horizontal
+    expect(validateBackendRpcParams('chat.overlay.set', { pngBase64: png })).toStrictEqual({
+      pngBase64: png
+    })
+    expect(
+      validateBackendRpcParams('chat.overlay.set', {
+        pngBase64: png,
+        rect,
+        verticalPngBase64: png,
+        verticalRect: fixtures.overlayLayout.placed.chat.vertical
+      })
+    ).toStrictEqual({
+      pngBase64: png,
+      rect,
+      verticalPngBase64: png,
+      verticalRect: fixtures.overlayLayout.placed.chat.vertical
+    })
+    expect(() => validateBackendRpcParams('chat.overlay.set', { pngBase64: '' })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('chat.overlay.set', { pngBase64: png, anchor: 'top-left' })
+    ).toThrow()
+    const info = { active: true, width: 640, height: 480, revision: 7, vertical: false }
+    expect(validateBackendRpcResult('chat.overlay.set', info)).toStrictEqual(info)
+    expect(
+      validateBackendRpcResult('chat.overlay.clear', { ...info, active: false })
+    ).toStrictEqual({ ...info, active: false })
+    expect(() =>
+      validateBackendRpcResult('chat.overlay.set', { ...info, vertical: null })
+    ).toThrow()
+    expect(validateBackendRpcResult('chat.overlay.canvases', {})).toStrictEqual({})
+    // A dual-orientation session: the horizontal stream rides the primary
+    // leg at the session's own size, the vertical leg has its own canvas.
+    const canvases = {
+      horizontal: { width: 1280, height: 720 },
+      vertical: { width: 720, height: 1280 }
+    }
+    expect(validateBackendRpcResult('chat.overlay.canvases', canvases)).toStrictEqual(canvases)
+    expect(
+      validateBackendRpcResult('chat.overlay.canvases', {
+        horizontal: { width: 1920, height: 1080 }
+      })
+    ).toStrictEqual({ horizontal: { width: 1920, height: 1080 } })
+    // The serde null trap: an absent canvas is omitted, never null.
+    expect(() => validateBackendRpcResult('chat.overlay.canvases', { vertical: null })).toThrow()
+    expect(() => validateBackendRpcResult('chat.overlay.canvases', { horizontal: null })).toThrow()
   })
 
   it('keeps the banner wire shape identical across languages, timer off or on (plan 186)', () => {

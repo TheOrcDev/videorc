@@ -53,6 +53,7 @@ import { formatVideoQuality } from '@/lib/format-video'
 import { outputLabel } from '@/lib/performance-check'
 import { isCommandKey, shortcutAriaKeys } from '@/lib/platform'
 import { destinationLabel, platformLabel } from '@/lib/platform-copy'
+import { beginVideorcSignIn } from '@/lib/videorc-web-links'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { YOUTUBE_STREAM_KEY_LINK_LABEL, YOUTUBE_STREAM_KEY_URL } from '@/lib/youtube-quota-copy'
 
@@ -734,6 +735,7 @@ export function GoLiveDestinationRow({
           message={destination.chatMessage}
           read={destination.chatRead}
           write={destination.chatWrite}
+          onSignInToVideorc={beginVideorcSignIn}
         />
         {!ready ? (
           <div className="flex flex-wrap gap-2">
@@ -826,7 +828,9 @@ const READ_TONE: Record<CommentsReadState, StatusTone> = {
   ended: 'neutral',
   failed: 'error',
   unavailable: 'neutral',
-  'needs-sign-in': 'neutral'
+  'needs-sign-in': 'neutral',
+  // Plan 215 A2: the relay waits on the Videorc account; attention, not a failure.
+  'needs-videorc-sign-in': 'warn'
 }
 
 const WRITE_TONE: Record<CommentsWriteState, StatusTone> = {
@@ -837,15 +841,21 @@ const WRITE_TONE: Record<CommentsWriteState, StatusTone> = {
   unavailable: 'neutral'
 }
 
-/** What chat can do on a destination: read, send, and why not. */
+/**
+ * What chat can do on a destination: read, send, and why not. When the
+ * relay waits on the Videorc sign-in (plan 215 A2), Sign in is the fix and
+ * sits right here: the stream itself still goes live.
+ */
 export function GoLiveCommentsStatus({
   read,
   write,
-  message
+  message,
+  onSignInToVideorc
 }: {
   read: CommentsReadState
   write: CommentsWriteState
   message: string
+  onSignInToVideorc?: () => void
 }): ReactElement {
   return (
     <div className="flex flex-col gap-1.5">
@@ -854,6 +864,13 @@ export function GoLiveCommentsStatus({
         <StatusBadge label="Send" tone={WRITE_TONE[write]} value={commentsWriteLabel(write)} />
       </div>
       {message ? <p className="text-xs text-muted-foreground">{message}</p> : null}
+      {read === 'needs-videorc-sign-in' && onSignInToVideorc ? (
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" onClick={onSignInToVideorc}>
+            Sign in to Videorc
+          </Button>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -874,6 +891,8 @@ function commentsReadLabel(state: CommentsReadState): string {
       return 'Unavailable'
     case 'needs-sign-in':
       return 'Needs Sign in'
+    case 'needs-videorc-sign-in':
+      return 'Needs Videorc sign-in'
   }
 }
 

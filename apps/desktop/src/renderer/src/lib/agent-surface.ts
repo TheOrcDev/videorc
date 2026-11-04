@@ -249,6 +249,8 @@ export class AgentSurfacePublisher {
   private lastPublishedBody: string | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private retryAttempt = 0
+  /** Counts publishes as they are sent; only the newest records its body. */
+  private publishSeq = 0
   private offSounds: (() => void) | null = null
 
   constructor(private readonly sounds: SoundboardStore = soundboard) {}
@@ -327,9 +329,12 @@ export class AgentSurfacePublisher {
     const surface = buildAgentSurface(latest, soundsFrom(this.sounds))
     const body = JSON.stringify(surface)
     if (body === this.lastPublishedBody) return
+    const publish = ++this.publishSeq
     try {
       await client.request('agent.surface.publish', { surface })
-      this.lastPublishedBody = body
+      // Same rule as the remote surface (issue #1068): only the newest
+      // publish in flight records its body as what the backend holds.
+      if (publish === this.publishSeq) this.lastPublishedBody = body
       this.retryAttempt = 0
     } catch (error) {
       if (this.retryAttempt < PUBLISH_RETRY_DELAYS_MS.length) {

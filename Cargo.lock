@@ -1723,6 +1723,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-system-extensions"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00ca10e1fd778a1dd13d579afb37168422ef4bbb36b6723179c2228f6b8372c"
+dependencies = [
+ "dispatch2",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-video-toolbox"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3124,6 +3135,7 @@ dependencies = [
 name = "videorc-native-preview-addon"
 version = "0.1.0"
 dependencies = [
+ "dispatch2",
  "napi",
  "napi-build",
  "napi-derive",
@@ -3136,6 +3148,7 @@ dependencies = [
  "objc2-io-surface",
  "objc2-metal",
  "objc2-quartz-core",
+ "objc2-system-extensions",
 ]
 
 [[package]]

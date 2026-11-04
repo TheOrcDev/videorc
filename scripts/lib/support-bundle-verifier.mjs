@@ -179,6 +179,12 @@ function inspectBackendCrashRecords(bundle, failures) {
     if (typeof record.intentional !== 'boolean') {
       failures.push(`${label}.intentional must be a boolean.`)
     }
+    if (
+      record.windowsStatus !== undefined &&
+      (typeof record.windowsStatus !== 'string' || !record.windowsStatus)
+    ) {
+      failures.push(`${label}.windowsStatus must be an NTSTATUS name when present.`)
+    }
     if (!Array.isArray(record.stderrTail)) {
       failures.push(`${label}.stderrTail must be an array of strings.`)
     } else {

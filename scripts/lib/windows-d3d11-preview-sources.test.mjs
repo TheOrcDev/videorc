@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  configureWindowsD3d11RendererSourcesWhenListed,
   windowsD3d11CommandNotApplied,
   windowsD3d11HarnessScreenNotListed,
   windowsD3d11HarnessStateFailures,
@@ -62,6 +63,102 @@ test('only a not-yet-listed screen is retried', () => {
     ),
     false
   )
+})
+
+test('configuring waits for the renderer to list the screen, and only for that', async () => {
+  const notListed = new Error(
+    `Windows D3D11 preview smoke could not select available screen ${SCREEN}.`
+  )
+  let calls = 0
+  const listedOnThirdTry = async () => {
+    calls += 1
+    if (calls < 3) throw notListed
+    return configuredState()
+  }
+  const state = await configureWindowsD3d11RendererSourcesWhenListed(
+    listedOnThirdTry,
+    SCREEN,
+    Date.now() + 10_000,
+    1
+  )
+  assert.equal(calls, 3)
+  assert.equal(state.sources.screenId, SCREEN)
+
+  const unavailable = new Error('Windows D3D11 preview harness is unavailable in this app mode.')
+  calls = 0
+  await assert.rejects(
+    configureWindowsD3d11RendererSourcesWhenListed(
+      async () => {
+        calls += 1
+        throw unavailable
+      },
+      SCREEN,
+      Date.now() + 10_000,
+      1
+    ),
+    unavailable
+  )
+  assert.equal(calls, 1)
+
+  await assert.rejects(
+    configureWindowsD3d11RendererSourcesWhenListed(
+      async () => {
+        throw notListed
+      },
+      SCREEN,
+      Date.now() - 1,
+      1
+    ),
+    notListed
+  )
+})
+
+test('configuring refuses a deadline that is not a finite time', async () => {
+  let calls = 0
+  for (const deadline of [Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      configureWindowsD3d11RendererSourcesWhenListed(
+        async () => {
+          calls += 1
+          return configuredState()
+        },
+        SCREEN,
+        deadline,
+        1
+      ),
+      /not a finite time/
+    )
+  }
+  assert.equal(calls, 0)
+})
+
+test('a retry wait longer than the time left still ends at the deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
+  const notListed = new Error(
+    `Windows D3D11 preview smoke could not select available screen ${SCREEN}.`
+  )
+  let calls = 0
+  const configuring = configureWindowsD3d11RendererSourcesWhenListed(
+    async () => {
+      calls += 1
+      throw notListed
+    },
+    SCREEN,
+    50,
+    10_000
+  )
+  // Let the first attempt fail and the retry wait start.
+  await new Promise((resolve) => setImmediate(resolve))
+  t.mock.timers.tick(50)
+  const settled = await Promise.race([
+    configuring.then(
+      () => 'resolved',
+      (error) => error
+    ),
+    new Promise((resolve) => setImmediate(() => resolve('still waiting')))
+  ])
+  assert.equal(settled, notListed)
+  assert.equal(calls, 1)
 })
 
 test('the layout intent commits the probe screen alone in ScreenOnly', () => {

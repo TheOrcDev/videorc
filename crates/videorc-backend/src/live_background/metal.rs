@@ -120,6 +120,15 @@ inline float2 gl_mod2(float2 x, float y) { return x - y * floor(x / y); }
 inline float3 gl_mod3(float3 x, float y) { return x - y * floor(x / y); }
 inline float4 gl_mod4(float4 x, float y) { return x - y * floor(x / y); }
 inline float sq(float x) { return x * x; }
+// The GLSL's `pcg` and `unit` (Beams, Color Bends, Ghost Fibers): PCG over
+// whole numbers, then the top 24 bits as a value in [0, 1), the same bits on
+// every GPU and API (#987, #1077).
+inline uint live_pcg(uint v) {
+  uint state = v * 747796405u + 2891336453u;
+  uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+inline float live_unit(uint h) { return float(h >> 8u) * (1.0 / 16777216.0); }
 // The classic hash12 (Ferrofluid's field and Ghost Fibers' grain).
 inline float hash12(float2 p) {
   float3 p3 = fract(float3(p.xyx) * 0.1031);
@@ -639,9 +648,26 @@ fragment float4 line_waves_main(LiveVOut in [[stage_in]], constant float4* u [[b
 // Ported from React Bits by David Haz (https://reactbits.dev), used with permission (plan 194).
 constant float BEAMS_PI = 3.141592653589793;
 
-inline float4 beams_permute(float4 x) { return gl_mod4(((x * 34.0) + 1.0) * x, 289.0); }
+inline float4 beams_permute(float4 x) {
+  uint4 i = uint4(x);
+  return float4((i * 34u + 1u) * i % 289u);
+}
 inline float4 beams_taylor_inv_sqrt(float4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
 inline float3 beams_fade(float3 t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+
+// The GLSL's `gradient`: the sevenths of a permutation split as whole
+// numbers, the fold decided on them.
+inline void beams_gradient(float4 p, thread float4& gx, thread float4& gy, thread float4& gz) {
+  float4 q = floor((p + 0.5) / 7.0);
+  float4 rx = p - 7.0 * q;
+  float4 ry = q - 7.0 * floor((q + 0.5) / 7.0);
+  gx = rx / 7.0;
+  gy = ry / 7.0 - 0.5;
+  gz = float4(0.5) - abs(gx) - abs(gy);
+  float4 fold = step(7.0 - 2.0 * rx - abs(2.0 * ry - 7.0), float4(0.0));
+  gx -= fold * (step(float4(0.0), gx) - 0.5);
+  gy -= fold * (step(float4(0.0), gy) - 0.5);
+}
 
 inline float beams_cnoise(float3 P) {
   float3 Pi0 = floor(P);
@@ -657,20 +683,10 @@ inline float beams_cnoise(float3 P) {
   float4 ixy = beams_permute(beams_permute(ix) + iy);
   float4 ixy0 = beams_permute(ixy + iz0);
   float4 ixy1 = beams_permute(ixy + iz1);
-  float4 gx0 = ixy0 / 7.0;
-  float4 gy0 = fract(floor(gx0) / 7.0) - 0.5;
-  gx0 = fract(gx0);
-  float4 gz0 = float4(0.5) - abs(gx0) - abs(gy0);
-  float4 sz0 = step(gz0, float4(0.0));
-  gx0 -= sz0 * (step(float4(0.0), gx0) - 0.5);
-  gy0 -= sz0 * (step(float4(0.0), gy0) - 0.5);
-  float4 gx1 = ixy1 / 7.0;
-  float4 gy1 = fract(floor(gx1) / 7.0) - 0.5;
-  gx1 = fract(gx1);
-  float4 gz1 = float4(0.5) - abs(gx1) - abs(gy1);
-  float4 sz1 = step(gz1, float4(0.0));
-  gx1 -= sz1 * (step(float4(0.0), gx1) - 0.5);
-  gy1 -= sz1 * (step(float4(0.0), gy1) - 0.5);
+  float4 gx0, gy0, gz0;
+  beams_gradient(ixy0, gx0, gy0, gz0);
+  float4 gx1, gy1, gz1;
+  beams_gradient(ixy1, gx1, gy1, gz1);
   float3 g000 = float3(gx0.x, gy0.x, gz0.x);
   float3 g100 = float3(gx0.y, gy0.y, gz0.y);
   float3 g010 = float3(gx0.z, gy0.z, gz0.z);
@@ -704,8 +720,8 @@ inline float beams_cnoise(float3 P) {
   return 2.2 * n_xyz;
 }
 
-inline float beams_lane_hash(float lane, constant float4* u) {
-  return fract(sin(lane * 91.3458 + u[4].x * 17.17) * 47453.5453);
+inline float beams_lane_hash(float lane, uint salt, constant float4* u) {
+  return live_unit(live_pcg(live_pcg(live_pcg(uint(int(lane) + 65536)) + as_type<uint>(u[4].x)) + salt));
 }
 
 inline float beams_lobe(float nh, float nl, float nv, float vh, float roughness) {
@@ -721,11 +737,11 @@ inline float beams_lobe(float nh, float nl, float nv, float vh, float roughness)
 }
 
 inline float2 beams_glint(float lane, float2 local, float uTime, float camera, constant float4* u) {
-  float along = local.y / u[2].y - beams_lane_hash(lane, u) * 60.0;
+  float along = local.y / u[2].y - beams_lane_hash(lane, 0u, u) * 60.0;
   float delta = 0.01;
   float slope = (beams_cnoise(float3(0.0, along + delta, uTime)) - beams_cnoise(float3(0.0, along - delta, uTime))) / (2.0 * delta);
   slope *= 0.2 * u[2].z;
-  float spin = beams_lane_hash(lane + 0.37, u);
+  float spin = beams_lane_hash(lane, 1u, u);
   float tilt = ((spin - 0.5) * 0.5 + sin(uTime * 2.1 + spin * 6.2831) * 0.06) * u[3].z;
   float3 normal = normalize(float3(tilt, -slope, 1.0));
   float3 view = normalize(float3(-local, camera));
@@ -772,17 +788,17 @@ fragment float4 beams_field(LiveVOut in [[stage_in]], constant float4* u [[buffe
   return float4(value.x, value.y, min(hot, 6.0), 1.0);
 }
 
-inline float beams_random(float2 st) {
-  return fract(sin(dot(st, float2(12.9898, 78.233))) * 43758.5453123);
+inline float beams_random(float2 st, uint salt) {
+  return live_unit(live_pcg(live_pcg(live_pcg(uint(st.x)) + uint(st.y)) + salt));
 }
 
 inline float beams_grain_noise(float2 st) {
   float2 i = floor(st);
   float2 f = fract(st);
-  float a = beams_random(i);
-  float b = beams_random(i + float2(1.0, 0.0));
-  float c = beams_random(i + float2(0.0, 1.0));
-  float d = beams_random(i + float2(1.0, 1.0));
+  float a = beams_random(i, 0u);
+  float b = beams_random(i + float2(1.0, 0.0), 0u);
+  float c = beams_random(i + float2(0.0, 1.0), 0u);
+  float d = beams_random(i + float2(1.0, 1.0), 0u);
   float2 w = f * f * (3.0 - 2.0 * f);
   return mix(a, b, w.x) + (c - a) * w.y * (1.0 - w.x) + (d - b) * w.x * w.y;
 }
@@ -833,7 +849,7 @@ fragment float4 beams_composite(LiveVOut in [[stage_in]], constant float4* u [[b
   color = max(color, float3(0.0));
 
   // No edge fade and full opacity: React Bits' mask is 1.
-  float jitter = (beams_random(frag.yx + 31.7) - 0.5) / 255.0;
+  float jitter = (beams_random(frag, 1u) - 0.5) / 255.0;
   color = clamp(color + jitter, 0.0, 1.0);
   float alpha = max(color.r, max(color.g, color.b));
   return float4((color + u[6].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);
@@ -911,7 +927,7 @@ fragment float4 color_bends_main(LiveVOut in [[stage_in]], constant float4* u [[
   float noise = u[3].y;
   if (noise > 0.0001) {
     // Fixed in place: React Bits adds the time to the hash every frame.
-    float n = fract(sin(dot(frag, float2(12.9898, 78.233))) * 43758.5453123);
+    float n = live_unit(live_pcg(live_pcg(uint(frag.x)) + uint(frag.y)));
     col += (n - 0.5) * noise;
     col = clamp(col, 0.0, 1.0);
   }
@@ -1443,8 +1459,8 @@ constant float4 GHOST_PLACEMENTS[3] = { float4(0.0, 0.0, 0.0, 0.0), float4(1.9, 
 constant float GHOST_RIBBON_GAIN[3] = { 1.0, 0.5, 0.55 };
 constant float GHOST_RIBBON_TINT[3] = { 0.0, 0.75, 0.35 };
 
-inline float ghost_hash11(float n) {
-  return fract(sin(n * 91.3458) * 47453.5453);
+inline float ghost_hash11(uint a, uint b, uint c, uint salt) {
+  return live_unit(live_pcg(live_pcg(live_pcg(live_pcg(a) + b) + c) + salt));
 }
 
 // React Bits' `fit`: the canvas aspect over 1.5, clamped to 0.6–1.
@@ -1468,8 +1484,7 @@ vertex GhostVOut ghost_fibers_dust_vertex(uint vid [[vertex_id]], uint iid [[ins
   float2 viewport = u[0].xy;
   float dpr = u[0].w;
   float uTime = u[0].z;
-  float id = float(iid);
-  float3 seed = float3(ghost_hash11(id * 1.37 + 0.3), ghost_hash11(id * 2.91 + 1.7), ghost_hash11(id * 4.17 + 2.9));
+  float3 seed = float3(ghost_hash11(iid, 0u, 0u, 1u), ghost_hash11(iid, 0u, 0u, 2u), ghost_hash11(iid, 0u, 0u, 3u));
   float3 box = float3(9.0, 5.4, 6.0);
   float3 p = (seed - 0.5) * box;
   p.z -= 0.6;
@@ -1478,7 +1493,7 @@ vertex GhostVOut ghost_fibers_dust_vertex(uint vid [[vertex_id]], uint iid [[ins
   float depth;
   float3 projected = ghost_project(p, viewport, depth);
   float2 px = projected.xy;
-  float size = u[8].x * mix(0.5, 1.4, ghost_hash11(id * 7.7));
+  float size = u[8].x * mix(0.5, 1.4, ghost_hash11(iid, 0u, 0u, 4u));
   float baseRadius = max(0.5 * size * dpr * GHOST_CAMERA / max(depth, 0.1), 0.45);
   float coc = min(u[4].w * abs(1.0 - u[4].z / max(depth, 0.1)) * viewport.y * 0.035, 22.0 * dpr * 1.6);
   float radius = baseRadius + coc;
@@ -1552,21 +1567,23 @@ vertex GhostVOut ghost_fibers_dots_vertex(uint vid [[vertex_id]], uint iid [[ins
   int withinRibbon = int(iid) - ribbon * perRibbon;
   int fiber = withinRibbon / perFiber;
   int bead = withinRibbon - fiber * perFiber;
-  float uRibbon = float(ribbon);
   float4 place = GHOST_PLACEMENTS[ribbon];
   float uGain = GHOST_RIBBON_GAIN[ribbon] * u[5].w;
   float uTint = GHOST_RIBBON_TINT[ribbon];
   float fi = float(fiber);
   float fk = float(bead);
+  uint fiberId = uint(fiber);
+  uint beadId = uint(bead);
+  uint ribbonId = uint(ribbon);
 
-  float seed = ghost_hash11(fi * 1.731 + uRibbon * 17.0);
+  float seed = ghost_hash11(fiberId, ribbonId, 0u, 1u);
   float s = fract((fk + uFlow + seed * uDots) / uDots) - 0.5;
   float sNext = s + 1.0 / uDots;
   float layer = gl_mod(fi, 3.0) - 1.0;
   float slot = floor(fi / 3.0);
   float perLayer = max(floor(uFibers / 3.0), 1.0);
-  float v = ((slot + 0.5) / perLayer) * 2.0 - 1.0 + (ghost_hash11(fi * 3.113 + 4.0) - 0.5) * (1.6 / perLayer) + layer * 0.12 / perLayer;
-  float depthOffset = (ghost_hash11(fi * 7.919 + 2.0) - 0.5) * GHOST_DEPTH_SPREAD * (0.35 + 6.0 * s * s);
+  float v = ((slot + 0.5) / perLayer) * 2.0 - 1.0 + (ghost_hash11(fiberId, 0u, 0u, 2u) - 0.5) * (1.6 / perLayer) + layer * 0.12 / perLayer;
+  float depthOffset = (ghost_hash11(fiberId, 0u, 0u, 3u) - 0.5) * GHOST_DEPTH_SPREAD * (0.35 + 6.0 * s * s);
 
   float3 normal;
   float3 world = ghost_ribbon_point(s, v, depthOffset, layer, place, orient, scale, normal, u);
@@ -1601,15 +1618,15 @@ vertex GhostVOut ghost_fibers_dots_vertex(uint vid [[vertex_id]], uint iid [[ins
   float fold = pow(1.0 - facing, 6.0) * u[6].z;
   float endFade = smoothstep(0.5, 0.4, abs(s)) * smoothstep(1.6, 4.2, depth);
   float uTips = u[6].x;
-  float tipEnd = mix(0.6, 0.06 + 0.26 * ghost_hash11(fi * 9.137 + place.w * 3.0), uTips);
+  float tipEnd = mix(0.6, 0.06 + 0.26 * ghost_hash11(fiberId, ribbonId, 0u, 4u), uTips);
   // GLSL's pow((s - tipEnd) / 0.0065, 2.0): a negative base squared.
   float tip = exp(-sq((s - tipEnd) / 0.0065)) * uTips;
   endFade *= smoothstep(tipEnd + 0.003, tipEnd - 0.001, s);
   // The intro is finished (React Bits' appear = 1) and no click pulses.
   float uDotLength = u[5].y;
-  float twinklePhase = ghost_hash11(fi * 13.7 + fk * 0.917 + uRibbon * 3.0);
+  float twinklePhase = ghost_hash11(fiberId, beadId, ribbonId, 5u);
   float twinkle = pow(max(sin(uTime * (1.2 + 2.6 * twinklePhase) * 3.0 + twinklePhase * 61.0), 0.0), 36.0) * u[5].z * (1.0 - 0.85 * uDotLength);
-  float strength = mix(0.45, 1.0, ghost_hash11(fi * 5.37 + 1.0)) * mix(1.0, 0.72, abs(layer) * u[3].y);
+  float strength = mix(0.45, 1.0, ghost_hash11(fiberId, 0u, 0u, 6u)) * mix(1.0, 0.72, abs(layer) * u[3].y);
   float intensity = energy * crowd * strength * endFade * 0.8 * uGain * (1.0 + fold * 7.0 + twinkle * 5.0 + tip * 7.0);
   float highlight = clamp(fold * 0.55 + twinkle + tip, 0.0, 1.0);
 
@@ -2906,40 +2923,33 @@ mod tests {
     }
 
     /// Hosted macOS CI runners draw on "Apple Paravirtual device", not an
-    /// Apple GPU.
-    fn is_paravirtual(renderer: &LiveBackgroundMetalRenderer) -> bool {
-        let name = renderer.device.name().to_string();
-        eprintln!("golden device: {name}");
-        name.contains("Paravirtual")
+    /// Apple GPU; the log says which this run was.
+    fn log_device(renderer: &LiveBackgroundMetalRenderer) {
+        eprintln!("golden device: {}", renderer.device.name());
     }
 
-    /// The (mean, max cell) bound a golden frame of `css` stays inside, in
-    /// 0–255 units: mean 2.0 and cell 10 on an Apple GPU.
+    /// The (mean, max cell) bound every golden frame stays inside, in 0–255
+    /// units: mean 2.0 and cell 10, on an Apple GPU and on hosted CI's
+    /// paravirtual device alike.
     ///
-    /// The paravirtual GPU of hosted CI misses Beams and Ghost Fibers the way
-    /// WARP does on Windows CI (see the D3D11 golden test): both hash with
-    /// `sin` of large arguments (Ghost Fibers' reach about 1e7 rad), and its
-    /// range reduction is not ANGLE's. CI on 2026-10-25 measured Beams at means 10.3–21.7 with a
-    /// worst cell of 229, and Ghost Fibers at means up to 1.68 with a worst
-    /// cell of 88, while an Apple GPU matched them inside the strict bound.
-    /// The dedicated bounds keep those numbers in the log; a mean over them
-    /// is still a port bug, and every other background keeps the strict one.
-    fn golden_bound(css: &str, paravirtual: bool) -> (f64, u8) {
-        match (paravirtual, css) {
-            (true, "beams") => (24.0, 240),
-            (true, "ghost-fibers") => (2.0, 96),
-            _ => (2.0, 10),
-        }
-    }
+    /// The paravirtual GPU once had wider bounds for Beams (24 / 240) and
+    /// Ghost Fibers (2 / 96): both hashed with `sin` of large arguments
+    /// (Ghost Fibers' reach about 1e7 rad), whose range reduction is not
+    /// ANGLE's; CI on 2026-10-25 measured Beams at means 10.3–21.7 with a
+    /// worst cell of 229 while an Apple GPU matched inside the strict bound.
+    /// Both now hash in integers and Beams splits its Perlin gradient in
+    /// whole numbers (#987, #1077), so every device draws the goldens' lanes
+    /// and strands; a miss is a port bug.
+    const GOLDEN_BOUND: (f64, u8) = (2.0, 10);
 
     /// Plan 190 S2: every golden grid (the GLSL in WebGL2, 640 × 360 box
-    /// filtered to 64 × 36) matches the MSL within `golden_bound`.
+    /// filtered to 64 × 36) matches the MSL within `GOLDEN_BOUND`.
     #[test]
     fn golden_grids_match_the_glsl_reference() {
         let Some((mut renderer, _board)) = renderer() else {
             return;
         };
-        let paravirtual = is_paravirtual(&renderer);
+        log_device(&renderer);
         let golden = load_golden();
         let mut worst: Vec<(&str, f64, u8)> = Vec::new();
         let mut failures = Vec::new();
@@ -2947,7 +2957,7 @@ mod tests {
             let (mean, max) = golden_error(&mut renderer, &golden, frame);
             let name = format!("{}/{}@{}", frame.css, frame.look.id, frame.phase);
             eprintln!("golden {name}: mean {mean:.3}, max cell {max}");
-            let (mean_limit, max_cell) = golden_bound(frame.css, paravirtual);
+            let (mean_limit, max_cell) = GOLDEN_BOUND;
             if mean > mean_limit || max > max_cell {
                 failures.push(format!("{name}: mean {mean:.3}, max {max}"));
             }
@@ -2975,7 +2985,7 @@ mod tests {
         let Some((mut renderer, _board)) = renderer() else {
             return;
         };
-        let paravirtual = is_paravirtual(&renderer);
+        log_device(&renderer);
         let golden = load_golden();
         for id in [
             LiveBackgroundId::PlasmaWave,
@@ -2998,7 +3008,7 @@ mod tests {
                     "{} light {name}: worst mean {worst_mean:.3}, worst max cell {worst_max}, {bytes} scratch bytes at 640x360",
                     css_id(id)
                 );
-                let (mean_limit, max_cell) = golden_bound(css_id(id), paravirtual);
+                let (mean_limit, max_cell) = GOLDEN_BOUND;
                 assert!(
                     worst_mean <= mean_limit && worst_max <= max_cell,
                     "{id:?} {name}"

@@ -1,3 +1,4 @@
+import { windowsBridgeEnvelopeRefusal } from './bridge-envelope'
 import { normalizeCameraLook } from './camera-look'
 import type { GlobalShortcutsConfig } from '../../../shared/backend'
 import { formatBitrate, formatResolution, formatVideoQuality, resolutionName } from './format-video'
@@ -1054,8 +1055,21 @@ export const streamPlatformOutputCapabilities: Record<
 export function videoProfileCompatibility(
   config: Pick<CaptureConfig, 'recordEnabled' | 'streamEnabled' | 'video'> & {
     streaming?: StreamingSettings
-  }
+  },
+  platform?: string
 ): VideoProfileCompatibility {
+  // Issue #1062: on Windows an output outside the encoder bridge's envelope
+  // is refused by the backend (software OpenH264 cannot hold it), so the
+  // Output page and Go Live say so first, in the same words.
+  const envelopeRefusal = windowsBridgeEnvelopeRefusal({
+    platform,
+    recordEnabled: config.recordEnabled,
+    streamEnabled: config.streamEnabled,
+    video: config.video
+  })
+  if (envelopeRefusal) {
+    return { blockingReason: envelopeRefusal, warning: null }
+  }
   // Video-profile / streaming guardrails removed per owner (2026-06-24): 4K
   // livestreaming (YouTube 4K30), higher-bitrate and non-YouTube stream outputs
   // ship now, so the app no longer pre-blocks these profiles. Platforms and the
@@ -2629,7 +2643,15 @@ export function findRememberedSource(
     return undefined
   }
 
-  return candidates.find((device) => device.name.trim() === normalizedName)
+  return (
+    candidates.find((device) => device.name.trim() === normalizedName) ??
+    // 0.18.0 saved this tag even when the name already said iPhone. Keep
+    // those picks working after an id change, behind id and exact-name matches.
+    candidates.find(
+      (device) =>
+        device.kind === 'camera' && `${device.name.trim()} · iPhone camera` === normalizedName
+    )
+  )
 }
 
 function sourceIdentityFor(device: Device | undefined): { id?: string; name?: string } {

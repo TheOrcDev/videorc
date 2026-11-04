@@ -1,0 +1,42 @@
+{
+  "$comment": "Plan 214, the one source of truth for the Videorc Camera identifiers. Swift mirrors it in Sources/VideorcCameraCore/Identifiers.swift (pnpm test:scripts fails on drift), Rust mirrors it in crates/videorc-backend/src/virtual_camera.rs (Workstream A), and the packaging hook, the build script and the release validator read this file directly.",
+  "cameraName": "Videorc Camera",
+  "appBundleId": "dev.theorcdev.videorc",
+  "extensionBundleId": "dev.theorcdev.videorc.camera",
+  "extensionBundleName": "VideorcCamera",
+  "teamId": "C2PA37RB58",
+  "appGroup": "C2PA37RB58.dev.theorcdev.videorc",
+  "machServiceName": "C2PA37RB58.dev.theorcdev.videorc.camera",
+  "deviceUuid": "7C2B0687-25A9-44A9-A5FC-3293B79D2853",
+  "sourceStreamUuid": "1CCC837F-7786-4724-BC71-925249A9FE86",
+  "sinkStreamUuid": "5599A319-404B-4915-AB63-9ED972F48F71",
+  "producerSigningIds": ["dev.theorcdev.videorc", "videorc-backend"],
+  "customProperties": {
+    "clientCount": "4cc_vccc_glob_0000",
+    "producerWord": "4cc_vcpw_glob_0000"
+  },
+  "producerWords": ["on", "off"],
+  "format": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "pixelFormat": "32BGRA",
+    "fourcc": "BGRA"
+  },
+  "staleAfterSeconds": 1,
+  "stills": {
+    "notRunningTitle": "Videorc isn't running",
+    "offTitle": "Videorc Camera is off",
+    "offSubtitle": "Output → Videorc Camera",
+    "startingTitle": "Starting Videorc Camera…"
+  },
+  "deploymentTarget": "13.0",
+  "usageDescription": "Videorc Camera shows your Videorc program as a camera in Meet, Zoom, Teams and Discord.",
+  "entitlements": {
+    "systemExtensionInstall": "com.apple.developer.system-extension.install",
+    "applicationGroups": "com.apple.security.application-groups",
+    "applicationIdentifier": "com.apple.application-identifier",
+    "teamIdentifier": "com.apple.developer.team-identifier",
+    "appSandbox": "com.apple.security.app-sandbox"
+  }
+}

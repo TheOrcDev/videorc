@@ -12,6 +12,7 @@ import {
   buildMicrophoneSources,
   capturePickerDevices,
   defaultCaptureConfig,
+  findRememberedSource,
   formatMeasuredAudioLag,
   legacyStreamKeyMigrationCandidates,
   mergeSourceKind,
@@ -211,6 +212,52 @@ describe('reconcileSourceSelection', () => {
     function persisted(sources: SourceSelection): SourceSelection {
       return persistableCaptureConfig({ ...captureConfigFixture(), sources }).sources
     }
+
+    describe('Continuity Camera names saved by 0.18.0', () => {
+      it.each(['iPhone Camera', "Uroš's iPhone Camera"])(
+        'restores %s by its old label when its id changes',
+        (name) => {
+          const camera = { ...iphone, name }
+          const oldName = `${name} · iPhone camera`
+          const picks: SourceSelection[] = [
+            { cameraId: 'camera:old-iphone', cameraName: oldName },
+            {
+              cameraId: facetime.id,
+              cameraName: facetime.name,
+              wantedCameraId: 'camera:old-iphone',
+              wantedCameraName: oldName
+            }
+          ]
+
+          for (const pick of picks) {
+            const next = reconcileSourceSelection(pick, [facetime, camera])
+            expect(next).toMatchObject({ cameraId: camera.id, cameraName: name })
+            expect(next.wantedCameraId).toBeUndefined()
+            expect(next.wantedCameraName).toBeUndefined()
+            expect(persisted(next)).toMatchObject({ cameraId: camera.id, cameraName: name })
+          }
+        }
+      )
+
+      it('keeps id matching ahead of the legacy name fallback', () => {
+        const next = reconcileSourceSelection(
+          { cameraId: facetime.id, cameraName: `${iphone.name} · iPhone camera` },
+          [iphone, facetime]
+        )
+        expect(next).toMatchObject({ cameraId: facetime.id, cameraName: facetime.name })
+      })
+
+      it('keeps an exact name match ahead of the legacy name fallback', () => {
+        const exact = { ...iphone, id: 'camera:exact', name: `${iphone.name} · iPhone camera` }
+        expect(findRememberedSource('camera:old-iphone', exact.name, [iphone, exact])).toBe(exact)
+      })
+
+      it('does not strip the camera tag when matching another source kind', () => {
+        expect(
+          findRememberedSource(undefined, `${display1.name} · iPhone camera`, [display1])
+        ).toBeUndefined()
+      })
+    })
 
     it('a missing camera gets a stand-in for the session, and the pick is what persists', () => {
       const pick: SourceSelection = {
@@ -2773,5 +2820,44 @@ describe('microphone noise suppression settings', () => {
     expect(
       normalizeAudioSettings({ microphoneNoiseSuppression: 'rnnoise' }).microphoneNoiseSuppression
     ).toBe('rnnoise')
+  })
+})
+
+describe('videoProfileCompatibility on Windows (issue #1062)', () => {
+  it("blocks an output outside the encoder bridge envelope, in the backend's words", () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['record-4k60-experimental']
+    config.recordEnabled = true
+    config.streamEnabled = false
+    expect(videoProfileCompatibility(config, 'win32')).toEqual({
+      blockingReason:
+        "4K at 60 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 60 fps.",
+      warning: null
+    })
+    expect(videoProfileCompatibility(config, 'darwin')).toEqual({
+      blockingReason: null,
+      warning: null
+    })
+    expect(videoProfileCompatibility(config)).toEqual({ blockingReason: null, warning: null })
+  })
+
+  it('leaves a livestream to the Go Live sheet, and the 4K freeze warning as it was', () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['record-4k60-experimental']
+    config.recordEnabled = true
+    config.streamEnabled = true
+    config.streaming = {
+      ...config.streaming,
+      enabled: true,
+      defaultOutputPreset: 'stream-safe-1080p60',
+      defaultBitrateKbps: 6000,
+      targets: config.streaming.targets.map((target, index) => ({
+        ...target,
+        enabled: index === 0
+      }))
+    }
+    const result = videoProfileCompatibility(config, 'win32')
+    expect(result.blockingReason).toBeNull()
+    expect(result.warning).toMatch(/4K local recording while livestreaming/)
   })
 })

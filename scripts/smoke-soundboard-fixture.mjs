@@ -28,6 +28,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { runSmokeCargoTest } from './lib/smoke-cargo-test.mjs'
 import { spawnProcessGroup } from './lib/process-group.mjs'
 import { toneAmplitude } from './lib/separate-source-take-gates.mjs'
 
@@ -46,8 +47,7 @@ const CLIPPING_CEILING = 0.99
 const ROLES = ['combined', 'microphone']
 
 console.log(`Soundboard fixture evidence: ${directory}`)
-await run(
-  'cargo',
+await runSmokeCargoTest(
   [
     'test',
     '-p',
@@ -59,7 +59,7 @@ await run(
     'session_audio::mix_tests::soundboard_artifact_fixture',
     '--nocapture'
   ],
-  { ...process.env, VIDEORC_SOUNDBOARD_ARTIFACT_DIR: directory }
+  { cwd: root, env: { ...process.env, VIDEORC_SOUNDBOARD_ARTIFACT_DIR: directory } }
 )
 for (const role of ROLES) {
   if (!existsSync(audioPcm(role))) {

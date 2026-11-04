@@ -67,6 +67,15 @@ export const DEFAULT_GATES = Object.freeze({
   digitalZeroTailMs: 300,
   maxDigitalZeroRuns: 0,
   requireNoDigitalZeroRuns: false,
+  // Silent track (issue 1064): a Windows take whose DirectShow microphone
+  // returned 1-LSB silence read "silence 11285 ms" over the whole take and
+  // still PASSED. When the run declares a microphone (expectAudio), a track
+  // that sits under -80 dBFS (digital silence; a quiet room's floor is far
+  // above it) for nearly all of its length fails: the microphone recorded
+  // nothing. Runs without a microphone are untouched.
+  silentTrackNoiseDb: -80,
+  silentTrackMinRunMs: 100,
+  silentTrackMinCoverage: 0.95,
   // Recording colorimetry law (2026-07 quality plan Q1): artifacts must be
   // TAGGED BT.709 video-range. Warn by default (legacy files and third-party
   // callers); the recording matrix smoke sets true to hard-fail.
@@ -664,6 +673,20 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
         warnings.push(message)
       }
     }
+    // Issue 1064: a declared microphone whose track is digital silence from
+    // start to end recorded nothing, whatever the meter showed.
+    if (
+      metrics.expectAudio &&
+      metrics.silentTrackCoverage != null &&
+      metrics.silentTrackCoverage >= gates.silentTrackMinCoverage
+    ) {
+      failures.push(
+        `audio track is digital silence (under ${gates.silentTrackNoiseDb} dBFS) for ` +
+          `${(metrics.silentTrackCoverage * 100).toFixed(1)}% of the take ` +
+          `(${(metrics.silentTrackMs ?? 0).toFixed(0)}ms) although a microphone was selected — ` +
+          `the microphone recorded nothing`
+      )
+    }
   } else if (metrics.expectAudio) {
     failures.push('audio expected but no audio stream present')
   }
@@ -1022,7 +1045,8 @@ export async function analyzeRecording(filePath, options = {}) {
     audioPackets,
     silences,
     keyframeTimes,
-    digitalZeroSegments
+    digitalZeroSegments,
+    silentTrackSegments
   ] = await Promise.all([
     hasVideo
       ? runFreezedetect(filePath, {
@@ -1050,8 +1074,22 @@ export async function analyzeRecording(filePath, options = {}) {
           noiseDb: gates.digitalZeroNoiseDb,
           minSilenceMs: gates.digitalZeroMinMs
         })
+      : [],
+    // Issue 1064: digital silence over the whole track, whatever the room.
+    hasAudio
+      ? runSilencedetect(filePath, {
+          ffmpegPath,
+          noiseDb: gates.silentTrackNoiseDb,
+          minSilenceMs: gates.silentTrackMinRunMs
+        })
       : []
   ])
+  const silentTrackSeconds = silentTrackSegments.reduce((sum, s) => sum + (s.duration ?? 0), 0)
+  const audioDurationSeconds = probe.audio[0]?.duration ?? probe.formatDuration ?? null
+  const silentTrackCoverage =
+    hasAudio && audioDurationSeconds != null && audioDurationSeconds > 0
+      ? Math.min(1, silentTrackSeconds / audioDurationSeconds)
+      : null
   const digitalZeroRuns = interiorSilenceRuns(digitalZeroSegments, {
     leadInMs: gates.digitalZeroLeadInMs,
     tailMs: gates.digitalZeroTailMs,
@@ -1154,6 +1192,8 @@ export async function analyzeRecording(filePath, options = {}) {
     digitalZeroRunCount: hasAudio ? digitalZeroRuns.length : null,
     longestDigitalZeroMs: hasAudio ? longestDigitalZero * 1000 : null,
     firstDigitalZeroSeconds: digitalZeroRuns.length > 0 ? digitalZeroRuns[0].start : null,
+    silentTrackMs: hasAudio ? silentTrackSeconds * 1000 : null,
+    silentTrackCoverage,
     avSkewMs: skew,
     startSkewMs: skewComponents.startSkewMs,
     tailMismatchMs: skewComponents.tailMismatchMs,
@@ -1277,7 +1317,9 @@ export function renderMarkdownReport(report) {
   if (m.hasAudio) {
     lines.push(`- Audio gaps: max ${fmt(m.maxAudioGapMs)}ms across ${m.audioGapCount} gap(s)`)
     lines.push(
-      `- Silence: longest ${fmt(m.longestSilenceMs)}ms across ${m.silenceCount} segment(s)`
+      `- Silence: longest ${fmt(m.longestSilenceMs)}ms across ${m.silenceCount} segment(s)`,
+      `- Digital silence: ${fmt(m.silentTrackMs ?? 0, 0)}ms` +
+        (m.silentTrackCoverage != null ? ` (${(m.silentTrackCoverage * 100).toFixed(1)}% of the track)` : '')
     )
     lines.push(
       `- Digital zero runs mid-take: ${m.digitalZeroRunCount ?? 'n/a'} ` +

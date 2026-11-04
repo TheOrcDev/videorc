@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  MAIN_ISOLATED_BACKEND_EVENTS,
   parseMainBackendWireMessage,
   parseMainBannerList,
   parseMainBannersChangedEvent,
@@ -8,7 +9,9 @@ import {
   parseMainCompositorStatusEvent,
   parseMainPreviewSurfaceStatus,
   parseMainPreviewSurfaceStatusEvent,
-  parseMainRecordingStatusEvent
+  parseMainRecordingStatusEvent,
+  parseMainVirtualCameraChangedEvent,
+  parseMainVirtualCameraStatus
 } from './backend-event-message'
 
 describe('main backend event trust boundary', () => {
@@ -54,5 +57,27 @@ describe('main backend event trust boundary', () => {
     expect(() =>
       parseMainBackendWireMessage(JSON.stringify({ event: 'recording.status', payload: {} }))
     ).toThrow('recording.status')
+  })
+})
+
+describe('the Videorc Camera status on the main socket (plan 214 B3)', () => {
+  const ready = { on: true, available: true, state: 'ready', viewers: 0, platformStep: 'ready' }
+
+  it('validates the status and the changed event at use', () => {
+    expect(parseMainVirtualCameraStatus(ready)).toEqual(ready)
+    expect(parseMainVirtualCameraChangedEvent(ready)).toEqual(ready)
+    expect(() => parseMainVirtualCameraStatus({ on: true })).toThrow('virtualCamera.status')
+    expect(() => parseMainVirtualCameraChangedEvent({ ...ready, state: 'sleeping' })).toThrow(
+      'virtualCamera.changed'
+    )
+    expect(() => parseMainVirtualCameraChangedEvent(null)).toThrow('virtualCamera.changed')
+  })
+
+  it('never retires the socket over a bad camera status: the event is isolated', () => {
+    expect(MAIN_ISOLATED_BACKEND_EVENTS.has('virtualCamera.changed')).toBe(true)
+    const parsed = parseMainBackendWireMessage(
+      JSON.stringify({ event: 'virtualCamera.changed', payload: { on: 'yes' } })
+    )
+    expect(parsed).toEqual({ event: 'virtualCamera.changed', payload: { on: 'yes' } })
   })
 })

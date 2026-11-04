@@ -357,7 +357,10 @@ macOS can't compile the Linux target (PipeWire needs Linux headers), so
 type-checks the GL module on any OS. CI's Linux job is the real compile gate.
 A GLES golden-grid test runs on Linux when EGL is present; it skips without
 EGL and accepts Mesa's llvmpipe only with
-`VIDEORC_LIVE_BACKGROUND_GL_ALLOW_SOFTWARE=1`.
+`VIDEORC_LIVE_BACKGROUND_GL_ALLOW_SOFTWARE=1`. Beams and Ghost Fibers get the
+paravirtual Metal bounds there (mean 24 / cell 240 and 2 / 96): their
+`sin` hashes of large arguments hold an Apple GPU's last bits, which no GLES
+driver reproduces (`golden_bound` in `gl.rs` has the measurements).
 
 ### Measuring a machine
 

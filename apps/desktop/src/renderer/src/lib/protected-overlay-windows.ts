@@ -5,6 +5,23 @@ export type ProtectedOverlayWindow = {
   windowId?: number
 }
 
+/**
+ * The Stream Manager as a protected overlay window (plan 215 D6): it joins
+ * the exclusion list, and leaves the window picker, only while its Hide
+ * from stream switch is on. Off (the 2026-08-19 default) it is part of the
+ * show, so it is neither excluded nor hidden from the picker.
+ */
+export function streamManagerProtectedOverlayWindow(state: {
+  open: boolean
+  windowId?: number
+  hiddenFromStream: boolean
+}): ProtectedOverlayWindow {
+  return {
+    open: state.open && state.hiddenFromStream,
+    ...(typeof state.windowId === 'number' ? { windowId: state.windowId } : {})
+  }
+}
+
 export function protectedOverlayWindowIdsFromOverlayWindows(
   ...windows: ProtectedOverlayWindow[]
 ): number[] {

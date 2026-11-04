@@ -11,6 +11,7 @@
 // Pure parsing lives here (covered by test:scripts); running the binary is the
 // caller's job.
 
+import { CAMERA_LOOK_FFMPEG_FILTERS } from './camera-look-ffmpeg-filters.mjs'
 import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
 
 /** Repair-encoder preference, mirroring RepairVideoEncoder in repair.rs:
@@ -31,9 +32,13 @@ export const REPAIR_ENCODER_ARGS = {
 export const REQUIRED_MACOS_FFMPEG_ENCODERS = ['h264_videotoolbox', 'aac', 'pcm_s16le']
 
 /** Filters required by Premium local creative transforms: `afftdn` for Noise
- * Cleanup (built into the LGPL FFmpeg bundle, no separately licensed model)
- * and the trim/concat set Clean cut renders with (plan 119 S13). */
-export const REQUIRED_MACOS_FFMPEG_FILTERS = ['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS]
+ * Cleanup (built into the LGPL FFmpeg bundle, no separately licensed model),
+ * the trim/concat set Clean cut renders with (plan 119 S13), and the
+ * full-range YUV lookup-table chain the legacy recording path grades the
+ * camera look with (plan 213 I; never the GPL-only `eq`). */
+export const REQUIRED_MACOS_FFMPEG_FILTERS = [
+  ...new Set(['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS])
+]
 
 /** Protocols every shipped macOS ffmpeg must expose. rtmps implies a TLS
  * backend was linked (static OpenSSL since 0.9.23); tls is listed separately

@@ -6,6 +6,8 @@ mod color;
 #[path = "../frame_store.rs"]
 mod frame_store;
 #[cfg(target_os = "macos")]
+// Same policy as the backend crate root (main.rs): pixel loops keep `chunks_exact`.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 #[path = "../metal_compositor.rs"]
 mod metal_compositor;
 #[cfg(target_os = "macos")]
@@ -811,6 +813,16 @@ mod macos {
         Ok(())
     }
 
+    #[cfg(unix)]
+    fn current_parent_pid() -> Option<u32> {
+        Some(std::os::unix::process::parent_id())
+    }
+
+    #[cfg(not(unix))]
+    fn current_parent_pid() -> Option<u32> {
+        None
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{HELPER_IDLE_PUMP_INTERVAL, HELPER_STDIN_QUEUE_CAPACITY, helper_stdin_channel};
@@ -845,16 +857,6 @@ mod macos {
             drop(rx);
             assert!(tx.send(HELPER_STDIN_QUEUE_CAPACITY).is_err());
         }
-    }
-
-    #[cfg(unix)]
-    fn current_parent_pid() -> Option<u32> {
-        Some(std::os::unix::process::parent_id())
-    }
-
-    #[cfg(not(unix))]
-    fn current_parent_pid() -> Option<u32> {
-        None
     }
 }
 

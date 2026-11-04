@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep, timeout};
 
+use crate::account::SessionState;
 use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
 use crate::streaming::{PlatformAccount, StreamPlatform, stream_platform_id};
@@ -50,6 +51,10 @@ pub enum CommentsReadState {
     /// The destination streams with a key, and the platform shares chat only
     /// with apps you sign in to: Sign in brings it (plan 213 J1). Not a failure.
     NeedsSignIn,
+    /// The Videorc sign-in is missing or no longer accepted, so the relay that
+    /// reads X and Kick chat has nothing to show (plan 215 A1). Not a
+    /// failure: the connector parks, and Sign in attaches it again (A4).
+    NeedsVideorcSignIn,
 }
 
 /// Write capability for one concrete stream destination.
@@ -478,8 +483,12 @@ pub(crate) fn comments_destination_id(platform: StreamPlatform, target_id: Optio
 /// Build the initial Live Chat snapshot for setup time (no session running): one provider
 /// row per native platform derived from its chat capability, with no messages yet. The
 /// LiveChatCoordinator replaces this with live connector state once Go Live starts.
-pub fn initial_chat_snapshot(accounts: &[PlatformAccount], updated_at: String) -> LiveChatSnapshot {
-    let providers = chat_capabilities(accounts)
+pub fn initial_chat_snapshot(
+    accounts: &[PlatformAccount],
+    updated_at: String,
+    session: &SessionState,
+) -> LiveChatSnapshot {
+    let providers = chat_capabilities(accounts, session)
         .into_iter()
         .map(provider_state_from_capability)
         .collect();
@@ -565,10 +574,42 @@ pub struct ChatCapability {
     pub message: String,
 }
 
-/// Capability to read live chat for one platform, given its connected account (if any).
+/// X and Kick chat come through the Videorc relay, so a platform-ready
+/// capability still cannot read without the Videorc sign-in (plan 215 A2).
+/// Signed out is the parked read state in the Go Live check's words; a store
+/// that cannot be read is a failure with its error, never "signed out".
+/// Sending and removing stay with the platform's own credentials.
+fn gate_relay_chat_on_videorc_session(
+    capability: ChatCapability,
+    session: &SessionState,
+    needs_sign_in: &str,
+) -> ChatCapability {
+    if capability.read != CommentsReadState::Ready {
+        return capability;
+    }
+    match session {
+        SessionState::SignedIn => capability,
+        SessionState::SignedOut => ChatCapability {
+            read: CommentsReadState::NeedsVideorcSignIn,
+            chat_read_available: false,
+            message: needs_sign_in.to_string(),
+            ..capability
+        },
+        SessionState::Unreadable(error) => ChatCapability {
+            read: CommentsReadState::Failed,
+            chat_read_available: false,
+            message: format!("Couldn't read your Videorc sign-in: {error}"),
+            ..capability
+        },
+    }
+}
+
+/// Capability to read live chat for one platform, given its connected account
+/// (if any) and the Videorc session the relay platforms need (plan 215 A2).
 pub fn chat_capability(
     platform: StreamPlatform,
     account: Option<&PlatformAccount>,
+    session: &SessionState,
 ) -> ChatCapability {
     match platform {
         StreamPlatform::Youtube => {
@@ -632,45 +673,49 @@ pub fn chat_capability(
                     .ok()
                     .flatten()
                     .is_some();
-            ChatCapability {
-                platform,
-                state: if x_live_ready {
-                    ChatCapabilityState::Available
-                } else {
-                    ChatCapabilityState::NotConnected
+            gate_relay_chat_on_videorc_session(
+                ChatCapability {
+                    platform,
+                    state: if x_live_ready {
+                        ChatCapabilityState::Available
+                    } else {
+                        ChatCapabilityState::NotConnected
+                    },
+                    chat_read_available: x_live_ready,
+                    read: if x_live_ready {
+                        CommentsReadState::Ready
+                    } else {
+                        CommentsReadState::Unavailable
+                    },
+                    write: if x_live_ready {
+                        // POST /2/broadcasts/:id/chat accepts the OAuth 1.0a user
+                        // context we already hold (closed-beta Livestream API).
+                        CommentsWriteState::Ready
+                    } else {
+                        CommentsWriteState::ReadOnly
+                    },
+                    // The same credentials sign DELETE .../chat/{id} (plan 140);
+                    // without them "Authorize X Live" is the fix, like a scope.
+                    moderate: if x_live_ready {
+                        Some(CommentsModerateState::Ready)
+                    } else if account.is_some() {
+                        Some(CommentsModerateState::MissingScope)
+                    } else {
+                        None
+                    },
+                    required_scope: None,
+                    account_id: account.map(|account| account.account_id.clone()),
+                    account_label: account.map(|account| account.account_label.clone()),
+                    // Authorize X Live is named only once Sign in is done (plan 213 J3).
+                    message: if signed_in && !x_live_ready {
+                        X_AUTHORIZE_LIVE_FOR_CHAT.to_string()
+                    } else {
+                        crate::x_chat::x_chat_message(x_live_ready).to_string()
+                    },
                 },
-                chat_read_available: x_live_ready,
-                read: if x_live_ready {
-                    CommentsReadState::Ready
-                } else {
-                    CommentsReadState::Unavailable
-                },
-                write: if x_live_ready {
-                    // POST /2/broadcasts/:id/chat accepts the OAuth 1.0a user
-                    // context we already hold (closed-beta Livestream API).
-                    CommentsWriteState::Ready
-                } else {
-                    CommentsWriteState::ReadOnly
-                },
-                // The same credentials sign DELETE .../chat/{id} (plan 140);
-                // without them "Authorize X Live" is the fix, like a scope.
-                moderate: if x_live_ready {
-                    Some(CommentsModerateState::Ready)
-                } else if account.is_some() {
-                    Some(CommentsModerateState::MissingScope)
-                } else {
-                    None
-                },
-                required_scope: None,
-                account_id: account.map(|account| account.account_id.clone()),
-                account_label: account.map(|account| account.account_label.clone()),
-                // Authorize X Live is named only once Sign in is done (plan 213 J3).
-                message: if signed_in && !x_live_ready {
-                    X_AUTHORIZE_LIVE_FOR_CHAT.to_string()
-                } else {
-                    crate::x_chat::x_chat_message(x_live_ready).to_string()
-                },
-            }
+                session,
+                X_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN,
+            )
         }
         // Kick chat is read through the videorc-web relay (webhooks need a
         // public endpoint) and sent straight to Kick (plan 063, S5).
@@ -698,7 +743,11 @@ pub fn chat_capability(
             };
             capability.moderate =
                 moderate_state_for_scope(account, crate::kick_chat::KICK_CHAT_MODERATE_SCOPE);
-            capability
+            gate_relay_chat_on_videorc_session(
+                capability,
+                session,
+                KICK_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN,
+            )
         }
         // A stream-key Facebook live can't be read: comments need the Page
         // sign-in that waits on Meta's review (plan 206 S9).
@@ -845,12 +894,30 @@ pub const X_AUTHORIZE_LIVE_FOR_CHAT: &str = "Authorize X Live to read and send c
 /// needs Sign in. The Stream Manager row and the Go Live check say the same.
 pub const X_STREAM_KEY_CHAT_NEEDS_SIGN_IN: &str = "X chat needs Sign in. Your stream key still streams; X shares chat only with apps you sign in to.";
 
+/// The relay that reads X chat waits on the Videorc sign-in (plan 215 A1):
+/// the Stream Manager row, in words that name Videorc and never X.
+pub const X_CHAT_NEEDS_VIDEORC_SIGN_IN: &str = "Sign in to Videorc to read X chat.";
+/// The Kick twin.
+pub const KICK_CHAT_NEEDS_VIDEORC_SIGN_IN: &str = "Sign in to Videorc to read Kick chat.";
+/// The relay refused the stored session (a 401): the same parked state, with
+/// the reason.
+pub const X_CHAT_SIGN_IN_EXPIRED: &str =
+    "Your Videorc sign-in expired. Sign in to Videorc to read X chat.";
+pub const KICK_CHAT_SIGN_IN_EXPIRED: &str =
+    "Your Videorc sign-in expired. Sign in to Videorc to read Kick chat.";
+/// The Go Live check and the toast (plan 215 A2, A3): the sentence form.
+pub const X_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN: &str = "X chat needs your Videorc sign-in.";
+pub const KICK_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN: &str = "Kick chat needs your Videorc sign-in.";
+
 /// Chat capability for every native platform (YouTube, Twitch, X, Kick), preferring a connected
 /// account over stale saved rows. Custom RTMP has no platform comments and is omitted, and so
 /// are the key-only destinations (Facebook, TikTok, Instagram): a session that streams to one
 /// gets its unsupported row from its destination instead.
-pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
-    chat_capabilities_with_quota(accounts, false)
+pub fn chat_capabilities(
+    accounts: &[PlatformAccount],
+    session: &SessionState,
+) -> Vec<ChatCapability> {
+    chat_capabilities_with_quota(accounts, false, session)
 }
 
 /// Like [`chat_capabilities`], with the YouTube quota breaker folded into the
@@ -859,6 +926,7 @@ pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
 pub fn chat_capabilities_with_quota(
     accounts: &[PlatformAccount],
     youtube_paused: bool,
+    session: &SessionState,
 ) -> Vec<ChatCapability> {
     [
         StreamPlatform::Youtube,
@@ -875,7 +943,7 @@ pub fn chat_capabilities_with_quota(
                     && account.status == crate::streaming::PlatformAccountStatus::Connected
             })
             .or_else(|| accounts.iter().find(|account| account.platform == platform));
-        let mut capability = chat_capability(platform, account);
+        let mut capability = chat_capability(platform, account, session);
         if youtube_paused
             && platform == StreamPlatform::Youtube
             && capability.moderate == Some(CommentsModerateState::Ready)
@@ -964,6 +1032,34 @@ pub enum ChatSenderConfig {
         probe: Arc<FakeSendProbe>,
         delay: Duration,
     },
+}
+
+/// What re-spawns an X or Kick connector parked on the Videorc sign-in (plan
+/// 215 A4): the config it was started with, broadcast included. Captured at
+/// spawn and dropped at stop, like the senders; the connector itself reads
+/// the fresh session token from the store when it runs again.
+#[derive(Debug, Clone)]
+pub(crate) enum ReattachableConnector {
+    X(crate::x_chat::XChatConfig),
+    Kick(crate::kick_chat::KickChatConfig),
+}
+
+impl ReattachableConnector {
+    fn platform(&self) -> StreamPlatform {
+        match self {
+            Self::X(_) => StreamPlatform::X,
+            Self::Kick(_) => StreamPlatform::Kick,
+        }
+    }
+}
+
+/// One destination parked on the Videorc sign-in (plan 215 A4), and what
+/// re-spawns it when there is something registered.
+#[derive(Debug, Clone)]
+pub(crate) struct ParkedConnector {
+    pub(crate) destination_id: String,
+    pub(crate) platform: StreamPlatform,
+    pub(crate) connector: Option<ReattachableConnector>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1117,6 +1213,9 @@ pub struct LiveChatCoordinator {
     tasks: Vec<JoinHandle<()>>,
     /// Send credentials per concrete destination; session-scoped.
     senders: HashMap<String, ChatSenderConfig>,
+    /// What each X and Kick connector needs to attach again after the Videorc
+    /// sign-in (plan 215 A4), by destination id; session-scoped like `senders`.
+    reattach: HashMap<String, ReattachableConnector>,
     /// Same-id callers subscribe to one backend-owned operation task. The receiver is
     /// removed after terminal persistence; SQLite remains the durable idempotency
     /// authority afterward.
@@ -1217,6 +1316,7 @@ impl LiveChatCoordinator {
             reconnect_count: 0,
             tasks: Vec::new(),
             senders: HashMap::new(),
+            reattach: HashMap::new(),
             send_operations_in_flight: HashMap::new(),
             chatters_seen: HashSet::new(),
             seventv_indexes: Arc::default(),
@@ -1229,6 +1329,39 @@ impl LiveChatCoordinator {
 
     pub fn register_sender(&mut self, destination_id: String, sender: ChatSenderConfig) {
         self.senders.insert(destination_id, sender);
+    }
+
+    /// Remember what re-spawns this destination's connector after the Videorc
+    /// sign-in (plan 215 A4). Registered at spawn, alongside the sender.
+    pub(crate) fn register_reattachable(
+        &mut self,
+        destination_id: String,
+        connector: ReattachableConnector,
+    ) {
+        self.reattach.insert(destination_id, connector);
+    }
+
+    /// The destinations parked on the Videorc sign-in (plan 215 A4), each
+    /// with what re-spawns it, or `None` when nothing was registered for it
+    /// (a row installed by a start path that spawned no connector). Pure, so
+    /// the choice is testable apart from the spawn.
+    pub(crate) fn connectors_awaiting_videorc_sign_in(&self) -> Vec<ParkedConnector> {
+        if self.session_id.is_none() {
+            return Vec::new();
+        }
+        self.providers
+            .iter()
+            .filter(|provider| provider.read == CommentsReadState::NeedsVideorcSignIn)
+            .map(|provider| ParkedConnector {
+                destination_id: provider.id.clone(),
+                platform: provider.platform,
+                connector: self
+                    .reattach
+                    .get(&provider.id)
+                    .filter(|connector| connector.platform() == provider.platform)
+                    .cloned(),
+            })
+            .collect()
     }
 
     /// Whether this session sends to Kick (its subscriptions are in use).
@@ -1374,6 +1507,7 @@ impl LiveChatCoordinator {
         self.messages_received = 0;
         self.reconnect_count = 0;
         self.senders.clear();
+        self.reattach.clear();
         self.fake_echo.clear();
         self.chatters_seen.clear();
         self.seventv_indexes = Arc::default();
@@ -1392,6 +1526,7 @@ impl LiveChatCoordinator {
         }
         self.session_id = None;
         self.senders.clear();
+        self.reattach.clear();
         self.fake_echo.clear();
         self.seventv_indexes = Arc::default();
     }
@@ -1629,6 +1764,29 @@ impl LiveChatCoordinator {
         }
     }
 
+    /// The relay waits on the Videorc sign-in (plan 215 A1): the connector
+    /// parks (`Waiting`, no resume time) with the read state that names it.
+    /// Not a failure, so `last_error` clears; Sign in attaches it again (A4).
+    pub fn set_provider_needs_videorc_sign_in(
+        &mut self,
+        platform: StreamPlatform,
+        target_id: Option<&str>,
+        message: &str,
+    ) {
+        if let Some(provider) = self.providers.iter_mut().find(|provider| {
+            provider.platform == platform
+                && target_id
+                    .map(|target_id| provider.target_id.as_deref() == Some(target_id))
+                    .unwrap_or(true)
+        }) {
+            provider.state = LiveChatProviderConnectionState::Waiting;
+            provider.read = CommentsReadState::NeedsVideorcSignIn;
+            provider.message = message.to_string();
+            provider.last_error = None;
+            provider.retry_at = None;
+        }
+    }
+
     pub fn attach_task(&mut self, task: JoinHandle<()>) {
         self.tasks.push(task);
     }
@@ -1770,6 +1928,7 @@ fn session_provider_rows(
     accounts: &[PlatformAccount],
     platforms: &[StreamPlatform],
     destinations: &[LiveChatDestinationStart],
+    session: &SessionState,
 ) -> Vec<LiveChatProviderState> {
     if !destinations.is_empty() {
         return destinations
@@ -1780,6 +1939,7 @@ fn session_provider_rows(
                     accounts
                         .iter()
                         .find(|account| account.platform == destination.platform),
+                    session,
                 );
                 let mut provider = provider_state_from_capability(capability);
                 provider.id = destination.target_id.clone();
@@ -1813,7 +1973,7 @@ fn session_provider_rows(
             .collect();
     }
     let requested: HashSet<StreamPlatform> = platforms.iter().copied().collect();
-    chat_capabilities(accounts)
+    chat_capabilities(accounts, session)
         .into_iter()
         .filter(|capability| requested.is_empty() || requested.contains(&capability.platform))
         .map(provider_state_from_capability)
@@ -2036,7 +2196,12 @@ where
         );
     }
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
-    let mut providers = session_provider_rows(&accounts, &params.platforms, &params.destinations);
+    let mut providers = session_provider_rows(
+        &accounts,
+        &params.platforms,
+        &params.destinations,
+        &crate::account::session_state(),
+    );
     for provider in &mut providers {
         let configured_target_id = match provider.platform {
             StreamPlatform::Youtube => params
@@ -2305,10 +2470,17 @@ where
             session_generation,
             kick.clone(),
         ));
+        let destination_id =
+            comments_destination_id(StreamPlatform::Kick, kick.target_id.as_deref());
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(handle);
+        // Plan 215 A4: the Videorc sign-in re-spawns this connector as is.
+        coordinator.register_reattachable(
+            destination_id.clone(),
+            ReattachableConnector::Kick(kick.clone()),
+        );
         coordinator.register_sender(
-            comments_destination_id(StreamPlatform::Kick, kick.target_id.as_deref()),
+            destination_id,
             ChatSenderConfig::Kick(crate::kick_chat::KickChatSenderConfig {
                 access_token: kick.access_token,
                 account_id: kick.account_id,
@@ -2323,10 +2495,16 @@ where
             state.clone(),
             params.session_id.clone(),
             session_generation,
-            x,
+            x.clone(),
         ));
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(handle);
+        // Plan 215 A4: the Videorc sign-in re-spawns this connector with its
+        // broadcast.
+        coordinator.register_reattachable(
+            comments_destination_id(StreamPlatform::X, x.target_id.as_deref()),
+            ReattachableConnector::X(x),
+        );
     }
     // Followers and subscribers (plan 055, S3) share the connectors'
     // abort-on-stop lifecycle.
@@ -2411,25 +2589,30 @@ where
     F: std::future::Future<Output = ()>,
 {
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
-    let mut provider = session_provider_rows(&accounts, &[StreamPlatform::X], &[])
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| LiveChatProviderState {
-            id: comments_destination_id(StreamPlatform::X, params.target_id.as_deref()),
-            platform: StreamPlatform::X,
-            target_id: None,
-            account_id: None,
-            account_label: None,
-            read: CommentsReadState::WaitingForBroadcastContext,
-            write: CommentsWriteState::Ready,
-            moderate: None,
-            state: LiveChatProviderConnectionState::Disabled,
-            message: crate::x_chat::x_chat_message(false).to_string(),
-            last_connected_at: None,
-            last_message_at: None,
-            last_error: None,
-            retry_at: None,
-        });
+    let mut provider = session_provider_rows(
+        &accounts,
+        &[StreamPlatform::X],
+        &[],
+        &crate::account::session_state(),
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| LiveChatProviderState {
+        id: comments_destination_id(StreamPlatform::X, params.target_id.as_deref()),
+        platform: StreamPlatform::X,
+        target_id: None,
+        account_id: None,
+        account_label: None,
+        read: CommentsReadState::WaitingForBroadcastContext,
+        write: CommentsWriteState::Ready,
+        moderate: None,
+        state: LiveChatProviderConnectionState::Disabled,
+        message: crate::x_chat::x_chat_message(false).to_string(),
+        last_connected_at: None,
+        last_message_at: None,
+        last_error: None,
+        retry_at: None,
+    });
     provider.target_id = params.target_id.clone();
     provider.id = comments_destination_id(StreamPlatform::X, provider.target_id.as_deref());
 
@@ -2476,12 +2659,18 @@ where
         state.clone(),
         params.session_id,
         session_generation,
-        config,
+        config.clone(),
     ));
     {
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(viewer_handle);
         coordinator.attach_task(handle);
+        // Plan 215 A4: the Videorc sign-in re-spawns this connector with the
+        // broadcast it was attached for.
+        coordinator.register_reattachable(
+            sender_destination_id.clone(),
+            ReattachableConnector::X(config),
+        );
         coordinator.register_sender(
             sender_destination_id,
             ChatSenderConfig::X {
@@ -2495,6 +2684,88 @@ where
     state.emit_event("liveChat.snapshot", snapshot.clone());
     drop(lifecycle_delivery);
     Ok(snapshot)
+}
+
+/// Plan 215 A4: the Videorc sign-in just completed. Every X and Kick connector
+/// parked on it (`NeedsVideorcSignIn`) re-spawns with the config it was
+/// registered with, broadcast included, in the same chat session and
+/// generation: the stream never restarts, and the connector reads the fresh
+/// token from the store as it always did. A parked row nothing was registered
+/// for stays as it is and says so in the log; it attaches at the next Go
+/// Live. Returns how many connectors were re-spawned.
+pub async fn reattach_after_videorc_sign_in(state: &AppState) -> usize {
+    // The same lifecycle fence the start paths hold while they attach tasks,
+    // so a stop cannot retire the session between the choice and the spawn.
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let reattached = {
+        let mut coordinator = state.live_chat.lock().await;
+        let Some(session_id) = coordinator.session_id().map(str::to_string) else {
+            return 0;
+        };
+        let session_generation = coordinator.session_generation();
+        let parked = coordinator.connectors_awaiting_videorc_sign_in();
+        let mut reattached = 0;
+        for ParkedConnector {
+            destination_id,
+            platform,
+            connector,
+        } in parked
+        {
+            let Some(connector) = connector else {
+                state.emit_log(
+                    "warn",
+                    format!(
+                        "{} chat for {destination_id} waits on the Videorc sign-in but has no registered connector; it attaches at the next Go Live.",
+                        stream_platform_id(platform)
+                    ),
+                );
+                continue;
+            };
+            state.emit_log(
+                "info",
+                format!(
+                    "Videorc sign-in completed: attaching {} chat for {destination_id} again.",
+                    stream_platform_id(platform)
+                ),
+            );
+            let handle = match connector {
+                ReattachableConnector::X(config) => {
+                    tokio::spawn(crate::x_chat::run_x_chat_connector(
+                        state.clone(),
+                        session_id.clone(),
+                        session_generation,
+                        config,
+                    ))
+                }
+                ReattachableConnector::Kick(config) => {
+                    tokio::spawn(crate::kick_chat::run_kick_chat_connector(
+                        state.clone(),
+                        session_id.clone(),
+                        session_generation,
+                        config,
+                    ))
+                }
+            };
+            coordinator.attach_task(handle);
+            reattached += 1;
+        }
+        reattached
+    };
+    if reattached > 0 {
+        let snapshot = current_status(state).await;
+        state.emit_event("liveChat.snapshot", snapshot);
+    }
+    drop(lifecycle_delivery);
+    reattached
+}
+
+/// The Videorc account changed (plan 215 A4, A5): the renderer's chat rows
+/// hear the new truth. Between sessions the rows are the capability snapshot,
+/// which reads the session state as it is now; during a session the row is
+/// whatever the connectors say.
+pub async fn publish_chat_snapshot_after_account_change(state: &AppState) {
+    let snapshot = current_status(state).await;
+    state.emit_event("liveChat.snapshot", snapshot);
 }
 
 /// The YouTube connector resolves the live chat id from the broadcast id after
@@ -3265,7 +3536,7 @@ pub async fn current_status(state: &AppState) -> LiveChatSnapshot {
         return snapshot;
     }
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
-    initial_chat_snapshot(&accounts, now)
+    initial_chat_snapshot(&accounts, now, &crate::account::session_state())
 }
 
 /// Current live-chat diagnostics for the `liveChat.diagnostics` command.
@@ -3594,7 +3865,7 @@ pub(crate) async fn set_provider_and_emit(
         (expected_session_id, expected_generation),
         platform,
         target_id,
-        (connection, None),
+        ProviderTransition::Connection(connection, None),
         message,
         (std::future::ready(()), std::future::ready(())),
     )
@@ -3617,11 +3888,43 @@ pub(crate) async fn set_provider_waiting_and_emit(
         (expected_session_id, expected_generation),
         platform,
         target_id,
-        (LiveChatProviderConnectionState::Waiting, Some(retry_at)),
+        ProviderTransition::Connection(LiveChatProviderConnectionState::Waiting, Some(retry_at)),
         message,
         (std::future::ready(()), std::future::ready(())),
     )
     .await
+}
+
+/// The relay waits on the Videorc sign-in (plan 215 A1): the provider parks
+/// with the read state that names it, and the renderer hears it like any
+/// other transition.
+pub(crate) async fn set_provider_needs_videorc_sign_in_and_emit(
+    state: &AppState,
+    expected_session_id: &str,
+    expected_generation: u64,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+    message: &str,
+) -> bool {
+    set_provider_and_emit_with_hooks(
+        state,
+        (expected_session_id, expected_generation),
+        platform,
+        target_id,
+        ProviderTransition::NeedsVideorcSignIn,
+        message,
+        (std::future::ready(()), std::future::ready(())),
+    )
+    .await
+}
+
+/// One provider transition: a connection state with an optional resume time,
+/// or the parked state that waits on the Videorc sign-in (plan 215 A1), which
+/// is a read state and not a connection failure.
+#[derive(Clone, Copy)]
+enum ProviderTransition<'a> {
+    Connection(LiveChatProviderConnectionState, Option<&'a str>),
+    NeedsVideorcSignIn,
 }
 
 async fn set_provider_and_emit_with_hooks<F, G>(
@@ -3629,7 +3932,7 @@ async fn set_provider_and_emit_with_hooks<F, G>(
     expected_owner: (&str, u64),
     platform: StreamPlatform,
     target_id: Option<&str>,
-    transition: (LiveChatProviderConnectionState, Option<&str>),
+    transition: ProviderTransition<'_>,
     message: &str,
     hooks: (F, G),
 ) -> bool
@@ -3637,7 +3940,6 @@ where
     F: std::future::Future<Output = ()>,
     G: std::future::Future<Output = ()>,
 {
-    let (connection, retry_at) = transition;
     let (expected_session_id, expected_generation) = expected_owner;
     let (before_mutation, before_emit) = hooks;
     before_mutation.await;
@@ -3659,8 +3961,19 @@ where
         if !provider_exists {
             return false;
         }
-        coordinator.set_provider_status(platform, target_id, connection, message, &now);
-        coordinator.set_provider_retry_at(platform, target_id, retry_at.map(str::to_string));
+        match transition {
+            ProviderTransition::Connection(connection, retry_at) => {
+                coordinator.set_provider_status(platform, target_id, connection, message, &now);
+                coordinator.set_provider_retry_at(
+                    platform,
+                    target_id,
+                    retry_at.map(str::to_string),
+                );
+            }
+            ProviderTransition::NeedsVideorcSignIn => {
+                coordinator.set_provider_needs_videorc_sign_in(platform, target_id, message);
+            }
+        }
         coordinator
             .providers
             .iter()
@@ -6433,7 +6746,7 @@ mod tests {
                 ("session-a", session_generation),
                 StreamPlatform::Youtube,
                 Some("shared-target"),
-                (LiveChatProviderConnectionState::Reconnecting, None),
+                ProviderTransition::Connection(LiveChatProviderConnectionState::Reconnecting, None),
                 "Transient connection loss.",
                 (std::future::ready(()), async move {
                     let _ = captured_tx.send(());
@@ -6490,7 +6803,7 @@ mod tests {
                 ("shared-session", original_generation),
                 StreamPlatform::Youtube,
                 Some("shared-target"),
-                (LiveChatProviderConnectionState::Reconnecting, None),
+                ProviderTransition::Connection(LiveChatProviderConnectionState::Reconnecting, None),
                 "Old connector retry.",
                 (
                     async move {
@@ -6984,19 +7297,27 @@ mod tests {
     #[test]
     fn youtube_force_ssl_account_can_read_and_send_chat() {
         let granted = account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE]);
-        let capability = chat_capability(StreamPlatform::Youtube, Some(&granted));
+        let capability = chat_capability(
+            StreamPlatform::Youtube,
+            Some(&granted),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::Available);
         assert!(capability.chat_read_available);
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::Ready);
 
         let without_scope = account(StreamPlatform::Youtube, &[]);
-        let capability = chat_capability(StreamPlatform::Youtube, Some(&without_scope));
+        let capability = chat_capability(
+            StreamPlatform::Youtube,
+            Some(&without_scope),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
         assert_eq!(capability.read, CommentsReadState::Unavailable);
         assert_eq!(capability.write, CommentsWriteState::MissingScope);
 
-        let capability = chat_capability(StreamPlatform::Youtube, None);
+        let capability = chat_capability(StreamPlatform::Youtube, None, &SessionState::SignedIn);
         assert_eq!(capability.state, ChatCapabilityState::NotConnected);
         assert_eq!(capability.write, CommentsWriteState::Unavailable);
     }
@@ -7008,7 +7329,11 @@ mod tests {
             StreamPlatform::Twitch,
             &["channel:manage:broadcast", "channel:read:stream_key"],
         );
-        let capability = chat_capability(StreamPlatform::Twitch, Some(&account));
+        let capability = chat_capability(
+            StreamPlatform::Twitch,
+            Some(&account),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
         assert!(!capability.chat_read_available);
         assert!(capability.message.contains("Reconnect Twitch"));
@@ -7017,7 +7342,11 @@ mod tests {
     #[test]
     fn twitch_with_user_read_chat_is_available() {
         let account = account(StreamPlatform::Twitch, &[TWITCH_CHAT_SCOPE]);
-        let capability = chat_capability(StreamPlatform::Twitch, Some(&account));
+        let capability = chat_capability(
+            StreamPlatform::Twitch,
+            Some(&account),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::Available);
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::MissingScope);
@@ -7029,7 +7358,11 @@ mod tests {
             StreamPlatform::Twitch,
             &[TWITCH_CHAT_SCOPE, TWITCH_CHAT_WRITE_SCOPE],
         );
-        let capability = chat_capability(StreamPlatform::Twitch, Some(&account));
+        let capability = chat_capability(
+            StreamPlatform::Twitch,
+            Some(&account),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::Ready);
     }
@@ -7042,7 +7375,11 @@ mod tests {
         );
         stale.status = PlatformAccountStatus::NeedsReconnect;
 
-        let capability = chat_capability(StreamPlatform::Twitch, Some(&stale));
+        let capability = chat_capability(
+            StreamPlatform::Twitch,
+            Some(&stale),
+            &SessionState::SignedIn,
+        );
 
         assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
         assert_eq!(capability.read, CommentsReadState::Unavailable);
@@ -7066,7 +7403,7 @@ mod tests {
         connected.id = "connected".to_string();
         connected.account_id = "connected-channel".to_string();
 
-        let capability = chat_capabilities(&[stale, connected])
+        let capability = chat_capabilities(&[stale, connected], &SessionState::SignedIn)
             .into_iter()
             .find(|capability| capability.platform == StreamPlatform::Twitch)
             .unwrap();
@@ -7127,13 +7464,13 @@ mod tests {
 
     #[test]
     fn x_without_account_is_not_connected_and_custom_has_no_comments() {
-        let x = chat_capability(StreamPlatform::X, None);
+        let x = chat_capability(StreamPlatform::X, None, &SessionState::SignedIn);
         assert_eq!(x.state, ChatCapabilityState::NotConnected);
         assert_eq!(x.write, CommentsWriteState::ReadOnly);
         // Plan 213 J3: signed out, Sign in comes first, never Authorize X Live.
         assert_eq!(x.message, "Sign in to X to read and send chat.");
         assert_eq!(
-            chat_capability(StreamPlatform::Custom, None).state,
+            chat_capability(StreamPlatform::Custom, None, &SessionState::SignedIn).state,
             ChatCapabilityState::Unsupported
         );
     }
@@ -7141,7 +7478,7 @@ mod tests {
     #[test]
     fn missing_account_reports_not_connected() {
         assert_eq!(
-            chat_capability(StreamPlatform::Twitch, None).state,
+            chat_capability(StreamPlatform::Twitch, None, &SessionState::SignedIn).state,
             ChatCapabilityState::NotConnected
         );
     }
@@ -7150,7 +7487,7 @@ mod tests {
     fn moderate_readiness_follows_the_moderation_scopes_and_the_quota_pause() {
         // Plan 140 S4: honest per-destination "Remove messages" readiness.
         // No account: absent on the wire.
-        let no_account = chat_capability(StreamPlatform::Twitch, None);
+        let no_account = chat_capability(StreamPlatform::Twitch, None, &SessionState::SignedIn);
         assert_eq!(no_account.moderate, None);
         assert!(
             serde_json::to_value(&no_account)
@@ -7164,7 +7501,12 @@ mod tests {
             &[TWITCH_CHAT_SCOPE, TWITCH_CHAT_WRITE_SCOPE],
         );
         assert_eq!(
-            chat_capability(StreamPlatform::Twitch, Some(&twitch)).moderate,
+            chat_capability(
+                StreamPlatform::Twitch,
+                Some(&twitch),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::MissingScope)
         );
         let twitch_moderator = account(
@@ -7175,12 +7517,17 @@ mod tests {
             ],
         );
         assert_eq!(
-            chat_capability(StreamPlatform::Twitch, Some(&twitch_moderator)).moderate,
+            chat_capability(
+                StreamPlatform::Twitch,
+                Some(&twitch_moderator),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::Ready)
         );
         let kick = account(StreamPlatform::Kick, &[crate::kick_chat::KICK_EVENTS_SCOPE]);
         assert_eq!(
-            chat_capability(StreamPlatform::Kick, Some(&kick)).moderate,
+            chat_capability(StreamPlatform::Kick, Some(&kick), &SessionState::SignedIn).moderate,
             Some(CommentsModerateState::MissingScope)
         );
         let kick_moderator = account(
@@ -7191,30 +7538,48 @@ mod tests {
             ],
         );
         assert_eq!(
-            chat_capability(StreamPlatform::Kick, Some(&kick_moderator)).moderate,
+            chat_capability(
+                StreamPlatform::Kick,
+                Some(&kick_moderator),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::Ready)
         );
         // YouTube's force-ssl already covers deletes.
         let youtube = account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE]);
         assert_eq!(
-            chat_capability(StreamPlatform::Youtube, Some(&youtube)).moderate,
+            chat_capability(
+                StreamPlatform::Youtube,
+                Some(&youtube),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::Ready)
         );
         let youtube_stale = account(StreamPlatform::Youtube, &[]);
         assert_eq!(
-            chat_capability(StreamPlatform::Youtube, Some(&youtube_stale)).moderate,
+            chat_capability(
+                StreamPlatform::Youtube,
+                Some(&youtube_stale),
+                &SessionState::SignedIn
+            )
+            .moderate,
             Some(CommentsModerateState::MissingScope)
         );
         // No native path at all.
-        let custom = chat_capability(StreamPlatform::Custom, None);
+        let custom = chat_capability(StreamPlatform::Custom, None, &SessionState::SignedIn);
         assert_eq!(custom.moderate, Some(CommentsModerateState::Unsupported));
         assert_eq!(
             serde_json::to_value(&custom).unwrap()["moderate"],
             "unsupported"
         );
         // The quota pause downgrades a ready YouTube destination only.
-        let paused =
-            chat_capabilities_with_quota(&[youtube.clone(), twitch_moderator.clone()], true);
+        let paused = chat_capabilities_with_quota(
+            &[youtube.clone(), twitch_moderator.clone()],
+            true,
+            &SessionState::SignedIn,
+        );
         let by_platform = |capabilities: &[ChatCapability], platform: StreamPlatform| {
             capabilities
                 .iter()
@@ -7230,7 +7595,11 @@ mod tests {
             by_platform(&paused, StreamPlatform::Twitch),
             Some(CommentsModerateState::Ready)
         );
-        let running = chat_capabilities_with_quota(&[youtube.clone()], false);
+        let running = chat_capabilities_with_quota(
+            std::slice::from_ref(&youtube),
+            false,
+            &SessionState::SignedIn,
+        );
         assert_eq!(
             by_platform(&running, StreamPlatform::Youtube),
             Some(CommentsModerateState::Ready)
@@ -7239,6 +7608,7 @@ mod tests {
         let row = provider_state_from_capability(chat_capability(
             StreamPlatform::Youtube,
             Some(&youtube),
+            &SessionState::SignedIn,
         ));
         assert_eq!(row.moderate, Some(CommentsModerateState::Ready));
         let mut wire = serde_json::to_value(&row).unwrap();
@@ -7251,7 +7621,7 @@ mod tests {
     #[test]
     fn capabilities_cover_every_native_platform() {
         let accounts = vec![account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE])];
-        let capabilities = chat_capabilities(&accounts);
+        let capabilities = chat_capabilities(&accounts, &SessionState::SignedIn);
         assert_eq!(capabilities.len(), 4);
         assert_eq!(capabilities[0].platform, StreamPlatform::Youtube);
         assert_eq!(capabilities[0].state, ChatCapabilityState::Available);
@@ -7272,20 +7642,84 @@ mod tests {
                 crate::kick_chat::KICK_CHAT_WRITE_SCOPE,
             ],
         );
-        let capability = chat_capability(StreamPlatform::Kick, Some(&both));
+        let capability =
+            chat_capability(StreamPlatform::Kick, Some(&both), &SessionState::SignedIn);
         assert_eq!(capability.state, ChatCapabilityState::Available);
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::Ready);
 
         let read_only = account(StreamPlatform::Kick, &[crate::kick_chat::KICK_EVENTS_SCOPE]);
-        let capability = chat_capability(StreamPlatform::Kick, Some(&read_only));
+        let capability = chat_capability(
+            StreamPlatform::Kick,
+            Some(&read_only),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.read, CommentsReadState::Ready);
         assert_eq!(capability.write, CommentsWriteState::MissingScope);
 
         let neither = account(StreamPlatform::Kick, &[]);
-        let capability = chat_capability(StreamPlatform::Kick, Some(&neither));
+        let capability = chat_capability(
+            StreamPlatform::Kick,
+            Some(&neither),
+            &SessionState::SignedIn,
+        );
         assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
         assert!(capability.message.contains("Reconnect Kick"));
+    }
+
+    /// Plan 215 A2: X and Kick chat ride the Videorc relay. Signed out of
+    /// Videorc, a platform-ready capability names the Videorc sign-in in the
+    /// Go Live check's words and cannot read; a store that cannot be read is
+    /// a failure with its error, never "signed out". Sending stays with the
+    /// platform. YouTube and Twitch never look at the Videorc account.
+    #[test]
+    fn relay_chat_capability_names_the_missing_videorc_sign_in() {
+        let kick = account(
+            StreamPlatform::Kick,
+            &[
+                crate::kick_chat::KICK_EVENTS_SCOPE,
+                crate::kick_chat::KICK_CHAT_WRITE_SCOPE,
+            ],
+        );
+        let signed_out =
+            chat_capability(StreamPlatform::Kick, Some(&kick), &SessionState::SignedOut);
+        assert_eq!(signed_out.read, CommentsReadState::NeedsVideorcSignIn);
+        assert_eq!(signed_out.write, CommentsWriteState::Ready);
+        assert!(!signed_out.chat_read_available);
+        assert_eq!(signed_out.message, KICK_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN);
+        assert_eq!(signed_out.message, "Kick chat needs your Videorc sign-in.");
+        assert!(signed_out.account_id.is_some(), "the account rides along");
+
+        let unreadable = chat_capability(
+            StreamPlatform::Kick,
+            Some(&kick),
+            &SessionState::Unreadable("permission denied".to_string()),
+        );
+        assert_eq!(unreadable.read, CommentsReadState::Failed);
+        assert!(
+            unreadable.message.contains("permission denied"),
+            "{}",
+            unreadable.message
+        );
+        assert!(!unreadable.message.to_lowercase().contains("sign in"));
+
+        // The X words name X chat, and a signed-out X account still comes first.
+        assert_eq!(
+            X_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN,
+            "X chat needs your Videorc sign-in."
+        );
+        let x_signed_out = chat_capability(StreamPlatform::X, None, &SessionState::SignedOut);
+        assert_eq!(x_signed_out.read, CommentsReadState::Unavailable);
+        assert_eq!(x_signed_out.message, X_SIGN_IN_FOR_CHAT);
+
+        let youtube = account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE]);
+        let youtube_signed_out = chat_capability(
+            StreamPlatform::Youtube,
+            Some(&youtube),
+            &SessionState::SignedOut,
+        );
+        assert_eq!(youtube_signed_out.read, CommentsReadState::Ready);
+        assert!(youtube_signed_out.chat_read_available);
     }
 
     #[tokio::test]
@@ -7355,6 +7789,7 @@ mod tests {
                 ),
                 notice: None,
             }],
+            &SessionState::SignedIn,
         );
 
         assert_eq!(providers[0].state, LiveChatProviderConnectionState::Failed);
@@ -7364,13 +7799,13 @@ mod tests {
 
     #[test]
     fn facebook_stream_key_destination_says_comments_need_sign_in() {
-        let capability = chat_capability(StreamPlatform::Facebook, None);
+        let capability = chat_capability(StreamPlatform::Facebook, None, &SessionState::SignedIn);
         assert_eq!(capability.state, ChatCapabilityState::Unsupported);
         assert!(!capability.chat_read_available);
         assert_eq!(capability.message, FACEBOOK_COMMENTS_UNAVAILABLE);
         // Only a session that streams to Facebook carries its row.
         assert!(
-            chat_capabilities(&[])
+            chat_capabilities(&[], &SessionState::SignedIn)
                 .iter()
                 .all(|capability| capability.platform != StreamPlatform::Facebook)
         );
@@ -7385,6 +7820,7 @@ mod tests {
                 preparation_error: None,
                 notice: None,
             }],
+            &SessionState::SignedIn,
         );
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].target_id.as_deref(), Some("facebook"));
@@ -7444,7 +7880,7 @@ mod tests {
     #[test]
     fn initial_snapshot_maps_capabilities_to_provider_rows() {
         let accounts = vec![account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE])];
-        let snapshot = initial_chat_snapshot(&accounts, "now".to_string());
+        let snapshot = initial_chat_snapshot(&accounts, "now".to_string(), &SessionState::SignedIn);
         assert_eq!(snapshot.providers.len(), 4);
         assert!(snapshot.messages.is_empty());
         assert_eq!(snapshot.providers[0].platform, StreamPlatform::Youtube);
@@ -7581,5 +8017,201 @@ mod tests {
         stop_live_chat(&state).await;
         assert!(!crate::captions::caption_task_alive_for_test(&state).await);
         *state.recording.lock().await = None;
+    }
+
+    /// Plan 215 A4, the choice apart from the spawn: only a row parked on the
+    /// Videorc sign-in is attached again, with the connector registered for
+    /// it; a parked row nothing was registered for is reported without one;
+    /// a connected row is left alone; and between sessions there is nothing.
+    #[test]
+    fn only_rows_parked_on_the_videorc_sign_in_attach_again() {
+        let mut coordinator = LiveChatCoordinator::new(10);
+        assert!(coordinator.connectors_awaiting_videorc_sign_in().is_empty());
+
+        let parked_x = LiveChatProviderState {
+            read: CommentsReadState::NeedsVideorcSignIn,
+            state: LiveChatProviderConnectionState::Waiting,
+            message: X_CHAT_NEEDS_VIDEORC_SIGN_IN.to_string(),
+            ..connected_provider("x-target", StreamPlatform::X)
+        };
+        let parked_kick = LiveChatProviderState {
+            read: CommentsReadState::NeedsVideorcSignIn,
+            state: LiveChatProviderConnectionState::Waiting,
+            message: KICK_CHAT_NEEDS_VIDEORC_SIGN_IN.to_string(),
+            ..connected_provider("kick-target", StreamPlatform::Kick)
+        };
+        coordinator.start_session(
+            "session-1".to_string(),
+            vec![
+                parked_x,
+                connected_provider("yt-target", StreamPlatform::Youtube),
+                parked_kick,
+            ],
+        );
+        coordinator.register_reattachable(
+            "x-target".to_string(),
+            ReattachableConnector::X(crate::x_chat::XChatConfig {
+                broadcast_id: "1NGarompkEqJj".to_string(),
+                target_id: Some("x-target".to_string()),
+                overrides: Default::default(),
+            }),
+        );
+
+        let parked = coordinator.connectors_awaiting_videorc_sign_in();
+        assert_eq!(parked.len(), 2, "{parked:?}");
+        assert_eq!(parked[0].destination_id, "x-target");
+        assert_eq!(parked[0].platform, StreamPlatform::X);
+        assert!(matches!(
+            &parked[0].connector,
+            Some(ReattachableConnector::X(config)) if config.broadcast_id == "1NGarompkEqJj"
+        ));
+        assert_eq!(parked[1].destination_id, "kick-target");
+        assert!(parked[1].connector.is_none(), "nothing registered for Kick");
+
+        // Stop clears the registry with the senders.
+        coordinator.stop_session();
+        assert!(coordinator.connectors_awaiting_videorc_sign_in().is_empty());
+    }
+
+    /// Plan 215 A4, against the mock relay: X chat starts, the relay refuses
+    /// the Videorc session (the streamer's expired sign-in), and the row parks
+    /// in words that name Videorc. The streamer signs in: the parked connector
+    /// re-spawns with its registered broadcast in the same session and
+    /// generation, binds again, reaches Connected and delivers chat. The
+    /// stream never restarts. (A missing token parks the same way: the A1
+    /// tests in `x_chat.rs` and `kick_chat.rs`. The relay's refusal is used
+    /// here because a unit test cannot put a token into the process-wide test
+    /// secrets store without racing every test that asserts "signed out".)
+    #[tokio::test]
+    async fn x_chat_attaches_again_when_the_videorc_sign_in_completes() {
+        use crate::x_chat::tests::{MockMode, mock_config, spawn_mock_server};
+        use std::sync::atomic::Ordering;
+
+        let server = spawn_mock_server(MockMode::SignedOut, Vec::new()).await;
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        // Nothing to attach between sessions.
+        assert_eq!(reattach_after_videorc_sign_in(&state).await, 0);
+
+        let mut params = empty_start_params("session-1");
+        params.platforms = vec![StreamPlatform::X];
+        params.x = Some(mock_config(&server));
+        let started = start_live_chat(&state, params).await;
+        assert_eq!(started.session_id.as_deref(), Some("session-1"));
+        let session_generation = state.live_chat.lock().await.session_generation();
+
+        let parked = wait_for_x_provider(&state, |provider| {
+            provider.read == CommentsReadState::NeedsVideorcSignIn
+        })
+        .await;
+        assert_eq!(parked.state, LiveChatProviderConnectionState::Waiting);
+        assert_eq!(parked.message, X_CHAT_SIGN_IN_EXPIRED);
+        assert_eq!(parked.last_error, None);
+        assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 1);
+        {
+            let coordinator = state.live_chat.lock().await;
+            let awaiting = coordinator.connectors_awaiting_videorc_sign_in();
+            assert_eq!(awaiting.len(), 1);
+            assert!(matches!(
+                &awaiting[0].connector,
+                Some(ReattachableConnector::X(config)) if config.broadcast_id == "1NGarompkEqJj"
+            ));
+        }
+
+        // The streamer signs in: the relay accepts the session again, and the
+        // sign-in attaches the parked connector.
+        server.set_mode(MockMode::Deliver);
+        let mut events = state.events.subscribe();
+        assert_eq!(reattach_after_videorc_sign_in(&state).await, 1);
+
+        let connected = wait_for_x_provider(&state, |provider| {
+            provider.state == LiveChatProviderConnectionState::Connected
+        })
+        .await;
+        assert_eq!(connected.read, CommentsReadState::Ready);
+        assert_eq!(connected.last_error, None);
+        let message = wait_for_x_message(&state, "message-1").await;
+        assert_eq!(message.session_id, "session-1");
+
+        // The same session and generation: the stream never restarted. One
+        // more bind, with the registered broadcast.
+        let snapshot = current_status(&state).await;
+        assert_eq!(snapshot.session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            state.live_chat.lock().await.session_generation(),
+            session_generation
+        );
+        assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(server.state.bind_authorizations.lock().await.len(), 1);
+        assert!(
+            state
+                .live_chat
+                .lock()
+                .await
+                .connectors_awaiting_videorc_sign_in()
+                .is_empty()
+        );
+        // The renderer heard the rows change through the usual events.
+        let mut published = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(event) => published.push(event.event),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            published.iter().any(|event| event == "liveChat.snapshot"),
+            "{published:?}"
+        );
+        // A second sign-in has nothing left to attach.
+        assert_eq!(reattach_after_videorc_sign_in(&state).await, 0);
+
+        stop_live_chat(&state).await;
+        let _ = server.shutdown.send(());
+    }
+
+    async fn wait_for_x_provider(
+        state: &AppState,
+        condition: impl Fn(&LiveChatProviderState) -> bool,
+    ) -> LiveChatProviderState {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(provider) = current_status(state)
+                .await
+                .providers
+                .into_iter()
+                .find(|provider| provider.platform == StreamPlatform::X && condition(provider))
+            {
+                return provider;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for the X provider row"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_for_x_message(state: &AppState, provider_message_id: &str) -> LiveChatMessage {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(message) = current_status(state)
+                .await
+                .messages
+                .into_iter()
+                .find(|message| message.provider_message_id == provider_message_id)
+            {
+                return message;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for X message {provider_message_id}"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 }
