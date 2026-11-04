@@ -2804,3 +2804,42 @@ describe('canvas orientation lock (the Studio mode owns the orientation)', () =>
     })
   })
 })
+
+describe('videoProfileCompatibility on Windows (issue #1062)', () => {
+  it("blocks an output outside the encoder bridge envelope, in the backend's words", () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['record-4k60-experimental']
+    config.recordEnabled = true
+    config.streamEnabled = false
+    expect(videoProfileCompatibility(config, 'win32')).toEqual({
+      blockingReason:
+        "4K at 60 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 60 fps.",
+      warning: null
+    })
+    expect(videoProfileCompatibility(config, 'darwin')).toEqual({
+      blockingReason: null,
+      warning: null
+    })
+    expect(videoProfileCompatibility(config)).toEqual({ blockingReason: null, warning: null })
+  })
+
+  it('leaves a livestream to the Go Live sheet, and the 4K freeze warning as it was', () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['record-4k60-experimental']
+    config.recordEnabled = true
+    config.streamEnabled = true
+    config.streaming = {
+      ...config.streaming,
+      enabled: true,
+      defaultOutputPreset: 'stream-safe-1080p60',
+      defaultBitrateKbps: 6000,
+      targets: config.streaming.targets.map((target, index) => ({
+        ...target,
+        enabled: index === 0
+      }))
+    }
+    const result = videoProfileCompatibility(config, 'win32')
+    expect(result.blockingReason).toBeNull()
+    expect(result.warning).toMatch(/4K local recording while livestreaming/)
+  })
+})
