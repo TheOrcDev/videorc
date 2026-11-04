@@ -10,7 +10,9 @@ export const FIRST_RUN_SMOKE_LIMITS = Object.freeze({
   // once (a React render on the theme or media change), never on a reload.
   toneFlipWithinMs: 250,
   lookSampleAtLeastMs: 30000,
-  clipsWatchMs: 10000
+  clipsWatchMs: 10000,
+  // Plan 212's check took 6–50 s on the owner's Mac, depending on load (#973).
+  performanceCheckSettleMs: 180000
 })
 
 // Emitted at admission, BEFORE the native source is queued. Reuse is also
@@ -26,6 +28,21 @@ export function firstRunSourceStartLines(lines) {
   return lines.filter((line) =>
     FIRST_RUN_SOURCE_START_PATTERNS.some((pattern) => new RegExp(pattern).test(line))
   )
+}
+
+// The renderer's firstRunLookWritesHeld states (lib/first-run.ts).
+const LOOK_HOLDING_STATES = ['starting', 'recording', 'streaming', 'stopping']
+
+// Plan 212 × 207 (#973): first-run setup starts the performance check as it
+// opens, and while its benchmark sessions run the look's writes are held
+// until setup closes. A user reads two steps before the look; the smoke
+// chooses one once the check is over: not running, no session left, and it
+// has finished (a verdict, a host-busy refusal, or the completed event, so a
+// run that is still about to start is not taken for one that ended).
+export function firstRunPerformanceCheckSettled({ check, recording, completed = false }) {
+  if (!check || check.running) return false
+  if (!recording || LOOK_HOLDING_STATES.includes(recording.state)) return false
+  return completed || check.result !== undefined || check.lastRunNotRecorded !== undefined
 }
 
 const STEPS = ['permissions', 'goal', 'look', 'sound', 'destinations']
