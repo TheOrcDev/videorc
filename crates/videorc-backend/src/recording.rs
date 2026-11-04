@@ -17348,6 +17348,17 @@ fn tee_output_args(spec: String) -> Vec<String> {
     ]
 }
 
+/// The encoder bridge's proven envelopes above 30 fps, as (long side, short
+/// side) in either orientation. The renderer mirrors them in
+/// `lib/bridge-envelope.ts`, so a change here changes both.
+const RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES: (u32, u32) = (2560, 1440);
+const STREAMING_BRIDGE_60FPS_MAX_SIDES: (u32, u32) = (1920, 1080);
+const BRIDGE_60FPS_MAX_FPS: u32 = 60;
+
+fn video_fits_sides(video: &VideoSettings, (long_side, short_side): (u32, u32)) -> bool {
+    video.width.max(video.height) <= long_side && video.width.min(video.height) <= short_side
+}
+
 /// Record-only 60fps recordings ride the encoder bridge up to 1440p (the
 /// perf-gated envelope): same compositor the preview shows, platform encoder,
 /// epoch-trimmed start, and bounded stop. 4K60 remains outside that envelope.
@@ -17355,12 +17366,10 @@ fn record_only_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
     if params.output.stream_enabled {
         return false;
     }
-    if params.output.video.fps > 60 {
+    if params.output.video.fps > BRIDGE_60FPS_MAX_FPS {
         return false;
     }
-    let long_side = params.output.video.width.max(params.output.video.height);
-    let short_side = params.output.video.width.min(params.output.video.height);
-    long_side <= 2560 && short_side <= 1440
+    video_fits_sides(&params.output.video, RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES)
 }
 
 /// Livestreaming has a narrower proven 60fps bridge envelope than local
@@ -17384,9 +17393,8 @@ fn streaming_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
         profiles.push(params.output.video.clone());
     }
     profiles.into_iter().all(|profile| {
-        profile.fps <= 60
-            && profile.width.max(profile.height) <= 1920
-            && profile.width.min(profile.height) <= 1080
+        profile.fps <= BRIDGE_60FPS_MAX_FPS
+            && video_fits_sides(&profile, STREAMING_BRIDGE_60FPS_MAX_SIDES)
     })
 }
 
@@ -17465,8 +17473,80 @@ fn compositor_encoder_bridge_ruled_out(params: &StartSessionParams) -> bool {
     // The bridge cap: record-only runs to 1440p60; livestreaming runs to
     // 1080p60 across every encoded role. Profiles outside those measured
     // envelopes retain the legacy path, and the session log says so.
+    outside_compositor_bridge_60fps_envelope(params)
+}
+
+/// The request asks for more than 30 fps at a profile outside both measured
+/// bridge envelopes: the only reason, short of the developer env override,
+/// that a validated request takes the legacy path.
+fn outside_compositor_bridge_60fps_envelope(params: &StartSessionParams) -> bool {
     requested_compositor_bridge_fps(params) > 30
         && !(record_only_bridge_60fps_eligible(params) || streaming_bridge_60fps_eligible(params))
+}
+
+/// The resolution class in the renderer's one spelling (`formatVideoQuality`):
+/// "4K" or the short edge ("1440p") for a landscape canvas, both sides
+/// ("1440 × 2560") for a portrait one.
+#[cfg(any(test, target_os = "windows"))]
+fn video_size_name(video: &VideoSettings) -> String {
+    if video.height > video.width {
+        return format!("{} × {}", video.width, video.height);
+    }
+    match video.width.min(video.height) {
+        2160 => "4K".to_string(),
+        short_side => format!("{short_side}p"),
+    }
+}
+
+/// The largest canvas of `video`'s orientation inside an envelope, named.
+#[cfg(any(test, target_os = "windows"))]
+fn envelope_size_name(video: &VideoSettings, (long_side, short_side): (u32, u32)) -> String {
+    let (width, height) = if video.height > video.width {
+        (short_side, long_side)
+    } else {
+        (long_side, short_side)
+    };
+    video_size_name(&VideoSettings {
+        preset: VideoPreset::Custom,
+        width,
+        height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+    })
+}
+
+/// Issue #1062: on Windows the legacy FFmpeg path encodes with software
+/// OpenH264, which ran 4K60 at about 0.35x realtime and wrote a truncated,
+/// time-compressed file with no warning. A request the envelope rules out of
+/// the bridge is refused at validation instead, with the choices that stay
+/// inside it. `bridge_disabled_by_env` is the developer override, which keeps
+/// its legacy path. Pure and cross-platform so every host unit-tests it;
+/// only a Windows start consults it.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_bridge_envelope_refusal(
+    params: &StartSessionParams,
+    bridge_disabled_by_env: bool,
+) -> Option<String> {
+    if bridge_disabled_by_env || !outside_compositor_bridge_60fps_envelope(params) {
+        return None;
+    }
+    let fps = requested_compositor_bridge_fps(params);
+    let video = &params.output.video;
+    if params.output.stream_enabled {
+        // Not reached after `validate_video_profile_policy`: a livestream
+        // above 30 fps shares one encode at or below 1080p, or splits only
+        // inside the envelope. Kept so no validated request takes the legacy
+        // path, whatever a later policy allows.
+        let cap = envelope_size_name(video, STREAMING_BRIDGE_60FPS_MAX_SIDES);
+        return Some(format!(
+            "Livestreaming at {fps} fps on Windows works up to {cap} for the recording and every destination. Choose {cap}, or 30 fps."
+        ));
+    }
+    let name = video_size_name(video);
+    let cap = envelope_size_name(video, RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES);
+    Some(format!(
+        "{name} at {fps} fps isn't supported on Windows yet. Choose {name} at 30 fps or {cap} at {fps} fps."
+    ))
 }
 
 /// The video output the encoder bridge is asked for, or the raw legacy
@@ -24347,6 +24427,19 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     validate_caption_output_policy(params)?;
     validate_video_profile_policy(params)?;
     crate::source_iso::validate_separate_source_recordings(params)?;
+    // Issue #1062: Windows has no hardware legacy path, so a request outside
+    // the bridge envelope is refused here, before the clip buffer hands over
+    // and before any probe, rather than recorded through software OpenH264.
+    #[cfg(target_os = "windows")]
+    if let Some(message) = windows_bridge_envelope_refusal(
+        params,
+        compositor_encoder_bridge_disabled(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        ),
+    ) {
+        bail!(message);
+    }
 
     Ok(())
 }
@@ -31882,6 +31975,100 @@ mod tests {
         let mut streaming = base_params(true, true);
         streaming.output.video.fps = 60;
         assert!(!record_only_bridge_60fps_eligible(&streaming));
+    }
+
+    /// Issue #1062: a Windows request the envelope rules out of the bridge
+    /// is refused with the choices that stay inside it, never recorded
+    /// through software OpenH264 at a third of realtime.
+    #[test]
+    fn windows_refuses_a_60fps_recording_outside_the_bridge_envelope() {
+        let mut params = base_params(true, false);
+        params.output.video = video_preset_defaults(VideoPreset::Record4k60Experimental);
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "4K at 60 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 60 fps."
+            )
+        );
+        // The developer env override keeps its legacy path.
+        assert_eq!(windows_bridge_envelope_refusal(&params, true), None);
+
+        // The advice keeps the requested rate: every rate up to 60 fits.
+        params.output.video.fps = 48;
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "4K at 48 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 48 fps."
+            )
+        );
+
+        // A portrait canvas is named by both sides, like the renderer.
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2160,
+            height: 3840,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "2160 × 3840 at 60 fps isn't supported on Windows yet. Choose 2160 × 3840 at 30 fps or 1440 × 2560 at 60 fps."
+            )
+        );
+    }
+
+    #[test]
+    fn windows_keeps_every_request_inside_the_bridge_envelope() {
+        let mut params = base_params(true, false);
+        for preset in [
+            VideoPreset::Record4k30,
+            VideoPreset::Tutorial1440p30,
+            VideoPreset::Tutorial1080p30,
+            VideoPreset::StreamSafe1080p60,
+            VideoPreset::Vertical1080x1920,
+        ] {
+            params.output.video = video_preset_defaults(preset.clone());
+            assert_eq!(
+                windows_bridge_envelope_refusal(&params, false),
+                None,
+                "{preset:?} rides the bridge"
+            );
+        }
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2560,
+            height: 1440,
+            fps: 60,
+            bitrate_kbps: 16_000,
+        };
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+        params.output.video.width = 1440;
+        params.output.video.height = 2560;
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+    }
+
+    #[test]
+    fn windows_keeps_a_livestream_inside_the_streaming_envelope() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p60;
+        streaming.default_bitrate_kbps = 12_000;
+        params.streaming = Some(streaming);
+        normalize_stream_only_output_video(&mut params).unwrap();
+        assert_eq!(requested_compositor_bridge_fps(&params), 60);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+
+        // The recording beside it at 1080p: the proven streaming envelope.
+        params.output.record_enabled = true;
+        params.output.video = video_preset_defaults(VideoPreset::Tutorial1080p30);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+        params.output.video = video_preset_defaults(VideoPreset::StreamYoutube1080p60);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
     }
 
     #[tokio::test]

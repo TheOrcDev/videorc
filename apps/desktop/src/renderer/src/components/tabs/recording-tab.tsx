@@ -206,8 +206,8 @@ function LocalRecordingSection(): ReactElement {
   // canvas can never contradict the scene's orientation.
   const orientation = layoutPresetOrientation(captureConfig.layout.layoutPreset)
   const resolutionPresets = resolutionOptionsForOrientation(orientation)
-  const presetOptions = recordingPresetOptions(video.preset, orientation)
-  const compatibility = videoProfileCompatibility(captureConfig)
+  const presetOptions = recordingPresetOptions(video.preset, orientation, runtimeInfo?.platform)
+  const compatibility = videoProfileCompatibility(captureConfig, runtimeInfo?.platform)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   // Plan 157: the switch stays available; when the current selection cannot
   // produce both files the copy says so and the session records Combined only.

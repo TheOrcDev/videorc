@@ -14419,7 +14419,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!streamingProfileGate.allowed) {
         return streamingProfileGate.reason
       }
-      const compatibility = videoProfileCompatibility(config)
+      const compatibility = videoProfileCompatibility(config, runtimeInfo?.platform)
       if (compatibility.blockingReason) {
         return compatibility.blockingReason
       }
@@ -14470,6 +14470,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       health,
       transportSessionActive,
       livestreamingEntitlementReason,
+      runtimeInfo?.platform,
       savedSceneAppStates,
       sceneLibrary.scenes,
       streamOutputTopologyPreflight,
