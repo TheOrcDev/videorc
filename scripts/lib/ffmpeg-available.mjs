@@ -15,11 +15,14 @@ export function ffmpegAvailable(ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PA
 // Video codec args for synthetic H.264 fixtures, picked from what this ffmpeg
 // can actually encode. The vendored Linux FFmpeg is LGPL (OpenH264, no
 // libx264), and `docs/linux-dev-loop.md` points VIDEORC_SMOKE_FFMPEG_PATH at
-// it, so a hardcoded `-c:v libx264` failed every fixture there.
+// it, so a hardcoded `-c:v libx264` failed every fixture there. The Windows
+// LGPL pin is only required to have Media Foundation's `h264_mf` (#1081),
+// encoded with the quality args the repair path ships on it.
 const FIXTURE_H264_ENCODERS = [
   ['libx264', ['-c:v', 'libx264', '-preset', 'ultrafast']],
   ['libopenh264', ['-c:v', 'libopenh264', '-b:v', '4M']],
-  ['h264_videotoolbox', ['-c:v', 'h264_videotoolbox', '-b:v', '4M']]
+  ['h264_videotoolbox', ['-c:v', 'h264_videotoolbox', '-b:v', '4M']],
+  ['h264_mf', ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '90']]
 ]
 
 export function fixtureH264EncoderArgsFor(encodersOutput) {
