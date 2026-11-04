@@ -140,7 +140,7 @@
     "baseline:real-source:camera-mpegts-output:no-preview": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_BASELINE_NO_SCREEN=1 VIDEORC_BASELINE_NO_PREVIEW_SURFACE=1 VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT=videotoolbox-h264-mpegts -- node scripts/real-source-baseline-app.mjs",
     "acceptance:obs-side-by-side": "node scripts/obs-side-by-side-acceptance.mjs",
     "measure:av-sync": "node scripts/measure-av-sync.mjs",
-    "smoke:rnnoise": "node scripts/smoke-rnnoise-app.mjs",
+    "smoke:rnnoise": "node scripts/smoke-rnnoise.mjs",
     "smoke:dev": "node scripts/smoke-dev-app.mjs",
     "smoke:recording-matrix": "node scripts/smoke-recording-matrix-app.mjs",
     "smoke:session-decay": "node scripts/smoke-recording-session-decay.mjs",

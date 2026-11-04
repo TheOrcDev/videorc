@@ -1,11 +1,15 @@
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { evaluateRnnoiseArtifact, measureFloatPcmWindow } from './lib/rnnoise-artifact-gate.mjs'
+import {
+  fixtureRecord,
+  RNNOISE_FIXTURE_ENV,
+  RNNOISE_FIXTURE_SOURCE_ENV
+} from './lib/rnnoise-speech-fixture.mjs'
 import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -20,21 +24,21 @@ const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-rnnoise-${Date.now()}`)
 )
 const reportPath = join(outputDirectory, 'rnnoise-artifact.json')
-const speechFixturePath = process.env.VIDEORC_RNNOISE_TEST_PCM_PATH
+// One pass: speech when VIDEORC_RNNOISE_TEST_PCM_PATH names a fixture, the
+// tone otherwise. `pnpm smoke:rnnoise` (smoke-rnnoise.mjs) runs both.
+const speechFixturePath = process.env[RNNOISE_FIXTURE_ENV]
 const speechFixture = speechFixturePath ? readFileSync(speechFixturePath) : null
+const speechFixtureSource =
+  process.env[RNNOISE_FIXTURE_SOURCE_ENV] === 'synthesized' ? 'synthesized' : 'supplied'
 const microphoneId = 'microphone:coreaudio:4294967295'
 const injectionMs = 3_000
 const report = {
   pass: false,
   stimulus: speechFixture
-    ? 'paced supplied speech PCM, normalized raw peak 0.12'
+    ? `paced ${speechFixtureSource} speech PCM, normalized raw peak 0.12`
     : 'paced 440 Hz native fixture, raw peak 0.12',
   fixture: speechFixture
-    ? {
-        path: speechFixturePath,
-        sha256: createHash('sha256').update(speechFixture).digest('hex'),
-        bytes: speechFixture.length
-      }
+    ? fixtureRecord({ source: speechFixtureSource, path: speechFixturePath, bytes: speechFixture })
     : null,
   scope: 'DSP/control/encoded-file wiring; no speech-quality or device-permission claim',
   recordings: [],
