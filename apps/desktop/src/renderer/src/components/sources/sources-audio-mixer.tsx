@@ -41,7 +41,6 @@ import {
   ParameterSliderReset,
   type ParameterChangeReason
 } from '@/components/ui/parameter-slider'
-import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useWorkspaceNav } from '@/components/workspace-nav'
@@ -154,6 +153,31 @@ function MixerRow({ children }: { children: ReactNode }): ReactElement {
  */
 export function keepMicrophoneReadyHint(platform: string | undefined): string {
   return `Opens the microphone while Studio is on screen, so Record starts at once. ${microphoneIndicatorCopy(platform)} while it's open; hiding the window releases it.`
+}
+
+/**
+ * The Microphone row's Noise reduction switch (PR 1036): checked is RNNoise.
+ * It can't turn On with no microphone, and its line says so instead of the
+ * level fact. Off always stays possible: removing a microphone keeps the
+ * choice (docs/rnnoise.md), so a switch left On never gets stuck there.
+ * Outside a recording or livestream the level is the input before noise
+ * reduction, so the line says when it shows the cleaned sound.
+ */
+export function noiseReductionSwitchView(
+  value: MicrophoneNoiseSuppression,
+  microphoneSelected: boolean
+): { checked: boolean; disabled: boolean; description: string } {
+  const checked = value === 'rnnoise'
+  const disabled = !checked && !microphoneSelected
+  return {
+    checked,
+    disabled,
+    description: `Cuts background noise while you record or go live. ${
+      disabled
+        ? 'Choose a microphone to turn it on.'
+        : 'The level shows the cleaned sound only then.'
+    }`
+  }
 }
 
 /** The Sources "Audio" column: the Microphone, System audio, then the soundboard's Sounds. */
@@ -336,9 +360,9 @@ export function SourcesAudioMixer(): ReactElement {
 }
 
 /**
- * The Microphone row: Mute in the header; the picker, its level and Gain in
- * the body; Sync, Keep microphone ready (and, in development builds,
- * Calibrate) folded into More.
+ * The Microphone row: Mute in the header; the picker, its level, Gain and
+ * Noise reduction in the body; Sync, Keep microphone ready (and, in
+ * development builds, Calibrate) folded into More.
  * Markup from props, so the tests render it.
  */
 export function MicrophoneChannel({
@@ -394,6 +418,7 @@ export function MicrophoneChannel({
   onSyncChange: (offsetMs: number, reason: ParameterChangeReason) => void
 }): ReactElement {
   const tag = syncOffsetTag(syncOffsetMs, syncUserSet)
+  const noiseReduction = noiseReductionSwitchView(noiseSuppression, microphoneSelected)
   return (
     <AudioConfigProvider value={{ dimmed: muted || !microphoneSelected }}>
       <SourceItem
@@ -486,24 +511,22 @@ export function MicrophoneChannel({
             {MIC_SESSION_LEVEL_UNAVAILABLE_COPY}
           </p>
         ) : null}
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-xs text-muted-foreground">Noise reduction</span>
-          <SegmentedControl
-            aria-label="Microphone noise reduction"
-            options={[
-              { value: 'off', label: 'Off' },
-              { value: 'rnnoise', label: 'On', disabled: !microphoneSelected }
-            ]}
+        <SettingsRow
+          data-videorc-mic-noise-reduction=""
+          description={noiseReduction.description}
+          label="Noise reduction"
+        >
+          <Switch
+            checked={noiseReduction.checked}
+            disabled={noiseReduction.disabled}
             size="sm"
-            value={noiseSuppression}
-            onValueChange={(value) => onNoiseSuppressionChange?.(value)}
+            onCheckedChange={(checked) => {
+              // Never On without a microphone; Off always goes through.
+              if (checked && !microphoneSelected) return
+              onNoiseSuppressionChange?.(checked ? 'rnnoise' : 'off')
+            }}
           />
-        </div>
-        {!sessionActive && noiseSuppression === 'rnnoise' ? (
-          <p className="text-xs text-muted-foreground">
-            Applies while recording or live. The idle meter shows input level.
-          </p>
-        ) : null}
+        </SettingsRow>
       </SourceItem>
     </AudioConfigProvider>
   )
