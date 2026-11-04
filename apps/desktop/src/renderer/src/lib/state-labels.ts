@@ -199,7 +199,10 @@ export function chatStateLabel(provider: ChatProviderInput): string {
  * The microphone meter's state, for its data attribute and the probes. The
  * words a streamer hears come from `micSignalLabel`.
  */
-export type MicMonitorState = 'live' | 'monitoring' | 'muted' | 'idle'
+export type MicMonitorState = 'live' | 'monitoring' | 'muted' | 'silent' | 'idle'
+
+/** Issue 1064: the word for a session microphone that captures digital silence. */
+export const MIC_SILENT_LABEL = 'Silent'
 
 const MIC_SIGNAL_LABELS: Record<MicMonitorState, string> = {
   // A microphone delivering sound is "Receiving", with or without a session:
@@ -207,10 +210,13 @@ const MIC_SIGNAL_LABELS: Record<MicMonitorState, string> = {
   live: SOURCE_RECEIVING_LABEL,
   monitoring: SOURCE_RECEIVING_LABEL,
   muted: 'Muted',
+  // Issue 1064: the session's bus reads nothing but digital silence from an
+  // unmuted microphone, so the meter must not say "Receiving".
+  silent: MIC_SILENT_LABEL,
   idle: 'No signal'
 }
 
-/** The microphone meter's state in a word: "Receiving", "Muted", "No signal". */
+/** The microphone meter's state in a word: "Receiving", "Muted", "Silent", "No signal". */
 export function micSignalLabel(state: MicMonitorState): string {
   return MIC_SIGNAL_LABELS[state]
 }

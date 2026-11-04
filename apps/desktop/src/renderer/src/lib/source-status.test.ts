@@ -199,6 +199,22 @@ describe('microphoneStatus', () => {
   it('shows no chip with no microphone selected', () => {
     expect(microphoneStatus({ ...base, selected: false, muted: true })).toBeNull()
   })
+
+  // Issue 1064: the bus reads digital silence from the session microphone.
+  it('says Silent, never Receiving, while the backend reports the session microphone silent', () => {
+    expect(microphoneStatus({ ...base, sessionActive: true, silent: true })).toEqual({
+      label: 'Silent',
+      tone: 'warn'
+    })
+    // The mute is the user's: it wins over the watchdog's word.
+    expect(microphoneStatus({ ...base, sessionActive: true, silent: true, muted: true })).toEqual({
+      label: 'Muted',
+      tone: 'neutral'
+    })
+    expect(microphoneStatus({ ...base, sessionActive: true, silent: false })?.label).toBe(
+      'Receiving'
+    )
+  })
 })
 
 describe('systemAudioStatus', () => {

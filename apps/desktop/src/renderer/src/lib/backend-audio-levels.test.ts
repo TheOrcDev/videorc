@@ -73,4 +73,36 @@ describe('backend audio levels store (plan 092 Phase C)', () => {
     store.publish(event)
     expect(store.isLive()).toBe(true)
   })
+
+  // Issue 1064: the bus's silence watchdog rides the levels, so the status
+  // word and the level never disagree.
+  it('carries the microphone silence report, notifying on change only', () => {
+    const clock = manualClock()
+    const store = createBackendAudioLevelsStore(clock)
+    let changes = 0
+    store.subscribeMicrophoneSilent(() => {
+      changes += 1
+    })
+    store.publish(event)
+    expect(store.isMicrophoneSilent()).toBe(false)
+    expect(changes).toBe(0)
+    store.publish({ ...event, microphoneSilent: true })
+    store.publish({ ...event, microphoneSilent: true })
+    expect(store.isMicrophoneSilent()).toBe(true)
+    expect(changes).toBe(1)
+    // An event without the flag is the all-clear (the backend sends it only while true).
+    store.publish(event)
+    expect(store.isMicrophoneSilent()).toBe(false)
+    expect(changes).toBe(2)
+  })
+
+  it('drops the silence report once the levels go stale', () => {
+    const clock = manualClock()
+    const store = createBackendAudioLevelsStore(clock)
+    store.publish({ ...event, microphoneSilent: true })
+    expect(store.isMicrophoneSilent()).toBe(true)
+    clock.advance(BACKEND_AUDIO_LEVELS_STALE_MS)
+    expect(store.isLive()).toBe(false)
+    expect(store.isMicrophoneSilent()).toBe(false)
+  })
 })

@@ -1,7 +1,7 @@
 import type { StatusTone } from '@/components/status-badge'
 import type { Device, DeviceStatus, PreviewCameraState, PreviewScreenState } from '@/lib/backend'
 import type { SourceStandIn } from '@/lib/capture'
-import { SOURCE_RECEIVING_LABEL, systemAudioIssueLabel } from '@/lib/state-labels'
+import { MIC_SILENT_LABEL, SOURCE_RECEIVING_LABEL, systemAudioIssueLabel } from '@/lib/state-labels'
 import type { SystemAudioSwitchView } from '@/lib/system-audio'
 
 // Plan 173: one status vocabulary for the four Sources rows. Each row's header
@@ -189,7 +189,9 @@ function pipelineSourceStatus(
 /**
  * The microphone: muted and missing are news; a working microphone says
  * nothing until a session runs, because its meter already moves. A dead meter
- * explains itself on the line under the meter, not in a second chip.
+ * explains itself on the line under the meter, not in a second chip. Issue
+ * 1064: a session microphone the bus reads as digital silence is "Silent",
+ * never "Receiving".
  */
 export function microphoneStatus(input: {
   selected: boolean
@@ -197,6 +199,8 @@ export function microphoneStatus(input: {
   device?: SelectedDeviceStatus
   muted: boolean
   sessionActive: boolean
+  /** The backend's silence watchdog reports the captured microphone silent. */
+  silent?: boolean
 }): SourceStatus | null {
   if (input.switching) return SWITCHING
   if (!input.selected) return null
@@ -207,6 +211,7 @@ export function microphoneStatus(input: {
     return notFound('microphone')
   }
   if (input.muted) return { label: 'Muted', tone: 'neutral' }
+  if (input.silent) return { label: MIC_SILENT_LABEL, tone: 'warn' }
   if (input.sessionActive) return { label: SOURCE_RECEIVING_LABEL, tone: 'good' }
   return null
 }

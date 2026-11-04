@@ -3134,6 +3134,11 @@ export interface AudioLevelsEvent {
   master?: AudioLevelReading
   /** Samples the mix clipped since the previous event. */
   masterClippedSamples: number
+  /**
+   * Issue 1064: the session's silence watchdog reports the captured
+   * microphone as digital silence (sent only while true).
+   */
+  microphoneSilent?: boolean
 }
 
 export interface AudioMeterSampleSnapshot {

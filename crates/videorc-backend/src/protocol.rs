@@ -2025,6 +2025,11 @@ pub struct AudioLevelsEvent {
     /// Samples the mix clipped since the previous event.
     #[serde(default)]
     pub master_clipped_samples: u64,
+    /// Issue 1064: the session's microphone silence watchdog reports the
+    /// captured microphone as digital silence. Sent only while true, so the
+    /// standby microphone and older readings keep their shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub microphone_silent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7086,6 +7091,7 @@ mod tests {
             sounds: None,
             master: None,
             master_clipped_samples: 0,
+            microphone_silent: false,
         };
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
@@ -7095,6 +7101,18 @@ mod tests {
                 "masterClippedSamples": 0
             })
         );
+        // Issue 1064: the watchdog's report rides the event only while true.
+        let silent = AudioLevelsEvent {
+            microphone_silent: true,
+            ..event.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&silent).unwrap()["microphoneSilent"],
+            serde_json::json!(true)
+        );
+        let decoded: AudioLevelsEvent =
+            serde_json::from_value(serde_json::to_value(&event).unwrap()).unwrap();
+        assert!(!decoded.microphone_silent);
         // The standby microphone has no session: the key is omitted, not null.
         let standby = AudioLevelsEvent {
             session_id: None,

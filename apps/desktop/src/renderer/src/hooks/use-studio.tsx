@@ -8142,8 +8142,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           void refreshSessions(nextClient)
         }
         // isSessionAudioLossCode lives in the lazy recovery chunk; this stays
-        // byte-cheap for the eager renderer budget.
-        if (/^(microphone-(input|timeline)|system-audio)-lost$/.test(event.code)) {
+        // byte-cheap for the eager renderer budget. Issue 1064: a microphone
+        // the bus reads as digital silence takes the same notice.
+        if (
+          /^(?:(?:microphone-(?:input|timeline)|system-audio)-lost|microphone-silent)$/.test(
+            event.code
+          )
+        ) {
           void publishMicrophoneInputLost(event)
         } else {
           // Plan 076: a timeline loss that recovered clears its notice.

@@ -4036,7 +4036,9 @@ const audioLevelsEventSchema = objectSchema(
     // Plan 189: the soundboard's sounds as mixed.
     sounds: optionalSchema(audioLevelReadingSchema),
     master: optionalSchema(audioLevelReadingSchema),
-    masterClippedSamples: nonNegativeInteger
+    masterClippedSamples: nonNegativeInteger,
+    // Issue 1064: the silence watchdog's report, sent only while true.
+    microphoneSilent: optionalSchema(booleanSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<AudioLevelsEvent>

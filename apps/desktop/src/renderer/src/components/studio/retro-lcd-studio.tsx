@@ -56,6 +56,7 @@ import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav
 import { useStudioCore } from '@/hooks/use-studio'
 import { buildCameraSources, buildCaptureSources } from '@/lib/capture'
 import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
+import { MIC_SESSION_LEVEL_UNAVAILABLE_COPY } from '@/lib/mic-meter-input'
 import { screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { captionsStatusLabel, micSignalLabel, systemAudioIssueLabel } from '@/lib/state-labels'
@@ -357,6 +358,7 @@ function RetroMicrophoneRows({
   discoveryPending,
   meter,
   monitorState,
+  sessionLevelUnavailable = false,
   muted,
   muteShortcut,
   platform,
@@ -445,6 +447,12 @@ function RetroMicrophoneRows({
           {micSignalLabel(monitorState)}
         </span>
       </div>
+      {/* Issue 1064: a session meter with no backend level says so. */}
+      {sessionLevelUnavailable ? (
+        <div className={LCD_MESSAGE} data-videorc-mic-level-reason="session">
+          {MIC_SESSION_LEVEL_UNAVAILABLE_COPY}
+        </div>
+      ) : null}
       <div className={cn(LCD_FADER, 'py-1.5')}>
         <MicrophoneGainFader gainDb={gainDb} onGainChange={onGainChange} />
       </div>

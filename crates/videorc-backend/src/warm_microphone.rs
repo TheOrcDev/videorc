@@ -399,6 +399,7 @@ fn standby_levels_event(stats: &AudioCaptureStats, gain_db: f32) -> AudioLevelsE
         sounds: None,
         master: None,
         master_clipped_samples: 0,
+        microphone_silent: false,
     }
 }
 

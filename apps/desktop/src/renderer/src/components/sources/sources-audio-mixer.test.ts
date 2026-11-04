@@ -343,6 +343,29 @@ describe('Sources Microphone row (plans 093, 173)', () => {
     expect(renderMicrophone()).not.toContain('data-videorc-mic-level-reason')
   })
 
+  // Issue 1064: a running bus with no level paints nothing and says so; a
+  // microphone the bus reads as digital silence is "Silent", not "Receiving".
+  it("says the level is unavailable during a session, and Silent on the watchdog's word", () => {
+    const unavailable = renderMicrophone({
+      meter: NO_READING,
+      monitorState: 'idle',
+      sessionActive: true,
+      sessionLevelUnavailable: true
+    })
+    expect(unavailable).toContain('data-videorc-mic-level-reason="session"')
+    expect(unavailable).toContain(
+      'Level unavailable. The meter shows only what your recording and stream hear.'
+    )
+    const silent = renderMicrophone({
+      monitorState: 'silent',
+      sessionActive: true,
+      status: { label: 'Silent', tone: 'warn' }
+    })
+    expect(silent).toContain('data-videorc-mic-monitor-state="silent"')
+    expect(silent).toContain('>Silent<')
+    expect(silent).not.toContain('>Receiving<')
+  })
+
   it('folds Sync into More, closed by default (plan 173, D2)', () => {
     const closed = renderMicrophone({ syncOffsetMs: 150, syncUserSet: true })
     expect(closed).not.toContain('data-slot="parameter-slider"')
