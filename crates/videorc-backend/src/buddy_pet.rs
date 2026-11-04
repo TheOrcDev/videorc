@@ -2272,10 +2272,12 @@ pub(crate) mod tests {
                 "{bad}"
             );
         }
+        let roots = temp_roots();
         assert_eq!(
-            pack_dir(&temp_roots(), "../x", PACK_ID).unwrap_err().rule,
+            pack_dir(&roots, "../x", PACK_ID).unwrap_err().rule,
             PetRule::PackId
         );
+        let _ = std::fs::remove_dir_all(roots[0].parent().unwrap());
     }
 
     /// Plan 172 D4: `official:<slug>` names a downloaded pack under the write

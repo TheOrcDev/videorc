@@ -381,16 +381,13 @@ mod tests {
     use crate::protocol::ServerEvent;
     use crate::sound_store::{NewSound, sound_file_name, write_wav_s16_stereo_48k};
     use crate::storage::Database;
+    use crate::test_temp_dir::TestTempDir;
     use tokio::sync::broadcast;
 
-    fn player_state() -> (
-        AppState,
-        broadcast::Receiver<ServerEvent>,
-        std::path::PathBuf,
-    ) {
-        let dir =
-            std::env::temp_dir().join(format!("videorc-sound-player-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// The guard comes first so it drops after the state's database
+    /// (Windows cannot remove a folder holding an open SQLite file).
+    fn player_state() -> (TestTempDir, AppState, broadcast::Receiver<ServerEvent>) {
+        let dir = TestTempDir::new("sound-player");
         let (events, receiver) = broadcast::channel(256);
         let state = AppState::new(
             "test-token".to_string(),
@@ -398,7 +395,7 @@ mod tests {
             events,
             Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
         );
-        (state, receiver, dir)
+        (dir, state, receiver)
     }
 
     /// A sound row with a real managed file of `duration_ms` of a tone.
@@ -458,7 +455,7 @@ mod tests {
     async fn a_session_without_a_bus_is_announced_and_cleared_at_its_end() {
         // Release test 147, plan 0001: a session whose audio skips the bus
         // can't carry sounds, and the board says so until it ends.
-        let (state, mut receiver, dir) = player_state();
+        let (dir, state, mut receiver) = player_state();
         let player = SoundPlayer::default();
         assert!(!player.playback().session_without_sounds);
         player.session_without_bus(&state, "s-1");
@@ -478,12 +475,12 @@ mod tests {
             serde_json::to_value(player.playback()).unwrap(),
             serde_json::json!({ "voices": [] })
         );
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn play_press_and_stop_follow_the_pad_modes_without_a_session() {
-        let (state, mut events, dir) = player_state();
+        let (dir, state, mut events) = player_state();
         let player = state.soundboard.clone();
         // Long enough that no timer fires during the test on a loaded host.
         let once = seed_sound(&state, "Airhorn", SoundMode::OneShot, 10_000);
@@ -544,7 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_one_shot_ends_on_its_timer_and_a_ninth_voice_stops_the_oldest() {
-        let (state, mut events, dir) = player_state();
+        let (dir, state, mut events) = player_state();
         let player = state.soundboard.clone();
         let short = seed_sound(&state, "Ding", SoundMode::OneShot, 100);
         player.play(&state, &short.id).await.unwrap();
@@ -582,7 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_sound_or_file_is_an_error_and_delete_evicts() {
-        let (state, _events, dir) = player_state();
+        let (dir, state, _events) = player_state();
         let player = state.soundboard.clone();
         assert!(player.play(&state, "nope").await.is_err());
         let sound = seed_sound(&state, "Boom", SoundMode::OneShot, 1_000);
@@ -612,7 +609,7 @@ mod tests {
         // mixed voices into the ring while sounds.press answered false.
         use std::sync::atomic::Ordering;
 
-        let (state, _events, dir) = player_state();
+        let (dir, state, _events) = player_state();
         let player = state.soundboard.clone();
         let ding = seed_sound(&state, "Ding", SoundMode::OneShot, 10_000);
         let (handle, starts) = SoundboardHandle::test_recording_bus();
