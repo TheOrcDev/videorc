@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   assertFakeActivityTotals,
+  commentsTotalsMatch,
   probeCommentsTotals,
   waitForFakeActivityReceipts
 } from './comments-totals-probe.mjs'
@@ -113,6 +114,7 @@ function harness(failPhase) {
         (failPhase === 'reopen' && reopened) ||
         (failPhase === 'history' && history)
       return {
+        numberFormatLocale: 'en-US',
         stats: [
           { id: 'supporters', text: failed ? '0' : '1' },
           { id: 'tips', text: '$20' },
@@ -411,3 +413,42 @@ test('additional owned receipts remain available to the strict over-count assert
   incorrect.messageCount = 15
   assert.throws(() => assertFakeActivityTotals(incorrect), /accounting disagreed/)
 })
+
+for (const locale of ['en-US', 'en-GB', 'fr-FR', 'de-DE', 'ar-EG']) {
+  test(`confirmed detached totals respect ${locale} without weakening currency or counts`, () => {
+    const currency = (code, amount) =>
+      new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: code,
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0
+      }).format(amount)
+    const metrics = {
+      numberFormatLocale: locale,
+      stats: [
+        { id: 'supporters', text: (1).toLocaleString(locale) },
+        { id: 'tips', text: currency('USD', 20) },
+        { id: 'chat', text: (6003).toLocaleString(locale) }
+      ]
+    }
+    assert.equal(commentsTotalsMatch(metrics, true), true)
+    for (const [id, text] of [
+      ['tips', currency('CAD', 20)],
+      ['tips', currency('USD', 21)],
+      ['supporters', (2).toLocaleString(locale)],
+      ['chat', (6002).toLocaleString(locale)]
+    ]) {
+      assert.equal(
+        commentsTotalsMatch(
+          {
+            ...metrics,
+            stats: metrics.stats.map((stat) => (stat.id === id ? { id, text } : stat))
+          },
+          true
+        ),
+        false
+      )
+    }
+    assert.equal(commentsTotalsMatch({ ...metrics, numberFormatLocale: undefined }, true), false)
+  })
+}
