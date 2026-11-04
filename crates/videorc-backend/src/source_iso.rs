@@ -508,7 +508,7 @@ pub(crate) fn iso_muxer_ffmpeg_args(
             "-ac".to_string(),
             "2".to_string(),
             "-i".to_string(),
-            crate::recording::ffmpeg_file_path(path),
+            crate::ffmpeg::ffmpeg_file_path(path),
         ]);
         let index = next_input_index;
         next_input_index += 1;
@@ -552,7 +552,7 @@ pub(crate) fn iso_muxer_ffmpeg_args(
         "-shortest".to_string(),
         "-f".to_string(),
         "matroska".to_string(),
-        crate::recording::ffmpeg_file_path(output_mkv),
+        crate::ffmpeg::ffmpeg_file_path(output_mkv),
     ]);
     configure_iso_local_muxer(&mut args, output_mkv, fps)?;
     Ok(args)
@@ -572,7 +572,7 @@ pub(crate) fn configure_iso_local_muxer(
     fps: u32,
 ) -> Result<()> {
     anyhow::ensure!(fps > 0, "Separate recording frame rate must be positive");
-    let output = crate::recording::ffmpeg_file_path(output);
+    let output = crate::ffmpeg::ffmpeg_file_path(output);
     let index = args
         .iter()
         .position(|arg| arg == &output)

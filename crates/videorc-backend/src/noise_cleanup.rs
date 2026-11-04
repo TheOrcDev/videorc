@@ -964,7 +964,7 @@ pub fn build_ffmpeg_args(
         "error".to_string(),
         "-n".to_string(),
         "-i".to_string(),
-        input.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(input),
         "-map".to_string(),
         "0".to_string(),
         // Plan 200 C3: Videorc MP4s carry a `tmcd` timecode track and a
@@ -989,7 +989,7 @@ pub fn build_ffmpeg_args(
         "-progress".to_string(),
         "pipe:1".to_string(),
         "-nostats".to_string(),
-        output.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(output),
     ]);
     Ok(args)
 }
@@ -1208,7 +1208,7 @@ fn video_stream_hash(
             "-v",
             "error",
             "-i",
-            &path.display().to_string(),
+            &crate::ffmpeg::ffmpeg_file_path(path),
             "-map",
             "0:v",
             "-c",
@@ -1248,7 +1248,7 @@ fn decode_audio(
             "-v",
             "error",
             "-i",
-            &path.display().to_string(),
+            &crate::ffmpeg::ffmpeg_file_path(path),
             "-map",
             "0:a:0",
             "-f",

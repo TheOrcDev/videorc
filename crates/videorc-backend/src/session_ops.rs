@@ -333,7 +333,7 @@ pub(crate) async fn probe_duration_ms(ffmpeg_path: &str, file: &Path) -> Option<
             "-of",
             "json",
         ])
-        .arg(file)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(file))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let output = output_duration_probe(&mut command).await.ok()?;

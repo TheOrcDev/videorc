@@ -261,7 +261,7 @@ pub fn concat_list(selection: &Selection, segment_dir: &Path) -> String {
     let mut script = String::from("ffconcat version 1.0\n");
     for (index, segment) in selection.segments.iter().enumerate() {
         let path = segment_dir.join(&segment.file_name);
-        let quoted = path.display().to_string().replace('\'', "'\\''");
+        let quoted = crate::ffmpeg::ffmpeg_file_path(&path).replace('\'', "'\\''");
         script.push_str(&format!("file '{quoted}'\n"));
         if let Some(next) = selection.segments.get(index + 1) {
             let duration = (next.start_seconds - segment.start_seconds).max(0.0);
@@ -285,17 +285,16 @@ pub fn segment_muxer_args(segment_dir: &Path, seconds: u32) -> Vec<String> {
         "-reset_timestamps".to_string(),
         "0".to_string(),
         "-segment_list".to_string(),
-        segment_dir.join(SEGMENT_LIST_FILE).display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(&segment_dir.join(SEGMENT_LIST_FILE)),
         "-segment_list_type".to_string(),
         "csv".to_string(),
         "-segment_list_size".to_string(),
         keep_count(seconds).to_string(),
         "-segment_list_flags".to_string(),
         "+live".to_string(),
-        segment_dir
-            .join(format!("{SEGMENT_FILE_PREFIX}%06d{SEGMENT_FILE_SUFFIX}"))
-            .display()
-            .to_string(),
+        crate::ffmpeg::ffmpeg_file_path(
+            &segment_dir.join(format!("{SEGMENT_FILE_PREFIX}%06d{SEGMENT_FILE_SUFFIX}")),
+        ),
     ]
 }
 
@@ -333,7 +332,7 @@ pub fn save_args(concat_list_path: &Path, partial_output: &Path) -> Vec<String> 
         "-safe".to_string(),
         "0".to_string(),
         "-i".to_string(),
-        concat_list_path.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(concat_list_path),
         "-map".to_string(),
         "0:v:0".to_string(),
         "-map".to_string(),
@@ -344,7 +343,7 @@ pub fn save_args(concat_list_path: &Path, partial_output: &Path) -> Vec<String> 
         "+faststart".to_string(),
         "-f".to_string(),
         "mp4".to_string(),
-        partial_output.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(partial_output),
     ]
 }
 
@@ -1473,7 +1472,7 @@ async fn probe_replay(ffprobe_path: &str, path: &Path) -> Result<ReplayProbe, St
             "-of",
             "json",
         ])
-        .arg(path)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(path))
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
