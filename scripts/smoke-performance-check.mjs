@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 // Performance check over the REAL backend WS: run the ladder on this machine,
 // then prove the benchmark sessions were invisible — no recording.status /
@@ -183,7 +184,7 @@ try {
       return withTimeout(exited, 5000, 'backend kill')
     })
   }
-  await rm(stateRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  await removeProfileDir(stateRoot, { label: 'performance-check' })
 }
 
 function withTimeout(promise, ms, label) {

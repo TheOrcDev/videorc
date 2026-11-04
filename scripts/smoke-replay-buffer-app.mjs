@@ -32,15 +32,7 @@
 // copied packets is the recording's (same clock, same packets); the
 // real-game acceptance checks it by ear.
 
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync
-} from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -66,6 +58,7 @@ import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const { values: args } = parseArgs({
   options: {
@@ -640,7 +633,7 @@ try {
     renderer,
     remote,
     stopApp,
-    removeProfile: () => rmSync(userDataDir, { recursive: true, force: true })
+    removeProfile: () => removeProfileDir(userDataDir, { label: 'replay-buffer' })
   })
   for (const failure of cleanup.failures) {
     console.error(`replay-buffer: cleanup failed for ${failure.owner}.`)

@@ -16,12 +16,13 @@
 //                           resources\videorc-backend.exe)
 //   VIDEORC_SMOKE_FFMPEG_PATH  FFmpeg (default vendor/ffmpeg/windows-x64/bin)
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 
 import { devAppSpawnOptions } from './lib/app-launcher.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 if (process.platform !== 'win32') {
   console.log('SKIP: Windows System audio start is Windows only.')
@@ -86,7 +87,7 @@ try {
   throw error
 } finally {
   if (run) await hardKill(run).catch(() => {})
-  rmSync(stateRoot, { force: true, recursive: true })
+  await removeProfileDir(stateRoot, { label: 'windows-system-audio-start smoke' })
 }
 
 async function launch(label) {

@@ -16,12 +16,13 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { devAppSpawnOptions, repoRoot, stopProcess } from './lib/app-launcher.mjs'
 import { connectBackend } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const BLOCK_METHOD = 'test.commandLanes.accountMaintenance.block'
 const STATUS_METHOD = 'test.commandLanes.accountMaintenance.status'
@@ -175,7 +176,7 @@ try {
   if (backendProcess) {
     await stopProcess(backendProcess, { timeoutMs: 10_000 }).catch(() => {})
   }
-  rmSync(stateRoot, { recursive: true, force: true })
+  await removeProfileDir(stateRoot, { label: 'command-lanes smoke' })
 }
 
 async function probe(client, label, method, params) {

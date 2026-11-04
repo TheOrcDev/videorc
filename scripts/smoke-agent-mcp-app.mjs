@@ -60,7 +60,6 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
-  rmSync,
   statSync,
   writeFileSync
 } from 'node:fs'
@@ -84,6 +83,7 @@ import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const debug = process.env.VIDEORC_AGENT_SMOKE_DEBUG === '1'
@@ -1802,8 +1802,9 @@ try {
   try {
     await stopApp()
   } finally {
-    rmSync(userDataDir, { recursive: true, force: true })
-    if (passed && createdOutput) rmSync(outputDirectory, { recursive: true, force: true })
+    await removeProfileDir(userDataDir, { label: 'agent-mcp smoke' })
+    if (passed && createdOutput)
+      await removeProfileDir(outputDirectory, { label: 'agent-mcp smoke' })
     else if (!passed) console.error(`agent-mcp smoke: evidence kept in ${outputDirectory}`)
   }
 }

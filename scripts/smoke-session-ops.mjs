@@ -5,6 +5,8 @@ import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
+
 // Library rewrite L6: session ops round-trip over the REAL backend WS —
 // import → list → rename → duplicate → storage totals → delete. Runs the
 // debug backend binary against an isolated database (secrets/posters derive
@@ -183,7 +185,8 @@ try {
   if (backend && backend.exitCode === null) {
     backend.kill('SIGTERM')
   }
-  await rm(stateRoot, { recursive: true, force: true })
+  // Windows keeps videorc.sqlite3-wal locked until the backend has exited.
+  await removeProfileDir(stateRoot, { label: 'session-ops smoke', pids: [backend?.pid] })
 }
 
 function waitForReady(child) {
