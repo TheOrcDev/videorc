@@ -3905,6 +3905,26 @@ fn replay_auto_start_requested(replay_only: bool, params: &StartSessionParams) -
     replay_only && params.replay.as_ref().is_some_and(|replay| replay.auto)
 }
 
+/// Plan 181 guard for Record and Go Live: they carry the default ring
+/// (`auto`) too, and on a software encoder path it is a second encode beside
+/// the one the user pressed for (live lab 2026-11-04 on ogre: Go Live came
+/// before the launch's buffer-only start was refused, so one FFmpeg child ran
+/// two OpenH264 1080p30 encodes). The press is the user's, so the session
+/// starts without the ring instead of failing. A ring the user turned on
+/// (`auto: false`) still rides along. Returns why the ring was dropped.
+fn drop_automatic_ring_on_software_encoder(
+    replay_only: bool,
+    params: &mut StartSessionParams,
+    backend: EncodeBackend,
+) -> Option<crate::replay_buffer::AutoStartRefused> {
+    if replay_only || !params.replay.as_ref().is_some_and(|replay| replay.auto) {
+        return None;
+    }
+    let refusal = crate::replay_buffer::auto_start_refusal(backend)?;
+    params.replay = None;
+    Some(refusal)
+}
+
 /// An automatic ring on the bridge waits for a visible camera's first frame:
 /// the bridge refuses a scene source with no frames, and the ring is the one
 /// start nobody pressed, so it can wait instead of failing.
@@ -4665,6 +4685,22 @@ async fn start_session_with_timeline(
         )
     {
         return Err(refusal.into());
+    }
+    if let Some(refusal) = drop_automatic_ring_on_software_encoder(
+        replay_only,
+        &mut params,
+        windows_encoded_bridge_decision.effective_encode_backend,
+    ) {
+        // The ring's status carries the reason, as after a refused
+        // buffer-only start, so the renderer stops offering it.
+        crate::replay_buffer::note_auto_start_refused(&state, &refusal.message);
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            "replay-buffer-software-encoder",
+            &format!("Clips are off for this session: {}", refusal.message),
+        );
     }
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
     if source_iso_plan.is_some() {
@@ -40602,6 +40638,84 @@ mod tests {
         assert!(
             !replay_auto_start_requested(true, &params),
             "a ring the user turned on runs anywhere"
+        );
+    }
+
+    #[test]
+    fn record_and_go_live_drop_the_automatic_ring_on_a_software_encoder() {
+        let automatic = |params: &mut StartSessionParams| {
+            params.replay = Some(crate::protocol::ReplayParams {
+                seconds: 60,
+                auto: true,
+            });
+        };
+        for backend in [
+            EncodeBackend::SoftwareOpenH264,
+            EncodeBackend::SoftwareMediaFoundation,
+            EncodeBackend::SoftwareX264,
+        ] {
+            let mut go_live = base_params(false, true);
+            automatic(&mut go_live);
+            let refusal = drop_automatic_ring_on_software_encoder(false, &mut go_live, backend)
+                .expect("a second encode beside the stream");
+            assert!(
+                refusal.message.contains("second encode"),
+                "{}",
+                refusal.message
+            );
+            assert!(
+                go_live.replay.is_none(),
+                "{backend:?}: the stream starts without the ring"
+            );
+        }
+
+        let mut record = base_params(true, false);
+        automatic(&mut record);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut record,
+                EncodeBackend::HardwareVaapi
+            )
+            .is_none()
+        );
+        assert!(record.replay.is_some(), "a hardware encoder keeps the ring");
+
+        record.replay.as_mut().unwrap().auto = false;
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut record,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none()
+        );
+        assert!(
+            record.replay.is_some(),
+            "a ring the user turned on runs anywhere"
+        );
+
+        let mut buffer_only = base_params(true, false);
+        automatic(&mut buffer_only);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                true,
+                &mut buffer_only,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none(),
+            "a buffer-only start is refused by the guard above, never started bare"
+        );
+        assert!(buffer_only.replay.is_some());
+
+        let mut no_ring = base_params(true, false);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut no_ring,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none()
         );
     }
 
