@@ -46,6 +46,18 @@ describe('SceneCard', () => {
     expect(render()).not.toContain('<svg')
   })
 
+  it('gives the name the whole card width: the check sits on the picture (#1083)', () => {
+    // Beside the name, the check left an 84 px vertical tile 46 px of line,
+    // and "Screen + camera" broke into three lines, cut to "Screen +".
+    const markup = render({ selected: true })
+    const button = /<button[^>]*data-slot="scene-card-button"[\s\S]*?<\/button>/.exec(markup)?.[0]
+    expect(button).not.toContain('<svg')
+    const check = /<span[^>]*data-testid="scene-card-check"[^>]*>[\s\S]*?<\/span>/.exec(markup)?.[0]
+    expect(check).toContain('<svg')
+    expect(check).toContain('pointer-events-none')
+    expect(render()).not.toContain('scene-card-check')
+  })
+
   it('keeps the choice apart from what is shown in use when they differ', () => {
     const markup = render({ selected: false, pressed: true })
     expect(markup).toContain('aria-pressed="true"')
