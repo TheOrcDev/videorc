@@ -5352,7 +5352,7 @@ impl StartupBarrierAccumulator {
     fn observe(
         &mut self,
         evidence: CompositorFrameEvidence,
-        started_at: Instant,
+        started_at: tokio::time::Instant,
     ) -> StartupBarrierObservation {
         if evidence.has_real_source && self.first_source_frame_ms.is_none() {
             self.first_source_frame_ms = Some(started_at.elapsed().as_millis() as u64);
@@ -5420,7 +5420,7 @@ impl StartupBarrierAccumulator {
         StartupBarrierObservation::Pending
     }
 
-    fn ready_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+    fn ready_result(&self, started_at: tokio::time::Instant) -> CompositorStartupBarrierResult {
         CompositorStartupBarrierResult {
             ready: true,
             wait_ms: started_at.elapsed().as_millis() as u64,
@@ -5434,7 +5434,7 @@ impl StartupBarrierAccumulator {
         }
     }
 
-    fn timeout_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+    fn timeout_result(&self, started_at: tokio::time::Instant) -> CompositorStartupBarrierResult {
         let wait_ms = started_at.elapsed().as_millis() as u64;
         // Cadence-only: the compositor IS producing usable frames, just
         // not three in a row inside the budget. Anything structural, or
@@ -5470,7 +5470,10 @@ pub async fn wait_for_compositor_startup_frames(
     state: &AppState,
     params: CompositorStartupBarrierParams,
 ) -> CompositorStartupBarrierResult {
-    let started_at = Instant::now();
+    // The barrier's clock is tokio's, like its polling sleeps: under a test's
+    // paused time its deadline and the wait it reports advance with the
+    // frames the test publishes, not with the host's load (#1076).
+    let started_at = tokio::time::Instant::now();
     let mut accumulator = StartupBarrierAccumulator::new(params);
 
     // Seed from frames the compositor already produced (instant-record P3): a
@@ -5543,7 +5546,9 @@ pub fn frame_history_proves_live_sources(
         // judged at its own canvas size.
         accumulator.params.width = evidence.width;
         accumulator.params.height = evidence.height;
-        if accumulator.observe(*evidence, now) == StartupBarrierObservation::Ready {
+        if accumulator.observe(*evidence, tokio::time::Instant::from_std(now))
+            == StartupBarrierObservation::Ready
+        {
             return Some(accumulator.frames_observed);
         }
     }
@@ -18526,7 +18531,10 @@ mod tests {
                 camera_sequence,
                 screen_sequence,
                 has_image_source,
-                published_at: Instant::now(),
+                // Stamped from tokio's clock: under paused time the gaps the
+                // barrier measures are exactly the writer's sleeps, however
+                // late the host runs them. On a running clock this is now.
+                published_at: tokio::time::Instant::now().into_std(),
             });
     }
 
@@ -18989,7 +18997,7 @@ mod tests {
         assert!(stream.metadata.has_metal_iosurface_target());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_waits_for_consecutive_target_real_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19021,7 +19029,7 @@ mod tests {
         assert_eq!(result.timeout_reason, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_requires_stable_frame_cadence_when_configured() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19246,7 +19254,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_blocks_unstable_frame_cadence_when_configured() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19298,7 +19306,7 @@ mod tests {
     /// Cadence matrix: the owner's 166/100/90ms hiccup pattern is unsteady
     /// under a tight budget (cadence-only, with the last three gaps on record)
     /// and clean under the 200ms production budget, at 30 and at 60fps.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_reports_gap_history_and_cadence_only_for_hiccups() {
         for (label, budget_ms, expect_ready) in [
             ("30fps/tight", 71_u64, false),
@@ -19386,7 +19394,7 @@ mod tests {
     /// A stall is never cadence-only: no frame at all, or frames that stop
     /// advancing the required camera, report zero/one fresh frame and no
     /// cadence violation so the caller refuses instead of recording.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_stalls_are_not_cadence_only() {
         let silent = wait_for_compositor_startup_frames(
             &test_state(),
@@ -19459,7 +19467,7 @@ mod tests {
 
     /// A resolution block AFTER usable frames wins over earlier cadence
     /// misses: the latest observation decides, so this is never cadence-only.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_structural_block_after_hiccups_is_not_cadence_only() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19509,7 +19517,7 @@ mod tests {
         assert_eq!(startup_gap_history_label(&[]), "none");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_requires_advancing_camera_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -19548,7 +19556,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn startup_barrier_accepts_advancing_camera_frames() {
         let state = test_state();
         let writer_state = state.clone();
@@ -23751,8 +23759,11 @@ mod tests {
                     presented_at,
                     Duration::from_secs_f64(1.0 / f64::from(video.fps)),
                 );
-                // Both inputs deliver current audio from the moment Record starts.
-                let started = Instant::now();
+                // Both inputs deliver current audio from the moment Record
+                // starts: the presentation the epoch came from, not a wall
+                // clock read after it, which a loaded host stretches past the
+                // half-tick allowance below (#1076).
+                let started = presented_at;
                 for (microphone, system) in [(true, false), (false, true), (true, true)] {
                     for packet_frames in [128, 480, 512, 960] {
                         let case = format!(
