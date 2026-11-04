@@ -12356,7 +12356,10 @@ describe('real StudioProvider lifecycle', () => {
       }
     }
 
-    async function startSystemAudioSession(backend: StudioBackend): Promise<{
+    async function startSystemAudioSession(
+      backend: StudioBackend,
+      beforeStart?: (latest: () => StudioCoreContextValue) => Promise<void>
+    ): Promise<{
       latest: () => StudioCoreContextValue
       emit: (name: string, value: unknown) => void
       updates: () => Array<Record<string, unknown>>
@@ -12389,6 +12392,7 @@ describe('real StudioProvider lifecycle', () => {
           latest().wsStatus === 'connected' &&
           latest().captureConfig.sources.microphoneId === 'mic:1'
       )
+      if (beforeStart) await beforeStart(latest)
       await act(async () => {
         await latest().startSession()
       })
@@ -12535,6 +12539,83 @@ describe('real StudioProvider lifecycle', () => {
         microphoneGainDb: 6,
         microphoneMuted: true
       })
+    })
+
+    const startWithNoiseReduction = async (latest: () => StudioCoreContextValue): Promise<void> => {
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneNoiseSuppression: 'rnnoise' }
+        }))
+      })
+    }
+
+    it('confirms noise reduction once after a start that asked for it', async () => {
+      const backend = new StudioBackend()
+      const { latest, updates } = await startSystemAudioSession(backend, startWithNoiseReduction)
+      const started = backend.sentCommands.find((command) => command.method === 'session.start')
+      expect(
+        (started?.params as { audio: { microphoneNoiseSuppression?: string } }).audio
+      ).toMatchObject({ microphoneNoiseSuppression: 'rnnoise' })
+      await waitForObservation(() => updates().length === 1)
+      expect(updates()[0]).toMatchObject({
+        sessionId: 'session-1',
+        microphoneNoiseSuppression: 'rnnoise'
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      expect(updates()).toHaveLength(1)
+      expect(latest().captureConfig.audio.microphoneNoiseSuppression).toBe('rnnoise')
+      expect(latest().lastError).toBeNull()
+      expect(toastSpies.error).not.toHaveBeenCalled()
+      expect(toastSpies.warning).not.toHaveBeenCalled()
+    })
+
+    it('shows Off and one message when the started session cannot run noise reduction', async () => {
+      // A microphone that bypasses the session audio bus starts without
+      // noise reduction: the confirmation after start is rejected, the
+      // rollback shows Off, and the backend's own record of the downgrade
+      // (its health event) adds no second notice.
+      const backend = new StudioBackend()
+      backend.audioProcessingReasonCode = 'microphone-noise-suppression-unavailable'
+      const { latest, updates, emitIssue } = await startSystemAudioSession(
+        backend,
+        startWithNoiseReduction
+      )
+      await waitForObservation(
+        () =>
+          updates().length >= 1 && latest().captureConfig.audio.microphoneNoiseSuppression === 'off'
+      )
+      expect(updates()[0]).toMatchObject({ microphoneNoiseSuppression: 'rnnoise' })
+      expect(latest().lastError).toContain(
+        'Noise reduction is unavailable for this capture. It is Off.'
+      )
+      const notices = (): number =>
+        toastSpies.error.mock.calls.length + toastSpies.warning.mock.calls.length
+      await waitForObservation(() => notices() === 1)
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      // A rejection re-sends the system audio fields (PR #477 review); that
+      // and anything after it asks for Off, never for noise reduction again.
+      const settled = updates().length
+      expect(
+        updates()
+          .slice(1)
+          .map((update) => update.microphoneNoiseSuppression)
+      ).toEqual(
+        updates()
+          .slice(1)
+          .map(() => 'off')
+      )
+      await emitIssue('microphone-noise-suppression-unavailable')
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      expect(updates()).toHaveLength(settled)
+      expect(latest().captureConfig.audio.microphoneNoiseSuppression).toBe('off')
+      expect(notices()).toBe(1)
     })
 
     it('sends a rejected system audio update again instead of treating it as sent', async () => {

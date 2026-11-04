@@ -217,6 +217,13 @@ export function systemAudioProcessingDelta(
  * request. Controls can still change while start is in flight; comparing the
  * active values with this seed preserves that edit without inventing a
  * redundant live mutation for an untouched start.
+ *
+ * A start that asked for noise reduction is confirmed once after start: a
+ * microphone that bypasses the session audio bus (a direct FFmpeg capture)
+ * starts without it, and the backend answers that confirmation with the
+ * `microphone-noise-suppression-unavailable` rejection, whose rollback shows
+ * Off and says so. A bus-backed session confirms the same mode and nothing
+ * changes.
  */
 export function liveAudioProcessingSessionSyncDecision(
   desired: AudioProcessingUpdateParams,
@@ -237,6 +244,7 @@ export function liveAudioProcessingSessionSyncDecision(
     lastApplied,
     enqueueDesired:
       !startSnapshotMatches ||
+      lastApplied.microphoneNoiseSuppression === 'rnnoise' ||
       desired.microphoneGainDb !== lastApplied.microphoneGainDb ||
       desired.microphoneMuted !== lastApplied.microphoneMuted ||
       (desired.microphoneNoiseSuppression ?? 'off') !== lastApplied.microphoneNoiseSuppression

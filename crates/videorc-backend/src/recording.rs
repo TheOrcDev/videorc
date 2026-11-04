@@ -403,6 +403,49 @@ impl Drop for PublishedSessionStartGuard {
 /// DirectShow input because the capture worker could not open it (plan 065).
 pub(crate) const WORKER_MICROPHONE_FALLBACK_CODE: &str = "microphone-capture-worker-fallback";
 
+/// Health code for a session that asked for noise reduction on a microphone
+/// that bypasses the session audio bus; also the live update's reason code
+/// for the same refusal.
+pub(crate) const MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE: &str =
+    "microphone-noise-suppression-unavailable";
+const MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_MESSAGE: &str =
+    "Noise reduction isn't available for this microphone, so this session goes on without it.";
+
+/// Noise reduction runs on the session audio bus. A microphone that bypasses
+/// it (the Windows DirectShow or Linux Pulse fallback, a build without the
+/// capture worker) starts anyway, without noise reduction for this session;
+/// the remembered setting is untouched. The renderer confirms the mode once
+/// after start and shows Off through the live update's
+/// `microphone-noise-suppression-unavailable` rejection, so this health event
+/// is the session's record, not a second notice. Returns whether it
+/// downgraded the session.
+fn drop_noise_reduction_without_session_audio(
+    state: &AppState,
+    session_id: &str,
+    params: &mut StartSessionParams,
+    has_session_audio: bool,
+) -> bool {
+    if has_session_audio
+        || params.audio.microphone_noise_suppression
+            != crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+    {
+        return false;
+    }
+    params.audio.microphone_noise_suppression = crate::protocol::MicrophoneNoiseSuppression::Off;
+    state.emit_log(
+        "warn",
+        "Noise reduction is unavailable for the selected microphone (it bypasses the session audio bus); this session runs without it.",
+    );
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Warn,
+        MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE,
+        MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_MESSAGE,
+    );
+    true
+}
+
 /// What a session does when the capture worker cannot open its microphone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerMicrophoneFallback {
@@ -3384,7 +3427,7 @@ pub async fn update_active_audio_processing(
             result.microphone_noise_suppression = settings.noise_suppression;
         } else if settings.noise_suppression == crate::protocol::MicrophoneNoiseSuppression::Rnnoise
         {
-            result.reason_code = Some("microphone-noise-suppression-unavailable".to_string());
+            result.reason_code = Some(MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE.to_string());
             result.confirmed_microphone_noise_suppression =
                 Some(crate::protocol::MicrophoneNoiseSuppression::Off);
             return result;
@@ -4623,16 +4666,10 @@ async fn start_session_with_timeline(
     };
     let has_session_audio = has_native_audio || silent_audio_fifo.is_some();
     // An empty microphone selection still owns a persistent SessionPcm bus.
-    // Keep the remembered mode for a later source attachment; reject only
-    // routes that actually bypass that bus (such as direct FFmpeg capture).
-    if params.audio.microphone_noise_suppression
-        == crate::protocol::MicrophoneNoiseSuppression::Rnnoise
-        && !has_session_audio
-    {
-        anyhow::bail!(
-            "Noise reduction is unavailable for the selected microphone. Turn it off or select a supported microphone."
-        );
-    }
+    // Keep the remembered mode for a later source attachment; only a route
+    // that bypasses that bus (direct FFmpeg capture) runs without it, and
+    // the session starts either way.
+    drop_noise_reduction_without_session_audio(&state, &session_id, &mut params, has_session_audio);
     let audio_tracks = capture_audio_tracks(&capture);
     let active_screen = state.database.active_stream_screen()?;
     // Plan 186 S4: the banners showing when the session starts decide whether
@@ -43092,6 +43129,85 @@ mod tests {
         assert_eq!(
             result.confirmed_microphone_noise_suppression,
             Some(crate::protocol::MicrophoneNoiseSuppression::Off)
+        );
+    }
+
+    /// A microphone that bypasses the session audio bus (the DirectShow or
+    /// Pulse fallback, a build without the capture worker) starts with noise
+    /// reduction Off for that session and one Warn event; a bus-backed
+    /// session keeps the request and says nothing.
+    #[tokio::test]
+    async fn rnnoise_start_without_the_session_audio_bus_runs_off_and_warns_once() {
+        use crate::protocol::MicrophoneNoiseSuppression;
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("rnnoise-direct")
+            .unwrap();
+        let mut params = base_params(true, false);
+        params.audio.microphone_noise_suppression = MicrophoneNoiseSuppression::Rnnoise;
+        assert!(!drop_noise_reduction_without_session_audio(
+            &state,
+            "rnnoise-direct",
+            &mut params,
+            true
+        ));
+        assert_eq!(
+            params.audio.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Rnnoise,
+            "a bus-backed session keeps the request"
+        );
+        assert!(
+            state
+                .database
+                .list_health_events("rnnoise-direct")
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(drop_noise_reduction_without_session_audio(
+            &state,
+            "rnnoise-direct",
+            &mut params,
+            false
+        ));
+        assert_eq!(
+            params.audio.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Off
+        );
+        assert_eq!(
+            audio_processing_settings(&params).noise_suppression,
+            MicrophoneNoiseSuppression::Off,
+            "the FFmpeg live control is seeded Off"
+        );
+        let events = state.database.list_health_events("rnnoise-direct").unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(matches!(events[0].level, HealthLevel::Warn), "{events:?}");
+        assert_eq!(
+            events[0].code,
+            MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE
+        );
+        assert_eq!(
+            events[0].message,
+            MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_MESSAGE
+        );
+        assert!(!events[0].message.contains('\u{2014}'), "no em dashes");
+        assert_eq!(events[0].session_id.as_deref(), Some("rnnoise-direct"));
+
+        // Off stays Off, with nothing more to say.
+        assert!(!drop_noise_reduction_without_session_audio(
+            &state,
+            "rnnoise-direct",
+            &mut params,
+            false
+        ));
+        assert_eq!(
+            state
+                .database
+                .list_health_events("rnnoise-direct")
+                .unwrap()
+                .len(),
+            1
         );
     }
 

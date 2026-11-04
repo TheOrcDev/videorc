@@ -638,11 +638,36 @@ describe('live RNNoise controls', () => {
         microphoneNoiseSuppression: 'off'
       })
     ).toMatchObject({ lastApplied: { microphoneNoiseSuppression: 'off' }, enqueueDesired: true })
+  })
+  it('confirms noise reduction once after a start that asked for it', () => {
+    // A microphone that bypasses the session audio bus starts without noise
+    // reduction; the confirmation is what brings back the rejection whose
+    // rollback shows Off. An untouched Off start still sends nothing.
+    const desired = activeAudioProcessingUpdateParams(
+      { state: 'recording', sessionId: base.sessionId },
+      { ...base, microphoneNoiseSuppression: 'rnnoise' }
+    )!
     expect(
       liveAudioProcessingSessionSyncDecision(desired, {
         ...base,
         microphoneNoiseSuppression: 'rnnoise'
-      }).enqueueDesired
+      })
+    ).toEqual({
+      lastApplied: {
+        microphoneGainDb: 0,
+        microphoneMuted: false,
+        microphoneNoiseSuppression: 'rnnoise'
+      },
+      enqueueDesired: true
+    })
+    expect(
+      liveAudioProcessingSessionSyncDecision(
+        activeAudioProcessingUpdateParams(
+          { state: 'recording', sessionId: base.sessionId },
+          { ...base, microphoneNoiseSuppression: 'off' }
+        )!,
+        { ...base, microphoneNoiseSuppression: 'off' }
+      ).enqueueDesired
     ).toBe(false)
   })
   it('keeps suppression and system edits across a newer legacy gain or mute request', () => {
