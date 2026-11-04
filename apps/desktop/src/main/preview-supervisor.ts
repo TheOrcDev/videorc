@@ -247,7 +247,11 @@ export class PreviewSupervisorModel {
   private acceptsSurfaceEvent(generation: number): boolean {
     return (
       generation === this.state.generation &&
-      this.state.surfaceRequested &&
+      // A failure drops the surface request, but the same open window's
+      // surface can still come up after it: the Windows D3D11 presenter
+      // claims after main reported the proof surface stopped.
+      (this.state.surfaceRequested ||
+        (this.state.lifecycleState === 'failed' && this.state.windowOpen)) &&
       this.state.lifecycleState !== 'closing' &&
       this.state.lifecycleState !== 'closed' &&
       this.state.lifecycleState !== 'permission-required'

@@ -192,8 +192,11 @@ pnpm live:install --rollback
   file is ever made executable; `--appimage-extract` runs only after the hash
   matches; the extracted app must hold `videorc`, `resources/videorc-backend`
   and `resources/ffmpeg/bin/ffmpeg`, with the version from its desktop file.
-- **local:** an unpacked build of this checkout (`pnpm package:desktop:linux`),
-  recorded as `local-build`, unverified, and said so in the log.
+- **local:** an unpacked test build of this checkout
+  (`VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop:linux`), recorded as
+  `local-build`, unverified, and said so in the log. The harness drives every
+  run over CDP, which a packaged build opens only as a test build, so a plain
+  `pnpm package:desktop:linux` build is refused (`not-a-test-build`).
 - **release** reads `latest-linux.yml` and is refused
   (`linux-feed-unavailable`) while the Linux Alpha feed is not public (it
   answers 404 today). **candidate:** is refused: there is no Linux

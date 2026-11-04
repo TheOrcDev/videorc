@@ -12,6 +12,7 @@ import {
 } from './linux-update-notice'
 import { safeConsole } from './safe-console'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
+import { createAppUpdateConfigGate } from './updater-config-file'
 import { installUpdateWithInterruptionLease } from './updater-install'
 import { shouldRetryUpdateOnMirror, UPDATE_FEED_URLS } from './updater-mirror'
 import type { UpdateFeedRoute } from './updater-mirror'
@@ -71,6 +72,12 @@ let requestAccountPilotGrant: (() => Promise<unknown>) | null = null
 const linuxNoticeSource =
   process.platform === 'linux' ? linuxUpdateNoticeSource(process.env, app.isPackaged) : null
 let linuxNoticeInFlight: Promise<UpdateStatus> | null = null
+// A dev or --dir package has no app-update.yml, so only a pinned feed can be
+// checked there (updater-config-file.ts).
+const allowsUpdateCheck = createAppUpdateConfigGate({
+  resourcesPath: process.resourcesPath,
+  log: (message) => safeConsole.log(message)
+})
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -407,6 +414,11 @@ export function initAutoUpdater(
     return
   }
 
+  if (!allowsUpdateCheck(pilotFeedActive)) {
+    setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    return
+  }
+
   // The opt-out suppresses only silent checks. Pilot feed routing and bearer
   // ownership still apply to the packaged app's explicit manual update flow.
   if (backgroundUpdatesDisabled) return
@@ -469,7 +481,7 @@ export function registerUpdaterIpc(
   secureIpcHandle('updates:get-status', () => currentStatus)
 
   secureIpcHandle('updates:check', async (): Promise<UpdateStatus> => {
-    if (!app.isPackaged || updaterConfigurationBlocked) {
+    if (!app.isPackaged || updaterConfigurationBlocked || !allowsUpdateCheck(pilotFeedActive)) {
       setStatus(updateStatusFromEvent({ type: 'unsupported' }))
       return currentStatus
     }
@@ -495,7 +507,7 @@ export function registerUpdaterIpc(
   })
 
   secureIpcHandle('updates:download', async (): Promise<UpdateStatus> => {
-    if (!app.isPackaged || updaterConfigurationBlocked) {
+    if (!app.isPackaged || updaterConfigurationBlocked || !allowsUpdateCheck(pilotFeedActive)) {
       setStatus(updateStatusFromEvent({ type: 'unsupported' }))
       return currentStatus
     }

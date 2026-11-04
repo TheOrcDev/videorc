@@ -131,6 +131,8 @@ const api: VideorcApi = {
   openBuddyTabFromCommentsWindow: (command) => invoke('comments-window:open-buddy-tab', command),
   openDestinationFromCommentsWindow: (command) =>
     invoke('comments-window:open-destination', command),
+  signInToVideorcFromCommentsWindow: (command) =>
+    invoke('comments-window:sign-in-videorc', command),
   moderateFromCommentsWindow: (command) => invoke('comments-window:moderation', command),
   onModerationRequest: (callback) => subscribe('comments-window:moderation-request', callback),
   pushModerationResult: (resolution) =>
@@ -186,6 +188,8 @@ const api: VideorcApi = {
   getCommentsWindowState: () => invoke('comments-window:get-state'),
   setCommentsWindowAlwaysOnTop: (alwaysOnTop) =>
     invoke('comments-window:set-always-on-top', alwaysOnTop),
+  setCommentsWindowHiddenFromStream: (hidden) =>
+    invoke('comments-window:set-hidden-from-stream', hidden),
   setCommentsWindowHighlightAnchor: (anchor) =>
     invoke('comments-window:set-highlight-anchor', anchor),
   setCommentsWindowAutoShowActivity: (on) => invoke('comments-window:set-auto-show-activity', on),
@@ -225,6 +229,7 @@ const api: VideorcApi = {
   destroyNativePreviewSurface: (generation) => invoke('preview-surface:destroy', generation),
   getNativePreviewSurfaceStatus: () => invoke('preview-surface:status'),
   openSystemPermissions: (pane) => invoke('system:open-permissions', pane),
+  virtualCameraAction: (action) => invoke('virtual-camera:action', action),
   getMediaAccessStatus: () => invoke('system:media-access-status'),
   requestMediaAccess: (pane) => invoke('system:request-media-access', pane),
   requestScreenAccess: () => invoke('system:request-screen-access'),
@@ -260,6 +265,7 @@ const api: VideorcApi = {
   onExitRequest: (callback) => subscribe('app:exit-request', callback),
   onBuddyDeepLink: (callback) => subscribe('buddy:deep-link', callback),
   onOpenDestination: (callback) => subscribe('livestream:open-destination', callback),
+  onAccountSignInRequest: (callback) => subscribe('account:sign-in-request', callback),
   onShortcutModifier: (callback) => subscribe('shortcut:modifier', callback),
   onWindowVisible: (callback) => subscribe('window:visible', callback),
   onBackendConnection: (callback) => subscribe('backend:connection', callback),

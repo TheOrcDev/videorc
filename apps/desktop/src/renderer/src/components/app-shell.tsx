@@ -6,6 +6,7 @@ const CommandPalette = lazy(async () => ({
 import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { PageErrorBoundary } from '@/components/page-error-boundary'
+import { PageLoading } from '@/components/page-loading'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusBarReplayState } from '@/components/status-bar-replay'
@@ -42,6 +43,7 @@ import { pageChunk, useRenderPageWhenLoaded, type PageLoad } from '@/lib/page-ch
 import { PAGE_CONTAINER } from '@/lib/page-layout'
 import { navigationShortcutTab, shellShortcutAction } from '@/lib/shell-shortcuts'
 import { shortcutAccelerator } from '@/lib/shortcuts'
+import { beginVideorcSignIn } from '@/lib/videorc-web-links'
 import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
   isBuddyTabId,
@@ -112,6 +114,10 @@ const PAGE_CHUNKS: Record<WorkspaceTab, PageLoad> = {
   diagnostics: diagnosticsPage,
   settings: settingsPage
 }
+/** Whether a page has opened in this window: before one has, the app is opening. */
+function anyPageOpened(): boolean {
+  return Object.values(PAGE_CHUNKS).some((page) => page.isLoaded())
+}
 const StudioTab = studioPage.Page
 const AssetsTab = assetsPage.Page
 const CaptionsTab = captionsPage.Page
@@ -148,18 +154,6 @@ const EndLivestreamDialog = lazy(async () => ({
 const AgentsWatcher = lazy(async () => ({
   default: (await import('@/components/agents-watcher')).AgentsWatcher
 }))
-
-function WorkspaceTabFallback(): ReactElement {
-  return (
-    <div
-      aria-live="polite"
-      className="flex min-h-40 items-center justify-center text-xs text-muted-foreground"
-      role="status"
-    >
-      Opening Videorc…
-    </div>
-  )
-}
 
 // Snapshot before the first render, before What's New can initialize its key.
 // Writes wait for runtime info so suppressed smoke profiles remain untouched.
@@ -204,6 +198,7 @@ function AppShellContent(): ReactElement {
     wsStatus,
     runtimeInfo,
     entitlementTier,
+    accountNeedsSignIn,
     previewWindowOpen,
     togglePreviewWindow,
     notesWindowOpen,
@@ -521,6 +516,14 @@ function AppShellContent(): ReactElement {
     return off
   }, [openLivestream])
 
+  // Plan 215 A3: "Sign in to Videorc" in the Stream Manager starts the
+  // account sign-in this window owns (main has shown the window), the same
+  // door as the sidebar's Sign in.
+  useEffect(() => {
+    const off = window.videorc?.onAccountSignInRequest?.(() => beginVideorcSignIn())
+    return off
+  }, [])
+
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
       const request = readCleanCutOpenRequest((event as CustomEvent<unknown>).detail)
@@ -579,6 +582,7 @@ function AppShellContent(): ReactElement {
             active={active}
             activeStudioPanel={isStudioPanel(active) ? active : null}
             accountTier={entitlementTier}
+            accountNeedsSignIn={accountNeedsSignIn}
             // A click on a row keeps the focus on the row; every other way to
             // a page moves it to the page title.
             onSelect={(tab) => setActive(tab, { focusTitle: false })}
@@ -609,7 +613,7 @@ function AppShellContent(): ReactElement {
                   starts clean. */}
                 <PageErrorBoundary key={active}>
                   <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
-                    <Suspense fallback={<WorkspaceTabFallback />}>
+                    <Suspense fallback={<PageLoading opening={!anyPageOpened()} tab={active} />}>
                       {active === 'studio' ? <StudioTab /> : null}
                       {active === 'sources' ? <SourcesTab /> : null}
                       {active === 'layouts' ? <LayoutTab /> : null}

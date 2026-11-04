@@ -7,6 +7,7 @@ import { summarizeNumericSeries } from '../../lib/performance-contract.mjs'
 import { DEFAULT_FRAME_OPTIONS, runFrameChecks } from './frame-checks.mjs'
 import { parseJournalLine, flattenHealthEvents } from './app-observer.mjs'
 import { redactValue } from './redact.mjs'
+import { isStreamReadable } from './youtube-observer.mjs'
 
 // Plan 178 U9 step 4 (plan 166 S8 steps 1-2). The verdict engine: every
 // signal of plan 166's "Incident signals and first thresholds" computed from
@@ -229,6 +230,21 @@ export function droppedFrameWindows(journal, windowMs) {
     }
   }
   return windows
+}
+
+/**
+ * Pure: did any leg drop or duplicate frames between two journal samples?
+ * Both counters are cumulative per leg; a leg new in `line` has lost nothing.
+ */
+export function lostFramesBetween(previous, line) {
+  const before = new Map((previous?.legs ?? []).map((leg) => [leg.targetId, leg]))
+  return (line?.legs ?? []).some((leg) => {
+    const prior = before.get(leg.targetId)
+    if (!prior) return false
+    return ['droppedFrames', 'duplicatedFrames'].some(
+      (key) => Number.isFinite(leg[key]) && Number.isFinite(prior[key]) && leg[key] > prior[key]
+    )
+  })
 }
 
 /** Pure: least-squares slope of `values` against their index. */
@@ -460,12 +476,19 @@ export async function computeVerdict(
   // or no speed is a gap that ends a run, so a bad sample after it is not
   // counted from a good one before it. The charts, the minimum and the
   // median read only measured ones.
-  const bitrateSamples = samples.map((line) => ({
-    atMs: line.tsMs,
-    value: isLive(line)
-      ? (line.legs ?? []).reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0)
-      : null
-  }))
+  const bitrateSamples = samples.map((line, index) => {
+    const live = isLive(line)
+    const legs = line.legs ?? []
+    const fpsValues = live ? legs.map((leg) => leg.fps).filter(Number.isFinite) : []
+    const speeds = live ? legs.map((leg) => leg.speed).filter(Number.isFinite) : []
+    return {
+      atMs: line.tsMs,
+      value: live ? legs.reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0) : null,
+      fps: fpsValues.length ? Math.min(...fpsValues) : null,
+      speed: speeds.length ? Math.min(...speeds) : null,
+      lostFrames: index > 0 && lostFramesBetween(samples[index - 1], line)
+    }
+  })
   series.bitrate = bitrateSamples.filter((p) => p.value !== null)
   const speedSamples = samples.map((line) => {
     const speeds = isLive(line)
@@ -549,11 +572,26 @@ export async function computeVerdict(
       6000
     const fraction = thresholds.bitrate?.minFractionOfTarget ?? 0.7
     const bitrateFor = (thresholds.bitrate?.forSeconds ?? 60) * 1000
-    const low = longestBadRunMs(
-      bitrateSamples,
-      (p) => p.value < target * fraction,
-      (p) => p.value !== null
-    )
+    // An encoder in bitrate mode spends only what the picture needs: OpenH264
+    // at 6000k reads ~6 Mbps on moving content and ~0.35 Mbps on a still
+    // (ogre, 2026-11-04). A low reading is a stream fault only when something
+    // else shows starvation too: frames under the profile rate, encoding
+    // slower than realtime, or frames dropped. Without that proof it counts.
+    const targetFps = Number(profile?.fps) || null
+    const fpsFloor = targetFps
+      ? targetFps * (thresholds.bitrate?.contentLimitedMinFpsFraction ?? 0.97)
+      : null
+    const contentLimited = (p) =>
+      fpsFloor !== null &&
+      p.fps !== null &&
+      p.fps >= fpsFloor &&
+      p.speed !== null &&
+      p.speed >= speedMin &&
+      !p.lostFrames
+    const isLow = (p) => p.value < target * fraction
+    const measured = (p) => p.value !== null
+    const low = longestBadRunMs(bitrateSamples, (p) => isLow(p) && !contentLimited(p), measured)
+    const lowAtAll = longestBadRunMs(bitrateSamples, isLow, measured)
     const bitrateBreach = low >= bitrateFor
     const bitrateJudge = judge(bitrateBreach, 'P1')
     const medianBitrate = series.bitrate.map((p) => p.value).sort((a, b) => a - b)[
@@ -566,7 +604,9 @@ export async function computeVerdict(
         signature: bitrateBreach ? 'stream:bitrate' : null,
         summary: bitrateBreach
           ? `bitrate under ${Math.round(fraction * 100)}% of ${target} kbps for ${Math.round(low / 1000)} s`
-          : `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target`,
+          : lowAtAll >= bitrateFor
+            ? `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target: content-limited (fps, speed and frames held while it was under ${Math.round(fraction * 100)}%)`
+            : `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target`,
         value: Math.round(medianBitrate),
         threshold: Math.round(target * fraction),
         unit: 'kbps',
@@ -643,17 +683,29 @@ export async function computeVerdict(
   // --- observer: noData while live, Studio end, YouTube health --------------------
   const observerIncidents = observer.flatMap((snapshot) => snapshot.incidents ?? [])
   const firstOf = (type) => observerIncidents.find((incident) => incident.type === type) ?? null
+  // Only a poll that read the stream proves anything: a run whose every poll
+  // failed (no broadcaster token, say) checked nothing on YouTube.
+  const readable = observer.filter(isStreamReadable)
+  const unreadable = observer.length - readable.length
+  const firstReadError = observer.flatMap((snapshot) => snapshot.errors ?? [])[0]?.message
+  const observerOff = manifest.session?.youtube?.unavailable ?? null
+  const notChecked = observerOff
+    ? `not checked: ${observerOff}`
+    : observer.length
+      ? `not checked: none of ${observer.length} observer polls read the stream (${String(firstReadError ?? 'no error').slice(0, 160)})`
+      : 'no observer snapshots (local sink or observer off)'
+  const readableNote = unreadable ? ` (${unreadable} of ${observer.length} polls unreadable)` : ''
   const noData = firstOf('stream:noData-while-live')
   signals.push(
     signal('stream:noData-while-live', {
-      status: noData ? 'fail' : observer.length ? 'pass' : 'skipped',
+      status: noData ? 'fail' : readable.length ? 'pass' : 'skipped',
       severity: noData ? 'P0' : null,
       signature: noData ? 'stream:noData-while-live' : null,
       summary: noData
         ? `P0: ${noData.detail}`
-        : observer.length
-          ? 'YouTube had data on every poll while the app was On air'
-          : 'no observer snapshots (local sink or observer off)',
+        : readable.length
+          ? `YouTube had data on every readable poll while the app was On air${readableNote}`
+          : notChecked,
       threshold: thresholds.noDataWhileLive?.polls ?? 2,
       unit: 'polls',
       evidence: ['observer.ndjson', 'journal.ndjson']
@@ -688,19 +740,19 @@ export async function computeVerdict(
   const healthIncidents = observerIncidents.filter((incident) =>
     /^youtube-(health|config)/.test(incident.type)
   )
-  if (observer.length === 0) {
+  if (readable.length === 0 && healthIncidents.length === 0) {
     signals.push(
       signal('youtube:health', {
         status: 'skipped',
-        summary: 'no observer snapshots',
+        summary: notChecked,
         evidence: ['observer.ndjson']
       })
     )
   } else if (healthIncidents.length === 0) {
     signals.push(
       signal('youtube:health', {
-        summary: `YouTube health stayed good over ${observer.length} polls`,
-        value: observer.length,
+        summary: `YouTube health stayed good over ${readable.length} readable polls${readableNote}`,
+        value: readable.length,
         unit: 'polls',
         evidence: ['observer.ndjson', 'charts/youtube-health.png']
       })

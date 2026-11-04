@@ -16,10 +16,9 @@ use chrono::Utc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use crate::capture_health::{
-    CaptureHealthCameraEpoch, CaptureHealthScreenEpoch, CaptureHealthTransition, CaptureStage,
-    DEGRADED_RATE_FRACTION,
-};
+#[cfg(any(test, debug_assertions))]
+use crate::capture_health::{CaptureHealthCameraEpoch, CaptureHealthScreenEpoch};
+use crate::capture_health::{CaptureHealthTransition, CaptureStage, DEGRADED_RATE_FRACTION};
 use crate::compositor::compositor_status;
 use crate::diagnostics::{apply_capture_health, apply_capture_recovery_status};
 use crate::preview_camera::{
@@ -2753,9 +2752,8 @@ pub(crate) async fn seed_terminal_capture_recovery_failure_for_transport_test(
                 "transport test terminal failure".to_string(),
                 now_timestamp(),
             )
-            .map(|status| {
-                emit_recovery_status_at_commit(state, &status);
-                status
+            .inspect(|status| {
+                emit_recovery_status_at_commit(state, status);
             })
             .expect("transport test failure transition")
     };

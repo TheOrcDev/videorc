@@ -28,7 +28,11 @@ import {
 } from '@/hooks/use-studio-mic-sources'
 import type { AudioSettings, Device } from '@/lib/backend'
 import { buildMicrophoneSources, microphonePickerDevices } from '@/lib/capture'
-import { systemAudioMeterInput, type MeterInput } from '@/lib/mic-meter-input'
+import {
+  MIC_SESSION_LEVEL_UNAVAILABLE_COPY,
+  systemAudioMeterInput,
+  type MeterInput
+} from '@/lib/mic-meter-input'
 import { systemAudioStatus } from '@/lib/source-status'
 import { micSignalLabel, type MicMonitorState } from '@/lib/state-labels'
 import {
@@ -84,7 +88,7 @@ export function AudioSection(): ReactElement {
     systemAudioIssue
   } = useStudioCore()
   const { openSettings } = useWorkspaceNav()
-  const { meter, monitorState } = useMicrophoneMeter()
+  const { meter, monitorState, sessionLevelUnavailable } = useMicrophoneMeter()
   const backendLevelsLive = useBackendAudioLevelsLive()
   const microphones = microphonePickerDevices(deviceList.devices)
   const audio = captureConfig.audio
@@ -112,6 +116,7 @@ export function AudioSection(): ReactElement {
     gainDb: audio.microphoneGainDb,
     meter,
     monitorState,
+    sessionLevelUnavailable,
     muteShortcut: settings.globalShortcuts?.micToggle,
     muted: audio.microphoneMuted,
     platform,
@@ -269,6 +274,8 @@ export type MicrophoneRowProps = {
   discoveryPending: boolean
   meter: MeterInput
   monitorState: MicMonitorState
+  /** Issue 1064: the running bus sends no level, so the meter shows none. */
+  sessionLevelUnavailable?: boolean
   muted: boolean
   /** The bound global mute shortcut (an accelerator); absent when none is bound. */
   muteShortcut?: string
@@ -290,6 +297,7 @@ function MicrophoneRow({
   discoveryPending,
   meter,
   monitorState,
+  sessionLevelUnavailable = false,
   muted,
   muteShortcut,
   platform,
@@ -369,6 +377,13 @@ function MicrophoneRow({
         </span>
       </div>
       <MicrophoneGainFader gainDb={gainDb} onGainChange={onGainChange} />
+      {/* Issue 1064: a session meter with no backend level says so, instead
+          of painting the renderer's own microphone. */}
+      {sessionLevelUnavailable ? (
+        <p className="text-xs text-muted-foreground" data-videorc-mic-level-reason="session">
+          {MIC_SESSION_LEVEL_UNAVAILABLE_COPY}
+        </p>
+      ) : null}
     </SourceItem>
   )
 }

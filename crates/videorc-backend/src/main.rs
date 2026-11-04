@@ -37,6 +37,7 @@ mod capture_input;
 mod capture_interruption;
 mod capture_log;
 mod capture_recovery;
+mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
 mod cohost;
@@ -70,6 +71,7 @@ mod buddy_pet_build;
 mod buddy_pet_create;
 mod h264_profile;
 mod host_pressure;
+mod incident_tone;
 mod kick;
 mod kick_chat;
 #[cfg(any(test, target_os = "linux"))]
@@ -159,6 +161,8 @@ mod system_audio_capture;
 #[cfg(any(windows, all(test, target_os = "macos")))]
 mod system_audio_capture_windows;
 mod system_audio_session;
+#[cfg(test)]
+mod test_temp_dir;
 mod transcript;
 mod twitch;
 mod twitch_chat;
@@ -167,6 +171,10 @@ mod usage_stats;
 mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
+mod virtual_camera;
+mod virtual_camera_linux;
+mod virtual_camera_macos;
+mod virtual_camera_service;
 mod warm_microphone;
 #[allow(dead_code)]
 mod windows_capture_owner;
@@ -224,7 +232,7 @@ use futures_util::stream;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use preview_camera::{
     latest_preview_camera_bmp, latest_preview_camera_png, preview_camera_status,
-    start_preview_camera, stop_preview_camera,
+    start_preview_camera, stop_preview_camera_from_client,
 };
 use preview_screen::{
     latest_preview_screen_bmp, latest_preview_screen_png, preview_screen_status,
@@ -502,7 +510,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
         let _ = objc2_core_graphics::CGMainDisplayID();
     }
     spawn_orphan_watchdog_thread();
-    secrets::init_native_secret_store();
+    secrets::init_secret_store();
     diagnostics::start_runtime_resource_sampler();
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -622,6 +630,8 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     }
     // Plan 186 S10: "Hide after" and "Show every" for the whole process.
     tokio::spawn(banner_timers::run_banner_timers(state.clone()));
+    // Plan 214 D4: Videorc Camera comes back on when it was on.
+    virtual_camera_service::start_from_settings(&state).await;
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -4806,6 +4816,10 @@ const WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY: usize = 32;
 const WEBSOCKET_ACCOUNT_MAINTENANCE_QUEUE_CAPACITY: usize = 8;
 const WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY: usize = 16;
 const WEBSOCKET_STOP_LANE_QUEUE_CAPACITY: usize = 4;
+// Issue #1063: imports a socket may have admitted at once, the running one
+// included. They still run one at a time process-wide; the rest wait their
+// turn inside the ordered queue age instead of being refused at once.
+const WEBSOCKET_ASSET_IMPORT_LANE_QUEUE_CAPACITY: usize = 4;
 const WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_ACCOUNT_MAINTENANCE_MAX_QUEUE_AGE: Duration = Duration::from_secs(15);
 const WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
@@ -4837,6 +4851,13 @@ const WEBSOCKET_MUTATION_EXECUTOR_THREADS: usize = 16;
 const WEBSOCKET_DURABLE_CHAT_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_STOP_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_ORDERED_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+// Issue #1068 part 5: the renderer's surface projections for the Phone
+// remote and the Agents bridge are idempotent and latest-wins. On the
+// ordered lane they expired or were rejected behind a 2–13 s session.start
+// or preview.camera.start, so the remotes went stale exactly when recording
+// started. Their own lane is bounded like the others; its worker collapses
+// a backlog to the newest publish per method.
+const WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const COMMAND_LANE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.accountMaintenance.block";
 const LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.liveControl.block";
 const COMMAND_LANE_SMOKE_STATUS_METHOD: &str = "test.commandLanes.accountMaintenance.status";
@@ -5555,6 +5576,7 @@ fn websocket_observation_requires_operator_fence(text: &str) -> bool {
                 | "captions.status.get"
                 | "comments.highlight.status"
                 | "comments.highlight.canvases"
+                | "chat.overlay.canvases"
                 | CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD
                 | CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD
         )
@@ -5641,6 +5663,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "captions.overlay.set"
         | "comments.highlight.set"
         | "comments.highlight.clear"
+        | "chat.overlay.set"
+        | "chat.overlay.clear"
         | "cohost.start"
         | "cohost.stop"
         | "cohost.question.answered"
@@ -5791,7 +5815,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.live.start"
         | "preview.live.stop"
         | "screen.hide"
-        | "screen.show" => Some(DEFAULT_MUTATION_POLICY),
+        | "screen.show"
+        | "virtualCamera.set"
+        | "virtualCamera.platform.report" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.source.switch" => Some(Mutation {
             max_execution_age: live_source_switch::SOURCE_SWITCH_EXECUTION_TIMEOUT,
@@ -5906,6 +5932,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "captions.test.snapshot"
         | "comments.highlight.status"
         | "comments.highlight.canvases"
+        | "chat.overlay.canvases"
         | "overlays.layout.get"
         | "cohost.status"
         | "cohost.settings.get"
@@ -5990,6 +6017,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "session.sources.get"
         | "recording.status"
         | "screen.privacy.get"
+        | "virtualCamera.status"
         | "stream.targets.snapshot" => Some(Observation),
 
         "screens.active" => Some(DEFAULT_MUTATION_POLICY),
@@ -6014,6 +6042,8 @@ enum WebSocketIsolatedCommandLaneKind {
     DurableChat,
     LiveControl,
     Stop,
+    /// The renderer's latest-wins projections for the remotes (issue #1068).
+    SurfacePublish,
 }
 
 fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
@@ -6054,19 +6084,42 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "captions.style.set"
         | "comments.highlight.set"
         | "comments.highlight.clear"
+        | "chat.overlay.set"
+        | "chat.overlay.clear"
         | "screen.hide"
         | "screen.show" => Some(WebSocketIsolatedCommandLaneKind::LiveControl),
         "session.stop" | COMMAND_LANE_SMOKE_RELEASE_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::Stop)
         }
+        // Issue #1068 part 5: the renderer's projections for the Phone remote
+        // and the Agents bridge. Each stores the renderer's own snapshot and
+        // emits it; neither reads or changes what a stateful command owns,
+        // so neither waits behind one. A newer publish supersedes an older
+        // one that is still queued.
+        "remote.surface.publish" | "agent.surface.publish" => {
+            Some(WebSocketIsolatedCommandLaneKind::SurfacePublish)
+        }
         _ => None,
     }
+}
+
+/// Issue #1063: a starter sound decoding is "another import" too, so the copy
+/// never names an image. The smokes retry on "already being imported".
+const ASSET_IMPORT_BUSY_MESSAGE: &str =
+    "Another file is already being imported. Wait for it to finish, then try again.";
+
+fn asset_import_busy_error(command_id: String) -> ServerResponse {
+    ServerResponse::error(command_id, "screen-import-busy", ASSET_IMPORT_BUSY_MESSAGE)
 }
 
 #[derive(Clone)]
 struct WebSocketIsolatedCommandLane {
     kind: WebSocketIsolatedCommandLaneKind,
     capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    /// A process-wide turn a dispatched command waits for (bounded by its
+    /// dispatch deadline) and holds until it finishes. Admission (`capacity`)
+    /// stays per socket.
+    execution: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     sender: mpsc::Sender<WebSocketQueuedLaneCommand>,
     max_queue_age: Duration,
     metrics: TrackedWebSocketCommandLaneMetrics,
@@ -6085,6 +6138,7 @@ impl WebSocketIsolatedCommandLane {
             Self {
                 kind,
                 capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(capacity)),
+                execution: None,
                 sender,
                 max_queue_age,
                 metrics,
@@ -6098,11 +6152,7 @@ impl WebSocketIsolatedCommandLane {
 
     fn full_error(&self, command_id: String) -> ServerResponse {
         match self.kind {
-            WebSocketIsolatedCommandLaneKind::AssetImport => ServerResponse::error(
-                command_id,
-                "screen-import-busy",
-                "An image is already being imported. Wait for it to finish, then try again.",
-            ),
+            WebSocketIsolatedCommandLaneKind::AssetImport => asset_import_busy_error(command_id),
             WebSocketIsolatedCommandLaneKind::Observation => ServerResponse::error(
                 command_id,
                 "observation-lane-full",
@@ -6127,6 +6177,7 @@ impl WebSocketIsolatedCommandLane {
 
 struct WebSocketLaneAdmissionGuard {
     _capacity_permit: tokio::sync::OwnedSemaphorePermit,
+    _execution_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     account_refresh_pending: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     _operator_mutation: Option<WebSocketOperatorMutationGuard>,
     live_control_order: Option<WebSocketOperatorMutationGuard>,
@@ -6146,6 +6197,10 @@ struct WebSocketQueuedLaneCommand {
     dispatch_deadline: tokio::time::Instant,
     queue_ticket: WebSocketQueueTicket,
     dispatch_fence: Option<WebSocketCommandDispatchFence>,
+    execution: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    /// Latest-wins commands name their key (the method); a queued command
+    /// with a later same-key command behind it is superseded, never applied.
+    coalesce_key: Option<String>,
     _admission: WebSocketLaneAdmissionGuard,
 }
 
@@ -6187,6 +6242,9 @@ fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAccepted
                 WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE
             }
             Some(WebSocketIsolatedCommandLaneKind::Stop) => WEBSOCKET_STOP_MAX_QUEUE_AGE,
+            Some(WebSocketIsolatedCommandLaneKind::SurfacePublish) => {
+                WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE
+            }
             // Observation is classified above because it is a read-only
             // property rather than a mutation-lane classifier result.
             Some(WebSocketIsolatedCommandLaneKind::Observation) => {
@@ -6262,6 +6320,7 @@ struct WebSocketIsolatedCommandLanes {
     durable_chat: WebSocketIsolatedCommandLane,
     live_control: WebSocketIsolatedCommandLane,
     stop: WebSocketIsolatedCommandLane,
+    surface_publish: WebSocketIsolatedCommandLane,
 }
 
 struct WebSocketIsolatedCommandLaneReceivers {
@@ -6271,6 +6330,7 @@ struct WebSocketIsolatedCommandLaneReceivers {
     durable_chat: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     live_control: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     stop: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    surface_publish: mpsc::Receiver<WebSocketQueuedLaneCommand>,
 }
 
 impl WebSocketIsolatedCommandLanes {
@@ -6280,11 +6340,11 @@ impl WebSocketIsolatedCommandLanes {
     ) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
         let (mut asset_import, asset_import_rx) = WebSocketIsolatedCommandLane::new(
             WebSocketIsolatedCommandLaneKind::AssetImport,
-            1,
+            WEBSOCKET_ASSET_IMPORT_LANE_QUEUE_CAPACITY,
             WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
             transport.register_command_lane("assetImport"),
         );
-        asset_import.capacity = import_capacity;
+        asset_import.execution = Some(import_capacity);
         let (observation, observation_rx) = WebSocketIsolatedCommandLane::new(
             WebSocketIsolatedCommandLaneKind::Observation,
             WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY,
@@ -6315,6 +6375,12 @@ impl WebSocketIsolatedCommandLanes {
             WEBSOCKET_STOP_MAX_QUEUE_AGE,
             transport.register_command_lane("stop"),
         );
+        let (surface_publish, surface_publish_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::SurfacePublish,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE,
+            transport.register_command_lane("surfacePublish"),
+        );
         (
             Self {
                 observation,
@@ -6323,6 +6389,7 @@ impl WebSocketIsolatedCommandLanes {
                 durable_chat,
                 live_control,
                 stop,
+                surface_publish,
             },
             WebSocketIsolatedCommandLaneReceivers {
                 observation: observation_rx,
@@ -6331,6 +6398,7 @@ impl WebSocketIsolatedCommandLanes {
                 durable_chat: durable_chat_rx,
                 live_control: live_control_rx,
                 stop: stop_rx,
+                surface_publish: surface_publish_rx,
             },
         )
     }
@@ -6343,6 +6411,7 @@ impl WebSocketIsolatedCommandLanes {
             WebSocketIsolatedCommandLaneKind::DurableChat => self.durable_chat.clone(),
             WebSocketIsolatedCommandLaneKind::LiveControl => self.live_control.clone(),
             WebSocketIsolatedCommandLaneKind::Stop => self.stop.clone(),
+            WebSocketIsolatedCommandLaneKind::SurfacePublish => self.surface_publish.clone(),
         }
     }
 }
@@ -6369,6 +6438,7 @@ impl WebSocketIsolatedCommandLaneKind {
             Self::DurableChat => "durableChat",
             Self::LiveControl => "liveControl",
             Self::Stop => "stop",
+            Self::SurfacePublish => "surfacePublish",
         }
     }
 }
@@ -6798,14 +6868,19 @@ fn try_enqueue_websocket_lane_command(
     };
     let queue_ticket = lane.metrics.record_enqueue();
     let dispatch_deadline = dispatch_deadline.min(tokio::time::Instant::now() + lane.max_queue_age);
+    let coalesce_key = (lane.kind == WebSocketIsolatedCommandLaneKind::SurfacePublish)
+        .then(|| websocket_command_method(text.as_str()));
     let queued = WebSocketQueuedLaneCommand {
         command_id: command_id.clone(),
         text,
         dispatch_deadline,
         queue_ticket,
         dispatch_fence,
+        execution: lane.execution.clone(),
+        coalesce_key,
         _admission: WebSocketLaneAdmissionGuard {
             _capacity_permit: capacity_permit,
+            _execution_permit: None,
             account_refresh_pending,
             _operator_mutation: operator_mutation,
             live_control_order,
@@ -6939,6 +7014,44 @@ async fn run_websocket_command_lane_worker(
                 continue;
             }
 
+            // A latest-wins command with a newer same-key command queued behind
+            // it is never applied: the newer one is next in line and carries the
+            // projection that replaced this one. It is answered ok, the same
+            // answer the newer publish gets, because the publisher only asks
+            // that its latest snapshot reach the backend.
+            let superseded = front.coalesce_key.as_deref().is_some_and(|key| {
+                pending
+                    .iter()
+                    .skip(1)
+                    .any(|later| later.coalesce_key.as_deref() == Some(key))
+            });
+            if superseded {
+                let superseded = pending.pop_front().expect("lane front exists");
+                let WebSocketQueuedLaneCommand {
+                    command_id,
+                    text,
+                    queue_ticket,
+                    _admission,
+                    ..
+                } = superseded;
+                metrics.record_dispatch(queue_ticket);
+                tracing::debug!(
+                    "[command-lane] {} superseded by a newer publish queued in the {} lane",
+                    websocket_command_method(&text),
+                    websocket_lane_label(&text)
+                );
+                let response = ServerResponse::ok(command_id, serde_json::json!({ "ok": true }));
+                drop(_admission);
+                let _ = queue_websocket_response(
+                    &context.outgoing,
+                    &context.reliable_metrics,
+                    &context.slow_pressure,
+                    response,
+                )
+                .await;
+                continue;
+            }
+
             let command = pending.pop_front().expect("lane front exists");
             metrics.record_dispatch(command.queue_ticket);
             let command_state = context.state.clone();
@@ -6955,9 +7068,38 @@ async fn run_websocket_command_lane_worker(
                     dispatch_deadline,
                     queue_ticket,
                     dispatch_fence,
-                    _admission,
+                    execution,
+                    mut _admission,
                     ..
                 } = command;
+                // Issue #1063: an import waits for the one process-wide import
+                // turn (a starter sound may hold it) inside its queue age; one
+                // that never gets it is told the import slot was busy.
+                if let Some(execution) = execution {
+                    match tokio::time::timeout_at(dispatch_deadline, execution.acquire_owned())
+                        .await
+                    {
+                        Ok(Ok(permit)) => _admission._execution_permit = Some(permit),
+                        Ok(Err(_)) | Err(_) => {
+                            lane_metrics.record_expired_before_dispatch();
+                            warn_command_expired_before_dispatch(
+                                websocket_lane_label(&text),
+                                &text,
+                                Some(queue_ticket.queued_for(std::time::Instant::now())),
+                                "execution turn",
+                            );
+                            drop(_admission);
+                            let _ = queue_websocket_response(
+                                &response_tx,
+                                &response_metrics,
+                                &response_pressure,
+                                asset_import_busy_error(command_id),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
                 let order_ready = match _admission.live_control_order.as_ref() {
                     Some(order) => {
                         tokio::time::timeout_at(dispatch_deadline, order.wait_for_turn())
@@ -7331,6 +7473,14 @@ async fn run_websocket_command_dispatcher(
         lane_receivers.stop,
         1,
         lanes.stop.metrics.clone(),
+        &lane_worker_context,
+    );
+    // One publish at a time keeps them in arrival order, so the newest wins.
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.surface_publish,
+        1,
+        lanes.surface_publish.metrics.clone(),
         &lane_worker_context,
     );
 
@@ -9508,6 +9658,13 @@ fn dispatch_authorized_backend_command(
             let signed_out = account::signed_out_account();
             *state.account_session.lock().await = Some(signed_out.clone());
             drop(account_transition);
+            // Plan 215 A5: the account changed; the chat rows between
+            // sessions read the new truth.
+            publish_account_changed(state, &signed_out, protocol::AccountChangeReason::SignedOut);
+            let chat_state = state.clone();
+            tokio::spawn(async move {
+                live_chat::publish_chat_snapshot_after_account_change(&chat_state).await
+            });
             ServerResponse::ok(command.id, signed_out)
         }),
         "account.complete_sign_in" => Box::pin(async move {
@@ -9526,6 +9683,17 @@ fn dispatch_authorized_backend_command(
                         Ok(resolved) => {
                             *state.account_session.lock().await = Some(resolved.clone());
                             drop(account_transition);
+                            // Plan 215 A5: the account changed. (A dev build
+                            // whose exchange failed resolves signed out.)
+                            publish_account_changed(
+                                state,
+                                &resolved,
+                                if resolved.status == protocol::AccountStatus::SignedIn {
+                                    protocol::AccountChangeReason::SignedIn
+                                } else {
+                                    protocol::AccountChangeReason::SignedOut
+                                },
+                            );
                             let entitlement_state = state.clone();
                             tokio::spawn(async move {
                                 refresh_account_entitlements(&entitlement_state).await
@@ -9535,6 +9703,20 @@ fn dispatch_authorized_backend_command(
                             let listen_state = state.clone();
                             tokio::spawn(async move {
                                 cohost::resume_listen_after_sign_in(&listen_state).await
+                            });
+                            // Plan 215 A4: X and Kick chat parked on the
+                            // Videorc sign-in attach again, in the running
+                            // session; the stream never restarts. Between
+                            // sessions the chat rows hear the new truth.
+                            let chat_state = state.clone();
+                            tokio::spawn(async move {
+                                if live_chat::reattach_after_videorc_sign_in(&chat_state).await == 0
+                                {
+                                    live_chat::publish_chat_snapshot_after_account_change(
+                                        &chat_state,
+                                    )
+                                    .await;
+                                }
                             });
                             ServerResponse::ok(command.id, resolved)
                         }
@@ -9614,7 +9796,7 @@ fn dispatch_authorized_backend_command(
                 let session = state.account_session.lock().await;
                 account::current_account(session.as_ref())
             };
-            let (resolved, committed) = match prepared {
+            let (resolved, committed, change) = match prepared {
                 Some(Ok(prepared)) => match account::commit_account_refresh(
                     prepared,
                     state
@@ -9631,20 +9813,30 @@ fn dispatch_authorized_backend_command(
                         }
                     },
                 ) {
-                    Some(resolved) => (resolved, true),
-                    None => (current, false),
+                    Some(outcome) => (outcome.account, true, outcome.change),
+                    None => (current, false, None),
                 },
                 Some(Err(_)) => {
                     tracing::warn!("Account refresh exceeded its bounded network deadline.");
-                    (current, false)
+                    (current, false, None)
                 }
-                None => (current, false),
+                None => (current, false, None),
             };
             *state.account_session.lock().await = Some(resolved.clone());
             drop(account_transition);
             if committed {
                 let entitlement_state = state.clone();
                 tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
+            }
+            // Plan 215 A5 (D7): the sign-out the server made is news. The
+            // in-memory account is already signed out, so a renderer that
+            // asks account.get on hearing it sees the same.
+            if let Some(reason) = change {
+                publish_account_changed(state, &resolved, reason);
+                let chat_state = state.clone();
+                tokio::spawn(async move {
+                    live_chat::publish_chat_snapshot_after_account_change(&chat_state).await
+                });
             }
             ServerResponse::ok(command.id, resolved)
         }),
@@ -9833,6 +10025,26 @@ fn dispatch_authorized_backend_command(
                 command.id,
                 comment_highlight::clear_comment_highlight(state).await,
             )
+        }),
+        // Plan 215 G: the chat box, pushed like the highlight card.
+        "chat.overlay.set" => Box::pin(async move {
+            match serde_json::from_value::<chat_overlay::SetChatOverlayParams>(command.params) {
+                Ok(params) => match chat_overlay::set_chat_overlay(state, params).await {
+                    Ok(info) => ServerResponse::ok(command.id, info),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
+        "chat.overlay.clear" => Box::pin(async move {
+            ServerResponse::ok(command.id, chat_overlay::clear_chat_overlay(state))
+        }),
+        "chat.overlay.canvases" => Box::pin(async move {
+            ServerResponse::ok(command.id, chat_overlay::chat_overlay_canvases(state).await)
         }),
         "cohost.status" => {
             Box::pin(
@@ -11062,7 +11274,7 @@ fn dispatch_authorized_backend_command(
             }
         }),
         "preview.camera.stop" => Box::pin(async move {
-            let status = stop_preview_camera(state).await;
+            let status = stop_preview_camera_from_client(state).await;
             ServerResponse::ok(command.id, status)
         }),
         "preview.camera.status" => Box::pin(async move {
@@ -11300,9 +11512,13 @@ fn dispatch_authorized_backend_command(
             match serde_json::from_value::<protocol::SceneLayoutApplyParams>(command.params) {
                 Ok(params) => match live_layout::apply_layout_live(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
-                    Err(error) => {
-                        ServerResponse::error(command.id, "layout-live-failed", error.to_string())
-                    }
+                    // Plan 216 A3: a switch that gave up on a source names it
+                    // in the code, so the toast can.
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        live_layout::layout_failure_code(&error, "layout-live-failed"),
+                        error.to_string(),
+                    ),
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -11315,7 +11531,7 @@ fn dispatch_authorized_backend_command(
                     Ok(status) => ServerResponse::ok(command.id, status),
                     Err(error) => ServerResponse::error(
                         command.id,
-                        "layout-preview-failed",
+                        live_layout::layout_failure_code(&error, "layout-preview-failed"),
                         error.to_string(),
                     ),
                 },
@@ -11367,40 +11583,53 @@ fn dispatch_authorized_backend_command(
         "scene.source.transform.update" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneTransformUpdateParams>(command.params) {
                 Ok(params) => {
-                    // Plan 058: a live editor draft for this source ends exactly
-                    // when the scene this commit installs reaches the
-                    // compositor. Capture the draft generation first so a
-                    // gesture that starts during the commit is never ended by it.
-                    let draft_generation =
-                        compositor::editor_draft_generation_for(state, &params.source_id).await;
-                    let result = {
-                        let mut guard = state.scene.lock().await;
-                        update_source_transform(&mut guard, params)
-                    };
-                    match result {
-                        Ok(scene) => {
-                            match live_layout::commit_scene_with_current_layout(state, &scene).await
-                            {
-                                Ok(status) => {
-                                    if let Some(generation) = draft_generation {
-                                        compositor::release_editor_draft_at(
-                                            state,
-                                            generation,
-                                            status.scene_revision,
-                                        )
-                                        .await;
+                    // Plan 215 D1: a session on the legacy FFmpeg graph composes
+                    // a fixed picture, so the move is refused before it touches
+                    // the scene; every compositor path takes the commit hot.
+                    if let Some(reason) = recording::live_scene_edit_refusal(state).await {
+                        ServerResponse::error(
+                            command.id,
+                            recording::LIVE_SCENE_EDIT_REFUSED_CODE,
+                            reason,
+                        )
+                    } else {
+                        // Plan 058: a live editor draft for this source ends
+                        // exactly when the scene this commit installs reaches
+                        // the compositor. Capture the draft generation first so
+                        // a gesture that starts during the commit is never
+                        // ended by it.
+                        let draft_generation =
+                            compositor::editor_draft_generation_for(state, &params.source_id).await;
+                        let result = {
+                            let mut guard = state.scene.lock().await;
+                            update_source_transform(&mut guard, params)
+                        };
+                        match result {
+                            Ok(scene) => {
+                                match live_layout::commit_scene_with_current_layout(state, &scene)
+                                    .await
+                                {
+                                    Ok(status) => {
+                                        if let Some(generation) = draft_generation {
+                                            compositor::release_editor_draft_at(
+                                                state,
+                                                generation,
+                                                status.scene_revision,
+                                            )
+                                            .await;
+                                        }
+                                        ServerResponse::ok(command.id, status)
                                     }
-                                    ServerResponse::ok(command.id, status)
+                                    Err(error) => ServerResponse::error(
+                                        command.id,
+                                        "scene-commit-failed",
+                                        error.to_string(),
+                                    ),
                                 }
-                                Err(error) => ServerResponse::error(
-                                    command.id,
-                                    "scene-commit-failed",
-                                    error.to_string(),
-                                ),
                             }
-                        }
-                        Err(error) => {
-                            ServerResponse::error(command.id, "scene-update-failed", error)
+                            Err(error) => {
+                                ServerResponse::error(command.id, "scene-update-failed", error)
+                            }
                         }
                     }
                 }
@@ -11438,24 +11667,34 @@ fn dispatch_authorized_backend_command(
         "scene.source.transform.reset" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneSourceParams>(command.params) {
                 Ok(params) => {
-                    let result = {
-                        let mut guard = state.scene.lock().await;
-                        reset_source_transform(&mut guard, params)
-                    };
-                    match result {
-                        Ok(scene) => {
-                            match live_layout::commit_scene_with_current_layout(state, &scene).await
-                            {
-                                Ok(status) => ServerResponse::ok(command.id, status),
-                                Err(error) => ServerResponse::error(
-                                    command.id,
-                                    "scene-commit-failed",
-                                    error.to_string(),
-                                ),
+                    // Plan 215 D1: refused on a fixed picture, like the update.
+                    if let Some(reason) = recording::live_scene_edit_refusal(state).await {
+                        ServerResponse::error(
+                            command.id,
+                            recording::LIVE_SCENE_EDIT_REFUSED_CODE,
+                            reason,
+                        )
+                    } else {
+                        let result = {
+                            let mut guard = state.scene.lock().await;
+                            reset_source_transform(&mut guard, params)
+                        };
+                        match result {
+                            Ok(scene) => {
+                                match live_layout::commit_scene_with_current_layout(state, &scene)
+                                    .await
+                                {
+                                    Ok(status) => ServerResponse::ok(command.id, status),
+                                    Err(error) => ServerResponse::error(
+                                        command.id,
+                                        "scene-commit-failed",
+                                        error.to_string(),
+                                    ),
+                                }
                             }
-                        }
-                        Err(error) => {
-                            ServerResponse::error(command.id, "scene-reset-failed", error)
+                            Err(error) => {
+                                ServerResponse::error(command.id, "scene-reset-failed", error)
+                            }
                         }
                     }
                 }
@@ -11496,30 +11735,40 @@ fn dispatch_authorized_backend_command(
         "scene.source.nudge" => Box::pin(async move {
             match serde_json::from_value::<protocol::SceneSourceNudgeParams>(command.params) {
                 Ok(params) => {
-                    let result = {
-                        let mut guard = state.scene.lock().await;
-                        nudge_source(
-                            &mut guard,
-                            &params.source_id,
-                            params.direction_x,
-                            params.direction_y,
-                            params.large,
+                    // Plan 215 D1: refused on a fixed picture, like the update.
+                    if let Some(reason) = recording::live_scene_edit_refusal(state).await {
+                        ServerResponse::error(
+                            command.id,
+                            recording::LIVE_SCENE_EDIT_REFUSED_CODE,
+                            reason,
                         )
-                    };
-                    match result {
-                        Ok(scene) => {
-                            match live_layout::commit_scene_with_current_layout(state, &scene).await
-                            {
-                                Ok(status) => ServerResponse::ok(command.id, status),
-                                Err(error) => ServerResponse::error(
-                                    command.id,
-                                    "scene-commit-failed",
-                                    error.to_string(),
-                                ),
+                    } else {
+                        let result = {
+                            let mut guard = state.scene.lock().await;
+                            nudge_source(
+                                &mut guard,
+                                &params.source_id,
+                                params.direction_x,
+                                params.direction_y,
+                                params.large,
+                            )
+                        };
+                        match result {
+                            Ok(scene) => {
+                                match live_layout::commit_scene_with_current_layout(state, &scene)
+                                    .await
+                                {
+                                    Ok(status) => ServerResponse::ok(command.id, status),
+                                    Err(error) => ServerResponse::error(
+                                        command.id,
+                                        "scene-commit-failed",
+                                        error.to_string(),
+                                    ),
+                                }
                             }
-                        }
-                        Err(error) => {
-                            ServerResponse::error(command.id, "scene-nudge-failed", error)
+                            Err(error) => {
+                                ServerResponse::error(command.id, "scene-nudge-failed", error)
+                            }
                         }
                     }
                 }
@@ -12186,6 +12435,7 @@ fn dispatch_authorized_backend_command(
                     live_chat::chat_capabilities_with_quota(
                         &accounts,
                         crate::youtube_quota::paused_until(state).is_some(),
+                        &account::session_state(),
                     ),
                 ),
                 Err(error) => ServerResponse::error(
@@ -12827,7 +13077,12 @@ fn dispatch_authorized_backend_command(
                         {
                             Ok(()) => ServerResponse::ok(
                                 command.id,
-                                preflight::validate_go_live_preflight(params, &metadata, &accounts),
+                                preflight::validate_go_live_preflight(
+                                    params,
+                                    &metadata,
+                                    &accounts,
+                                    &account::session_state(),
+                                ),
                             ),
                             Err(error) => ServerResponse::error(
                                 command.id,
@@ -13788,6 +14043,49 @@ fn dispatch_authorized_backend_command(
                 ServerResponse::ok(command.id, privacy)
             }
         }),
+        // Plan 214 A4: Videorc Camera. The switch is saved (D4); the status
+        // rides `virtualCamera.changed` on every change.
+        "virtualCamera.status" => Box::pin(async move {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "virtualCamera.status does not accept parameters",
+                )
+            } else {
+                ServerResponse::ok(command.id, virtual_camera_service::status(state))
+            }
+        }),
+        "virtualCamera.set" => Box::pin(async move {
+            match serde_json::from_value::<protocol::VirtualCameraSetParams>(command.params) {
+                Ok(params) => match virtual_camera_service::set_on(state, params.on).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "virtual-camera-setting", error)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
+        "virtualCamera.platform.report" => Box::pin(async move {
+            match serde_json::from_value::<protocol::VirtualCameraPlatformReportParams>(
+                command.params,
+            ) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    virtual_camera_service::report_platform(
+                        state,
+                        params.platform_step,
+                        params.message,
+                    ),
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }),
         "session.remux_mp4" => Box::pin(async move {
             match serde_json::from_value::<protocol::RemuxSessionParams>(command.params) {
                 Ok(params)
@@ -14572,6 +14870,26 @@ fn publish_entitlements_updated(state: &AppState) {
     });
 }
 
+/// Every `account.changed` goes out through here (plan 215 A5): the account as
+/// the backend now holds it, and why it changed. The renderer applies the
+/// snapshot and, for the sign-out the server made (`SessionExpired`), says so
+/// (D7). Renderer and main sockets only: remote and phone sockets are locked
+/// to their own lanes, and agents have no socket.
+fn publish_account_changed(
+    state: &AppState,
+    account: &protocol::VideorcAccountSnapshot,
+    reason: protocol::AccountChangeReason,
+) {
+    tracing::info!(?reason, status = ?account.status, "Videorc account changed");
+    state.emit_event(
+        "account.changed",
+        protocol::AccountChangedEvent {
+            account: account.clone(),
+            reason,
+        },
+    );
+}
+
 async fn get_ai_quota() -> Result<protocol::AiQuotaStatus> {
     let token = stored_ai_session_token()?;
     let client = videorc_api::VideorcApiClient::new()?;
@@ -14650,6 +14968,7 @@ async fn current_recording_status(state: &AppState) -> protocol::RecordingStatus
             duration_ms: None,
             message: Some("Finalizing recording output.".to_string()),
             replay_only: false,
+            accepts_live_scene_edits: None,
         };
     }
     idle_status()
@@ -14661,6 +14980,17 @@ async fn export_support_bundle_for_state(
     ffmpeg_path: &str,
 ) -> Result<support_bundle::SupportBundleExportResult> {
     let sessions = state.database.list_sessions(20)?;
+    // Plan 215 A6: the account the app shows, against the store it reads.
+    let account = {
+        let session = state.account_session.lock().await;
+        support_bundle::SupportBundleAccount::from_state(
+            &account::current_account(session.as_ref()),
+            &account::session_state(),
+        )
+    };
+    let live_chat = support_bundle::SupportBundleLiveChat::from_snapshot(
+        &live_chat::current_status(state).await,
+    );
     support_bundle::export_support_bundle(support_bundle::SupportBundleExportInput {
         output_directory: params.output_directory.map(PathBuf::from),
         app_version: params.app_version,
@@ -14685,6 +15015,8 @@ async fn export_support_bundle_for_state(
         sessions,
         performance_check: performance_check::current_state(state).await.result,
         metrics_journal: metrics_journal::support_bundle_lines(),
+        account,
+        live_chat,
     })
 }
 
@@ -16835,7 +17167,7 @@ mod tests {
         assert_eq!(event["payload"]["frameSceneRevision"], 21);
         assert_eq!(event["payload"]["framesRendered"], 101);
         assert!(
-            reliable_rx.len() > 0,
+            !reliable_rx.is_empty(),
             "telemetry must be serviced while reliable traffic remains queued"
         );
         let queue = transport.snapshot().reliable_response_queue;
@@ -16935,6 +17267,7 @@ mod tests {
             "captions.status.get",
             "comments.highlight.status",
             "comments.highlight.canvases",
+            "chat.overlay.canvases",
             "scene.get",
             "liveChat.status",
             "liveChat.sendOperations.list",
@@ -16972,6 +17305,78 @@ mod tests {
                 "{method} can change authoritative takeover state and must use mutation execution"
             );
         }
+    }
+
+    /// Plan 214 A4: the switch through the renderer socket, the platform
+    /// report through the admin socket only, with the event and the exact
+    /// wire shapes (absent fields omitted, never null).
+    #[tokio::test]
+    async fn virtual_camera_rpcs_round_trip_with_the_event() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let status =
+            json!({ "id": "status", "method": "virtualCamera.status", "params": {} }).to_string();
+        let response = handle_text_message_with_role(&state, &status, BackendRole::Renderer).await;
+        assert!(response.ok);
+        assert_eq!(
+            response.payload.unwrap(),
+            json!({ "on": false, "available": true, "state": "off" })
+        );
+        // The platform report is main's: the renderer never forges it.
+        let report = json!({
+            "id": "report", "method": "virtualCamera.platform.report",
+            "params": { "platformStep": "needs-approval", "message": "Allow it in System Settings." }
+        })
+        .to_string();
+        let refused = handle_text_message_with_role(&state, &report, BackendRole::Renderer).await;
+        assert!(!refused.ok, "{refused:?}");
+        let reported = handle_text_message_with_role(&state, &report, BackendRole::Admin).await;
+        assert!(reported.ok, "{reported:?}");
+        let payload = reported.payload.unwrap();
+        assert_eq!(payload["state"], "needs-approval");
+        assert_eq!(payload["platformStep"], "needs-approval");
+        assert_eq!(payload["message"], "Allow it in System Settings.");
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.event, "virtualCamera.changed");
+        assert_eq!(event.payload, payload);
+        // The switch is saved on (D4). `platform_sink` hands unit tests no
+        // sink (the host's camera is never touched), which outranks the
+        // platform's report: the status says so, never a silent success.
+        let set = json!({ "id": "set", "method": "virtualCamera.set", "params": { "on": true } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &set, BackendRole::Renderer).await;
+        assert!(response.ok, "{response:?}");
+        let payload = response.payload.unwrap();
+        assert_eq!(payload["on"], true);
+        assert_eq!(payload["available"], false);
+        assert_eq!(payload["state"], "unavailable");
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("isn't available")),
+            "{payload}"
+        );
+        assert!(state.virtual_camera_setting().unwrap().on);
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.event, "virtualCamera.changed");
+        assert_eq!(event.payload["on"], true);
+        let bad = json!({ "id": "bad", "method": "virtualCamera.set", "params": { "on": "yes" } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &bad, BackendRole::Renderer).await;
+        assert!(!response.ok);
+        let off = json!({ "id": "off", "method": "virtualCamera.set", "params": { "on": false } })
+            .to_string();
+        let response = handle_text_message_with_role(&state, &off, BackendRole::Renderer).await;
+        assert!(response.ok);
+        assert!(!state.virtual_camera_setting().unwrap().on);
+        assert!(
+            websocket_command_is_read_only(&status),
+            "virtualCamera.status is an observation"
+        );
+        assert!(
+            websocket_command_mutation_max_execution_age(&set).is_some(),
+            "virtualCamera.set is a mutation"
+        );
     }
 
     /// Plan 210 S7: hide and show through the renderer socket, with the event
@@ -17063,6 +17468,176 @@ mod tests {
         assert!(response.ok, "{:?}", response.error);
     }
 
+    /// Plan 215 D1: a session on the legacy FFmpeg graph composes a fixed
+    /// picture, so a move, a nudge and a reset are refused with one named
+    /// code and the committed scene stays as it was. A session that composes
+    /// live takes the same edits hot, and `recording.status` says which.
+    #[tokio::test]
+    async fn scene_edits_are_refused_while_a_legacy_ffmpeg_session_runs() {
+        let state = test_state();
+        let mut layout = protocol::default_layout_settings();
+        layout.layout_preset = protocol::LayoutPreset::ScreenCamera;
+        let config = protocol::SceneConfigParams {
+            transition_ms: None,
+            sources: protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: Some("camera:avfoundation-native:camera-1".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: None,
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let scene = scene_from_capture_config(config);
+        live_layout::commit_scene_with_layout(&state, &scene, layout, None)
+            .await
+            .expect("the idle scene commits");
+
+        let mut session = recording::test_active_recording_stub("legacy");
+        session.set_accepts_live_scene_edits_for_test(false);
+        *state.recording.lock().await = Some(session);
+        assert_eq!(
+            current_recording_status(&state)
+                .await
+                .accepts_live_scene_edits,
+            Some(false)
+        );
+        let edits = [
+            (
+                "scene.source.transform.update",
+                json!({ "sourceId": "source:camera", "transform": { "x": 0.5, "y": 0.5 } }),
+            ),
+            (
+                "scene.source.nudge",
+                json!({ "sourceId": "source:camera", "directionX": 1.0, "directionY": 0.0 }),
+            ),
+            (
+                "scene.source.transform.reset",
+                json!({ "sourceId": "source:camera" }),
+            ),
+        ];
+        let before = serde_json::to_value(&*state.scene.lock().await).unwrap();
+        for (method, params) in &edits {
+            let text = json!({ "id": method, "method": method, "params": params }).to_string();
+            let response =
+                handle_text_message_with_role(&state, &text, BackendRole::Renderer).await;
+            let error = response
+                .error
+                .unwrap_or_else(|| panic!("{method} must be refused on a fixed picture"));
+            assert_eq!(error.code, "scene-edit-refused", "{method}");
+            assert_eq!(
+                error.message,
+                "Moving and resizing isn't available on this recording. Stop and record again.",
+                "{method}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&*state.scene.lock().await).unwrap(),
+            before,
+            "a refusal changes nothing"
+        );
+
+        // A session that composes live takes every one of them, hot.
+        *state.recording.lock().await = Some(recording::test_active_recording_stub("bridge"));
+        assert_eq!(
+            current_recording_status(&state)
+                .await
+                .accepts_live_scene_edits,
+            Some(true)
+        );
+        for (method, params) in &edits {
+            let text = json!({ "id": method, "method": method, "params": params }).to_string();
+            let response =
+                handle_text_message_with_role(&state, &text, BackendRole::Renderer).await;
+            assert!(response.ok, "{method}: {:?}", response.error);
+            assert_eq!(response.payload.unwrap()["mode"], "hot", "{method}");
+        }
+
+        // Nothing running: no flag, and the edit lands idle.
+        *state.recording.lock().await = None;
+        assert_eq!(
+            current_recording_status(&state)
+                .await
+                .accepts_live_scene_edits,
+            None
+        );
+        let (method, params) = &edits[0];
+        let text = json!({ "id": method, "method": method, "params": params }).to_string();
+        let response = handle_text_message_with_role(&state, &text, BackendRole::Renderer).await;
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.payload.unwrap()["mode"], "idle");
+    }
+
+    /// Plan 215 D1, review fix: the replay-only Clips ring (plan 181) runs
+    /// while the user is idle, and on a profile outside the bridge envelope
+    /// it runs on the legacy graph. An idle edit must keep landing in the
+    /// Preview then, as it always did; only a recording or a livestream on a
+    /// fixed picture refuses.
+    #[tokio::test]
+    async fn scene_edits_are_never_refused_for_a_clips_ring_on_a_fixed_picture() {
+        let state = test_state();
+        let mut layout = protocol::default_layout_settings();
+        layout.layout_preset = protocol::LayoutPreset::ScreenCamera;
+        let config = protocol::SceneConfigParams {
+            transition_ms: None,
+            sources: protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: Some("camera:avfoundation-native:camera-1".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: None,
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        };
+        let scene = scene_from_capture_config(config);
+        live_layout::commit_scene_with_layout(&state, &scene, layout, None)
+            .await
+            .expect("the idle scene commits");
+        let edit = json!({
+            "id": "move",
+            "method": "scene.source.transform.update",
+            "params": { "sourceId": "source:camera", "transform": { "x": 0.5, "y": 0.5 } }
+        })
+        .to_string();
+
+        let mut ring = recording::test_active_recording_stub("clips-ring");
+        ring.replay_only = true;
+        ring.set_accepts_live_scene_edits_for_test(false);
+        *state.recording.lock().await = Some(ring);
+        let response = handle_text_message_with_role(&state, &edit, BackendRole::Renderer).await;
+        assert!(
+            response.ok,
+            "a Clips ring on a fixed picture must not refuse an idle edit: {:?}",
+            response.error
+        );
+        let moved = state
+            .scene
+            .lock()
+            .await
+            .sources
+            .iter()
+            .find(|source| source.id == "source:camera")
+            .map(|source| (source.transform.x, source.transform.y))
+            .expect("the camera is in the scene");
+        assert_eq!(moved, (0.5, 0.5), "the idle edit landed");
+
+        // The same picture, recorded for real: refused.
+        let mut session = recording::test_active_recording_stub("legacy");
+        session.set_accepts_live_scene_edits_for_test(false);
+        *state.recording.lock().await = Some(session);
+        let response = handle_text_message_with_role(&state, &edit, BackendRole::Renderer).await;
+        assert_eq!(
+            response.error.expect("refused").code,
+            recording::LIVE_SCENE_EDIT_REFUSED_CODE
+        );
+    }
+
     #[test]
     fn camera_start_replies_inside_its_mutation_execution_contract() {
         // A slow camera must get a Starting reply, never a backend restart.
@@ -17103,6 +17678,8 @@ mod tests {
             "captions.style.set",
             "comments.highlight.set",
             "comments.highlight.clear",
+            "chat.overlay.set",
+            "chat.overlay.clear",
             "screen.hide",
             "screen.show",
             "capture.recovery.retry",
@@ -17710,6 +18287,239 @@ mod tests {
         );
     }
 
+    #[test]
+    fn surface_publishes_ride_their_own_lane() {
+        // Issue #1068 part 5: both projections are idempotent, latest-wins and
+        // read nothing a stateful command owns, so neither belongs on the
+        // ordered lane.
+        for method in ["remote.surface.publish", "agent.surface.publish"] {
+            let text = json!({ "id": "publish", "method": method, "params": {} }).to_string();
+            assert_eq!(
+                websocket_isolated_command_lane(text.as_str()),
+                Some(WebSocketIsolatedCommandLaneKind::SurfacePublish),
+                "{method} must never queue on the ordered lane"
+            );
+            assert!(
+                !websocket_command_is_read_only(text.as_str()),
+                "{method} stores a projection: it is a mutation, not an observation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_surface_publishes_do_not_wait_for_a_running_session_start() {
+        // Issue #1068: a 2–13 s session.start (or preview.camera.start) held the
+        // ordered lane; the owner's profile log had 44 expired and 15 rejected
+        // remote.surface.publish commands behind it, so the Phone remote went
+        // stale exactly when recording started.
+        let start_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_start = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let dispatched = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let start_entered = start_entered.clone();
+            let release_start = release_start.clone();
+            let dispatched = dispatched.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let start_entered = start_entered.clone();
+                let release_start = release_start.clone();
+                let dispatched = dispatched.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "session.start" {
+                        start_entered.add_permits(1);
+                        release_start.acquire().await.unwrap().forget();
+                    }
+                    dispatched.lock().await.push(command.method);
+                    ServerResponse::ok(command.id, json!({ "ok": true }))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let state = test_state();
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics,
+            slow_pressure,
+            handler,
+        ));
+
+        send_test_websocket_command(
+            &state,
+            &command_tx,
+            &command_metrics,
+            json!({ "id": "start", "method": "session.start", "params": {} }).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(5), start_entered.acquire())
+            .await
+            .expect("session.start should enter and hold the ordered lane")
+            .unwrap()
+            .forget();
+
+        // sessions.rename is the control: an ordinary ordered mutation that
+        // must still barrier behind the running session.start.
+        for (id, method) in [
+            ("remote", "remote.surface.publish"),
+            ("agent", "agent.surface.publish"),
+            ("rename", "sessions.rename"),
+        ] {
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": id, "method": method, "params": {} }).to_string(),
+            )
+            .await;
+        }
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if dispatched.lock().await.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both surface publishes must dispatch while session.start holds the ordered lane");
+        let mut observed = dispatched.lock().await.clone();
+        observed.sort();
+        assert_eq!(
+            observed,
+            ["agent.surface.publish", "remote.surface.publish"]
+        );
+
+        release_start.add_permits(1);
+        drop(command_tx);
+        dispatcher.await.unwrap();
+        let observed = dispatched.lock().await.clone();
+        assert_eq!(
+            &observed[2..],
+            ["session.start", "sessions.rename"],
+            "the ordered control must run only after session.start released the lane: {observed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn surface_publish_lane_collapses_a_backlog_to_the_newest_publish() {
+        // Issue #1068 part 5: while one publish runs, every older queued publish
+        // of the same method is superseded by the newest; each is still
+        // answered, and a different method keeps its own newest.
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let applied = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let entered = entered.clone();
+            let release = release.clone();
+            let applied = applied.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let entered = entered.clone();
+                let release = release.clone();
+                let applied = applied.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.id == "remote-1" {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    applied.lock().await.push(command.id.clone());
+                    ServerResponse::ok(command.id, json!({ "ok": true }))
+                })
+            })
+        };
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (lane, lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::SurfacePublish,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE,
+            transport.register_command_lane("surfacePublish"),
+        );
+        let connection = transport.register_connection();
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let mut workers = tokio::task::JoinSet::new();
+        spawn_websocket_command_lane_worker(
+            &mut workers,
+            lane_rx,
+            1,
+            lane.metrics.clone(),
+            &WebSocketCommandLaneWorkerContext {
+                state: state.clone(),
+                outgoing: outgoing_tx,
+                reliable_metrics: connection.reliable_response_queue,
+                slow_pressure: WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                command_handler: handler,
+            },
+        );
+        let enqueue = |id: &str, method: &str| {
+            try_enqueue_websocket_lane_command(
+                &lane,
+                json!({ "id": id, "method": method, "params": { "state": { "seq": id } } })
+                    .to_string(),
+                tokio::time::Instant::now() + Duration::from_secs(5),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        };
+
+        enqueue("remote-1", "remote.surface.publish");
+        timeout(Duration::from_secs(5), entered.acquire())
+            .await
+            .expect("the first publish should dispatch")
+            .unwrap()
+            .forget();
+        enqueue("remote-2", "remote.surface.publish");
+        enqueue("remote-3", "remote.surface.publish");
+        enqueue("remote-4", "remote.surface.publish");
+        enqueue("agent-1", "agent.surface.publish");
+        release.add_permits(1);
+
+        let mut answered = Vec::new();
+        while answered.len() < 5 {
+            let message = timeout(Duration::from_secs(5), outgoing_rx.recv())
+                .await
+                .expect("every publish is answered")
+                .expect("the response queue stays open");
+            let Message::Text(text) = message else {
+                panic!("unexpected response frame");
+            };
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], json!(true), "{text}");
+            assert_eq!(response["payload"], json!({ "ok": true }), "{text}");
+            answered.push(response["id"].as_str().unwrap().to_string());
+        }
+        answered.sort();
+        assert_eq!(
+            answered,
+            ["agent-1", "remote-1", "remote-2", "remote-3", "remote-4"]
+        );
+        assert_eq!(
+            applied.lock().await.clone(),
+            ["remote-1", "remote-4", "agent-1"],
+            "only the running publish, the newest of its method, and the other method's newest apply"
+        );
+
+        drop(lane);
+        timeout(Duration::from_secs(5), async {
+            while workers.join_next().await.is_some() {}
+        })
+        .await
+        .expect("the surface publish lane worker should stop after its sender closes");
+    }
+
     #[tokio::test]
     async fn websocket_read_only_queries_answer_while_a_stateful_command_is_in_flight() {
         // The 0.9.44 owner incident: session.stop (which awaits the MP4
@@ -17944,11 +18754,11 @@ mod tests {
             .unwrap()
             .forget();
         // Every request below must reply BEFORE the optimizer is released.
-        // Includes the same socket's ordered controls and another socket.
+        // Includes the same socket's ordered controls and another socket. A
+        // second import waits its turn instead (issue #1063, tested below).
         let result = async {
             for (tx, rx, metrics) in &mut clients {
                 for method in [
-                    "screens.importImage",
                     "health.ping",
                     "screens.activate",
                     "screens.clear",
@@ -17974,11 +18784,7 @@ mod tests {
                     metrics.reliable_response_queue.record_dequeue_oldest();
                     let response: serde_json::Value = serde_json::from_str(&text).unwrap();
                     assert_eq!(response["id"], method);
-                    if method == "screens.importImage" {
-                        assert_eq!(response["error"]["code"], "screen-import-busy");
-                    } else {
-                        assert_eq!(response["ok"], true, "{response}");
-                    }
+                    assert_eq!(response["ok"], true, "{response}");
                 }
             }
             Ok::<(), String>(())
@@ -18057,13 +18863,11 @@ mod tests {
             .unwrap()
             .forget();
         // Every request below must reply BEFORE the decode is released. A
-        // second import of either kind shares the one import slot and is
-        // refused at once instead of queueing behind it.
+        // second import of either kind shares the one import turn and waits
+        // for it (issue #1063, tested below).
         let result = async {
             for (tx, rx, metrics) in &mut clients {
                 for method in [
-                    "banners.importImage",
-                    "screens.importImage",
                     "health.ping",
                     "banners.show",
                     "banners.hide",
@@ -18088,11 +18892,7 @@ mod tests {
                     metrics.reliable_response_queue.record_dequeue_oldest();
                     let response: serde_json::Value = serde_json::from_str(&text).unwrap();
                     assert_eq!(response["id"], method);
-                    if method.ends_with(".importImage") {
-                        assert_eq!(response["error"]["code"], "screen-import-busy");
-                    } else {
-                        assert_eq!(response["ok"], true, "{response}");
-                    }
+                    assert_eq!(response["ok"], true, "{response}");
                 }
             }
             Ok::<(), String>(())
@@ -18111,13 +18911,246 @@ mod tests {
         assert_eq!(state.screen_import_capacity.available_permits(), 1);
     }
 
+    type TestImportClient = (
+        mpsc::Sender<WebSocketAcceptedCommand>,
+        mpsc::Receiver<Message>,
+        crate::state::WebSocketConnectionTransportMetrics,
+    );
+
+    /// Sockets whose imports hold the handler open until `release` gets a
+    /// permit, recording which import entered and the most that ran at once.
+    fn spawn_test_import_clients(
+        state: &AppState,
+        count: usize,
+        entered: std::sync::Arc<tokio::sync::Semaphore>,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+        log: std::sync::Arc<std::sync::Mutex<(Vec<String>, usize, usize)>>,
+    ) -> (Vec<TestImportClient>, Vec<tokio::task::JoinHandle<()>>) {
+        let handler: WebSocketCommandHandler = std::sync::Arc::new(move |_state, text| {
+            let entered = entered.clone();
+            let release = release.clone();
+            let log = log.clone();
+            Box::pin(async move {
+                let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                if websocket_isolated_command_lane(&text)
+                    == Some(WebSocketIsolatedCommandLaneKind::AssetImport)
+                {
+                    {
+                        let mut log = log.lock().unwrap();
+                        log.0.push(command.id.clone());
+                        log.1 += 1;
+                        log.2 = log.2.max(log.1);
+                    }
+                    entered.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    log.lock().unwrap().1 -= 1;
+                }
+                ServerResponse::ok(command.id, json!({}))
+            })
+        });
+        let mut clients = Vec::new();
+        let mut dispatchers = Vec::new();
+        for _ in 0..count {
+            let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+            let connection = transport.register_connection();
+            let (tx, rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+            let (out_tx, out_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+            let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+            dispatchers.push(tokio::spawn(run_websocket_command_dispatcher(
+                state.clone(),
+                rx,
+                connection.incoming_command_queue.clone(),
+                out_tx,
+                connection.reliable_response_queue.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler.clone(),
+            )));
+            clients.push((tx, out_rx, connection));
+        }
+        (clients, dispatchers)
+    }
+
+    async fn send_test_import(state: &AppState, client: &TestImportClient, id: &str, method: &str) {
+        send_test_websocket_command(
+            state,
+            &client.0,
+            &client.2.incoming_command_queue,
+            json!({"id": id, "method": method, "params": {}}).to_string(),
+        )
+        .await;
+    }
+
+    async fn wait_test_import_entered(entered: &tokio::sync::Semaphore) {
+        timeout(Duration::from_secs(2), entered.acquire())
+            .await
+            .expect("import entered its handler")
+            .unwrap()
+            .forget();
+    }
+
+    async fn recv_test_import_response(
+        client: &mut TestImportClient,
+        within: Duration,
+    ) -> Option<serde_json::Value> {
+        let Message::Text(text) = timeout(within, client.1.recv()).await.ok()?? else {
+            panic!("response")
+        };
+        client.2.reliable_response_queue.record_dequeue_oldest();
+        Some(serde_json::from_str(&text).unwrap())
+    }
+
+    /// Issue #1063: on a fresh profile the renderer seeds starter sounds
+    /// through `sounds.import`. An image import sent meanwhile, from that
+    /// socket or another, waits for the import turn and then runs; it is
+    /// never refused, and imports still run one at a time.
+    #[tokio::test]
+    async fn websocket_image_import_waits_behind_a_sound_import_then_runs() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let log = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), 0, 0)));
+        let (mut clients, dispatchers) =
+            spawn_test_import_clients(&state, 2, entered.clone(), release.clone(), log.clone());
+
+        send_test_import(&state, &clients[0], "starter", "sounds.import").await;
+        wait_test_import_entered(&entered).await;
+        send_test_import(&state, &clients[1], "banner", "banners.importImage").await;
+        send_test_import(&state, &clients[0], "takeover", "screens.importImage").await;
+        for client in &mut clients {
+            assert_eq!(
+                recv_test_import_response(client, Duration::from_millis(300)).await,
+                None,
+                "an import behind the starter sound waits instead of being refused"
+            );
+        }
+        assert_eq!(entered.available_permits(), 0);
+
+        for (client, id) in [(0, "starter"), (1, "banner"), (0, "takeover")] {
+            release.add_permits(1);
+            let response = recv_test_import_response(&mut clients[client], Duration::from_secs(2))
+                .await
+                .unwrap_or_else(|| panic!("{id} replied"));
+            assert_eq!(response["id"], id);
+            assert_eq!(response["ok"], true, "{response}");
+            if id != "takeover" {
+                wait_test_import_entered(&entered).await;
+            }
+        }
+
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let log = log.lock().unwrap();
+        assert_eq!(log.0, ["starter", "banner", "takeover"]);
+        assert_eq!(log.2, 1, "imports still run one at a time");
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    /// Issue #1063: the queue is bounded. Past it an import is refused at
+    /// once, in copy that does not blame an image import that isn't running.
+    #[tokio::test]
+    async fn websocket_asset_import_queue_overflow_is_refused_as_busy() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let log = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), 0, 0)));
+        let (mut clients, dispatchers) =
+            spawn_test_import_clients(&state, 1, entered.clone(), release.clone(), log.clone());
+        let client = &mut clients[0];
+
+        send_test_import(&state, client, "starter", "sounds.import").await;
+        wait_test_import_entered(&entered).await;
+        let queued = ["banner", "takeover", "sound"];
+        for (id, method) in queued.iter().zip([
+            "banners.importImage",
+            "screens.importImage",
+            "sounds.import",
+        ]) {
+            send_test_import(&state, client, id, method).await;
+        }
+        assert_eq!(
+            recv_test_import_response(client, Duration::from_millis(300)).await,
+            None
+        );
+        send_test_import(&state, client, "overflow", "screens.importImage").await;
+        let refused = recv_test_import_response(client, Duration::from_secs(2))
+            .await
+            .expect("overflow refused at once");
+        assert_eq!(refused["id"], "overflow");
+        assert_eq!(refused["error"]["code"], "screen-import-busy");
+        assert_eq!(refused["error"]["message"], ASSET_IMPORT_BUSY_MESSAGE);
+
+        release.add_permits(1 + queued.len());
+        for id in std::iter::once("starter").chain(queued) {
+            let response = recv_test_import_response(client, Duration::from_secs(2))
+                .await
+                .unwrap_or_else(|| panic!("{id} replied"));
+            assert_eq!(response["id"], id);
+            assert_eq!(response["ok"], true, "{response}");
+        }
+
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(log.lock().unwrap().2, 1);
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    /// Issue #1063: an import that waits out its queue age without getting
+    /// the import turn is refused as busy and never reaches the handler.
+    #[tokio::test]
+    async fn websocket_asset_import_that_never_gets_its_turn_is_refused_as_busy() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let log = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), 0, 0)));
+        let (mut clients, dispatchers) =
+            spawn_test_import_clients(&state, 1, entered, release, log.clone());
+        let held = state
+            .screen_import_capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+
+        send_test_import(&state, &clients[0], "banner", "banners.importImage").await;
+        let refused = recv_test_import_response(
+            &mut clients[0],
+            WEBSOCKET_ORDERED_MAX_QUEUE_AGE + Duration::from_secs(3),
+        )
+        .await
+        .expect("refused after its queue age");
+        assert_eq!(refused["id"], "banner");
+        assert_eq!(refused["error"]["code"], "screen-import-busy");
+        assert!(log.lock().unwrap().0.is_empty());
+
+        drop(held);
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    /// The guard comes first so it drops after the state's database
+    /// (Windows cannot remove a folder holding an open SQLite file).
     fn banner_test_state() -> (
+        crate::test_temp_dir::TestTempDir,
         AppState,
         broadcast::Receiver<ServerEvent>,
-        std::path::PathBuf,
     ) {
-        let dir = std::env::temp_dir().join(format!("videorc-banner-rpc-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp_dir::TestTempDir::new("banner-rpc");
         let (events, receiver) = broadcast::channel(256);
         let state = AppState::new(
             "test-token".to_string(),
@@ -18125,7 +19158,7 @@ mod tests {
             events,
             Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
         );
-        (state, receiver, dir)
+        (dir, state, receiver)
     }
 
     fn write_banner_png(dir: &std::path::Path, name: &str) -> String {
@@ -18161,7 +19194,7 @@ mod tests {
     /// database. The business rules live in the backend, not only in the UI.
     #[tokio::test]
     async fn banners_rpcs_enforce_the_showing_cap_and_the_session_delete_refusal() {
-        let (state, mut events, dir) = banner_test_state();
+        let (dir, state, mut events) = banner_test_state();
         let mut ids = Vec::new();
         for index in 0..5 {
             let path = write_banner_png(&dir, &format!("sponsor-{index}.png"));
@@ -18292,7 +19325,7 @@ mod tests {
                 .is_empty()
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Plan 205 D3 (owner): an import while nothing runs answers a shown
@@ -18301,7 +19334,7 @@ mod tests {
     /// fails for the show), and each import republishes the list once.
     #[tokio::test]
     async fn banners_import_shows_the_new_banner_unless_the_show_gates_refuse() {
-        let (state, mut events, dir) = banner_test_state();
+        let (dir, state, mut events) = banner_test_state();
         let import = |name: String| {
             let path = write_banner_png(&dir, &name);
             let state = &state;
@@ -18374,12 +19407,12 @@ mod tests {
             }
         }
         assert_eq!(changed, 8);
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn banners_import_refusals_are_the_verbatim_sentences() {
-        let (state, _events, dir) = banner_test_state();
+        let (dir, state, _events) = banner_test_state();
         let text = dir.join("notes.png");
         std::fs::write(&text, b"just some text").unwrap();
         let refused = banner_rpc(
@@ -18405,7 +19438,7 @@ mod tests {
                     .is_none(),
             "a refused import publishes nothing"
         );
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -20445,7 +21478,7 @@ mod tests {
             .send(ServerEvent::new("test.burst", json!({ "sequence": 1 })))
             .unwrap();
         timeout(Duration::from_secs(1), async {
-            while events_tx.len() != 0 {
+            while !events_tx.is_empty() {
                 tokio::task::yield_now().await;
             }
         })
@@ -20692,6 +21725,52 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    /// Plan 215 A5 (D7): the account change goes out as one event the
+    /// renderer's strict contract accepts, with the reason; the sign-out the
+    /// server made is `session-expired`. Desktop sockets only: it is not a
+    /// LAN projection, and the remote lane's include-list never names it.
+    #[test]
+    fn account_changed_is_one_desktop_event_with_its_reason() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+
+        publish_account_changed(
+            &state,
+            &account::signed_out_account(),
+            protocol::AccountChangeReason::SessionExpired,
+        );
+        let event = events.try_recv().expect("the account change is published");
+        assert_eq!(event.event, "account.changed");
+        assert_eq!(
+            event.payload,
+            json!({ "account": { "status": "signed-out" }, "reason": "session-expired" })
+        );
+
+        publish_account_changed(
+            &state,
+            &protocol::VideorcAccountSnapshot {
+                status: protocol::AccountStatus::SignedIn,
+                username: Some("orc_dev".to_string()),
+                display_name: Some("Orc Dev".to_string()),
+                email: Some("orc@videorc.com".to_string()),
+                avatar_url: None,
+            },
+            protocol::AccountChangeReason::SignedIn,
+        );
+        let event = events.try_recv().expect("the sign-in is published");
+        assert_eq!(event.event, "account.changed");
+        assert_eq!(event.payload["reason"], json!("signed-in"));
+        assert_eq!(event.payload["account"]["username"], json!("orc_dev"));
+        assert!(
+            event.payload["account"].get("avatarUrl").is_none(),
+            "an absent avatar sends no key"
+        );
+
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&"account.changed"));
+        assert!(ConnectionEventFilter::for_role(BackendRole::Renderer).allows("account.changed"));
+        assert!(ConnectionEventFilter::for_role(BackendRole::Admin).allows("account.changed"));
     }
 
     #[cfg(all(unix, debug_assertions))]
@@ -22171,9 +23250,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;

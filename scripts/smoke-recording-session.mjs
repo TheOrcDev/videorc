@@ -222,19 +222,15 @@ export async function recordScenario({
       ).capabilityId
     : undefined
   const mkvsBeforeStart = snapshotScenarioMkvPaths({ outputDirectory })
+  const params = sessionParams({
+    outputDirectoryCapability,
+    preset: scenario.preset,
+    background: scenario.background,
+    video: scenario.video
+  })
   let started
   try {
-    started = await request(
-      ws,
-      timeoutMs,
-      'session.start',
-      sessionParams({
-        outputDirectoryCapability,
-        preset: scenario.preset,
-        background: scenario.background,
-        video: scenario.video
-      })
-    )
+    started = await request(ws, timeoutMs, 'session.start', params)
   } catch (error) {
     assertNoZeroByteMkvsCreatedAfter({
       scenarioLabel: scenario.label,
@@ -298,6 +294,10 @@ export async function recordScenario({
     ffprobePath,
     intendedFps: SMOKE_VIDEO_FPS,
     expectAudio: true,
+    // The test-pattern session selects no microphone, so its audio is the
+    // paced-silence bus (hosted runners have no input device at all). The
+    // silent-microphone gate re-arms if a scenario ever selects one.
+    microphoneAvailable: Boolean(params.sources.microphone),
     gates: TEST_PATTERN_GATES
   })
   const reportPaths = writeReports(quality)

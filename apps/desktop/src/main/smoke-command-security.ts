@@ -56,6 +56,9 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-set-theme',
   'comments-window-set-highlight-anchor',
   'comments-window-set-auto-show-activity',
+  // Hide from stream and the marker of the invisibility smoke (plan 215 C5).
+  'comments-window-set-hidden-from-stream',
+  'comments-window-set-smoke-marker',
   'comments-window-set-view-mode',
   'comments-window-state',
   'comments-window-submit-message',
@@ -124,12 +127,14 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'proof-window-state',
   'raise-window',
   'resize-window',
+  'restore-native-preview-driver',
   'restore-window',
   'resume-native-preview-surface',
   'scroll-studio',
   'select-camera-device',
   'select-camera-shape',
   'select-layout-preset',
+  'send-input-to-proof-surface',
   'select-screen-device',
   'set-vibrancy',
   'suspend-native-preview-surface',
@@ -284,6 +289,10 @@ export const PACKAGED_SMOKE_COMMAND_NAMES = new Set([
   'captions-window-set-bounds',
   'comments-window-open',
   'comments-window-set-bounds',
+  // Hide from stream for the Windows stream smoke, and the marker of the
+  // packaged invisibility smoke (plan 215 C3, C5).
+  'comments-window-set-hidden-from-stream',
+  'comments-window-set-smoke-marker',
   'destroy-native-preview-surface',
   'drain-native-preview-host-commands',
   'exercise-main-present-pump-reconnect',
@@ -733,4 +742,102 @@ function writeJson(response: ServerResponse, statusCode: number, payload: unknow
     'Cache-Control': 'no-store'
   })
   response.end(JSON.stringify(payload))
+}
+
+export type SmokeProofSurfaceInputModifier = 'leftbuttondown' | 'shift' | 'alt' | 'control' | 'meta'
+
+export interface SmokeProofSurfaceInputEvent {
+  type: 'mouseDown' | 'mouseUp' | 'mouseMove'
+  x: number
+  y: number
+  button?: 'left' | 'middle' | 'right'
+  clickCount?: number
+  modifiers?: SmokeProofSurfaceInputModifier[]
+}
+
+const SMOKE_PROOF_SURFACE_INPUT_TYPES = new Set(['mouseDown', 'mouseUp', 'mouseMove'])
+const SMOKE_PROOF_SURFACE_INPUT_BUTTONS = new Set(['left', 'middle', 'right'])
+const SMOKE_PROOF_SURFACE_INPUT_MODIFIERS = new Set<SmokeProofSurfaceInputModifier>([
+  'leftbuttondown',
+  'shift',
+  'alt',
+  'control',
+  'meta'
+])
+const SMOKE_PROOF_SURFACE_INPUT_LIMIT = 64
+
+/**
+ * Plan 216 C: the mouse events a probe delivers to the proof surface's own
+ * web contents (`send-input-to-proof-surface`), surface-local, so the
+ * in-window surface's forwarding to the host window is exercised the way real
+ * input reaches a view on a host that refuses HID posting. A short, closed
+ * vocabulary; null when anything is off.
+ */
+export function validateSmokeProofSurfaceInputEvents(
+  value: unknown
+): SmokeProofSurfaceInputEvent[] | null {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > SMOKE_PROOF_SURFACE_INPUT_LIMIT
+  ) {
+    return null
+  }
+  const events: SmokeProofSurfaceInputEvent[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return null
+    }
+    const candidate = item as Record<string, unknown>
+    if (
+      typeof candidate.type !== 'string' ||
+      !SMOKE_PROOF_SURFACE_INPUT_TYPES.has(candidate.type) ||
+      typeof candidate.x !== 'number' ||
+      typeof candidate.y !== 'number' ||
+      !Number.isFinite(candidate.x) ||
+      !Number.isFinite(candidate.y)
+    ) {
+      return null
+    }
+    const event: SmokeProofSurfaceInputEvent = {
+      type: candidate.type as SmokeProofSurfaceInputEvent['type'],
+      x: Math.round(candidate.x),
+      y: Math.round(candidate.y)
+    }
+    if (candidate.button !== undefined) {
+      if (
+        typeof candidate.button !== 'string' ||
+        !SMOKE_PROOF_SURFACE_INPUT_BUTTONS.has(candidate.button)
+      ) {
+        return null
+      }
+      event.button = candidate.button as SmokeProofSurfaceInputEvent['button']
+    }
+    if (candidate.clickCount !== undefined) {
+      if (
+        typeof candidate.clickCount !== 'number' ||
+        !Number.isInteger(candidate.clickCount) ||
+        candidate.clickCount < 0 ||
+        candidate.clickCount > 3
+      ) {
+        return null
+      }
+      event.clickCount = candidate.clickCount
+    }
+    if (candidate.modifiers !== undefined) {
+      if (
+        !Array.isArray(candidate.modifiers) ||
+        !candidate.modifiers.every(
+          (modifier) =>
+            typeof modifier === 'string' &&
+            SMOKE_PROOF_SURFACE_INPUT_MODIFIERS.has(modifier as SmokeProofSurfaceInputModifier)
+        )
+      ) {
+        return null
+      }
+      event.modifiers = candidate.modifiers as SmokeProofSurfaceInputModifier[]
+    }
+    events.push(event)
+  }
+  return events
 }

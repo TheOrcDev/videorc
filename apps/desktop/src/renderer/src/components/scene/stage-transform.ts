@@ -39,6 +39,29 @@ export const STAGE_SNAP_THRESHOLD = 0.015
 /** Smallest canvas fraction a resize may leave per axis (5% of the canvas). */
 export const MIN_SOURCE_FRACTION = 0.05
 
+/**
+ * The protocol's bounds for a box (plan 215 E3, D2; the backend's
+ * `scene_geometry::MAX_SOURCE_SIZE_FRACTION` and its position bounds): up to
+ * 400% of the canvas, placed from three canvases left or above to four right
+ * or below. What hangs off the canvas is cut off, never squashed.
+ */
+export const MAX_SOURCE_FRACTION = 4
+export const MIN_SOURCE_POSITION = -3
+export const MAX_SOURCE_POSITION = 4
+
+/**
+ * Where a box of `size` may sit on its axis (plan 215 E3, D2): anywhere, as
+ * long as at least 5% of the canvas (`MIN_SOURCE_FRACTION`) stays covered
+ * by it, and within the protocol's position bounds. A box smaller than that
+ * stays on the canvas, as before.
+ */
+export function clampSourcePosition(position: number, size: number): number {
+  const kept = Math.min(Math.max(size, 0), MIN_SOURCE_FRACTION)
+  const low = Math.max(MIN_SOURCE_POSITION, kept - size)
+  const high = Math.min(MAX_SOURCE_POSITION, 1 - kept)
+  return clamp(position, low, Math.max(low, high))
+}
+
 /** A snap guide line to draw across the canvas while a ghost is magnetized. */
 export interface SnapGuide {
   axis: 'x' | 'y'
@@ -81,7 +104,10 @@ export interface MoveInput {
   targets: SnapTargets
 }
 
-/** Ghost position for a move gesture: clamp to the canvas, then magnetize. */
+/**
+ * Ghost position for a move gesture: keep 5% of the canvas covered (plan
+ * 215 E3; the box may hang off the canvas by the rest), then magnetize.
+ */
 export function moveGhost(input: MoveInput): GhostResult {
   let dx = input.dx
   let dy = input.dy
@@ -130,8 +156,10 @@ export interface ResizeInput {
 /**
  * Ghost box for a resize gesture. The edge(s) named by the handle follow the
  * pointer; the opposite edge (or center line, for aspect-locked edge pulls)
- * anchors. Sizes clamp to [minFraction, canvas] and the box never leaves the
- * canvas. No snapping on resize — size is precision intent, like nudges.
+ * anchors. Sizes clamp to [minFraction, 400% of the canvas] (plan 215 E3,
+ * D2): an edge may be pulled past the canvas, as far as the protocol's
+ * position bounds, and at least 5% of the canvas stays covered. No snapping
+ * on resize — size is precision intent, like nudges.
  */
 export function resizeGhost(input: ResizeInput): GhostResult {
   const min = input.minFraction ?? MIN_SOURCE_FRACTION
@@ -175,18 +203,24 @@ export function resizeGhost(input: ResizeInput): GhostResult {
     const anchorX = movesLeft ? right : movesRight ? left : (left + right) / 2
     const anchorY = movesTop ? bottom : movesBottom ? top : (top + bottom) / 2
 
-    // Clamp the scale so both axes respect the minimum and the box stays on
-    // the canvas from its anchor.
-    const availableWidth = movesLeft
-      ? anchorX
-      : movesRight
-        ? 1 - anchorX
-        : availableCentered(anchorX)
-    const availableHeight = movesTop
-      ? anchorY
-      : movesBottom
-        ? 1 - anchorY
-        : availableCentered(anchorY)
+    // Clamp the scale so both axes respect the minimum, the 400% ceiling and
+    // the position bounds from the anchor.
+    const availableWidth = Math.min(
+      MAX_SOURCE_FRACTION,
+      movesLeft
+        ? anchorX - MIN_SOURCE_POSITION
+        : movesRight
+          ? MAX_SOURCE_FRACTION
+          : availableCentered(anchorX)
+    )
+    const availableHeight = Math.min(
+      MAX_SOURCE_FRACTION,
+      movesTop
+        ? anchorY - MIN_SOURCE_POSITION
+        : movesBottom
+          ? MAX_SOURCE_FRACTION
+          : availableCentered(anchorY)
+    )
     const maxScale = Math.min(
       start.width > 0 ? availableWidth / start.width : 1,
       start.height > 0 ? availableHeight / start.height : 1
@@ -204,10 +238,28 @@ export function resizeGhost(input: ResizeInput): GhostResult {
     return { rect: clampRect({ x, y, width, height }), guides: [] }
   }
 
-  const newLeft = movesLeft ? clamp(left + input.dx, 0, right - min) : left
-  const newRight = movesRight ? clamp(right + input.dx, left + min, 1) : right
-  const newTop = movesTop ? clamp(top + input.dy, 0, bottom - min) : top
-  const newBottom = movesBottom ? clamp(bottom + input.dy, top + min, 1) : bottom
+  // An edge stops at the smallest box, at the 400% box, at the position
+  // bounds, and where less than 5% of the canvas would stay covered.
+  const newLeft = movesLeft
+    ? clamp(
+        left + input.dx,
+        Math.max(MIN_SOURCE_POSITION, right - MAX_SOURCE_FRACTION),
+        Math.min(right - min, 1 - MIN_SOURCE_FRACTION)
+      )
+    : left
+  const newRight = movesRight
+    ? clamp(right + input.dx, Math.max(left + min, MIN_SOURCE_FRACTION), left + MAX_SOURCE_FRACTION)
+    : right
+  const newTop = movesTop
+    ? clamp(
+        top + input.dy,
+        Math.max(MIN_SOURCE_POSITION, bottom - MAX_SOURCE_FRACTION),
+        Math.min(bottom - min, 1 - MIN_SOURCE_FRACTION)
+      )
+    : top
+  const newBottom = movesBottom
+    ? clamp(bottom + input.dy, Math.max(top + min, MIN_SOURCE_FRACTION), top + MAX_SOURCE_FRACTION)
+    : bottom
   return {
     rect: clampRect({
       x: newLeft,
@@ -252,7 +304,8 @@ export interface CropResult extends GhostResult {
  * so what stays on screen does not move or scale: the crop on that side
  * changes by the share of the picture the edge passed over. An edge stops at
  * the picture's own edge (no crop), at 5% of the picture left, at the
- * smallest box and at the canvas. No snapping, like a resize.
+ * smallest box and at the protocol's position bounds (the box may hang off
+ * the canvas, plan 215 E3). No snapping, like a resize.
  */
 export function cropGhost(input: CropInput): CropResult {
   const min = input.minFraction ?? MIN_SOURCE_FRACTION
@@ -270,7 +323,7 @@ export function cropGhost(input: CropInput): CropResult {
   if (perX > 0 && input.handle.includes('w')) {
     const moved = travel(
       input.dx,
-      Math.min(crop.cropLeft / perX, x),
+      Math.min(crop.cropLeft / perX, x - MIN_SOURCE_POSITION),
       Math.min((keptX - MIN_CROP_KEPT) / perX, width - min)
     )
     x += moved
@@ -279,7 +332,7 @@ export function cropGhost(input: CropInput): CropResult {
   } else if (perX > 0 && input.handle.includes('e')) {
     const moved = -travel(
       -input.dx,
-      Math.min(crop.cropRight / perX, 1 - (x + width)),
+      Math.min(crop.cropRight / perX, MAX_SOURCE_POSITION - (x + width)),
       Math.min((keptX - MIN_CROP_KEPT) / perX, width - min)
     )
     width += moved
@@ -288,7 +341,7 @@ export function cropGhost(input: CropInput): CropResult {
   if (perY > 0 && input.handle.includes('n')) {
     const moved = travel(
       input.dy,
-      Math.min(crop.cropTop / perY, y),
+      Math.min(crop.cropTop / perY, y - MIN_SOURCE_POSITION),
       Math.min((keptY - MIN_CROP_KEPT) / perY, height - min)
     )
     y += moved
@@ -297,7 +350,7 @@ export function cropGhost(input: CropInput): CropResult {
   } else if (perY > 0 && input.handle.includes('s')) {
     const moved = -travel(
       -input.dy,
-      Math.min(crop.cropBottom / perY, 1 - (y + height)),
+      Math.min(crop.cropBottom / perY, MAX_SOURCE_POSITION - (y + height)),
       Math.min((keptY - MIN_CROP_KEPT) / perY, height - min)
     )
     height += moved
@@ -411,21 +464,23 @@ function snapAxis(
   return best ? { position: best.position, target: best.target } : null
 }
 
-/** Clamp a box position so it stays on the canvas (oversized boxes center-clamp). */
+/** A box position that keeps 5% of the canvas covered (plan 215 E3, D2). */
 function clampPosition(position: number, size: number): number {
-  const low = Math.min(0, 1 - size)
-  const high = Math.max(0, 1 - size)
-  return clamp(position, low, high)
+  return clampSourcePosition(position, size)
 }
 
-/** Space available to a box centered at `center` without leaving the canvas. */
+/**
+ * Space available to a box centered at `center` whose origin stays within
+ * the position bounds (plan 215 E3): the box may hang off the canvas on both
+ * sides; its size cap is the caller's.
+ */
 function availableCentered(center: number): number {
-  return Math.max(0, Math.min(center, 1 - center) * 2)
+  return Math.max(0, (center - MIN_SOURCE_POSITION) * 2)
 }
 
 function clampRect(rect: StageRect): StageRect {
-  const width = clamp(rect.width, 0, 1)
-  const height = clamp(rect.height, 0, 1)
+  const width = clamp(rect.width, 0, MAX_SOURCE_FRACTION)
+  const height = clamp(rect.height, 0, MAX_SOURCE_FRACTION)
   return {
     x: clampPosition(rect.x, width),
     y: clampPosition(rect.y, height),

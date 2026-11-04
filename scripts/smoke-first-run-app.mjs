@@ -26,6 +26,7 @@ import {
   evaluateFirstRunSmokeStep,
   FIRST_RUN_SMOKE_LIMITS,
   FIRST_RUN_SOURCE_START_PATTERNS,
+  firstRunPerformanceCheckSettled,
   firstRunPermissionsReady,
   firstRunSourceStartLines
 } from './lib/first-run-smoke-gate.mjs'
@@ -52,7 +53,8 @@ const report = {
   teardowns: [],
   sourceRequests: [],
   reloads: [],
-  rendererErrors: []
+  rendererErrors: [],
+  performanceCheckWaits: []
 }
 const save = () =>
   writeFileSync(join(output, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
@@ -64,6 +66,7 @@ let backend
 let appLines = []
 let guard
 let profileName
+let performanceCheckCompleted = false
 const themeShots = { dark: new Map(), light: new Map() }
 const allSteps = ['permissions', 'goal', 'look', 'sound', 'destinations']
 
@@ -332,7 +335,12 @@ async function screenshot(name) {
 }
 
 async function reloadWith(keys) {
-  const previousDocument = (await state()).documentId
+  const previous = await state()
+  // Only first-run setup starts the check (plan 212 D1); in the Studio the
+  // Clips ring is a real session and reloads as the user's would.
+  if (previous.setup === 'open' && previous.mode === 'first-run')
+    await waitForPerformanceCheck('reload')
+  const previousDocument = previous.documentId
   const reload = { profile: profileName, previousDocument, requestedAt: Date.now() }
   report.reloads.push(reload)
   save()
@@ -586,6 +594,15 @@ async function startApp(name) {
   cdp = await connect(target.webSocketDebuggerUrl)
   browserCdp = await connect(devtoolsUrl)
   backend = await connectBackend(launched.connections['backend-ready'], 10000)
+  performanceCheckCompleted = false
+  backend.addEventListener('message', (event) => {
+    try {
+      if (JSON.parse(event.data).event === 'performance.check.completed')
+        performanceCheckCompleted = true
+    } catch {
+      /* Not an event. */
+    }
+  })
   cdp.listeners.add((message) => {
     if (message.method === 'Runtime.exceptionThrown') {
       const details = message.params.exceptionDetails
@@ -655,7 +672,38 @@ async function advance(step) {
   return waitFor(step, (s) => s.cardStep === step && s.setup === 'open')
 }
 
+// #973: setup's performance check holds the look's writes while it runs, and
+// for good in a renderer reloaded while it runs.
+async function waitForPerformanceCheck(before) {
+  const startedAt = Date.now()
+  const deadline = startedAt + FIRST_RUN_SMOKE_LIMITS.performanceCheckSettleMs
+  let last
+  while (Date.now() < deadline) {
+    const [check, recording] = await Promise.all([
+      request(backend, 5000, 'performance.check.get'),
+      request(backend, 5000, 'recording.status')
+    ])
+    last = {
+      running: check.running,
+      hasResult: check.result !== undefined,
+      lastRunNotRecorded: check.lastRunNotRecorded ?? null,
+      recordingState: recording.state,
+      completedEvent: performanceCheckCompleted
+    }
+    if (
+      firstRunPerformanceCheckSettled({ check, recording, completed: performanceCheckCompleted })
+    ) {
+      const settled = { profile: profileName, before, ...last, waitedMs: Date.now() - startedAt }
+      report.performanceCheckWaits.push(settled)
+      return settled
+    }
+    await delay(250)
+  }
+  throw new Error(`performance check settle before ${before} timed out: ${JSON.stringify(last)}`)
+}
+
 async function chooseLook(background = 'silk') {
+  const performanceCheck = await waitForPerformanceCheck('look')
   const initial = await waitFor(
     'look options',
     (s) => s.cardStep === 'look' && s.layoutOptions.length >= 4
@@ -688,7 +736,12 @@ async function chooseLook(background = 'silk') {
       break
     await delay(100)
   } while (Date.now() < deadline)
-  const observation = { ...(await state()), ...committed, layoutClicked: selected?.preset ?? null }
+  const observation = {
+    ...(await state()),
+    ...committed,
+    layoutClicked: selected?.preset ?? null,
+    performanceCheck
+  }
   await check('look', observation)
   return { layout: observation.layout, background }
 }

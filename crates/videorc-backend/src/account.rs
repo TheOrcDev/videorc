@@ -2,7 +2,7 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::future::Future;
 
-use crate::protocol::{AccountStatus, VideorcAccountSnapshot};
+use crate::protocol::{AccountChangeReason, AccountStatus, VideorcAccountSnapshot};
 use crate::secrets;
 use crate::videorc_api::{SessionRefresh, SessionStatus, VerifiedSession, VideorcApiClient};
 
@@ -157,10 +157,15 @@ pub async fn complete_sign_in(
     }
     ensure_current_sign_in_intent(intent_generation)?;
     let replay_binding = sign_in_replay_binding(code, state);
-    if secrets::try_get_secret(LAST_SIGN_IN_BINDING_SECRET)
-        .ok()
-        .flatten()
-        .is_some_and(|completed_binding| completed_binding == replay_binding)
+    // A replay binding that cannot be read is not a replay: the exchange goes
+    // ahead, and the server refuses a code it already used. Said in the log,
+    // never swallowed (plan 215 A5).
+    let completed_binding =
+        secrets::try_get_secret(LAST_SIGN_IN_BINDING_SECRET).unwrap_or_else(|error| {
+            tracing::warn!("Could not read the last sign-in binding: {error:#}");
+            None
+        });
+    if completed_binding.is_some_and(|completed_binding| completed_binding == replay_binding)
         && let Some(snapshot) = restore_persisted_account()
     {
         ensure_current_sign_in_intent(intent_generation)?;
@@ -253,29 +258,53 @@ fn persist_account_with_replay_binding(
 }
 
 // Restore the signed-in account from the local secrets store at startup (no
-// network). Returns None when there is no stored token.
+// network). Returns None when there is no stored token. A store or snapshot
+// that cannot be read also gives None, and says so in the log (plan 215 A5):
+// the app then starts signed out, and the support bundle's `account` section
+// shows the store as unreadable.
 pub fn restore_persisted_account() -> Option<VideorcAccountSnapshot> {
-    let token = secrets::try_get_secret(SESSION_TOKEN_SECRET)
-        .ok()
-        .flatten()?;
-    if token.trim().is_empty() {
-        return None;
+    match restore_persisted_account_result() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(
+                "Could not restore the Videorc account from the secrets store: {error:#}"
+            );
+            None
+        }
     }
-    let raw = secrets::try_get_secret(ACCOUNT_SNAPSHOT_SECRET)
-        .ok()
-        .flatten()?;
-    serde_json::from_str(&raw).ok()
 }
 
-// Clear the stored token + snapshot (Sign out). Tolerant of already-absent keys.
+fn restore_persisted_account_result() -> Result<Option<VideorcAccountSnapshot>> {
+    let Some(token) = stored_session_token_result()? else {
+        return Ok(None);
+    };
+    debug_assert!(!token.trim().is_empty());
+    let Some(raw) = secrets::try_get_secret(ACCOUNT_SNAPSHOT_SECRET)? else {
+        tracing::warn!(
+            "The Videorc session token is stored without its account snapshot; starting signed out."
+        );
+        return Ok(None);
+    };
+    let snapshot = serde_json::from_str(&raw)
+        .map_err(|error| anyhow::anyhow!("Stored account snapshot is not valid JSON: {error}"))?;
+    Ok(Some(snapshot))
+}
+
+// Clear the stored token + snapshot (Sign out). Tolerant of already-absent
+// keys. A delete that fails is said in the log (plan 215 A5): the desktop is
+// signed out in memory, but the token would come back at the next launch.
 pub fn clear_persisted_account() {
-    let _ = secrets::delete_secrets(&[
+    if let Err(error) = secrets::delete_secrets(&[
         SESSION_TOKEN_SECRET,
         ACCOUNT_SNAPSHOT_SECRET,
         LAST_SIGN_IN_BINDING_SECRET,
         LEGACY_LAST_SIGN_IN_STATE_SECRET,
         ENTITLEMENT_TOKEN_SECRET,
-    ]);
+    ]) {
+        tracing::error!(
+            "Could not clear the Videorc account from the secrets store; it returns at the next launch: {error:#}"
+        );
+    }
 }
 
 /// Explicit desktop sign-out is also a durable account-intent tombstone. The
@@ -307,19 +336,60 @@ pub fn persist_entitlement_token(token: &str) {
 
 pub fn stored_entitlement_token() -> Option<String> {
     secrets::try_get_secret(ENTITLEMENT_TOKEN_SECRET)
-        .ok()
-        .flatten()
+        .unwrap_or_else(|error| {
+            tracing::warn!("Could not read the stored entitlement token: {error:#}");
+            None
+        })
         .filter(|token| !token.trim().is_empty())
 }
 
 // Read the stored durable session token (for Bearer-authed Videorc API calls).
+// A store that cannot be read gives None, said in the log (plan 215 A5);
+// callers that must tell "signed out" from "unreadable" use `session_token`.
 pub fn stored_session_token() -> Option<String> {
-    stored_session_token_result().ok().flatten()
+    session_token().ok()
 }
 
 pub(crate) fn stored_session_token_result() -> Result<Option<String>> {
     secrets::try_get_secret(SESSION_TOKEN_SECRET)
         .map(|token| token.filter(|token| !token.trim().is_empty()))
+}
+
+/// Whether the desktop holds a Videorc session token (plan 215 A1): the one
+/// truth the chat connectors, the Go Live check and the support bundle read.
+/// A store that cannot be read is its own state, never "signed out": a
+/// streamer who is signed in must not be told to sign in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionState {
+    SignedIn,
+    SignedOut,
+    /// The secrets store could not be read; the error, for the row and the log.
+    Unreadable(String),
+}
+
+impl SessionState {
+    pub fn is_signed_in(&self) -> bool {
+        matches!(self, Self::SignedIn)
+    }
+}
+
+/// The stored session token for a Bearer call, or why there is none.
+pub fn session_token() -> std::result::Result<String, SessionState> {
+    match stored_session_token_result() {
+        Ok(Some(token)) => Ok(token),
+        Ok(None) => Err(SessionState::SignedOut),
+        Err(error) => {
+            tracing::warn!("Could not read the Videorc session token: {error:#}");
+            Err(SessionState::Unreadable(format!("{error:#}")))
+        }
+    }
+}
+
+pub fn session_state() -> SessionState {
+    match session_token() {
+        Ok(_) => SessionState::SignedIn,
+        Err(state) => state,
+    }
 }
 
 enum PreparedAccountRefreshOutcome {
@@ -413,19 +483,49 @@ fn commit_account_refresh_if_current<T>(
     .then(commit)
 }
 
+/// A committed account refresh: the account as it now stands, and the change
+/// the renderer must hear about, if any (plan 215 A5). Only the sign-out the
+/// server made (`SessionExpired`) is a change here; a refresh that confirms
+/// the account, rotates its token or keeps the cached one changes nothing
+/// the streamer needs to know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRefreshOutcome {
+    pub account: VideorcAccountSnapshot,
+    pub change: Option<AccountChangeReason>,
+}
+
 /// Commit phase of account refresh. The caller holds
 /// `AppState.account_auth_transition`, so the identity check and any secret
 /// mutation are atomic with respect to sign-in/sign-out. `None` means a newer
 /// account intent or refresh request won while the network request was in
-/// flight. For a current Unauthorized result, entitlement revocation and its
-/// update event run before the durable credentials are deleted.
+/// flight, or the store could not be read for the identity check (said in the
+/// log; nothing is committed on a store we cannot see). For a current
+/// Unauthorized result, entitlement revocation and its update event run
+/// before the durable credentials are deleted, and the outcome names the
+/// expired session so the renderer hears it (plan 215 A5).
 pub fn commit_account_refresh(
     prepared: PreparedAccountRefresh,
     current_refresh_generation: u64,
     revoke_entitlements_and_emit_update: impl FnOnce(),
-) -> Option<VideorcAccountSnapshot> {
-    let current_intent_generation = current_sign_in_intent_generation().ok()?;
-    let current_token = stored_session_token_result().ok()?;
+) -> Option<AccountRefreshOutcome> {
+    let current_intent_generation = match current_sign_in_intent_generation() {
+        Ok(generation) => generation,
+        Err(error) => {
+            tracing::warn!(
+                "Account refresh not committed; the sign-in intent could not be read: {error:#}"
+            );
+            return None;
+        }
+    };
+    let current_token = match stored_session_token_result() {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(
+                "Account refresh not committed; the session token could not be read: {error:#}"
+            );
+            return None;
+        }
+    };
     let expected_token_for_identity = prepared.expected_token.clone();
     commit_account_refresh_if_current(
         prepared.expected_intent_generation,
@@ -435,15 +535,19 @@ pub fn commit_account_refresh(
         expected_token_for_identity.as_deref(),
         current_token.as_deref(),
         || match prepared.outcome {
-            PreparedAccountRefreshOutcome::NoStoredSession => signed_out_account(),
+            PreparedAccountRefreshOutcome::NoStoredSession => AccountRefreshOutcome {
+                account: signed_out_account(),
+                change: None,
+            },
             PreparedAccountRefreshOutcome::Refreshed(refresh) => apply_session_refresh(
                 prepared.expected_token.unwrap_or_default(),
                 refresh,
                 revoke_entitlements_and_emit_update,
             ),
-            PreparedAccountRefreshOutcome::KeepCachedAccount => {
-                restore_persisted_account().unwrap_or_else(signed_out_account)
-            }
+            PreparedAccountRefreshOutcome::KeepCachedAccount => AccountRefreshOutcome {
+                account: restore_persisted_account().unwrap_or_else(signed_out_account),
+                change: None,
+            },
         },
     )
 }
@@ -452,7 +556,7 @@ fn apply_session_refresh(
     current_token: String,
     refresh: SessionRefresh,
     revoke_entitlements_and_emit_update: impl FnOnce(),
-) -> VideorcAccountSnapshot {
+) -> AccountRefreshOutcome {
     match refresh.status {
         SessionStatus::Unauthorized => apply_unauthorized_session_refresh(
             revoke_entitlements_and_emit_update,
@@ -460,24 +564,45 @@ fn apply_session_refresh(
         ),
         SessionStatus::Active { name, email, image } => {
             let snapshot = snapshot_from_identity(name, email, image);
+            let rotated = refresh.rotated_token.is_some();
             let token = refresh.rotated_token.unwrap_or(current_token);
-            let _ = persist_account(&token, &snapshot);
-            snapshot
+            // A rotated token that fails to persist leaves the old one on
+            // disk; the next refresh then answers 401 and signs the desktop
+            // out. That must be on file (plan 215 A5), never silent.
+            if let Err(error) = persist_account(&token, &snapshot) {
+                if rotated {
+                    tracing::error!(
+                        "Could not persist the rotated Videorc session token; the stored one may stop working: {error:#}"
+                    );
+                } else {
+                    tracing::warn!("Could not persist the refreshed Videorc account: {error:#}");
+                }
+            }
+            AccountRefreshOutcome {
+                account: snapshot,
+                change: None,
+            }
         }
     }
 }
 
+/// The server refused the stored session: Premium closes, the credentials
+/// go, and the outcome names the expired session so the desktop can say so
+/// (plan 215 A5, D7) instead of quietly reading "Sign in".
 fn apply_unauthorized_session_refresh(
     revoke_entitlements_and_emit_update: impl FnOnce(),
     clear_persisted_credentials: impl FnOnce(),
-) -> VideorcAccountSnapshot {
+) -> AccountRefreshOutcome {
     // Premium must fail closed before durable auth disappears. Premium gates
     // read the in-memory hydration directly and do not take the async account
     // transition lock, so clearing credentials first would leave a real race
     // in which a concurrent request could still pass a premium gate.
     revoke_entitlements_and_emit_update();
     clear_persisted_credentials();
-    signed_out_account()
+    AccountRefreshOutcome {
+        account: signed_out_account(),
+        change: Some(AccountChangeReason::SessionExpired),
+    }
 }
 
 fn signed_in_mock(username: &str) -> VideorcAccountSnapshot {
@@ -617,7 +742,7 @@ mod tests {
         let entitlement_update_emitted = std::cell::Cell::new(false);
         let credentials_present = std::cell::Cell::new(true);
 
-        let account = apply_unauthorized_session_refresh(
+        let outcome = apply_unauthorized_session_refresh(
             || {
                 premium.set(false);
                 entitlement_update_emitted.set(true);
@@ -634,6 +759,7 @@ mod tests {
                 credentials_present.set(false);
             },
         );
+        let account = outcome.account;
 
         assert!(!credentials_present.get());
         assert_eq!(account.status, AccountStatus::SignedOut);
@@ -641,6 +767,40 @@ mod tests {
             !(account.status == AccountStatus::SignedOut && premium.get()),
             "SignedOut must never coexist observably with Premium"
         );
+    }
+
+    /// Plan 215 A5 (D7): a refresh the server answers 401 used to sign the
+    /// desktop out in silence. The outcome now names the expired session, and
+    /// the event built from it is the one `backend-rpc-contract.ts` validates:
+    /// `{ account: { status: "signed-out" }, reason: "session-expired" }`.
+    #[test]
+    fn an_unauthorized_refresh_names_the_expired_session_for_the_renderer() {
+        let outcome = apply_unauthorized_session_refresh(|| {}, || {});
+        assert_eq!(outcome.change, Some(AccountChangeReason::SessionExpired));
+        assert_eq!(outcome.account, signed_out_account());
+
+        let event = crate::protocol::AccountChangedEvent {
+            account: outcome.account,
+            reason: outcome.change.expect("the expired session is a change"),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({
+                "account": { "status": "signed-out" },
+                "reason": "session-expired"
+            })
+        );
+        // The other two reasons keep the renderer's enum.
+        assert_eq!(
+            serde_json::to_value(AccountChangeReason::SignedIn).unwrap(),
+            serde_json::json!("signed-in")
+        );
+        assert_eq!(
+            serde_json::to_value(AccountChangeReason::SignedOut).unwrap(),
+            serde_json::json!("signed-out")
+        );
+        // (The Active branch persists to the secrets store, which unit tests
+        // share per process; it is not exercised here.)
     }
 
     #[tokio::test]

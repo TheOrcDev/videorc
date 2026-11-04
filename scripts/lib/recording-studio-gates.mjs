@@ -15,9 +15,10 @@ export function bundledFfmpegPath({
       : platform === 'linux'
         ? ['linux-x64', 'bin', 'ffmpeg']
         : ['current', 'bin', 'ffmpeg']
-  // Join for the platform asked about, not the host running the gate.
-  const pathApi = platform === 'win32' ? win32 : posix
-  return pathApi.join(repoRoot, 'vendor', 'ffmpeg', ...bundle)
+  // Join with the target platform's separator, not the host's, so a path
+  // computed for another platform (the unit tests do) reads as that one.
+  const join = platform === 'win32' ? win32.join : posix.join
+  return join(repoRoot, 'vendor', 'ffmpeg', ...bundle)
 }
 
 export function buildRecordingStudioGateSteps({

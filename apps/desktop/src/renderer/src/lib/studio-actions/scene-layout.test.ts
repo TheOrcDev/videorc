@@ -553,7 +553,8 @@ describe('move_on_scene (plan 209 S11b, D22)', () => {
         SCENE_LAYOUT_COPY.rectOrPlace
       ],
       [{ item: 'banner:gone', place: 'center' }, SCENE_LAYOUT_COPY.bannerMissing],
-      [{ item: 'chat', place: 'center' }, SCENE_LAYOUT_COPY.noItem]
+      // `chat` is the chat box since plan 215 G; a poll is no item.
+      [{ item: 'poll', place: 'center' }, SCENE_LAYOUT_COPY.noItem]
     ] as const) {
       expect(
         await executeAgentIntent(call('move_on_scene', args), context),
@@ -781,6 +782,7 @@ describe('set_scene_item and get_scene_layout (plan 209 S11b)', () => {
       'highlight',
       'captions',
       'buddy',
+      'chat',
       'banner:sponsor',
       'banner:logo'
     ])

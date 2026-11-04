@@ -1616,6 +1616,7 @@ mod tests {
     fn healthy_rung_passes_and_each_signal_fails_alone() {
         assert!(score_rung(&healthy(30)).is_empty());
 
+        #[allow(clippy::type_complexity)]
         let cases: Vec<(&str, Box<dyn Fn(&mut RungMeasurement)>)> = vec![
             (
                 "encoder-below-realtime",

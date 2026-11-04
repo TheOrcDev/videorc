@@ -14,11 +14,27 @@
 // u[5..13) = the colours (React Bits' MAX_COLORS = 8)
 // u[13] = base colour
 precision highp float;
+precision highp int;
 
 uniform vec4 u[16];
 out vec4 outColor;
 
 const int MAX_COLORS = 8;
+
+// PCG (Jarzynski and Olano 2020) over whole numbers, then the top 24 bits as
+// a value in [0, 1): the same bits on every GPU and API. Plan 194 hashed with
+// fract(sin(x) * 47453.5453) and fract(sin(x) * 43758.5453123), whose sin of
+// hundreds to thousands of radians lands differently per driver, so the
+// grain differed per GPU (#987, #1077).
+uint pcg(uint v) {
+  uint state = v * 747796405u + 2891336453u;
+  uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+
+float unit(uint h) {
+  return float(h >> 8u) * (1.0 / 16777216.0);
+}
 
 void main() {
   vec2 vUv = gl_FragCoord.xy / u[0].xy;
@@ -89,7 +105,7 @@ void main() {
   float noise = u[3].y;
   if (noise > 0.0001) {
     // Fixed in place: React Bits adds the time to the hash every frame.
-    float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453123);
+    float n = unit(pcg(pcg(uint(gl_FragCoord.x)) + uint(gl_FragCoord.y)));
     col += (n - 0.5) * noise;
     col = clamp(col, 0.0, 1.0);
   }

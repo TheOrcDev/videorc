@@ -1298,6 +1298,13 @@ pub fn apply_stream_health(
     // either the capture or render stage. Those fields remain owned by their
     // stage-specific samplers; aliasing output cadence into both makes
     // attribution report healthy media stages when capture/render are unknown.
+    // The bottleneck reads drops since the last sample (#981): the health
+    // counter is a session total, and a drop during one reconnect must not
+    // name the encoder for the rest of the stream.
+    let dropped_frames_since_last_sample = health.dropped_frames.map_or(0, |dropped_frames| {
+        let previous = if new_session { 0 } else { stats.dropped_frames };
+        dropped_frames.saturating_sub(previous)
+    });
     if let Some(dropped_frames) = health.dropped_frames {
         stats.dropped_frames = dropped_frames;
         stats.skipped_frames = dropped_frames;
@@ -1333,7 +1340,7 @@ pub fn apply_stream_health(
         stats.capture_fps,
         stats.render_fps,
         stats.encoder_speed,
-        stats.dropped_frames,
+        dropped_frames_since_last_sample,
         stats.mic_dropped_frames,
         target_fps,
         stats.device_disconnected,
@@ -1475,6 +1482,11 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_recording_role_diagnostics = bridge.recording_role_diagnostics;
     stats.encoder_bridge_stream_role_diagnostics = bridge.stream_role_diagnostics;
     stats.encoder_bridge_input_fps = input_fps;
+    // Drops since the last bridge sample (#981): the snapshot carries the
+    // session total, which must not read as a current encoder problem.
+    let dropped_frames_since_last_sample = bridge
+        .dropped_frames
+        .saturating_sub(stats.encoder_bridge_dropped_frames);
     stats.encoder_bridge_dropped_frames = bridge.dropped_frames;
     stats.encoder_bridge_recording_dropped_frames = bridge.recording_dropped_frames;
     stats.encoder_bridge_stream_dropped_frames = bridge.stream_dropped_frames;
@@ -1585,7 +1597,7 @@ pub fn apply_encoder_bridge_stats(
         stats.capture_fps,
         stats.render_fps,
         stats.encoder_speed,
-        stats.dropped_frames,
+        dropped_frames_since_last_sample,
         stats.mic_dropped_frames,
         target_fps,
         stats.device_disconnected,
@@ -1643,6 +1655,11 @@ pub fn apply_preview_camera_source_stats(
 ) -> DiagnosticStats {
     stats.preview_camera_frame_age_ms = status.frame_age_ms;
     stats.preview_camera_source_fps = status.source_fps;
+    // Drops name the capture stage only while they grow (#981): the status
+    // carries a run total, and one old drop is not a current slowdown.
+    let dropped_frames_since_last_sample = status
+        .dropped_frames
+        .saturating_sub(stats.preview_camera_dropped_frames);
     stats.preview_camera_dropped_frames = status.dropped_frames;
     stats.preview_camera_state = Some(status.state.clone());
     stats.preview_camera_device_unique_id = status.device_unique_id.clone();
@@ -1655,7 +1672,7 @@ pub fn apply_preview_camera_source_stats(
     stats.preview_camera_selected_format_height = status.selected_format_height;
     stats.preview_camera_selected_format_min_fps = status.selected_format_min_fps;
     stats.preview_camera_selected_format_max_fps = status.selected_format_max_fps;
-    if status.dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
     stats.updated_at = Utc::now().to_rfc3339();
@@ -1739,6 +1756,11 @@ pub fn apply_preview_screen_source_stats(
 ) -> DiagnosticStats {
     stats.preview_screen_frame_age_ms = status.frame_age_ms;
     stats.preview_screen_source_fps = status.source_fps;
+    // Same rule as the camera (#981): only new drops name the capture stage.
+    // A static screen's idle callbacks are not drops (preview_screen.rs).
+    let dropped_frames_since_last_sample = status
+        .dropped_frames
+        .saturating_sub(stats.preview_screen_dropped_frames);
     stats.preview_screen_dropped_frames = status.dropped_frames;
     stats.preview_screen_message = status.message.clone();
     stats.preview_screen_native_width = status.native_width;
@@ -1749,7 +1771,7 @@ pub fn apply_preview_screen_source_stats(
     stats.preview_screen_actual_height = status.actual_height;
     stats.preview_screen_iosurface_available = status.iosurface_available;
     stats.preview_screen_d3d11_texture_available = status.d3d11_texture_available;
-    if status.dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
     stats.updated_at = Utc::now().to_rfc3339();
@@ -2179,11 +2201,16 @@ pub fn apply_system_audio_stats(
     stats
 }
 
+/// The slowest stage right now. `dropped_frames_since_last_sample` is the
+/// growth of the encoder's drop counter since the previous sample, never the
+/// session total (#981): a stuck total would name the encoder for the rest of
+/// the run after one drop. The cumulative view lives in
+/// `classify_recording_risk`, where a defect the file has taken on must stay.
 pub fn classify_bottleneck(
     capture_fps: Option<f64>,
     render_fps: Option<f64>,
     encoder_speed: Option<f64>,
-    dropped_frames: u64,
+    dropped_frames_since_last_sample: u64,
     mic_dropped_frames: u64,
     target_fps: u32,
     device_disconnected: bool,
@@ -2203,7 +2230,7 @@ pub fn classify_bottleneck(
     if render_fps.is_some_and(|fps| fps < f64::from(target_fps) * 0.9) {
         return DiagnosticBottleneck::Render;
     }
-    if dropped_frames > 0 {
+    if dropped_frames_since_last_sample > 0 {
         return DiagnosticBottleneck::Encoder;
     }
     if capture_fps.is_some() || render_fps.is_some() || encoder_speed.is_some() {
@@ -3846,6 +3873,7 @@ mod tests {
                 sequence: Some(120),
                 updated_at: "2026-06-08T00:00:00Z".to_string(),
                 message: Some("Live".to_string()),
+                no_video: None,
             },
         );
 
@@ -3860,6 +3888,168 @@ mod tests {
         assert_eq!(stats.preview_camera_actual_height, Some(1080));
         assert_eq!(stats.preview_camera_selected_format_width, Some(1920));
         assert_eq!(stats.preview_camera_selected_format_max_fps, Some(60.0));
+    }
+
+    fn screen_status_with_drops(dropped_frames: u64, frames_captured: u64) -> PreviewScreenStatus {
+        PreviewScreenStatus {
+            state: PreviewScreenState::Live,
+            source_id: Some("screen:screencapturekit:1".to_string()),
+            source_kind: Some(PreviewScreenSourceKind::Screen),
+            target_fps: 30,
+            width: Some(1920),
+            height: Some(1080),
+            native_width: Some(1920),
+            native_height: Some(1080),
+            requested_width: Some(1920),
+            requested_height: Some(1080),
+            actual_width: Some(1920),
+            actual_height: Some(1080),
+            iosurface_available: Some(true),
+            d3d11_texture_available: Some(false),
+            source_fps: Some(30.0),
+            frame_age_ms: Some(12),
+            frames_captured,
+            dropped_frames,
+            sequence: Some(frames_captured),
+            include_cursor: true,
+            exclude_current_process_windows: true,
+            updated_at: "2026-11-04T00:00:00Z".to_string(),
+            message: None,
+        }
+    }
+
+    fn camera_status_with_drops(dropped_frames: u64, frames_captured: u64) -> PreviewCameraStatus {
+        PreviewCameraStatus {
+            state: PreviewCameraState::Live,
+            camera_id: Some("camera:avfoundation-native:abc".to_string()),
+            device_unique_id: Some("device-abc".to_string()),
+            target_fps: 30,
+            width: Some(1920),
+            height: Some(1080),
+            requested_width: Some(1920),
+            requested_height: Some(1080),
+            actual_width: Some(1920),
+            actual_height: Some(1080),
+            selected_format_width: Some(1920),
+            selected_format_height: Some(1080),
+            selected_format_min_fps: Some(1.0),
+            selected_format_max_fps: Some(30.0),
+            source_fps: Some(30.0),
+            frame_age_ms: Some(8),
+            frames_captured,
+            dropped_frames,
+            sequence: Some(frames_captured),
+            updated_at: "2026-11-04T00:00:00Z".to_string(),
+            message: Some("Live".to_string()),
+            no_video: None,
+        }
+    }
+
+    /// #981: the screen status carries a run total. Drops name the capture
+    /// stage when they grow, and an old total never keeps naming it.
+    #[test]
+    fn preview_screen_drops_flag_capture_only_while_they_grow() {
+        let dropping =
+            apply_preview_screen_source_stats(idle_diagnostics(), &screen_status_with_drops(3, 90));
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(dropping.preview_screen_dropped_frames, 3);
+
+        let mut settled = dropping.clone();
+        settled.bottleneck = DiagnosticBottleneck::None;
+        let same_total =
+            apply_preview_screen_source_stats(settled.clone(), &screen_status_with_drops(3, 120));
+        assert_eq!(same_total.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(same_total.preview_screen_dropped_frames, 3);
+
+        let growing =
+            apply_preview_screen_source_stats(same_total, &screen_status_with_drops(4, 150));
+        assert_eq!(growing.bottleneck, DiagnosticBottleneck::Capture);
+
+        // A new run starts its counter at zero: not a drop, not a slowdown.
+        let new_run = apply_preview_screen_source_stats(settled, &screen_status_with_drops(0, 1));
+        assert_eq!(new_run.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(new_run.preview_screen_dropped_frames, 0);
+    }
+
+    #[test]
+    fn preview_camera_drops_flag_capture_only_while_they_grow() {
+        let dropping =
+            apply_preview_camera_source_stats(idle_diagnostics(), &camera_status_with_drops(2, 60));
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(dropping.preview_camera_dropped_frames, 2);
+
+        let mut settled = dropping;
+        settled.bottleneck = DiagnosticBottleneck::None;
+        let same_total =
+            apply_preview_camera_source_stats(settled, &camera_status_with_drops(2, 90));
+        assert_eq!(same_total.bottleneck, DiagnosticBottleneck::None);
+
+        let growing =
+            apply_preview_camera_source_stats(same_total, &camera_status_with_drops(5, 120));
+        assert_eq!(growing.bottleneck, DiagnosticBottleneck::Capture);
+        assert_eq!(growing.preview_camera_dropped_frames, 5);
+    }
+
+    /// #981: one frame dropped while a stream leg reconnected must not read as
+    /// "Encoder" for the rest of the session. Only new drops do.
+    #[test]
+    fn encoder_bridge_drops_flag_encoder_only_while_they_grow() {
+        let healthy_bridge = |dropped_frames: u64| EncoderBridgeDiagnosticSnapshot {
+            input_fps: Some(30.0),
+            encoder_speed: Some(1.0),
+            dropped_frames,
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(idle_diagnostics(), healthy_bridge(0), 30);
+        assert_eq!(stats.bottleneck, DiagnosticBottleneck::None);
+
+        let dropping = apply_encoder_bridge_stats(stats, healthy_bridge(1), 30);
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Encoder);
+        assert_eq!(dropping.dropped_frames, 1);
+        assert_eq!(dropping.encoder_bridge_dropped_frames, 1);
+
+        let settled = apply_encoder_bridge_stats(dropping, healthy_bridge(1), 30);
+        assert_eq!(settled.bottleneck, DiagnosticBottleneck::None);
+        // The session total stays visible; only the verdict moved on.
+        assert_eq!(settled.dropped_frames, 1);
+        assert_eq!(settled.encoder_bridge_dropped_frames, 1);
+
+        let dropping_again = apply_encoder_bridge_stats(settled, healthy_bridge(3), 30);
+        assert_eq!(dropping_again.bottleneck, DiagnosticBottleneck::Encoder);
+    }
+
+    #[test]
+    fn stream_health_drops_flag_encoder_only_while_they_grow() {
+        let health = |session_id: &str, dropped_frames: u64| StreamHealth {
+            session_id: session_id.to_string(),
+            fps: Some(30.0),
+            dropped_frames: Some(dropped_frames),
+            speed: Some(1.0),
+            bitrate_kbps: Some(6_000.0),
+            total_bytes: Some(1_024),
+            duplicated_frames: Some(0),
+            created_at: "now".to_string(),
+        };
+        let mut stats = idle_diagnostics();
+        stats.capture_fps = Some(30.0);
+        stats.render_fps = Some(30.0);
+
+        let dropping = apply_stream_health(stats, &health("session", 1), 30);
+        assert_eq!(dropping.bottleneck, DiagnosticBottleneck::Encoder);
+        assert_eq!(dropping.dropped_frames, 1);
+
+        let settled = apply_stream_health(dropping, &health("session", 1), 30);
+        assert_eq!(settled.bottleneck, DiagnosticBottleneck::None);
+        assert_eq!(settled.dropped_frames, 1);
+
+        let dropping_again = apply_stream_health(settled, &health("session", 2), 30);
+        assert_eq!(dropping_again.bottleneck, DiagnosticBottleneck::Encoder);
+
+        // A new session's first drops are new, whatever the old total was.
+        let next_session = apply_stream_health(dropping_again, &health("session-2", 1), 30);
+        assert_eq!(next_session.bottleneck, DiagnosticBottleneck::Encoder);
+        let next_settled = apply_stream_health(next_session, &health("session-2", 1), 30);
+        assert_eq!(next_settled.bottleneck, DiagnosticBottleneck::None);
     }
 
     #[test]

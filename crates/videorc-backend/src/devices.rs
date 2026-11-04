@@ -141,8 +141,10 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
                         // Mirror the microphone rule: the FFmpeg fallback rows are
                         // a safety net for when native discovery returns nothing,
                         // not duplicate picker entries beside every native camera.
+                        // Plan 214 A5: Videorc Camera is never a source of itself.
                         if !native_camera_rows_present
                             && !device.name.to_lowercase().contains("capture screen")
+                            && !crate::virtual_camera::is_videorc_camera_ffmpeg_name(&device.name)
                         {
                             devices.push(Device {
                                 app: None,
@@ -556,8 +558,14 @@ pub async fn find_avfoundation_camera_index(ffmpeg_path: &str, camera_name: &str
         .filter(|device| {
             device.kind == AvFoundationDeviceKind::Video
                 && !device.name.to_lowercase().contains("capture screen")
+                // Plan 214 A5: a saved id naming Videorc Camera resolves to
+                // nothing; never a silent substitute.
+                && !crate::virtual_camera::is_videorc_camera_ffmpeg_name(&device.name)
         })
         .collect::<Vec<_>>();
+    if crate::virtual_camera::is_videorc_camera_ffmpeg_name(camera_name) {
+        return None;
+    }
 
     video_devices
         .iter()

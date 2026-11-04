@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { devAppSpawnOptions, stopProcess } from './lib/app-launcher.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 // Maintained caption transport contract gate. This launches the real debug app/backend,
 // points its Videorc API client at a local authenticated HTTP service, upgrades the real
@@ -113,7 +114,7 @@ try {
       await stopProcess(backendProcess).catch(() => {})
     }
     await fake.close()
-    rmSync(stateRoot, { force: true, recursive: true })
+    await removeProfileDir(stateRoot, { label: 'captions-contract smoke' })
   }
 }
 

@@ -50,18 +50,34 @@ export function sourceOverrideOf(
 }
 
 /**
+ * Where a source with no Freeform memory starts: its box as Freeform should
+ * store it, or null for the frame the scene draws it with now. Plan 216 B6
+ * (D2): a screen on Fit with a known size starts at its PICTURE, the box
+ * the stage shows, so its handles sit on the picture from the first
+ * moment and nothing moves on entry.
+ */
+export type FreeformEntryBox = (
+  source: Pick<SceneSource, 'id' | 'transform'>
+) => CameraTransform | null
+
+/**
  * The overrides Freeform starts from: the remembered placement of every
- * source the scene still has, and where the scene draws it now for a source
- * with no memory (so nothing visibly moves).
+ * source the scene still has, and for a source with no memory its entry
+ * box (plan 216 B6) or where the scene draws it now, so nothing visibly
+ * moves.
  */
 export function freeformEntryOverrides(
   memory: FreeformMemory,
   orientation: LayoutOrientation,
-  sources: readonly Pick<SceneSource, 'id' | 'transform'>[]
+  sources: readonly Pick<SceneSource, 'id' | 'transform'>[],
+  entryBox: FreeformEntryBox = () => null
 ): FreeformOverrides {
   const remembered = memory[orientation] ?? {}
   return Object.fromEntries(
-    sources.map((source) => [source.id, remembered[source.id] ?? transformOf(source)])
+    sources.map((source) => [
+      source.id,
+      remembered[source.id] ?? entryBox(source) ?? transformOf(source)
+    ])
   )
 }
 
@@ -74,11 +90,17 @@ export function freeformEntryOverrides(
  */
 export function freeformEntryPatch(
   orientation: LayoutOrientation,
-  sources: readonly Pick<SceneSource, 'id' | 'transform'>[]
+  sources: readonly Pick<SceneSource, 'id' | 'transform'>[],
+  entryBox?: FreeformEntryBox
 ): Pick<LayoutSettings, 'arrangementMode' | 'sourceTransformOverrides'> {
   return {
     arrangementMode: 'freeform',
-    sourceTransformOverrides: freeformEntryOverrides(rememberedFreeform(), orientation, sources)
+    sourceTransformOverrides: freeformEntryOverrides(
+      rememberedFreeform(),
+      orientation,
+      sources,
+      entryBox
+    )
   }
 }
 

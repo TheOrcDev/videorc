@@ -1010,6 +1010,9 @@ pub struct AppState {
     /// Hide screen (plan 210 S7): the gate every screen capture publishes
     /// through. In memory only; a launch starts visible.
     pub screen_privacy: Arc<crate::screen_privacy::ScreenPrivacyGate>,
+    /// Videorc Camera (plan 214): the saved switch, the output and the weak
+    /// lease over the preview run.
+    pub virtual_camera: Arc<crate::virtual_camera_service::VirtualCameraService>,
     pub preview_surface: PreviewSurfaceSlot,
     /// Serializes preview-surface create/update/destroy transactions. The
     /// compositor lifecycle lock only protects worker ownership; it does not
@@ -1190,6 +1193,12 @@ pub struct AppState {
     /// The same card rasterized for the vertical simulcast leg's portrait
     /// canvas. Installed and cleared together with `highlight_overlay`.
     pub simulcast_highlight_overlay: crate::captions::CaptionOverlaySlot,
+    /// The chat box (plan 215 G): the last few chat messages, painted by the
+    /// renderer and pushed through `chat.overlay.set`, like the highlight.
+    pub chat_overlay: crate::captions::CaptionOverlaySlot,
+    /// The chat box rasterized for the vertical simulcast leg's portrait
+    /// canvas. Installed and cleared together with `chat_overlay`.
+    pub simulcast_chat_overlay: crate::captions::CaptionOverlaySlot,
     /// The Buddy avatar overlay (plan 164 Phase C): one raster per output
     /// target, pushed by the renderer through `buddy.overlay.set`.
     pub buddy_overlay: crate::captions::CaptionOverlaySlots,
@@ -1358,6 +1367,9 @@ impl AppState {
             preview_camera: Arc::new(tokio::sync::Mutex::new(initial_preview_camera_state())),
             preview_screen: Arc::new(tokio::sync::Mutex::new(initial_preview_screen_state())),
             screen_privacy: Arc::new(crate::screen_privacy::ScreenPrivacyGate::default()),
+            virtual_camera: Arc::new(
+                crate::virtual_camera_service::VirtualCameraService::default(),
+            ),
             preview_surface: Arc::new(tokio::sync::Mutex::new(initial_preview_surface_state())),
             preview_surface_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             windows_d3d11_media: Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new())),
@@ -1447,6 +1459,8 @@ impl AppState {
             caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             simulcast_highlight_overlay: crate::captions::new_caption_overlay_slot(),
+            chat_overlay: crate::captions::new_caption_overlay_slot(),
+            simulcast_chat_overlay: crate::captions::new_caption_overlay_slot(),
             buddy_overlay: crate::captions::new_caption_overlay_slots(),
             buddy_overlay_state: crate::buddy_overlay::new_buddy_overlay_state_slot(
                 cohost_settings.persona.id.clone(),

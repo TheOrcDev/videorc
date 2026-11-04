@@ -167,6 +167,14 @@ describe('chatStateLabel (plan 174 S2.3a, H-13)', () => {
     ).toBe('Needs Sign in')
   })
 
+  // Plan 215 A1: the relay waits on the Videorc account, not on X. The word
+  // names Videorc, and a parked connector is never "Failed" or "Waiting…".
+  it('says Needs Videorc sign-in when the relay waits on the Videorc account', () => {
+    expect(
+      chatStateLabel(chat({ state: 'waiting', read: 'needs-videorc-sign-in', write: 'ready' }))
+    ).toBe('Needs Videorc sign-in')
+  })
+
   it('pauses a parked connector that resumes on its own', () => {
     expect(chatStateLabel(chat({ state: 'waiting', retryAt: '2026-10-11T20:00:00Z' }))).toBe(
       'Paused'
@@ -181,6 +189,11 @@ describe('micSignalLabel (plan 174 S2.3a, C-38)', () => {
     expect(micSignalLabel('monitoring')).toBe('Receiving')
     expect(micSignalLabel('muted')).toBe('Muted')
     expect(micSignalLabel('idle')).toBe('No signal')
+  })
+
+  it('says Silent for a session microphone the bus reads as digital silence (issue 1064)', () => {
+    expect(micSignalLabel('silent')).toBe('Silent')
+    expect(micSignalLabel('silent')).not.toBe(micSignalLabel('live'))
   })
 })
 
@@ -221,7 +234,7 @@ describe('state labels', () => {
       ...PREVIEW_STATES.map(previewStateLabel),
       ...SOURCE_STATES.map(previewSourceStateLabel),
       ...CAPTIONS_STATES.map((state) => captionsStatusLabel({ state, desiredEnabled: true })),
-      ...(['live', 'monitoring', 'muted', 'idle'] as const).map(micSignalLabel)
+      ...(['live', 'monitoring', 'muted', 'silent', 'idle'] as const).map(micSignalLabel)
     ]
     for (const label of labels) {
       expect(isRawStatusValue(label)).toBe(false)

@@ -7,6 +7,7 @@ import {
   LINUX_ALPHA_UPDATE_FEED_NAME,
   parseLinuxUpdateFeed
 } from '../../lib/linux-alpha-release.mjs'
+import { BUILD_FLAGS_ASAR_PATH, readPackagedBuildFlags } from '../../lib/packaged-app-hardening.mjs'
 import { refuse } from './install-runner.mjs'
 import { RELEASE_FEED_URL, downloadVerified, hashingStream } from './install-sources.mjs'
 
@@ -337,6 +338,28 @@ async function isExecutableFile(path) {
   } catch (error) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false
     throw error
+  }
+}
+
+// The harness drives every run over CDP (VIDEORC_REMOTE_DEBUG_PORT), which a
+// packaged build opens only when it was built as a test build
+// (apps/desktop/src/main/packaged-test-hooks.ts). A plain local build installs
+// cleanly and then fails every run at "CDP endpoint not ready", so it is
+// refused here with the command that builds the right one.
+export const LINUX_TEST_BUILD_COMMAND = 'VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop:linux'
+
+export function assertLinuxTestBuild(appDir) {
+  let flags = null
+  try {
+    flags = readPackagedBuildFlags(join(appDir, LINUX_EXECUTABLE), 'linux')
+  } catch {
+    flags = null
+  }
+  if (flags?.packagedTestHooks !== true) {
+    refuse(
+      'not-a-test-build',
+      `This build is not a packaged test build (resources/app.asar ${BUILD_FLAGS_ASAR_PATH} says ${flags ? `packagedTestHooks: ${flags.packagedTestHooks}` : 'nothing'}), so it never opens the CDP port the harness drives. Rebuild with ${LINUX_TEST_BUILD_COMMAND}.`
+    )
   }
 }
 

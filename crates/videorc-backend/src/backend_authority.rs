@@ -231,6 +231,9 @@ fn admin_only_method(method: &str) -> bool {
                 | "account.sign_out"
                 | "account.windows_pilot_update_token"
                 | "compositor.scene.update"
+                // Plan 214 A4: only main knows the extension's activation or
+                // the Windows setup step; the renderer never forges it.
+                | "virtualCamera.platform.report"
                 | "preview.surface.take_native_host_commands"
                 | "sessions.delete.resolve"
                 | "sessions.delete.complete"
@@ -528,6 +531,24 @@ mod remote_role_tests {
                 "agent role must not reach {method}"
             );
         }
+    }
+
+    /// Plan 214 A4: the switch and the status are the Studio's and main's;
+    /// the platform report is main's alone. Remote and agent roles never
+    /// reach any of them.
+    #[test]
+    fn virtual_camera_methods_admit_renderer_and_admin_the_report_admin_only() {
+        for method in ["virtualCamera.status", "virtualCamera.set"] {
+            assert!(authorize_backend_method(BackendRole::Renderer, method, false).is_ok());
+            assert!(authorize_backend_method(BackendRole::Admin, method, false).is_ok());
+            assert!(authorize_backend_method(BackendRole::Remote, method, false).is_err());
+            assert!(authorize_backend_method(BackendRole::Agent, method, true).is_err());
+        }
+        let report = "virtualCamera.platform.report";
+        assert!(authorize_backend_method(BackendRole::Admin, report, false).is_ok());
+        assert!(authorize_backend_method(BackendRole::Renderer, report, false).is_err());
+        assert!(authorize_backend_method(BackendRole::Remote, report, false).is_err());
+        assert!(authorize_backend_method(BackendRole::Agent, report, true).is_err());
     }
 
     /// Plan 209 D19: the remote allowlist is byte-identical to `dc1309cb`.

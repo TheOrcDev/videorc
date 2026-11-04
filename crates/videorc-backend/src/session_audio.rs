@@ -1346,6 +1346,149 @@ pub struct OutputStallReport {
     pub lost_ms: u64,
 }
 
+/// Issue 1064: what the microphone silence watchdog reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophoneSilenceChange {
+    /// The selected, unmuted, live microphone captured nothing but digital
+    /// silence for the watchdog's hold.
+    Silent,
+    /// Sound came back after such a run.
+    Recovered,
+}
+
+/// Issue 1064: a microphone that delivers frames holding no sound at all (a
+/// Windows DirectShow device returning 1-LSB silence while the renderer's own
+/// analyser heard the room). The loss flow never sees it: frames arrive and
+/// the timeline places them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrophoneSilenceEvent {
+    pub change: MicrophoneSilenceChange,
+    pub generation: u64,
+    pub device_name: String,
+    /// Recording-window time of the change.
+    pub after_ms: u64,
+    /// How long the captured microphone had been silent: the hold when it is
+    /// reported, the whole run once sound returns.
+    pub silent_ms: u64,
+}
+
+/// Issue 1064: captured microphone samples under this peak are digital
+/// silence (-80 dBFS: three 16-bit steps). A real room, however quiet, sits
+/// far above it; a 1-LSB DirectShow device sits 10 dB under it.
+pub(crate) const MICROPHONE_SILENCE_FLOOR: f32 = 1.0e-4;
+/// How long the captured microphone stays under the floor before it is
+/// reported, and how long sound must stay above it before the report ends.
+pub(crate) const MICROPHONE_SILENCE_HOLD: Duration = Duration::from_secs(3);
+const MICROPHONE_SILENCE_RECOVERY_HOLD: Duration = Duration::from_millis(500);
+
+/// A silence verdict for one chunk of captured microphone PCM, with the length
+/// of the silent run it reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MicrophoneSilenceVerdict {
+    Silent { silent_ms: u64 },
+    Recovered { silent_ms: u64 },
+}
+
+impl MicrophoneSilenceVerdict {
+    fn change(self) -> MicrophoneSilenceChange {
+        match self {
+            Self::Silent { .. } => MicrophoneSilenceChange::Silent,
+            Self::Recovered { .. } => MicrophoneSilenceChange::Recovered,
+        }
+    }
+
+    fn silent_ms(self) -> u64 {
+        match self {
+            Self::Silent { silent_ms } | Self::Recovered { silent_ms } => silent_ms,
+        }
+    }
+}
+
+/// Issue 1064: the microphone silence watchdog, across chunks. It counts
+/// captured frames only (timeline fill is the loss flow's), and only while the
+/// chunk is eligible: a microphone selected, not muted by the user, its input
+/// live, the bus not draining. Ineligible chunks reset the counting without
+/// changing the report, so a mute never raises it and never ends it.
+#[derive(Debug, Default)]
+pub(crate) struct MicrophoneSilenceWatchdog {
+    /// Captured frames under the floor in the current run.
+    silent_frames: u64,
+    /// Captured frames above the floor since the run, while reported silent.
+    sounding_frames: u64,
+    silent: bool,
+}
+
+impl MicrophoneSilenceWatchdog {
+    pub(crate) fn is_silent(&self) -> bool {
+        self.silent
+    }
+
+    /// The current run of silence, in milliseconds.
+    pub(crate) fn silent_ms(&self) -> u64 {
+        self.silent_frames * 1_000 / u64::from(NATIVE_AUDIO_SAMPLE_RATE)
+    }
+
+    /// One chunk: `peak` is its loudest captured sample and `captured_frames`
+    /// how many frames the device really delivered.
+    pub(crate) fn observe(
+        &mut self,
+        peak: f32,
+        captured_frames: u64,
+        eligible: bool,
+    ) -> Option<MicrophoneSilenceVerdict> {
+        if !eligible || captured_frames == 0 {
+            self.silent_frames = 0;
+            self.sounding_frames = 0;
+            return None;
+        }
+        let hold_frames = |hold: Duration| {
+            (hold.as_secs_f64() * f64::from(NATIVE_AUDIO_SAMPLE_RATE)).round() as u64
+        };
+        if peak < MICROPHONE_SILENCE_FLOOR {
+            self.sounding_frames = 0;
+            self.silent_frames += captured_frames;
+            if !self.silent && self.silent_frames >= hold_frames(MICROPHONE_SILENCE_HOLD) {
+                self.silent = true;
+                return Some(MicrophoneSilenceVerdict::Silent {
+                    silent_ms: self.silent_ms(),
+                });
+            }
+            return None;
+        }
+        if !self.silent {
+            self.silent_frames = 0;
+            return None;
+        }
+        // A click in a silent run is not sound coming back: the run keeps its
+        // length until sound has held for the recovery hold.
+        self.sounding_frames += captured_frames;
+        if self.sounding_frames >= hold_frames(MICROPHONE_SILENCE_RECOVERY_HOLD) {
+            let silent_ms = self.silent_ms();
+            self.silent = false;
+            self.silent_frames = 0;
+            self.sounding_frames = 0;
+            return Some(MicrophoneSilenceVerdict::Recovered { silent_ms });
+        }
+        None
+    }
+}
+
+/// The loudest captured sample of a rendered chunk and how many of its frames
+/// the device delivered (the rest is timeline fill).
+fn captured_peak(raw: &RenderedPcm) -> (f32, u64) {
+    let mut peak = 0.0_f32;
+    let mut captured = 0_u64;
+    for (frame, samples) in raw.captured.iter().zip(raw.samples.chunks_exact(2)) {
+        if *frame {
+            captured += 1;
+            for sample in samples {
+                peak = peak.max(sample.abs());
+            }
+        }
+    }
+    (peak, captured)
+}
+
 #[derive(Debug)]
 pub struct AudioObservation {
     pub generation: u64,
@@ -1361,6 +1504,8 @@ pub struct AudioObservation {
     pub losses: Vec<SourceLoss>,
     pub recoveries: Vec<SourceRecovery>,
     pub output_stalls: Vec<OutputStallReport>,
+    /// Issue 1064: the silence watchdog's changes since the last observation.
+    pub silence_events: Vec<MicrophoneSilenceEvent>,
 }
 
 /// Test-only view of every frame the bus offers the caption tap.
@@ -1442,6 +1587,9 @@ pub struct BusLevels {
     /// The chunk as written: what the recording and the stream get.
     pub master: Option<crate::protocol::AudioLevelReading>,
     pub master_clipped_samples: u64,
+    /// Issue 1064: the silence watchdog's current report, so the meter's
+    /// status word and its level come from the same reading.
+    pub microphone_silent: bool,
 }
 
 impl BusLevels {
@@ -1464,6 +1612,10 @@ struct AudioShared {
     losses: VecDeque<SourceLoss>,
     recoveries: VecDeque<SourceRecovery>,
     output_stalls: VecDeque<OutputStallReport>,
+    /// Issue 1064: the silence watchdog's changes, drained by the sampler.
+    silence_events: VecDeque<MicrophoneSilenceEvent>,
+    /// Issue 1064: the watchdog's current report, read with the levels.
+    microphone_silent: bool,
     system: SystemShared,
     system_stats: Arc<AudioCaptureStats>,
     mix_clipped_samples: u64,
@@ -1476,6 +1628,7 @@ struct AudioShared {
     #[cfg(test)]
     after_ramp: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     #[cfg(test)]
+    #[allow(clippy::type_complexity)]
     cancellation_input: Option<(u64, fn(&mut AudioTimeline))>,
     #[cfg(test)]
     mix_observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
@@ -1783,6 +1936,7 @@ impl SessionAudio {
             losses: shared.losses.drain(..).collect(),
             recoveries: shared.recoveries.drain(..).collect(),
             output_stalls: shared.output_stalls.drain(..).collect(),
+            silence_events: shared.silence_events.drain(..).collect(),
         }
     }
     pub fn switch_handle(&self) -> AudioSwitchHandle {
@@ -1909,6 +2063,7 @@ impl AudioSwitchHandle {
                 .unwrap()
                 .boundary("levels-before-take", &shared);
         }
+        let microphone_silent = shared.microphone_silent;
         let levels = &mut shared.levels;
         let reading = BusLevels {
             microphone: levels.microphone.take(),
@@ -1916,6 +2071,7 @@ impl AudioSwitchHandle {
             sounds: levels.sounds.take(),
             master: levels.master.take(),
             master_clipped_samples: std::mem::take(&mut levels.master_clipped_samples),
+            microphone_silent,
         };
         #[cfg(test)]
         if let Some(observation) = &shared.mix_observation {
@@ -2243,6 +2399,8 @@ pub fn attach_prepared_with(
         losses: VecDeque::new(),
         recoveries: VecDeque::new(),
         output_stalls: VecDeque::new(),
+        silence_events: VecDeque::new(),
+        microphone_silent: false,
         system: SystemShared::default(),
         system_stats: Arc::new(AudioCaptureStats::default()),
         mix_clipped_samples: 0,
@@ -3085,7 +3243,7 @@ impl MixWindowTrace {
             "availableFrames": available, "inspectedFramesPerChannel": covered,
             "missingFramesPerChannel": (to - from).saturating_sub(covered),
             "complete": omitted == 0 && covered == to - from,
-            "trailingUnpairedSample": samples.len() % 2 != 0
+            "trailingUnpairedSample": !samples.len().is_multiple_of(2)
         })
     }
 
@@ -5201,6 +5359,8 @@ fn run_bus_owned(
     // Plan 189: the soundboard's voices. Idle, they render nothing and the
     // chunk takes the same microphone-only path.
     let mut sound_voices = SoundVoices::new();
+    // Issue 1064: digital silence from a live microphone, across chunks.
+    let mut silence_watchdog = MicrophoneSilenceWatchdog::default();
     let system_stats = shared
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -5803,6 +5963,48 @@ fn run_bus_owned(
             voice_fold = VoiceFold::default();
         }
         let microphone_fold = voice_fold.plan(&raw.samples, 2);
+        // Issue 1064: the captured chunk, before the gain and mute the user
+        // controls, feeds the silence watchdog. A ramp chunk, a draining bus,
+        // a muted or absent microphone and an input that is not live are
+        // ineligible: the mute is the user's, the loss and reopen flows own
+        // the rest.
+        {
+            let (peak, captured_frames) = captured_peak(&raw);
+            let eligible = producer.is_some()
+                && !ramp_in
+                && !ramp_old
+                && !draining.load(Ordering::Acquire)
+                && !settings.load().muted
+                && stats.input_state() == NativeAudioInputState::Live;
+            if let Some(verdict) = silence_watchdog.observe(peak, captured_frames, eligible) {
+                let after_ms =
+                    (stats.recording_window_elapsed_secs().unwrap_or_default() * 1_000.0) as u64;
+                let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
+                shared.microphone_silent = silence_watchdog.is_silent();
+                let event = MicrophoneSilenceEvent {
+                    change: verdict.change(),
+                    generation,
+                    device_name: shared.status.device_name.clone(),
+                    after_ms,
+                    silent_ms: verdict.silent_ms(),
+                };
+                match event.change {
+                    MicrophoneSilenceChange::Silent => tracing::warn!(
+                        after_ms = after_ms,
+                        "Microphone \"{}\" captured only digital silence for {} ms.",
+                        event.device_name,
+                        event.silent_ms
+                    ),
+                    MicrophoneSilenceChange::Recovered => tracing::info!(
+                        after_ms = after_ms,
+                        "Microphone \"{}\" has sound again after {} ms of silence.",
+                        event.device_name,
+                        event.silent_ms
+                    ),
+                }
+                shared.silence_events.push_back(event);
+            }
+        }
         let mixing = system_raw.is_some() || sounds_raw.is_some();
         let write_started = Instant::now();
         let mut deferred_health = Vec::new();
@@ -6376,6 +6578,116 @@ fn write_rendered_chunk(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        MICROPHONE_SILENCE_FLOOR, MICROPHONE_SILENCE_HOLD, MicrophoneSilenceVerdict,
+        MicrophoneSilenceWatchdog,
+    };
+
+    /// Feeds the watchdog `seconds` of eligible chunks at `peak`, returning
+    /// the verdicts it raised.
+    fn feed(
+        watchdog: &mut MicrophoneSilenceWatchdog,
+        peak: f32,
+        seconds: f64,
+        eligible: bool,
+    ) -> Vec<MicrophoneSilenceVerdict> {
+        let chunks = (seconds * f64::from(super::NATIVE_AUDIO_SAMPLE_RATE)
+            / super::CHUNK_FRAMES as f64)
+            .round() as usize;
+        (0..chunks)
+            .filter_map(|_| watchdog.observe(peak, super::CHUNK_FRAMES as u64, eligible))
+            .collect()
+    }
+
+    /// Issue 1064: a 1-LSB DirectShow microphone (-90 dBFS) is reported after
+    /// the hold, once, and the report ends once sound has held.
+    #[test]
+    fn silence_watchdog_reports_digital_silence_after_the_hold_and_recovers() {
+        let mut watchdog = MicrophoneSilenceWatchdog::default();
+        let lsb = 1.0 / 32_768.0;
+        let hold = MICROPHONE_SILENCE_HOLD.as_secs_f64();
+        assert!(feed(&mut watchdog, lsb, hold - 0.1, true).is_empty());
+        assert!(!watchdog.is_silent());
+        assert_eq!(
+            feed(&mut watchdog, lsb, 0.2, true),
+            vec![MicrophoneSilenceVerdict::Silent { silent_ms: 3_000 }]
+        );
+        assert!(watchdog.is_silent());
+        // Silence goes on: reported once, never again.
+        assert!(feed(&mut watchdog, lsb, 10.0, true).is_empty());
+        // A click is not sound coming back.
+        assert!(feed(&mut watchdog, 0.3, 0.1, true).is_empty());
+        assert!(feed(&mut watchdog, lsb, 1.0, true).is_empty());
+        assert!(watchdog.is_silent());
+        // Half a second of the room is.
+        let verdicts = feed(&mut watchdog, 0.01, 0.6, true);
+        assert_eq!(verdicts.len(), 1, "{verdicts:?}");
+        assert!(matches!(
+            verdicts[0],
+            MicrophoneSilenceVerdict::Recovered { silent_ms } if silent_ms >= 14_000
+        ));
+        assert!(!watchdog.is_silent());
+        // And it can be reported again after another hold.
+        assert_eq!(feed(&mut watchdog, 0.0, hold + 0.1, true).len(), 1);
+    }
+
+    /// A quiet room is not digital silence: its floor sits above -80 dBFS.
+    #[test]
+    fn silence_watchdog_ignores_a_quiet_room() {
+        let mut watchdog = MicrophoneSilenceWatchdog::default();
+        // -70 dBFS: a very quiet room, well under the meter's floor.
+        let quiet = 3.2e-4;
+        assert!(quiet > MICROPHONE_SILENCE_FLOOR);
+        assert!(feed(&mut watchdog, quiet, 30.0, true).is_empty());
+        assert!(!watchdog.is_silent());
+        // Alternating near-silence and room noise never accumulates a hold.
+        for _ in 0..20 {
+            assert!(feed(&mut watchdog, 0.0, 2.0, true).is_empty());
+            assert!(feed(&mut watchdog, quiet, 0.05, true).is_empty());
+        }
+        assert!(!watchdog.is_silent());
+    }
+
+    /// A mute, no microphone, a lost input or a draining bus are ineligible:
+    /// they neither raise the report nor end it.
+    #[test]
+    fn silence_watchdog_skips_ineligible_chunks_and_timeline_fill() {
+        let mut watchdog = MicrophoneSilenceWatchdog::default();
+        assert!(feed(&mut watchdog, 0.0, 60.0, false).is_empty());
+        assert!(!watchdog.is_silent());
+        // Timeline fill (no captured frames) counts for nothing either way.
+        for _ in 0..1_000 {
+            assert_eq!(watchdog.observe(0.0, 0, true), None);
+        }
+        assert!(!watchdog.is_silent());
+        // A mute in the middle of a run restarts the hold.
+        assert!(feed(&mut watchdog, 0.0, 2.0, true).is_empty());
+        assert!(feed(&mut watchdog, 0.0, 1.0, false).is_empty());
+        assert!(feed(&mut watchdog, 0.0, 2.0, true).is_empty());
+        assert_eq!(feed(&mut watchdog, 0.0, 1.1, true).len(), 1);
+        assert!(watchdog.is_silent());
+        // A mute while reported silent keeps the report: unmuting into the
+        // same silence raises nothing new, and the mute never "recovers" it.
+        assert!(feed(&mut watchdog, 0.0, 5.0, false).is_empty());
+        assert!(watchdog.is_silent());
+        assert!(feed(&mut watchdog, 0.0, 5.0, true).is_empty());
+        assert!(watchdog.is_silent());
+    }
+
+    #[test]
+    fn captured_peak_reads_captured_frames_only() {
+        let raw = super::RenderedPcm {
+            samples: vec![0.5, -0.5, 0.0, 0.0, 0.0, 0.25],
+            captured: vec![false, true, true],
+        };
+        assert_eq!(super::captured_peak(&raw), (0.25, 2));
+        let fill = super::RenderedPcm {
+            samples: vec![0.9, 0.9],
+            captured: vec![false],
+        };
+        assert_eq!(super::captured_peak(&fill), (0.0, 0));
+    }
+
     #[test]
     fn arriving_microphone_frames_rejected_by_timeline_are_not_callback_loss() {
         let now = Instant::now();
@@ -8491,10 +8803,10 @@ mod tests {
                 task_count,
                 spawn_owner,
                 move |phase| {
-                    if phase == OwnerPhase::BeforeOpened {
-                        if let Some(tx) = opened_tx.lock().unwrap().take() {
-                            let _ = tx.send(());
-                        }
+                    if phase == OwnerPhase::BeforeOpened
+                        && let Some(tx) = opened_tx.lock().unwrap().take()
+                    {
+                        let _ = tx.send(());
                     }
                 },
                 Some(ReadinessPolicy {
@@ -8588,10 +8900,10 @@ mod tests {
                 task_count,
                 spawn_owner,
                 move |phase| {
-                    if phase == OwnerPhase::BeforeOpened {
-                        if let Some(tx) = opened_tx.lock().unwrap().take() {
-                            let _ = tx.send(());
-                        }
+                    if phase == OwnerPhase::BeforeOpened
+                        && let Some(tx) = opened_tx.lock().unwrap().take()
+                    {
+                        let _ = tx.send(());
                     }
                 },
                 Some(ReadinessPolicy {
@@ -12448,7 +12760,7 @@ mod mix_tests {
             PeakLimiter::default(),
         );
         assert_eq!(write.microphone, mixed.microphone);
-        assert!(write.microphone.iter().any(|sample| *sample == 1.0));
+        assert!(write.microphone.contains(&1.0));
         assert!(
             write
                 .written

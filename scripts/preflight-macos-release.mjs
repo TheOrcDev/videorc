@@ -25,6 +25,9 @@ async function main() {
     macEntitlements: existsSync(
       join(repoRoot, 'apps', 'desktop', 'build-resources', 'entitlements.mac.plist')
     ),
+    macInheritEntitlements: existsSync(
+      join(repoRoot, 'apps', 'desktop', 'build-resources', 'entitlements.mac.inherit.plist')
+    ),
     releaseOutputDir: await canWriteDirectory(releaseDir)
   }
   const signing = {

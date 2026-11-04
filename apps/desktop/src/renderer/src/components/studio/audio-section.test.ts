@@ -267,6 +267,23 @@ describe('Audio section (plan 201 S2)', () => {
     expect(render({ monitorState: 'muted' })).toContain(
       'data-videorc-mic-monitor-state="muted">Muted</span>'
     )
+    // Issue 1064: the bus reads digital silence from the session microphone.
+    expect(render({ monitorState: 'silent' })).toContain(
+      'data-videorc-mic-monitor-state="silent">Silent</span>'
+    )
+  })
+
+  it('says the level is unavailable under a session meter with no backend reading (issue 1064)', () => {
+    const markup = render({
+      meter: { kind: 'value', peakDb: Number.NaN },
+      monitorState: 'idle',
+      sessionLevelUnavailable: true
+    })
+    expect(markup).toContain('data-videorc-mic-level-reason="session"')
+    expect(markup).toContain(
+      'Level unavailable. The meter shows only what your recording and stream hear.'
+    )
+    expect(render({ monitorState: 'idle' })).not.toContain('data-videorc-mic-level-reason')
   })
 })
 

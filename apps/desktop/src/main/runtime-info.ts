@@ -2,6 +2,7 @@ import { release } from 'node:os'
 
 import type {
   BackendCrashRecord,
+  FirstFrameDecisionRecord,
   RuntimeGpuDevice,
   RuntimeInfo,
   SystemPermissionPane
@@ -43,6 +44,8 @@ export interface RuntimeInfoInput {
   gpuFallback?: RuntimeInfo['gpuFallback']
   /** Persisted crash evidence, most recent first (see backend-crash-log.ts). */
   backendCrashes?: readonly BackendCrashRecord[]
+  /** The Preview watchdog's last decisions (see first-frame-decisions.ts). */
+  firstFrameDecisions?: readonly FirstFrameDecisionRecord[]
   windowGlass?: RuntimeInfo['windowGlass']
   env: Partial<
     Pick<
@@ -116,6 +119,7 @@ export function buildRuntimeInfo({
     retryAttempts: 0
   },
   backendCrashes = [],
+  firstFrameDecisions = [],
   windowGlass,
   env
 }: RuntimeInfoInput): RuntimeInfo {
@@ -132,6 +136,7 @@ export function buildRuntimeInfo({
     hardwareAccelerationDisabled,
     gpuFallback,
     backendCrashes: [...backendCrashes],
+    firstFrameDecisions: [...firstFrameDecisions],
     ...(windowGlass ? { windowGlass } : {}),
     isPackaged,
     firstRunSuppressed: env.VIDEORC_SMOKE_SKIP_FIRST_RUN === '1',

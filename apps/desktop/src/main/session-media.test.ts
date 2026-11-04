@@ -126,6 +126,9 @@ describe('mp4TopLevelBoxTypes', () => {
 describe('inspectSessionMediaFile', () => {
   let root: string
   let finalized: string
+  // Windows refuses file symlinks without Developer Mode or an elevated token
+  // (EPERM). Only the link case needs one; any other error still fails here.
+  let symlinkSkipReason: string | false = false
 
   beforeAll(() => {
     root = mkdtempSync(join(tmpdir(), 'videorc-session-media-'))
@@ -139,7 +142,12 @@ describe('inspectSessionMediaFile', () => {
     writeFileSync(join(root, 'clip.mov'), FINALIZED_MP4)
     writeFileSync(join(root, 'raw.ts'), FINALIZED_MP4)
     mkdirSync(join(root, 'folder.mp4'))
-    symlinkSync(finalized, join(root, 'link.mp4'))
+    try {
+      symlinkSync(finalized, join(root, 'link.mp4'))
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'EPERM') throw error
+      symlinkSkipReason = 'this host cannot create symlinks (EPERM)'
+    }
   })
 
   afterAll(() => {
@@ -167,16 +175,23 @@ describe('inspectSessionMediaFile', () => {
     expect(inspectSessionMediaFile(join(root, 'raw.ts'))).toEqual({ ok: false, error: 'not-mp4' })
   })
 
-  it('refuses missing files, directories, symlinks, traversal and relative paths', () => {
+  it('refuses missing files, directories, traversal and relative paths', () => {
     const notFound = { ok: false, error: 'not-found' }
     expect(inspectSessionMediaFile(join(root, 'gone.mp4'))).toEqual(notFound)
     expect(inspectSessionMediaFile(join(root, 'folder.mp4'))).toEqual(notFound)
-    expect(inspectSessionMediaFile(join(root, 'link.mp4'))).toEqual(notFound)
     expect(inspectSessionMediaFile(`${root}/folder.mp4/../Recording.mp4`)).toEqual(notFound)
     expect(inspectSessionMediaFile('Recording.mp4')).toEqual(notFound)
     expect(inspectSessionMediaFile('')).toEqual(notFound)
     expect(inspectSessionMediaFile(undefined)).toEqual(notFound)
     expect(inspectSessionMediaFile(42)).toEqual(notFound)
+  })
+
+  it('refuses a symlink to a finalized mp4', (ctx) => {
+    if (symlinkSkipReason) ctx.skip(symlinkSkipReason)
+    expect(inspectSessionMediaFile(join(root, 'link.mp4'))).toEqual({
+      ok: false,
+      error: 'not-found'
+    })
   })
 
   it('calls an unindexed, empty or unreadable mp4 not ready', () => {

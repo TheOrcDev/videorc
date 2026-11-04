@@ -21,6 +21,10 @@ interface StatusBadgeProps {
  * monochrome; the tone glows in the dot, or in the leading icon when there is
  * one. An error or an on-air session tints the whole chip instead: it has to
  * interrupt.
+ *
+ * The line box is 16 px, never `leading-none`: the value truncates, so it
+ * clips at its own line box, and Segoe UI's descenders (1.33 em from ascent to
+ * descent) fall below a 12 px one. "Receiving" lost its "g" on Windows.
  */
 function StatusBadge({
   label,
@@ -46,7 +50,7 @@ function StatusBadge({
   return (
     <span
       className={cn(
-        'inline-flex h-[22px] w-fit shrink-0 items-center gap-1.5 overflow-hidden rounded-full border px-2.5 text-xs leading-none font-medium whitespace-nowrap',
+        'inline-flex h-[22px] w-fit shrink-0 items-center gap-1.5 overflow-hidden rounded-full border px-2.5 text-xs leading-4 font-medium whitespace-nowrap',
         emphasis ? 'glass-chip-tinted' : 'glass-chip text-foreground',
         STATUS_TONE_CLASS[tone],
         className
