@@ -274,6 +274,39 @@ describe('AgentSurfacePublisher', () => {
     publisher.detach()
   })
 
+  it('never records an older in-flight publish as what the backend holds (issue #1068)', async () => {
+    const resolvers: Array<() => void> = []
+    const request = vi.fn(
+      () => new Promise<never>((resolve) => resolvers.push(() => resolve({ ok: true } as never)))
+    )
+    const publisher = new AgentSurfacePublisher(store())
+    publisher.attach({ request })
+    publisher.setEnabled(true)
+    publisher.markConnected()
+    publisher.sync(input())
+    await vi.advanceTimersByTimeAsync(200)
+    expect(request).toHaveBeenCalledTimes(1)
+    // A change while the first publish is in flight sends a second one.
+    publisher.sync(input({ microphoneMuted: true }))
+    await vi.advanceTimersByTimeAsync(200)
+    expect(request).toHaveBeenCalledTimes(2)
+    // The older publish resolves after the newer was sent: the backend
+    // keeps the newer, so flipping back to the older state must publish.
+    resolvers[0]?.()
+    await vi.advanceTimersByTimeAsync(0)
+    publisher.sync(input())
+    resolvers[1]?.()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(request).toHaveBeenCalledTimes(3)
+    // The newest resolve records its body: the same state is deduped.
+    resolvers[2]?.()
+    await vi.advanceTimersByTimeAsync(0)
+    publisher.sync(input())
+    await vi.advanceTimersByTimeAsync(200)
+    expect(request).toHaveBeenCalledTimes(3)
+    publisher.detach()
+  })
+
   it('also publishes while Buddy may use the tools, Agents off (plan 209 S19)', async () => {
     const request = vi.fn(async () => ({ ok: true }) as never)
     const publisher = new AgentSurfacePublisher(store())

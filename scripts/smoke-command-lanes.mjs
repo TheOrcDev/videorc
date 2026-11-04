@@ -96,7 +96,12 @@ try {
       sessionId: 'command-lane-smoke',
       text: 'command lane smoke'
     }),
-    probe(rpc, 'Stop', 'session.stop', {})
+    probe(rpc, 'Stop', 'session.stop', {}),
+    // Issue #1068 part 5: the Phone remote's projection has its own lane.
+    probe(rpc, 'SurfacePublish', 'remote.surface.publish', {
+      state: { sessionState: 'idle', sessionActive: false },
+      describe: { windows: [] }
+    })
   ])
 
   for (const result of probes) {
@@ -109,6 +114,10 @@ try {
   assert.ok(
     diagnostics?.websocketTransport?.commandLanes?.accountMaintenance,
     'diagnostics.stats did not expose AccountMaintenance lane telemetry'
+  )
+  assert.ok(
+    diagnostics?.websocketTransport?.commandLanes?.surfacePublish,
+    'diagnostics.stats did not expose SurfacePublish lane telemetry'
   )
   const chat = probes.find((result) => result.label === 'DurableChat')?.response
   assert.ok(
@@ -127,7 +136,13 @@ try {
       ].includes(scene?.error?.code),
     `scene change returned an unexpected domain outcome: ${JSON.stringify(scene)}`
   )
-  for (const label of ['Observation', 'LiveControl/screens', 'LiveControl/captions', 'Stop']) {
+  for (const label of [
+    'Observation',
+    'LiveControl/screens',
+    'LiveControl/captions',
+    'Stop',
+    'SurfacePublish'
+  ]) {
     const outcome = probes.find((result) => result.label === label)?.response
     assert.equal(outcome?.ok, true, `${label} should succeed: ${JSON.stringify(outcome)}`)
   }
@@ -164,7 +179,7 @@ try {
 
   console.log(
     'Command-lane smoke PASS — one real WebSocket held AccountMaintenance while Observation, ' +
-      'screens/captions LiveControl, DurableChat, and Stop all replied before explicit release. ' +
+      'screens/captions LiveControl, DurableChat, Stop, and SurfacePublish all replied before explicit release. ' +
       probes.map(({ label, elapsedMs }) => `${label}=${elapsedMs}ms`).join(', ')
   )
 } finally {

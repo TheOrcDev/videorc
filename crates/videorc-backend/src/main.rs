@@ -4850,6 +4850,13 @@ const WEBSOCKET_MUTATION_EXECUTOR_THREADS: usize = 16;
 const WEBSOCKET_DURABLE_CHAT_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_STOP_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_ORDERED_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+// Issue #1068 part 5: the renderer's surface projections for the Phone
+// remote and the Agents bridge are idempotent and latest-wins. On the
+// ordered lane they expired or were rejected behind a 2–13 s session.start
+// or preview.camera.start, so the remotes went stale exactly when recording
+// started. Their own lane is bounded like the others; its worker collapses
+// a backlog to the newest publish per method.
+const WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const COMMAND_LANE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.accountMaintenance.block";
 const LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.liveControl.block";
 const COMMAND_LANE_SMOKE_STATUS_METHOD: &str = "test.commandLanes.accountMaintenance.status";
@@ -6033,6 +6040,8 @@ enum WebSocketIsolatedCommandLaneKind {
     DurableChat,
     LiveControl,
     Stop,
+    /// The renderer's latest-wins projections for the remotes (issue #1068).
+    SurfacePublish,
 }
 
 fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedCommandLaneKind> {
@@ -6079,6 +6088,14 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "screen.show" => Some(WebSocketIsolatedCommandLaneKind::LiveControl),
         "session.stop" | COMMAND_LANE_SMOKE_RELEASE_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::Stop)
+        }
+        // Issue #1068 part 5: the renderer's projections for the Phone remote
+        // and the Agents bridge. Each stores the renderer's own snapshot and
+        // emits it; neither reads or changes what a stateful command owns,
+        // so neither waits behind one. A newer publish supersedes an older
+        // one that is still queued.
+        "remote.surface.publish" | "agent.surface.publish" => {
+            Some(WebSocketIsolatedCommandLaneKind::SurfacePublish)
         }
         _ => None,
     }
@@ -6179,6 +6196,9 @@ struct WebSocketQueuedLaneCommand {
     queue_ticket: WebSocketQueueTicket,
     dispatch_fence: Option<WebSocketCommandDispatchFence>,
     execution: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    /// Latest-wins commands name their key (the method); a queued command
+    /// with a later same-key command behind it is superseded, never applied.
+    coalesce_key: Option<String>,
     _admission: WebSocketLaneAdmissionGuard,
 }
 
@@ -6220,6 +6240,9 @@ fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAccepted
                 WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE
             }
             Some(WebSocketIsolatedCommandLaneKind::Stop) => WEBSOCKET_STOP_MAX_QUEUE_AGE,
+            Some(WebSocketIsolatedCommandLaneKind::SurfacePublish) => {
+                WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE
+            }
             // Observation is classified above because it is a read-only
             // property rather than a mutation-lane classifier result.
             Some(WebSocketIsolatedCommandLaneKind::Observation) => {
@@ -6295,6 +6318,7 @@ struct WebSocketIsolatedCommandLanes {
     durable_chat: WebSocketIsolatedCommandLane,
     live_control: WebSocketIsolatedCommandLane,
     stop: WebSocketIsolatedCommandLane,
+    surface_publish: WebSocketIsolatedCommandLane,
 }
 
 struct WebSocketIsolatedCommandLaneReceivers {
@@ -6304,6 +6328,7 @@ struct WebSocketIsolatedCommandLaneReceivers {
     durable_chat: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     live_control: mpsc::Receiver<WebSocketQueuedLaneCommand>,
     stop: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    surface_publish: mpsc::Receiver<WebSocketQueuedLaneCommand>,
 }
 
 impl WebSocketIsolatedCommandLanes {
@@ -6348,6 +6373,12 @@ impl WebSocketIsolatedCommandLanes {
             WEBSOCKET_STOP_MAX_QUEUE_AGE,
             transport.register_command_lane("stop"),
         );
+        let (surface_publish, surface_publish_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::SurfacePublish,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE,
+            transport.register_command_lane("surfacePublish"),
+        );
         (
             Self {
                 observation,
@@ -6356,6 +6387,7 @@ impl WebSocketIsolatedCommandLanes {
                 durable_chat,
                 live_control,
                 stop,
+                surface_publish,
             },
             WebSocketIsolatedCommandLaneReceivers {
                 observation: observation_rx,
@@ -6364,6 +6396,7 @@ impl WebSocketIsolatedCommandLanes {
                 durable_chat: durable_chat_rx,
                 live_control: live_control_rx,
                 stop: stop_rx,
+                surface_publish: surface_publish_rx,
             },
         )
     }
@@ -6376,6 +6409,7 @@ impl WebSocketIsolatedCommandLanes {
             WebSocketIsolatedCommandLaneKind::DurableChat => self.durable_chat.clone(),
             WebSocketIsolatedCommandLaneKind::LiveControl => self.live_control.clone(),
             WebSocketIsolatedCommandLaneKind::Stop => self.stop.clone(),
+            WebSocketIsolatedCommandLaneKind::SurfacePublish => self.surface_publish.clone(),
         }
     }
 }
@@ -6402,6 +6436,7 @@ impl WebSocketIsolatedCommandLaneKind {
             Self::DurableChat => "durableChat",
             Self::LiveControl => "liveControl",
             Self::Stop => "stop",
+            Self::SurfacePublish => "surfacePublish",
         }
     }
 }
@@ -6831,6 +6866,8 @@ fn try_enqueue_websocket_lane_command(
     };
     let queue_ticket = lane.metrics.record_enqueue();
     let dispatch_deadline = dispatch_deadline.min(tokio::time::Instant::now() + lane.max_queue_age);
+    let coalesce_key = (lane.kind == WebSocketIsolatedCommandLaneKind::SurfacePublish)
+        .then(|| websocket_command_method(text.as_str()));
     let queued = WebSocketQueuedLaneCommand {
         command_id: command_id.clone(),
         text,
@@ -6838,6 +6875,7 @@ fn try_enqueue_websocket_lane_command(
         queue_ticket,
         dispatch_fence,
         execution: lane.execution.clone(),
+        coalesce_key,
         _admission: WebSocketLaneAdmissionGuard {
             _capacity_permit: capacity_permit,
             _execution_permit: None,
@@ -6963,6 +7001,44 @@ async fn run_websocket_command_lane_worker(
                     "command-expired-before-dispatch",
                     "The command expired in its lane before dispatch and was not applied.",
                 );
+                drop(_admission);
+                let _ = queue_websocket_response(
+                    &context.outgoing,
+                    &context.reliable_metrics,
+                    &context.slow_pressure,
+                    response,
+                )
+                .await;
+                continue;
+            }
+
+            // A latest-wins command with a newer same-key command queued behind
+            // it is never applied: the newer one is next in line and carries the
+            // projection that replaced this one. It is answered ok, the same
+            // answer the newer publish gets, because the publisher only asks
+            // that its latest snapshot reach the backend.
+            let superseded = front.coalesce_key.as_deref().is_some_and(|key| {
+                pending
+                    .iter()
+                    .skip(1)
+                    .any(|later| later.coalesce_key.as_deref() == Some(key))
+            });
+            if superseded {
+                let superseded = pending.pop_front().expect("lane front exists");
+                let WebSocketQueuedLaneCommand {
+                    command_id,
+                    text,
+                    queue_ticket,
+                    _admission,
+                    ..
+                } = superseded;
+                metrics.record_dispatch(queue_ticket);
+                tracing::debug!(
+                    "[command-lane] {} superseded by a newer publish queued in the {} lane",
+                    websocket_command_method(&text),
+                    websocket_lane_label(&text)
+                );
+                let response = ServerResponse::ok(command_id, serde_json::json!({ "ok": true }));
                 drop(_admission);
                 let _ = queue_websocket_response(
                     &context.outgoing,
@@ -7395,6 +7471,14 @@ async fn run_websocket_command_dispatcher(
         lane_receivers.stop,
         1,
         lanes.stop.metrics.clone(),
+        &lane_worker_context,
+    );
+    // One publish at a time keeps them in arrival order, so the newest wins.
+    spawn_websocket_command_lane_worker(
+        &mut lane_workers,
+        lane_receivers.surface_publish,
+        1,
+        lanes.surface_publish.metrics.clone(),
         &lane_worker_context,
     );
 
@@ -17974,6 +18058,239 @@ mod tests {
             Some(WebSocketIsolatedCommandLaneKind::Stop),
             "the debug release control must remain reachable through a separate bounded lane"
         );
+    }
+
+    #[test]
+    fn surface_publishes_ride_their_own_lane() {
+        // Issue #1068 part 5: both projections are idempotent, latest-wins and
+        // read nothing a stateful command owns, so neither belongs on the
+        // ordered lane.
+        for method in ["remote.surface.publish", "agent.surface.publish"] {
+            let text = json!({ "id": "publish", "method": method, "params": {} }).to_string();
+            assert_eq!(
+                websocket_isolated_command_lane(text.as_str()),
+                Some(WebSocketIsolatedCommandLaneKind::SurfacePublish),
+                "{method} must never queue on the ordered lane"
+            );
+            assert!(
+                !websocket_command_is_read_only(text.as_str()),
+                "{method} stores a projection: it is a mutation, not an observation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_surface_publishes_do_not_wait_for_a_running_session_start() {
+        // Issue #1068: a 2–13 s session.start (or preview.camera.start) held the
+        // ordered lane; the owner's profile log had 44 expired and 15 rejected
+        // remote.surface.publish commands behind it, so the Phone remote went
+        // stale exactly when recording started.
+        let start_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_start = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let dispatched = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let start_entered = start_entered.clone();
+            let release_start = release_start.clone();
+            let dispatched = dispatched.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let start_entered = start_entered.clone();
+                let release_start = release_start.clone();
+                let dispatched = dispatched.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.method == "session.start" {
+                        start_entered.add_permits(1);
+                        release_start.acquire().await.unwrap().forget();
+                    }
+                    dispatched.lock().await.push(command.method);
+                    ServerResponse::ok(command.id, json!({ "ok": true }))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let command_metrics = connection.incoming_command_queue;
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport.clone());
+        let state = test_state();
+        let dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            command_rx,
+            command_metrics.clone(),
+            outgoing_tx,
+            reliable_metrics,
+            slow_pressure,
+            handler,
+        ));
+
+        send_test_websocket_command(
+            &state,
+            &command_tx,
+            &command_metrics,
+            json!({ "id": "start", "method": "session.start", "params": {} }).to_string(),
+        )
+        .await;
+        timeout(Duration::from_secs(5), start_entered.acquire())
+            .await
+            .expect("session.start should enter and hold the ordered lane")
+            .unwrap()
+            .forget();
+
+        // sessions.rename is the control: an ordinary ordered mutation that
+        // must still barrier behind the running session.start.
+        for (id, method) in [
+            ("remote", "remote.surface.publish"),
+            ("agent", "agent.surface.publish"),
+            ("rename", "sessions.rename"),
+        ] {
+            send_test_websocket_command(
+                &state,
+                &command_tx,
+                &command_metrics,
+                json!({ "id": id, "method": method, "params": {} }).to_string(),
+            )
+            .await;
+        }
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if dispatched.lock().await.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both surface publishes must dispatch while session.start holds the ordered lane");
+        let mut observed = dispatched.lock().await.clone();
+        observed.sort();
+        assert_eq!(
+            observed,
+            ["agent.surface.publish", "remote.surface.publish"]
+        );
+
+        release_start.add_permits(1);
+        drop(command_tx);
+        dispatcher.await.unwrap();
+        let observed = dispatched.lock().await.clone();
+        assert_eq!(
+            &observed[2..],
+            ["session.start", "sessions.rename"],
+            "the ordered control must run only after session.start released the lane: {observed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn surface_publish_lane_collapses_a_backlog_to_the_newest_publish() {
+        // Issue #1068 part 5: while one publish runs, every older queued publish
+        // of the same method is superseded by the newest; each is still
+        // answered, and a different method keeps its own newest.
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let applied = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler: WebSocketCommandHandler = {
+            let entered = entered.clone();
+            let release = release.clone();
+            let applied = applied.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let entered = entered.clone();
+                let release = release.clone();
+                let applied = applied.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.id == "remote-1" {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    applied.lock().await.push(command.id.clone());
+                    ServerResponse::ok(command.id, json!({ "ok": true }))
+                })
+            })
+        };
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (lane, lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::SurfacePublish,
+            WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY,
+            WEBSOCKET_SURFACE_PUBLISH_MAX_QUEUE_AGE,
+            transport.register_command_lane("surfacePublish"),
+        );
+        let connection = transport.register_connection();
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let mut workers = tokio::task::JoinSet::new();
+        spawn_websocket_command_lane_worker(
+            &mut workers,
+            lane_rx,
+            1,
+            lane.metrics.clone(),
+            &WebSocketCommandLaneWorkerContext {
+                state: state.clone(),
+                outgoing: outgoing_tx,
+                reliable_metrics: connection.reliable_response_queue,
+                slow_pressure: WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                command_handler: handler,
+            },
+        );
+        let enqueue = |id: &str, method: &str| {
+            try_enqueue_websocket_lane_command(
+                &lane,
+                json!({ "id": id, "method": method, "params": { "state": { "seq": id } } })
+                    .to_string(),
+                tokio::time::Instant::now() + Duration::from_secs(5),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        };
+
+        enqueue("remote-1", "remote.surface.publish");
+        timeout(Duration::from_secs(5), entered.acquire())
+            .await
+            .expect("the first publish should dispatch")
+            .unwrap()
+            .forget();
+        enqueue("remote-2", "remote.surface.publish");
+        enqueue("remote-3", "remote.surface.publish");
+        enqueue("remote-4", "remote.surface.publish");
+        enqueue("agent-1", "agent.surface.publish");
+        release.add_permits(1);
+
+        let mut answered = Vec::new();
+        while answered.len() < 5 {
+            let message = timeout(Duration::from_secs(5), outgoing_rx.recv())
+                .await
+                .expect("every publish is answered")
+                .expect("the response queue stays open");
+            let Message::Text(text) = message else {
+                panic!("unexpected response frame");
+            };
+            let response: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["ok"], json!(true), "{text}");
+            assert_eq!(response["payload"], json!({ "ok": true }), "{text}");
+            answered.push(response["id"].as_str().unwrap().to_string());
+        }
+        answered.sort();
+        assert_eq!(
+            answered,
+            ["agent-1", "remote-1", "remote-2", "remote-3", "remote-4"]
+        );
+        assert_eq!(
+            applied.lock().await.clone(),
+            ["remote-1", "remote-4", "agent-1"],
+            "only the running publish, the newest of its method, and the other method's newest apply"
+        );
+
+        drop(lane);
+        timeout(Duration::from_secs(5), async {
+            while workers.join_next().await.is_some() {}
+        })
+        .await
+        .expect("the surface publish lane worker should stop after its sender closes");
     }
 
     #[tokio::test]
