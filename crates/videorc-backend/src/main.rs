@@ -507,7 +507,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
         let _ = objc2_core_graphics::CGMainDisplayID();
     }
     spawn_orphan_watchdog_thread();
-    secrets::init_native_secret_store();
+    secrets::init_secret_store();
     diagnostics::start_runtime_resource_sampler();
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;

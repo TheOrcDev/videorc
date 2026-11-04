@@ -653,24 +653,61 @@ backend is intentionally not the default in this build because unsigned/dev
 rebuilds repeatedly prompt for the login password and make local validation
 unstable.
 
+On Windows the default is `dpapi` (#1078): the same JSON payload, at the same
+path, wrapped with `CryptProtectData` in user scope (no prompt, no UI). The
+signed-in Windows account is the boundary; the per-user `%APPDATA%` ACL alone
+left the account session, entitlement token, Phone remote device keys and the
+agents registry token readable as plain text.
+
 Default location:
 
 - Development and packaged macOS: `videorc-secrets.json` beside the app's SQLite
   database in the per-user app-data directory.
 - Unix permissions: the file is written with mode `0600`.
-- Windows/self-hosting: the same JSON model is used; the file relies on the
-  per-user app-data ACL.
+- Windows: `%APPDATA%\Videorc\videorc-secrets.json`, DPAPI-protected. The file
+  starts with the line `videorc-secrets:dpapi:1`, followed by the blob.
+
+Windows migration and recovery:
+
+- A plaintext `videorc-secrets.json` from an older build is protected in place
+  the first time the backend reads it (one atomic replace, so the plaintext
+  copy never coexists with the protected one).
+- A file the signed-in account cannot decrypt (copied from another user or
+  machine, or damaged) is never deleted or overwritten. Every secret access
+  fails with the file's path in the error until the file is removed by hand
+  (quit Videorc, delete it, sign in and re-pair) or opened by the account that
+  wrote it.
+- Downgrading to a build without `dpapi` behaves the same way: the older build
+  reports the file as "not valid JSON" on every access and writes nothing, so
+  the protected store survives a round trip through an older version.
+- Smokes and self-hosting that read the file back can set
+  `VIDEORC_SECRET_STORE=json-file` explicitly; a plain JSON file handed to a
+  `dpapi` backend (as every smoke does today) is migrated on first read.
+
+Startup maintenance, every platform with a file store:
+
+- A `videorc-secrets.json.tmp` left by a backend that died between staging the
+  new file and renaming it over the store is removed once the store itself has
+  loaded. A store that fails to load keeps its `.tmp`: after a crash it may be
+  the only readable copy.
+- A one-time purge drops the Kick event-subscription entries that unit tests
+  before 2026-11-01 (`802acbe1`) wrote into a developer's real store (the
+  `kick-flow`, `kick-flap`, `kick-relay-down`, … fixture account ids). It
+  records itself under `maintenance:test-fixture-purge` and matches whole refs
+  only; real Kick account ids are numeric. The same pre-fix runs also replaced
+  `remote-control.lan` and `agents.registry` with fixtures: if Phone remote or
+  an agent pairing looks wrong on a developer machine, re-pair it.
 
 Useful overrides:
 
 ```sh
-VIDEORC_SECRET_STORE=json-file
+VIDEORC_SECRET_STORE=json-file   # or dpapi (Windows builds only)
 VIDEORC_SECRETS_PATH=/path/to/videorc-secrets.json
 ```
 
 `VIDEORC_SECRET_STORE=keychain` is rejected in this build instead of silently
-falling back. Revisit Keychain only after a signed identity can prove stable
-permissions without repeated prompts.
+falling back, and so is `dpapi` on a build without it. Revisit Keychain only
+after a signed identity can prove stable permissions without repeated prompts.
 
 To delete local credentials, disconnect provider accounts in the Streaming tab
 and clear saved manual stream keys. For a full local reset, quit Videorc and
