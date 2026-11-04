@@ -4706,10 +4706,24 @@ async fn start_session_with_timeline(
     drop_noise_reduction_without_session_audio(&state, &session_id, &mut params, has_session_audio);
     // The bus reads the request through its settings from its first chunk:
     // the model must be parsed before the bus is attached below.
+    // A failed warm-up starts the session without it, like a bypassing route.
     if params.audio.microphone_noise_suppression
         == crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+        && let Err(error) = prewarm_noise_reduction().await
     {
-        prewarm_noise_reduction().await?;
+        state.emit_log(
+            "warn",
+            format!("Noise reduction stays Off for this session: {error:#}"),
+        );
+        params.audio.microphone_noise_suppression =
+            crate::protocol::MicrophoneNoiseSuppression::Off;
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Warn,
+            MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE,
+            MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_MESSAGE,
+        );
     }
     let audio_tracks = capture_audio_tracks(&capture);
     let active_screen = state.database.active_stream_screen()?;

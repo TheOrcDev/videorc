@@ -6713,8 +6713,13 @@ impl MicrophoneDenoiseTimeline {
             // At full wet the dry term is zero by construction, not by
             // multiplication: a non-finite raw sample times zero is NaN, and
             // nothing non-finite may reach a writer, tap, meter or limiter.
+            // Mid-ramp a non-finite dry sample counts as silence for the
+            // same reason.
             let dry = if self.wet_mix < 1.0 {
-                fold.fold(dry[0], dry[1], index, CHUNK_FRAMES) * dry_gain * (1.0 - self.wet_mix)
+                let dry = fold.fold(dry[0], dry[1], index, CHUNK_FRAMES)
+                    * dry_gain
+                    * (1.0 - self.wet_mix);
+                if dry.is_finite() { dry } else { 0.0 }
             } else {
                 0.0
             };
@@ -13918,6 +13923,33 @@ mod rnnoise_bus_tests {
             .unwrap();
         assert!(selected.samples.iter().all(|s| *s == 0.0));
         assert!(selected.captured.iter().all(|c| !c));
+    }
+
+    /// Mid-ramp the dry term still counts, but a non-finite dry sample is
+    /// silence there too.
+    #[test]
+    fn rnnoise_ramping_select_treats_a_non_finite_dry_sample_as_silence() {
+        let mut stage = MicrophoneDenoiseTimeline::new();
+        let mut samples = vec![0.25; 960];
+        samples[0] = f32::NAN;
+        samples[1] = f32::NAN;
+        samples[200] = f32::INFINITY;
+        let raw = RenderedPcm {
+            samples,
+            captured: vec![true; 480],
+        };
+        let wet = vec![0.0; 960];
+        let captured = vec![false; 480];
+        let fold = FoldPlan::one_shot(&[0.25; 960], 2);
+        let selected = stage
+            .select(&raw, &wet, &captured, controls(0.0), fold)
+            .unwrap();
+        assert!(selected.samples.iter().all(|s| s.is_finite()));
+        assert_eq!(selected.samples[0], 0.0, "the NaN frame is silence");
+        assert!(
+            selected.samples[400] > 0.0,
+            "the ramp still carries the clean dry signal"
+        );
     }
 
     #[test]
