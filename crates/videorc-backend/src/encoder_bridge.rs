@@ -6381,6 +6381,36 @@ impl<W: StdWrite> StdWrite for RawVideoWriteProgressSink<W> {
     }
 }
 
+/// How long one raw frame may wait on FFmpeg before its output fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawVideoFifoWriteBudget {
+    /// No byte accepted for this long ends the output.
+    stall_tolerance: Duration,
+    /// Bounds the whole frame, even while bytes keep trickling in.
+    hard_timeout: Duration,
+}
+
+/// A raw stream frame waits out a starved FFmpeg like every other stream write
+/// (plan 087): only `STREAM_OUTPUT_WEDGED_TIMEOUT` without progress fails the
+/// stream. The two-second raw budget cut frames mid-plane whenever FFmpeg fell
+/// below realtime and paused its reads for 4-6 s (ogre live lab, 2026-11-03);
+/// the short packet ended the stream leg. Recording and shared raw output keep
+/// their platform contract.
+fn raw_video_fifo_write_budget(role: EncoderBridgeOutputRole) -> RawVideoFifoWriteBudget {
+    match role {
+        EncoderBridgeOutputRole::Stream => RawVideoFifoWriteBudget {
+            stall_tolerance: STREAM_OUTPUT_WEDGED_TIMEOUT.max(RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE),
+            hard_timeout: STREAM_OUTPUT_WEDGED_TIMEOUT.max(RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT),
+        },
+        EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared => {
+            RawVideoFifoWriteBudget {
+                stall_tolerance: RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                hard_timeout: RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+            }
+        }
+    }
+}
+
 fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
     sink: W,
     mut receive: F,
@@ -6397,14 +6427,15 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
         inner: sink,
         epoch: write_progress_epoch,
     };
+    let budget = raw_video_fifo_write_budget(role);
     while let Some(frame) = receive() {
         let write_started_at = Instant::now();
         // The deadline anchors at WRITE START, not submit time: an admitted
         // frame that waited out an encoder pause is still valid recording
         // content — a recording tolerates late frames, never dropped ones
-        // (issue #149). Progress is judged by the platform stall tolerance;
+        // (issue #149). Progress is judged by the role's stall tolerance;
         // the hard timeout bounds the whole frame.
-        let deadline = write_started_at + RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE;
+        let deadline = write_started_at + budget.stall_tolerance;
         // Once any raw frame bytes reach FFmpeg, stopping mid-frame would
         // misalign every following YUV plane and can corrupt the final file.
         // Finish the in-flight frame; closing the queue prevents any new work
@@ -6414,8 +6445,8 @@ fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
             frame.bytes(),
             &stop,
             deadline,
-            RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
-            RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+            budget.stall_tolerance,
+            budget.hard_timeout,
             false,
         ) {
             Ok(()) => {
@@ -8902,6 +8933,8 @@ fn frame_count(duration_ms: u64, fps: u32) -> u64 {
 mod tests {
     use super::*;
     use crate::diagnostics::idle_diagnostics;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn store_recording_artifact_diagnostics(
         stats: &mut DiagnosticStats,
@@ -11952,6 +11985,200 @@ mod tests {
         assert_eq!(
             read_encoder_bridge_terminal_failure(&terminal_failure).as_deref(),
             Some(message.as_str())
+        );
+    }
+
+    #[test]
+    fn raw_stream_writer_waits_out_a_starved_ffmpeg_like_every_stream_write() {
+        // Plan 087: a stream fails only after the wedged timeout without
+        // progress. Recording and shared raw output keep the platform budget.
+        let stream = raw_video_fifo_write_budget(EncoderBridgeOutputRole::Stream);
+        assert_eq!(stream.stall_tolerance, STREAM_OUTPUT_WEDGED_TIMEOUT);
+        assert!(stream.hard_timeout >= stream.stall_tolerance);
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            assert_eq!(
+                raw_video_fifo_write_budget(role),
+                RawVideoFifoWriteBudget {
+                    stall_tolerance: RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+                    hard_timeout: RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
+                }
+            );
+        }
+    }
+
+    /// FFmpeg below realtime (ogre live lab, 2026-11-03): it reads part of a
+    /// frame, then nothing until `resume_at`, then drains again.
+    struct StarvedMidFrameSink {
+        clock: Rc<Cell<Instant>>,
+        written: usize,
+        stall_after: usize,
+        resume_at: Instant,
+    }
+
+    impl StdWrite for StarvedMidFrameSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.written >= self.stall_after && self.clock.get() < self.resume_at {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            let written = bytes.len().min(64 * 1024);
+            self.written += written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Virtual time that the sink reads too.
+    struct SharedVirtualFifoWriteTiming(Rc<Cell<Instant>>);
+
+    impl FifoWriteTiming for SharedVirtualFifoWriteTiming {
+        fn now(&self) -> Instant {
+            self.0.get()
+        }
+
+        fn wait(&mut self, action: FifoWriteWait) {
+            self.0.set(
+                self.0.get()
+                    + match action {
+                        FifoWriteWait::Yield => Duration::from_micros(1),
+                        FifoWriteWait::Sleep(duration) => duration,
+                    },
+            );
+        }
+    }
+
+    /// Writes one 1080p frame the way the raw writer loop does, through a
+    /// reader that pauses for `stall` a third of the way in. Returns the
+    /// result, the bytes FFmpeg got and the frame size.
+    fn write_full_hd_frame_through_a_starved_reader(
+        budget: RawVideoFifoWriteBudget,
+        stall: Duration,
+    ) -> (io::Result<()>, usize, usize) {
+        let began = Instant::now();
+        let clock = Rc::new(Cell::new(began));
+        let bytes = vec![7; raw_yuv420p_len(1920, 1080).expect("1080p frame size")];
+        let mut sink = StarvedMidFrameSink {
+            clock: clock.clone(),
+            written: 0,
+            stall_after: bytes.len() / 3,
+            resume_at: began + stall,
+        };
+        let result = write_all_until_with_timing(
+            &mut sink,
+            &bytes,
+            &AtomicBool::new(false),
+            FifoWriteBudget {
+                deadline: began + budget.stall_tolerance,
+                progress_timeout: budget.stall_tolerance,
+                hard_timeout: budget.hard_timeout,
+                cancel_on_stop: false,
+            },
+            &mut SharedVirtualFifoWriteTiming(clock),
+        );
+        (result, sink.written, bytes.len())
+    }
+
+    #[test]
+    fn a_raw_stream_frame_survives_ffmpeg_pausing_its_reads_mid_frame() {
+        // Longer than the raw budget that used to cut the stream (the
+        // recording's), shorter than the stream's wedged timeout. On ogre the
+        // pauses ran 4-6 s against a two-second budget.
+        let recording = raw_video_fifo_write_budget(EncoderBridgeOutputRole::Recording);
+        let stall = recording.stall_tolerance + Duration::from_secs(4);
+        assert!(stall < STREAM_OUTPUT_WEDGED_TIMEOUT);
+
+        let (result, written, frame_len) = write_full_hd_frame_through_a_starved_reader(
+            raw_video_fifo_write_budget(EncoderBridgeOutputRole::Stream),
+            stall,
+        );
+        result.expect("a stream frame must wait for FFmpeg to read again");
+        assert_eq!(written, frame_len);
+
+        // The old budget cut the same frame short: FFmpeg's rawvideo demuxer
+        // then hit EOF mid-packet and the stream leg ended.
+        let (result, written, frame_len) =
+            write_full_hd_frame_through_a_starved_reader(recording, stall);
+        let error = result.expect_err("the recording budget still bounds a stall");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(written < frame_len);
+    }
+
+    /// A reader that takes the first bytes of a frame, then nothing until
+    /// `ready_at`.
+    struct StalledMidFrameThenReadySink {
+        accept_before_stall: usize,
+        accepted: usize,
+        ready_at: Instant,
+        written: SharedCountingSink,
+    }
+
+    impl StdWrite for StalledMidFrameThenReadySink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let len = if self.accepted < self.accept_before_stall {
+                bytes.len().min(self.accept_before_stall - self.accepted)
+            } else if Instant::now() < self.ready_at {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            } else {
+                bytes.len()
+            };
+            self.accepted += len;
+            self.written.write(&bytes[..len])
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The writer loop gives a stream frame the stream budget. A pause just
+    /// past the old two-second raw budget used to end the stream leg.
+    #[test]
+    fn raw_stream_writer_loop_finishes_a_frame_across_a_reader_stall() {
+        let stall = Duration::from_millis(2_400);
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            stall > raw_video_fifo_write_budget(EncoderBridgeOutputRole::Recording).stall_tolerance
+        );
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(3);
+        let frame = vec![0x44; 64];
+        frame_tx
+            .send(QueuedRawVideoFrame::synthetic(frame.clone()))
+            .expect("queue raw frame");
+        drop(frame_tx);
+        let written = SharedCountingSink::default();
+        let terminal_failure = Arc::new(StdMutex::new(None));
+        let started_at = Instant::now();
+
+        run_raw_video_fifo_writer_loop(
+            StalledMidFrameThenReadySink {
+                accept_before_stall: 16,
+                accepted: 0,
+                ready_at: started_at + stall,
+                written: written.clone(),
+            },
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            terminal_failure.clone(),
+            EncoderBridgeOutputRole::Stream,
+        );
+
+        assert!(started_at.elapsed() >= stall);
+        let result = result_rx.recv().expect("raw writer result");
+        assert!(
+            matches!(result, RawVideoFifoWriterResult::FrameWritten { .. }),
+            "the stream writer must wait out a {stall:?} stall"
+        );
+        assert_eq!(written.bytes(), frame);
+        assert_eq!(
+            read_encoder_bridge_terminal_failure(&terminal_failure),
+            None
         );
     }
 
