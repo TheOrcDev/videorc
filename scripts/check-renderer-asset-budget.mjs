@@ -116,8 +116,13 @@ const htmlPath = resolve(
 // out, and the next candidates (captions-preflight, performance-check)
 // are called during render. Raise gzip to 475,000 (~3.8 KB over B); raw
 // and the entry ceilings hold.
+// 2026-11-04 (owner-approved): the issue sweep (#1118–#1153) merged 26 fixes
+// that each fit alone; together main measures 2,315,909 raw / 474,854 gzip.
+// The additions are small Studio wiring (the recent-drop window, the camera
+// frame-rate tracker, the silent-mic meter source, the bridge envelope, the
+// page-scoped loading line). Raise raw to 2,320,000; gzip holds at 475,000.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_310_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_320_000),
   maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 475_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
