@@ -399,19 +399,23 @@ describe('session audio news (plan 076)', () => {
     }
   })
 
-  it('keeps a processor failure visible with the backend recovery instructions', () => {
+  it('says the microphone was silenced for a moment, once per episode and never sticky', () => {
     const event = {
-      ...healthEvent('audio-processor-failed', 'error'),
+      ...healthEvent('microphone-noise-reduction-silenced'),
       message:
-        'Noise reduction failed. Microphone and system audio stopped. Stop and restart the session to restore audio.'
+        'Noise reduction got an invalid signal from the microphone, so Videorc silenced the microphone for a moment. The session continues.'
     }
     showSessionHealthEvent(event, false)
-    expect(toastSpies.error).toHaveBeenCalledWith('Session audio stopped', {
-      id: 'audio-processor-failed-live',
-      description: event.message,
-      duration: Infinity,
-      action: expect.objectContaining({ label: 'Copy' })
-    })
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone silenced for a moment',
+      expect.objectContaining({ description: event.message, duration: 12_000 })
+    )
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    // A second episode inside the notice window updates the same toast.
+    showSessionHealthEvent({ ...event, id: 'second' }, false)
+    expect(toastSpies.warning).toHaveBeenCalledTimes(2)
+    const ids = toastSpies.warning.mock.calls.map(([, options]) => (options as { id: string }).id)
+    expect(ids[0]).toBe(ids[1])
   })
 
   it('reports a stalled output and a recovered microphone once each', () => {

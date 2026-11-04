@@ -8319,7 +8319,6 @@ export interface SourceSwitchOperation {
 }
 export interface SessionSources {
   audio: {
-    processorFailure?: string
     sampleCursor: number
     generation: number
     deviceId: string | null

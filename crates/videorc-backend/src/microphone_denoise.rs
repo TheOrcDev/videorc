@@ -33,8 +33,9 @@ impl RnnoiseProcessor {
 
     /// Returns an owned frame so retries cannot advance RNNoise twice.
     ///
-    /// No input/output clipping occurs within the supported headroom. The
-    /// caller must surface failures and retain downstream output protection.
+    /// No input/output clipping occurs within the supported headroom. An
+    /// error never stops the bus: the session stage silences the chunk,
+    /// resets and re-syncs (see `MicrophoneDenoiseTimeline::prepare_or_silence`).
     /// A rejected frame does not advance state. An internal numerical failure
     /// resets state before returning an error.
     pub(crate) fn process_frame(

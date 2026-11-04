@@ -10683,7 +10683,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             observation.recoveries,
                             observation.output_stalls,
                             observation.silence_events,
-                            observation.processor_failure,
+                            observation.denoise_events,
                         )
                     })
                 }
@@ -10706,7 +10706,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             recoveries,
             output_stalls,
             silence_events,
-            processor_failure,
+            denoise_events,
         )) = counters
         else {
             return;
@@ -10720,9 +10720,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         {
             reemit_active_recording_status(&state, &session_id).await;
         }
-        if let Some(message) = processor_failure.as_deref() {
-            emit_audio_processor_failed_health_event(&state, &session_id, message);
-            reemit_active_recording_status(&state, &session_id).await;
+        for event in &denoise_events {
+            emit_microphone_noise_reduction_silenced_health_event(&state, &session_id, event);
         }
         for report in &output_stalls {
             emit_audio_output_stalled_health_event(&state, &session_id, report);
@@ -10913,19 +10912,31 @@ fn emit_audio_output_stalled_health_event(
     );
 }
 
-const AUDIO_PROCESSOR_FAILED_CODE: &str = "audio-processor-failed";
+/// Noise reduction refused or failed a microphone frame, so the bus wrote
+/// exact zeros for the microphone over that stretch and went on; nothing
+/// else on the bus noticed. One event per episode.
+pub(crate) const MICROPHONE_NOISE_REDUCTION_SILENCED_CODE: &str =
+    "microphone-noise-reduction-silenced";
+const MICROPHONE_NOISE_REDUCTION_SILENCED_MESSAGE: &str = "Noise reduction got an invalid signal from the microphone, so Videorc silenced the microphone for a moment. The session continues.";
 
-fn emit_audio_processor_failed_health_event(state: &AppState, session_id: &str, detail: &str) {
-    let message = format!(
-        "Noise reduction failed: {detail}. Microphone and system audio stopped. Stop and restart the session to restore audio."
+fn emit_microphone_noise_reduction_silenced_health_event(
+    state: &AppState,
+    session_id: &str,
+    event: &crate::session_audio::MicrophoneDenoiseSilencedEvent,
+) {
+    state.emit_log(
+        "warn",
+        format!(
+            "Noise reduction silenced microphone \"{}\" after {} ms: {}.",
+            event.device_name, event.after_ms, event.reason
+        ),
     );
-    state.emit_log("error", &message);
     let _ = emit_health_event(
         state,
         Some(session_id),
-        HealthLevel::Error,
-        AUDIO_PROCESSOR_FAILED_CODE,
-        &message,
+        HealthLevel::Warn,
+        MICROPHONE_NOISE_REDUCTION_SILENCED_CODE,
+        MICROPHONE_NOISE_REDUCTION_SILENCED_MESSAGE,
     );
 }
 
@@ -11525,7 +11536,7 @@ async fn monitor_session(
                     unreported_source_loss_after_ms: observation.losses,
                     unreported_recoveries: observation.recoveries,
                     unreported_output_stalls: observation.output_stalls,
-                    unreported_processor_failure: observation.processor_failure,
+                    unreported_denoise_events: observation.denoise_events,
                     system_audio: system_audio_sample(active),
                 }
             });
@@ -11828,10 +11839,13 @@ async fn monitor_session(
         }
     }
 
-    // SessionAudio Drop has joined the writer. Claim any fault published
-    // after the initial stats snapshot, including a fault racing user Stop.
-    if let Some(detail) = final_audio.and_then(|audio| audio.claim_processor_failure()) {
-        emit_audio_processor_failed_health_event(&state, &session_id, &detail);
+    // SessionAudio Drop has joined the writer. Claim the noise reduction
+    // episodes published after the initial stats snapshot, including one
+    // racing user Stop.
+    if let Some(audio) = final_audio {
+        for event in audio.claim_denoise_events() {
+            emit_microphone_noise_reduction_silenced_health_event(&state, &session_id, &event);
+        }
     }
     mark_stop_timeline(&state, RecordingStopPhase::BridgeStopped);
     // Dropping ActiveRecording stops the native post-controls audio producer.
@@ -11886,8 +11900,8 @@ async fn monitor_session(
         if let Some(sample) = native_audio_stats.system_audio.as_ref() {
             emit_system_audio_sample_events(&state, &session_id, sample);
         }
-        if let Some(message) = native_audio_stats.unreported_processor_failure.as_deref() {
-            emit_audio_processor_failed_health_event(&state, &session_id, message);
+        for event in &native_audio_stats.unreported_denoise_events {
+            emit_microphone_noise_reduction_silenced_health_event(&state, &session_id, event);
         }
         for report in &native_audio_stats.unreported_output_stalls {
             emit_audio_output_stalled_health_event(&state, &session_id, report);
@@ -14353,7 +14367,8 @@ struct NativeAudioStats {
     /// Recoveries and output stalls the sampler had not reported (plan 076).
     unreported_recoveries: Vec<crate::session_audio::SourceRecovery>,
     unreported_output_stalls: Vec<crate::session_audio::OutputStallReport>,
-    unreported_processor_failure: Option<String>,
+    /// Noise reduction episodes the sampler had not reported.
+    unreported_denoise_events: Vec<crate::session_audio::MicrophoneDenoiseSilencedEvent>,
     /// Final system-audio counters and events the sampler had not reported
     /// (plan 069 S4); `None` where the session cannot mix system audio.
     system_audio: Option<SystemAudioSample>,
@@ -28100,7 +28115,7 @@ mod tests {
             unreported_source_loss_after_ms: vec![],
             unreported_recoveries: vec![],
             unreported_output_stalls: vec![],
-            unreported_processor_failure: None,
+            unreported_denoise_events: vec![],
             system_audio: None,
         };
         assert_eq!(stats.silence_verdict(), None);
@@ -49365,12 +49380,27 @@ mod tests {
             session.end().await;
         }
 
+        /// A frame noise reduction refuses (65.0, past its +36 dBFS headroom)
+        /// silences the microphone for that stretch and nothing else: the
+        /// bus keeps running, system audio stays in the mix, the live
+        /// controls still apply, and one Warn event reports the episode.
+        /// The finalizer claims an episode no sampler observed, and a fresh
+        /// session reports nothing.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        async fn rnnoise_fault_reports_without_controls_and_closes_mixed_audio() {
+        async fn rnnoise_fault_silences_the_microphone_and_keeps_mixed_audio_running() {
             use std::sync::atomic::{AtomicBool, Ordering};
             let settings = AudioProcessingSettings {
                 noise_suppression: crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
                 ..Default::default()
+            };
+            let reported = |state: &AppState, session_id: &str| -> usize {
+                state
+                    .database
+                    .list_health_events(session_id)
+                    .unwrap()
+                    .iter()
+                    .filter(|event| event.code == MICROPHONE_NOISE_REDUCTION_SILENCED_CODE)
+                    .count()
             };
             for policy in ["sampler", "finalizer", "fresh"] {
                 let fail = policy != "fresh";
@@ -49411,11 +49441,7 @@ mod tests {
                     }
                 });
                 let session = live_session_with_source(
-                    if fail {
-                        "rnnoise-fault"
-                    } else {
-                        "rnnoise-fresh"
-                    },
+                    &format!("rnnoise-soft-{policy}"),
                     Some(source),
                     settings,
                 )
@@ -49455,98 +49481,94 @@ mod tests {
                     let final_audio = {
                         let recording = session.state.recording.lock().await;
                         let audio = recording.as_ref().unwrap().native_audio.as_ref().unwrap();
-                        if policy == "finalizer" {
-                            assert!(
-                                audio.observation(true).processor_failure.is_none(),
-                                "initial finalizer snapshot precedes fault"
-                            );
-                        }
+                        assert!(
+                            audio.observation(true).denoise_events.is_empty(),
+                            "no episode before the fault"
+                        );
                         audio.switch_handle()
                     };
                     fault.store(true, Ordering::Release);
                     if policy == "finalizer" {
-                        // FFmpeg may observe PCM EOF before the sampler ticks.
-                        // Exercise the finalizer's one-time observation path.
-                        let detail = timeout(Duration::from_secs(10), async {
+                        // FFmpeg may observe PCM EOF before a sampler ticks:
+                        // the finalizer claims the episode after the join.
+                        let events = timeout(Duration::from_secs(10), async {
                             loop {
-                                let detail = {
-                                    let recording = session.state.recording.lock().await;
-                                    let audio =
-                                        recording.as_ref().unwrap().native_audio.as_ref().unwrap();
-                                    if audio.input_state()
-                                        == NativeAudioInputState::DownstreamClosed
-                                    {
-                                        final_audio.claim_processor_failure()
-                                    } else {
-                                        None
-                                    }
-                                };
-                                if let Some(detail) = detail {
-                                    break detail;
+                                let claimed = final_audio.claim_denoise_events();
+                                if !claimed.is_empty() {
+                                    break claimed;
                                 }
                                 sleep(Duration::from_millis(10)).await;
                             }
                         })
                         .await
-                        .expect("finalizer observes failure before EOF cleanup");
-                        emit_audio_processor_failed_health_event(
+                        .expect("the finalizer claims the episode");
+                        assert_eq!(events.len(), 1, "{events:?}");
+                        assert!(
+                            events[0].reason.contains("non-finite or exceeds"),
+                            "{events:?}"
+                        );
+                        assert_eq!(events[0].generation, 0);
+                    } else {
+                        let event = health_event(
                             &session.state,
                             &session.session_id,
-                            &detail,
+                            MICROPHONE_NOISE_REDUCTION_SILENCED_CODE,
+                        )
+                        .await;
+                        assert!(matches!(event.level, HealthLevel::Warn), "{event:?}");
+                        assert_eq!(event.message, MICROPHONE_NOISE_REDUCTION_SILENCED_MESSAGE);
+                        assert!(
+                            event.message.contains("silenced the microphone"),
+                            "{event:?}"
                         );
-                        tokio::spawn(sample_native_audio_during_recording(
-                            session.state.clone(),
-                            session.session_id.clone(),
-                        ));
+                        assert!(!event.message.contains('\u{2014}'), "no em dashes");
                     }
-                    let event = health_event(
-                        &session.state,
-                        &session.session_id,
-                        AUDIO_PROCESSOR_FAILED_CODE,
-                    )
-                    .await;
-                    assert!(matches!(event.level, HealthLevel::Error));
-                    assert!(
-                        event
-                            .message
-                            .contains("Microphone and system audio stopped")
-                    );
-                    assert!(event.message.contains("Stop and restart"));
+                    // A continuous fault is one episode, and the session goes on.
+                    sleep(Duration::from_millis(400)).await;
                     {
                         let recording = session.state.recording.lock().await;
                         let active = recording
                             .as_ref()
-                            .expect("audio fault does not pretend video ended");
+                            .expect("an audio fault never ends the session");
                         let audio = active.native_audio.as_ref().unwrap();
-                        assert_eq!(audio.input_state(), NativeAudioInputState::DownstreamClosed);
-                        assert!(audio.status().processor_failure.is_some());
+                        assert_eq!(audio.input_state(), NativeAudioInputState::Live);
                         let system = audio.system_audio().observation();
-                        assert!(!system.attached);
-                        assert!(system.device_name.is_none());
-                        assert!(system.cutover_sample.is_none());
+                        assert!(system.attached, "system audio stays in the mix: {system:?}");
                         assert!(
-                            audio.observation(true).processor_failure.is_none(),
-                            "sampler claimed fault exactly once"
+                            audio.observation(false).denoise_events.is_empty(),
+                            "one event per episode"
                         );
                     }
+                    assert_eq!(session.fake.live(), 1, "the system capture stays open");
+                    assert!(final_audio.claim_denoise_events().is_empty());
                     let result = session.toggle(None).await;
-                    assert!(!result.applied);
-                    assert_eq!(
-                        result.reason_code.as_deref(),
-                        Some("live-audio-control-unavailable")
+                    assert!(
+                        result.applied,
+                        "the live controls survive the fault: {result:?}"
                     );
-                    timeout(Duration::from_secs(10), async {
-                        while session.fake.live() != 0 {
-                            sleep(Duration::from_millis(10)).await;
-                        }
-                    })
-                    .await
-                    .expect("system owner closed after DSP failure");
+                    if policy == "sampler" {
+                        assert_eq!(reported(&session.state, &session.session_id), 1);
+                        // Clean input for longer than the episode recovery,
+                        // then the fault again: a second episode, reported once.
+                        fault.store(false, Ordering::Release);
+                        sleep(Duration::from_millis(1_500)).await;
+                        fault.store(true, Ordering::Release);
+                        timeout(Duration::from_secs(10), async {
+                            while reported(&session.state, &session.session_id) < 2 {
+                                sleep(Duration::from_millis(20)).await;
+                            }
+                        })
+                        .await
+                        .expect("a second episode is reported");
+                        sleep(Duration::from_millis(400)).await;
+                        assert_eq!(reported(&session.state, &session.session_id), 2);
+                    }
                 } else {
                     let recording = session.state.recording.lock().await;
                     let audio = recording.as_ref().unwrap().native_audio.as_ref().unwrap();
-                    assert!(audio.status().processor_failure.is_none());
+                    assert!(audio.observation(false).denoise_events.is_empty());
                     assert_eq!(audio.input_state(), NativeAudioInputState::Live);
+                    assert_eq!(reported(&session.state, &session.session_id), 0);
                 }
                 session.end().await;
                 producer.abort();
