@@ -34,10 +34,12 @@ export function firstRunSourceStartLines(lines) {
 const LOOK_HOLDING_STATES = ['starting', 'recording', 'streaming', 'stopping']
 
 // Plan 212 × 207 (#973): first-run setup starts the performance check as it
-// opens, and while its benchmark sessions run the look's writes are held
-// until setup closes. A user reads two steps before the look; the smoke
-// chooses one once the check is over: not running, no session left, and it
-// has finished (a verdict, a host-busy refusal, or the completed event, so a
+// opens. While a benchmark session runs the idle scene commit is refused, and
+// a renderer reloaded mid-check reads that session's status but never its
+// suppressed stop, so it holds the look's writes until setup closes. A user
+// neither reloads nor picks a look in the check's first seconds; the smoke
+// reloads and chooses once the check is over: not running, no session left,
+// and finished (a verdict, a host-busy refusal, or the completed event, so a
 // run that is still about to start is not taken for one that ended).
 export function firstRunPerformanceCheckSettled({ check, recording, completed = false }) {
   if (!check || check.running) return false

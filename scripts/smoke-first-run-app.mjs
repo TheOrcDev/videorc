@@ -30,7 +30,7 @@ delete process.env.ELECTRON_RUN_AS_NODE
 const outputRoot = resolve(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir())
 mkdirSync(outputRoot, { recursive: true })
 const output = mkdtempSync(join(outputRoot, 'videorc-first-run-'))
-const report = { limits: FIRST_RUN_SMOKE_LIMITS, output, steps: [] }
+const report = { limits: FIRST_RUN_SMOKE_LIMITS, output, steps: [], performanceCheckWaits: [] }
 const save = () =>
   writeFileSync(join(output, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
 let cdp
@@ -277,7 +277,12 @@ async function screenshot(name) {
 }
 
 async function reloadWith(keys) {
-  const previousDocument = (await state()).documentId
+  const previous = await state()
+  // Only first-run setup starts the check (plan 212 D1); in the Studio the
+  // Clips ring is a real session and reloads as the user's would.
+  if (previous.setup === 'open' && previous.mode === 'first-run')
+    await waitForPerformanceCheck('reload')
+  const previousDocument = previous.documentId
   if (keys)
     await evaluate(
       `localStorage.clear(); for (const [key, value] of Object.entries(${JSON.stringify(keys)})) localStorage.setItem(key, value)`
@@ -540,8 +545,9 @@ async function advance(step) {
   return waitFor(step, (s) => s.cardStep === step && s.setup === 'open')
 }
 
-// #973: setup's performance check holds the look's writes while it runs.
-async function waitForPerformanceCheck() {
+// #973: setup's performance check holds the look's writes while it runs, and
+// for good in a renderer reloaded while it runs.
+async function waitForPerformanceCheck(before) {
   const startedAt = Date.now()
   const deadline = startedAt + FIRST_RUN_SMOKE_LIMITS.performanceCheckSettleMs
   let last
@@ -557,15 +563,20 @@ async function waitForPerformanceCheck() {
       recordingState: recording.state,
       completedEvent: performanceCheckCompleted
     }
-    if (firstRunPerformanceCheckSettled({ check, recording, completed: performanceCheckCompleted }))
-      return { ...last, waitedMs: Date.now() - startedAt }
+    if (
+      firstRunPerformanceCheckSettled({ check, recording, completed: performanceCheckCompleted })
+    ) {
+      const settled = { profile: profileName, before, ...last, waitedMs: Date.now() - startedAt }
+      report.performanceCheckWaits.push(settled)
+      return settled
+    }
     await delay(250)
   }
-  throw new Error(`performance check settle timed out: ${JSON.stringify(last)}`)
+  throw new Error(`performance check settle before ${before} timed out: ${JSON.stringify(last)}`)
 }
 
 async function chooseLook(background = 'silk') {
-  const performanceCheck = await waitForPerformanceCheck()
+  const performanceCheck = await waitForPerformanceCheck('look')
   const initial = await waitFor(
     'look options',
     (s) => s.cardStep === 'look' && s.layoutOptions.length >= 4
