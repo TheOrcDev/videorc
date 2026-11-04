@@ -39,7 +39,7 @@ Use the smallest gate that proves the change, then run the broader gate before h
 - Rust format: `cargo fmt --check --all`
 - Rust advisory audit: `pnpm audit:rust` (requires `cargo install cargo-audit --locked` locally)
 - Rust tests: `cargo test -p videorc-backend`
-- Rust lint: `cargo clippy -p videorc-backend -- -D warnings`
+- Rust lint: `cargo clippy -p videorc-backend --all-targets -- -D warnings` and `cargo clippy --release -p videorc-backend -- -D warnings` (release compiles out the `debug_assertions` smoke paths; locally add `CARGO_PROFILE_RELEASE_STRIP=false` if your toolchain lacks `rust-objcopy`)
 - Combined dependency advisory audit: `pnpm audit:deps`
 - Local smoke bundle: `pnpm smoke:local-gates`
 - Linux FFmpeg provisioning (Linux x64 only): `pnpm ffmpeg:fetch:linux`
