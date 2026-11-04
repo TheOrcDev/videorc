@@ -7612,9 +7612,13 @@ mod tests {
                 let mut bytes = vec![];
                 let mut buffer = [0_u8; 16_384];
                 loop {
+                    // Read the flag before the read: an empty read that
+                    // follows a stop the writer had already signalled means
+                    // every byte it wrote has been drained.
+                    let stopped = reader_stop.load(Ordering::Acquire);
                     match file.read(&mut buffer) {
                         Ok(0) => {
-                            if reader_stop.load(Ordering::Acquire) {
+                            if stopped {
                                 return Ok(bytes);
                             }
                         }
@@ -7623,7 +7627,7 @@ mod tests {
                             continue;
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if reader_stop.load(Ordering::Acquire) {
+                            if stopped {
                                 return Ok(bytes);
                             }
                         }
