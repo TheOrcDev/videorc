@@ -472,6 +472,30 @@ describe('session audio news (plan 076)', () => {
     )
   })
 
+  it('says the rest of the take is silent when the audio output stops for good', () => {
+    showSessionHealthEvent(healthEvent('audio-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your recording has no sound from here',
+      expect.objectContaining({
+        id: 'audio-output',
+        description: 'audio-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
+  it('says the recording stopped when its encoder stops taking frames (2026-11-03 Iris Xe)', () => {
+    showSessionHealthEvent(healthEvent('recording-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your recording stopped',
+      expect.objectContaining({
+        id: 'recording-output',
+        description: 'recording-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
   it('replaces a frozen-stream warning with the news that it resumed', () => {
     showSessionHealthEvent(healthEvent('stream-output-stalled'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(
