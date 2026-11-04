@@ -1,5 +1,5 @@
 import { DEV_BACKEND_PREBUILD_TIMEOUT_MS } from './app-launcher.mjs'
-import { withBuildSlot } from './host-lock.mjs'
+import { withLiveAwareBuildSlot } from './host-lock.mjs'
 import { spawnProcessGroup } from './process-group.mjs'
 
 /**
@@ -15,7 +15,7 @@ export async function runSmokeCargoTest(
     env = process.env,
     capture = false,
     log = console.log,
-    buildSlot = withBuildSlot,
+    buildSlot = withLiveAwareBuildSlot,
     run = runCargo
   } = {}
 ) {

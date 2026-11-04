@@ -51,7 +51,7 @@
     "build:mcpb": "node scripts/build-mcpb.mjs",
     "package:backend": "cargo build --release -p videorc-backend -p videorc-wer-helper",
     "package:desktop:linux": "pnpm package:backend && pnpm ffmpeg:fetch:linux && node scripts/preflight-linux-package.mjs && pnpm --filter @videorc/desktop package:linux",
-    "package:backend:macos": "cargo build --release -p videorc-backend --bin videorc-backend --bin native_preview_host_helper --bin videorc-mcp && pnpm build:native-preview-addon:release && pnpm build:camera-extension",
+    "package:backend:macos": "node scripts/wait-until-not-live.mjs && cargo build --release -p videorc-backend --bin videorc-backend --bin native_preview_host_helper --bin videorc-mcp && pnpm build:native-preview-addon:release && pnpm build:camera-extension",
     "package:preflight:macos": "node scripts/preflight-macos-package.mjs",
     "package:preflight:windows": "node scripts/preflight-windows-package.mjs",
     "package:preflight:linux": "node scripts/preflight-linux-package.mjs",
