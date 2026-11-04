@@ -14,6 +14,7 @@ import {
   localSinkArgs,
   parseDevToolsActivePort,
   parseDevtoolsLine,
+  quitLinuxApp,
   readPublishedAppPid,
   startLocalSink,
   stopOwnedChild,
@@ -125,6 +126,60 @@ test(
     assert.equal(launched.backend.pid, 77)
   }
 )
+
+test(
+  'a Linux app gets SIGTERM on its main PID alone before the group sweep',
+  posixOnly,
+  async () => {
+    const order = []
+    const app = fakeChild()
+    app.kill = (signal) => {
+      order.push(`main:${signal}`)
+      app.signalCode = signal
+      queueMicrotask(() => app.emit('exit', null, signal))
+    }
+    const dirs = labProfileDirs('/work', 'local-sink')
+    const launched = await launchApp({
+      appPath: '/opt/videorc-lab/app',
+      env: {},
+      dirs,
+      launcher: async (received) => {
+        assert.equal(received.launchViaMacosLaunchServices, false)
+        assert.deepEqual(received.spawnSpec, { command: '/opt/videorc-lab/app/videorc', args: [] })
+        return {
+          connections: { 'backend-ready': { host: '127.0.0.1', port: 1, token: 't', pid: 77 } },
+          stop: async () => {
+            order.push('group-sweep')
+            return { state: 'skipped' }
+          },
+          process: app
+        }
+      }
+    })
+    assert.equal(await launched.appPid(), 555)
+    assert.deepEqual(await launched.stop(), { state: 'skipped', quit: 'exited' })
+    assert.deepEqual(order, ['main:SIGTERM', 'group-sweep'])
+  }
+)
+
+test('the Linux quit still sweeps the group when the app hangs or already exited', async () => {
+  const hung = fakeChild({ exitsOn: 'never' })
+  let sweeps = 0
+  const groupStop = async () => {
+    sweeps += 1
+    return { state: 'killed' }
+  }
+  assert.deepEqual(await quitLinuxApp(hung, groupStop, { graceMs: 5 }), {
+    state: 'killed',
+    quit: 'timed-out'
+  })
+  assert.deepEqual(hung.signals, ['SIGTERM'])
+  const gone = fakeChild()
+  gone.exitCode = 0
+  assert.deepEqual(await quitLinuxApp(gone, groupStop), { state: 'killed', quit: 'not-running' })
+  assert.deepEqual(gone.signals, [])
+  assert.equal(sweeps, 2)
+})
 
 test('the published app PID is read from the ownership file for the census', async () => {
   const pid = await readPublishedAppPid('/state', {
