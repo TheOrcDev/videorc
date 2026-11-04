@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url'
 import {
   OUTPUT_PROFILES,
   chatArrivals,
+  chatSteps,
+  clipPullStep,
   evaluateYoutubeHealth,
   liveHoldStep,
   matchCaption,
@@ -15,7 +17,9 @@ import {
   outputProfileStep,
   recordFeature,
   runSubSteps,
-  sceneSwitchStep
+  sceneSwitchStep,
+  vodStep,
+  youtubeHealthStep
 } from './scenario-steps.mjs'
 import { createEventBus, createWaitFor } from './step-engine.mjs'
 import { createFakeClock } from './harness-test-fakes.mjs'
@@ -179,6 +183,31 @@ test('sceneSwitchStep applies the preset and records a feature with the scene id
   } finally {
     await rm(runDir, { recursive: true, force: true })
   }
+})
+
+test('with the observer off, the YouTube checks skip at once with the reason and chat fails fast', async () => {
+  const off = 'the broadcaster role is not authorized (pnpm live:hookup --role broadcaster)'
+  const logs = []
+  const observer = {
+    unavailable: off,
+    latest: () => assert.fail('no observer reading without a broadcaster'),
+    poll: async () => assert.fail('no observer poll without a broadcaster'),
+    pullClip: async () => ({ status: 'skipped', reason: 'broadcaster-not-authorized' })
+  }
+  const ctx = { observer, params: { profile: '1080p30' }, log: (line) => logs.push(line) }
+  assert.deepEqual(await youtubeHealthStep().run(ctx), { skipped: true, reason: off })
+  assert.deepEqual(await vodStep().run(ctx), { skipped: true, reason: off })
+  assert.deepEqual(await clipPullStep().run(ctx), {
+    skipped: true,
+    reason: 'broadcaster-not-authorized'
+  })
+  await assert.rejects(chatSteps()[0].run(ctx), /observer is off: the broadcaster role/)
+  assert.deepEqual(logs, [
+    `youtube-health: skipped (${off})`,
+    `vod: skipped (${off})`,
+    'clip: skipped (broadcaster-not-authorized)'
+  ])
+  await assert.rejects(youtubeHealthStep().run({ log: () => {} }), /observer is not running/)
 })
 
 test('outputProfileStep waits for the reloaded renderer before the next intent', async () => {
