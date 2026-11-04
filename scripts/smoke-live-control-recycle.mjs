@@ -22,9 +22,11 @@ import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   appQuitRecordingSessionParams,
+  barrierNeverEngagedError,
   createExecutableFfmpegShim,
   createFinalizationBarrierServer,
   finalizationBarrierEnvironment,
+  finalizationBarrierSessionFfmpegPath,
   readFinalizationRecoveryRecords,
   readSessionRow,
   resolveToolPath
@@ -121,7 +123,8 @@ try {
       outputDirectoryCapability: requiredString(
         outputAuthorization.capabilityId,
         'output directory capability'
-      )
+      ),
+      ffmpegPath: finalizationBarrierSessionFfmpegPath(shimPath)
     })
   )
   assert.equal(recording?.state, 'recording', `Expected recording, got ${recording?.state}.`)
@@ -355,7 +358,13 @@ async function waitForFinalizationEntryWithLiveProcesses(
 ) {
   const deadline = Date.now() + budgetMs
   while (!barrier.entry && Date.now() < deadline) {
-    assertProcessesAliveWithoutReplacement({ connections, oldBackendPid, appPid })
+    // A backend that exits before the export reaches the barrier means the
+    // barrier never engaged (#1081), not that safe finalization failed.
+    try {
+      assertProcessesAliveWithoutReplacement({ connections, oldBackendPid, appPid })
+    } catch (error) {
+      throw barrierNeverEngagedError(error, shimPath)
+    }
     await Promise.race([barrier.entryPromise, sleep(pollMs)])
   }
   if (!barrier.entry) {
@@ -424,8 +433,8 @@ function assertBackendConnection(connection, label) {
   assert.ok(Number.isSafeInteger(connection.port) && connection.port > 0, `${label} port missing`)
 }
 
-function dualOutputRecordingSessionParams({ outputDirectoryCapability }) {
-  const params = appQuitRecordingSessionParams({ outputDirectoryCapability })
+function dualOutputRecordingSessionParams({ outputDirectoryCapability, ffmpegPath }) {
+  const params = appQuitRecordingSessionParams({ outputDirectoryCapability, ffmpegPath })
   return {
     ...params,
     output: {

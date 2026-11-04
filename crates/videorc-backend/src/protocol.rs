@@ -205,6 +205,27 @@ pub struct VideorcAccountSnapshot {
     pub avatar_url: Option<String>,
 }
 
+/// Why the desktop's Videorc account changed (plan 215 A5). `SessionExpired`
+/// is the sign-out the server made: a refresh answered 401, so the stored
+/// session was dropped. Mirrored in `shared/backend.ts` (`AccountChangeReason`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountChangeReason {
+    SignedIn,
+    SignedOut,
+    SessionExpired,
+}
+
+/// The `account.changed` event (plan 215 A5): the account as the backend now
+/// holds it, and why it changed. Mirrored in `shared/backend.ts`
+/// (`AccountChangedEvent`) and the `backend-rpc-contract.ts` event schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountChangedEvent {
+    pub account: VideorcAccountSnapshot,
+    pub reason: AccountChangeReason,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendLogEvent {
@@ -2004,6 +2025,11 @@ pub struct AudioLevelsEvent {
     /// Samples the mix clipped since the previous event.
     #[serde(default)]
     pub master_clipped_samples: u64,
+    /// Issue 1064: the session's microphone silence watchdog reports the
+    /// captured microphone as digital silence. Sent only while true, so the
+    /// standby microphone and older readings keep their shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub microphone_silent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3573,6 +3599,7 @@ pub struct RecordingTimelineSnapshot {
     pub marks: Vec<RecordingTimelineMark>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderBridgeSyntheticParams {
@@ -3585,6 +3612,7 @@ pub struct EncoderBridgeSyntheticParams {
     pub bitrate_kbps: Option<u32>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderBridgeSyntheticResult {
@@ -4308,6 +4336,12 @@ pub struct PreviewCameraStatus {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Plan 216 D2: `Some(true)` while the session has acked Live but has sent
+    /// no frame for longer than `CAMERA_FIRST_FRAME_REUSE_GRACE` (the
+    /// frameless-zombie rule capture recovery uses). Absent otherwise, so
+    /// Sources and Health can name a camera that is on but sends no video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_video: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -7059,6 +7093,7 @@ mod tests {
             sounds: None,
             master: None,
             master_clipped_samples: 0,
+            microphone_silent: false,
         };
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
@@ -7068,6 +7103,18 @@ mod tests {
                 "masterClippedSamples": 0
             })
         );
+        // Issue 1064: the watchdog's report rides the event only while true.
+        let silent = AudioLevelsEvent {
+            microphone_silent: true,
+            ..event.clone()
+        };
+        assert_eq!(
+            serde_json::to_value(&silent).unwrap()["microphoneSilent"],
+            serde_json::json!(true)
+        );
+        let decoded: AudioLevelsEvent =
+            serde_json::from_value(serde_json::to_value(&event).unwrap()).unwrap();
+        assert!(!decoded.microphone_silent);
         // The standby microphone has no session: the key is omitted, not null.
         let standby = AudioLevelsEvent {
             session_id: None,

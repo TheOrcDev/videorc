@@ -40,6 +40,7 @@ export function withRelativeAliases(code, source) {
 const CAPTURE_RUNTIME_DEPENDENCIES = [
   'apps/desktop/src/renderer/src/lib/accelerator.ts',
   'apps/desktop/src/renderer/src/lib/backend.ts',
+  'apps/desktop/src/renderer/src/lib/bridge-envelope.ts',
   'apps/desktop/src/renderer/src/lib/camera-look.ts',
   'apps/desktop/src/renderer/src/lib/format-video.ts',
   'apps/desktop/src/renderer/src/lib/layout-framing-memory.ts',

@@ -298,6 +298,31 @@ Learned on-box 2026-07-08; encoded in `scripts/lib/app-launcher.mjs`:
   before they spawn anything. Prefer ordinary CLI flags when the script already
   exposes them, or set env in the parent Node `spawn({ env })`.
 
+## Shared host admission is off on Windows
+
+The shared-host rules in `AGENTS.md` (one app-smoke host lock per machine, two
+build slots for backend prebuilds and `pnpm cargo:slot`) are macOS and Linux
+only. `scripts/lib/host-lock.mjs` turns admission off on win32 by design
+(#937): `acquirePortLock`, `acquireHostSmokeLock` and `withBuildSlot` admit
+every caller at once, without taking a port. On a Windows box, nothing
+serializes parallel app smokes or cargo builds; run them one at a time
+yourself.
+
+`pnpm test:scripts` on Windows therefore skips the TCP lock cases in
+`scripts/lib/host-lock.test.mjs` with that reason, and runs one Windows-only
+case that pins the no-op instead. Unverified on Windows, because the code
+does not do it there:
+
+- mutual exclusion on the `VIDEORC_SMOKE_LOCK_PORT` lock and the holder named
+  in a timeout;
+- a crashed holder (killed by `TerminateProcess`) freeing its port;
+- in-process reentrancy and `VIDEORC_SMOKE_*_HOLDER` inheritance by children;
+- the build-slot cap (`VIDEORC_SMOKE_BUILD_SLOTS`) and nested builds;
+- refusing port 0 and the release that never waits on a probing peer.
+
+The memory check (`VIDEORC_SMOKE_MEMORY_*`) does run on Windows; it reads
+`os.freemem()`.
+
 ## electron-builder winCodeSign / symlink privilege
 
 Packaging used to pull the legacy `winCodeSign` tool bundle (for rcedit /
@@ -332,6 +357,23 @@ deletes old autobuild releases, so the pin 404s over time. Re-pin by picking a
 current `ffmpeg-n8.x-*-win64-lgpl-8.x.zip` from
 https://github.com/BtbN/FFmpeg-Builds/releases, downloading it, and recording
 its sha256 in the pin (LGPL-only assets — repo policy).
+
+## Protected Windows stream performance gate
+
+`pnpm smoke:windows-stream-performance` without `--incident` is a physical
+Windows 11 x64 gate. It requires an **installed NSIS** `Videorc.exe` candidate
+(`VIDEORC_WINDOWS_ACCEPTANCE_EXECUTABLE` or `VIDEORC_PERF_APP_EXECUTABLE`), not an
+unsigned `win-unpacked` tree. When you run it outside
+`pnpm smoke:local-gates:windows`, also set:
+
+- `VIDEORC_WINDOWS_ACCEPTANCE_DIR` — absolute hardware-class evidence root
+- `VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256` — lowercase 64-hex digest of
+  the installed `Videorc.exe` (names the immutable evidence directory for
+  `--gate` / protected calibration runs)
+
+The parent gate supplies those values (and related release identity env) after
+verifying the packaged payload. Missing host, candidate, or digest env remains
+`BLOCKED` (exit `2`), not a script crash.
 
 ## Startup incident diagnostics (Plan 067)
 

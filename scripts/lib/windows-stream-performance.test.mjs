@@ -138,6 +138,21 @@ describe('Windows stream performance matrix', () => {
     assert.equal(command.stdout.trim(), expected)
   })
 
+  it('returns exit 2 with BLOCKED on non-Windows hosts instead of failing the runner', () => {
+    if (process.platform === 'win32') {
+      return
+    }
+    const outputDirectory = join(tmpdir(), `videorc-stream-blocked-${Date.now()}`)
+    const command = spawnSync(
+      process.execPath,
+      ['scripts/smoke-windows-stream-performance.mjs', '--output', outputDirectory],
+      { cwd: new URL('../..', import.meta.url), encoding: 'utf8' }
+    )
+    assert.equal(command.status, 2, command.stdout)
+    assert.match(command.stderr, /windows-stream-performance: BLOCKED:/)
+    assert.match(command.stderr, /Windows 11 x64/)
+  })
+
   it('matches the active D3D11 budget contract context for context', () => {
     const projection = buildWindowsStreamPerformanceMatrix().map((scenario) => ({
       id: scenario.id,

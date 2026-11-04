@@ -33,6 +33,7 @@ import {
   parseBackendWireMessage,
   cameraSelectionDiagnosticsSchema,
   cameraConnectionHistoryEntrySchema,
+  supportBundleAccountSchema,
   runtimeValidatedBackendRpcMethods,
   validateMainOwnedPreviewSurfaceBoundsParams,
   validateBackendEventPayload,
@@ -116,6 +117,9 @@ describe('backend RPC contract', () => {
     // The standby microphone between sessions carries no session.
     const standby = { microphone: { peakDb: -30, rmsDb: -36 }, masterClippedSamples: 0 }
     expect(validateBackendEventPayload('audio.levels', standby)).toEqual(standby)
+    // Issue 1064: the silence watchdog's report rides the levels while true.
+    const silent = { ...levels, microphone: { peakDb: -120, rmsDb: -120 }, microphoneSilent: true }
+    expect(validateBackendEventPayload('audio.levels', silent)).toEqual(silent)
     for (const malformed of [
       { ...levels, sessionId: null },
       { ...levels, microphone: { peakDb: -12, rmsDb: -20, extra: 1 } },
@@ -123,6 +127,7 @@ describe('backend RPC contract', () => {
       { ...levels, microphone: { peakDb: 60, rmsDb: -20 } },
       { ...levels, microphone: null },
       { ...levels, masterClippedSamples: -1 },
+      { ...levels, microphoneSilent: 'yes' },
       { ...levels, unknown: true }
     ]) {
       expect(() => validateBackendEventPayload('audio.levels', malformed)).toThrow()
@@ -498,6 +503,32 @@ describe('backend RPC contract', () => {
         limits: { ...snapshot.limits, recording: { maxWidth: 3840 } }
       })
     ).toThrow('maxHeight')
+  })
+
+  // Plan 215 A5: the backend says when the account changes, and why. A
+  // session-expired reason is the sign-out the server made.
+  it('strictly validates the account.changed event', () => {
+    const expired = { account: { status: 'signed-out' }, reason: 'session-expired' }
+    expect(validateBackendEventPayload('account.changed', expired)).toEqual(expired)
+    const signedIn = {
+      account: {
+        status: 'signed-in',
+        username: 'orc_dev',
+        displayName: 'Orc Dev',
+        email: 'orc@videorc.com'
+      },
+      reason: 'signed-in'
+    }
+    expect(validateBackendEventPayload('account.changed', signedIn)).toEqual(signedIn)
+    expect(() =>
+      validateBackendEventPayload('account.changed', { ...expired, reason: 'expired' })
+    ).toThrow('reason')
+    expect(() =>
+      validateBackendEventPayload('account.changed', { ...expired, token: 'never' })
+    ).toThrow('token must be a known field')
+    expect(() => validateBackendEventPayload('account.changed', { reason: 'signed-out' })).toThrow(
+      'account'
+    )
   })
 
   it('types and exactly validates provider OAuth callback completion', () => {
@@ -3666,6 +3697,42 @@ it('accepts disconnected camera status and the support camera story', () => {
   }
   expect(cameraConnectionHistoryEntrySchema.parse(edge)).toEqual(edge)
   expect(() => cameraConnectionHistoryEntrySchema.parse({ ...edge, timestamp: null })).toThrow()
+})
+
+// Plan 215 A6: the bundle tells a shown sign-in from a stored token, as
+// booleans; an unreadable store carries its error and nothing else.
+it('accepts the support bundle account section and refuses a token in it', () => {
+  const shownButNoToken = { signedIn: true, tokenPresent: false, storeReadable: true }
+  expect(supportBundleAccountSchema.parse(shownButNoToken)).toEqual(shownButNoToken)
+  const unreadable = {
+    signedIn: false,
+    tokenPresent: false,
+    storeReadable: false,
+    storeError: 'secrets store: permission denied'
+  }
+  expect(supportBundleAccountSchema.parse(unreadable)).toEqual(unreadable)
+  expect(() => supportBundleAccountSchema.parse({ ...shownButNoToken, token: 'never' })).toThrow(
+    'token must be a known field'
+  )
+  expect(() => supportBundleAccountSchema.parse({ signedIn: true, tokenPresent: false })).toThrow(
+    'storeReadable'
+  )
+})
+
+it('keeps a live camera that sends no video (plan 216 D2)', () => {
+  const status = {
+    state: 'live',
+    cameraId: 'camera:builtin',
+    targetFps: 30,
+    framesCaptured: 0,
+    droppedFrames: 0,
+    updatedAt: '2026-11-03T14:51:46Z',
+    noVideo: true
+  }
+  expect(validateBackendEventPayload('preview.camera.status', status)).toEqual(status)
+  expect(() =>
+    validateBackendEventPayload('preview.camera.status', { ...status, noVideo: 'yes' })
+  ).toThrow()
 })
 
 describe('Videorc Camera wire contract (plan 214 A4)', () => {

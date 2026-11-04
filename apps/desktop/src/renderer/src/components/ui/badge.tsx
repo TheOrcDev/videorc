@@ -13,8 +13,10 @@ const STATUS_DOT =
   'gap-1.5 before:size-1.5 before:shrink-0 before:rounded-full before:glass-dot has-data-[icon=inline-start]:before:hidden [&>[data-icon=inline-start]]:text-(--chip-tone)'
 
 const badgeVariants = cva(
-  // 11 px at weight 500: a tag, not the 600 section label (text-label).
-  'group/badge rounded-tag focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden border px-1.5 text-[11px] leading-none font-medium whitespace-nowrap focus-visible:ring-3 has-data-[icon=inline-end]:pr-1 has-data-[icon=inline-start]:pl-1 [&>svg]:pointer-events-none [&>svg]:size-3!',
+  // 11 px at weight 500: a tag, not the 600 section label (text-label). The
+  // 16 px line box holds Segoe UI's descenders (1.33 em) for a child that
+  // truncates: `leading-none` clipped them on Windows.
+  'group/badge rounded-tag focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden border px-1.5 text-[11px] leading-4 font-medium whitespace-nowrap focus-visible:ring-3 has-data-[icon=inline-end]:pr-1 has-data-[icon=inline-start]:pl-1 [&>svg]:pointer-events-none [&>svg]:size-3!',
   {
     defaultVariants: {
       variant: 'default'

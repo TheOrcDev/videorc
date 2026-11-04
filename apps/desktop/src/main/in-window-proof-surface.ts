@@ -1,11 +1,16 @@
-// In-window Electron proof surface (Linux). Wayland lets no client place its
-// own toplevel: Hyprland, GNOME and KDE ignore the absolute frame the docked
-// preview window and its child proof-surface window ask for, so the preview
-// landed centred over the app instead of in the Studio slot (and a tiling
-// compositor re-tiles it on top of that). On Linux the proof surface therefore
-// lives INSIDE its host window as a WebContentsView — the main window while
-// docked, the preview window while floating — at a content-relative rect,
-// which every compositor honours.
+// In-window Electron proof surface (Linux and macOS). Wayland lets no client
+// place its own toplevel: Hyprland, GNOME and KDE ignore the absolute frame
+// the docked preview window and its child proof-surface window ask for, so the
+// preview landed centred over the app instead of in the Studio slot (and a
+// tiling compositor re-tiles it on top of that). On Linux the proof surface
+// therefore lives INSIDE its host window as a WebContentsView — the main
+// window while docked, the preview window while floating — at a
+// content-relative rect, which every compositor honours. macOS joined it in
+// plan 216 (D4): docked over the Scene canvas, the fallback was two borderless
+// windows asked to ignore the mouse, and on a streamer's macOS the mouse never
+// reached the canvas through them (the arrow keys moved the source). The view
+// forwards its mouse to the host window itself, so no AppKit hit-testing sits
+// between the pointer and the stage.
 //
 // The host implements the slice of BrowserWindow the proof-surface code drives
 // (bounds, visibility, lifecycle events), so the surface lifecycle, frame
@@ -38,6 +43,7 @@ export interface ProofSurfaceHost {
   on(event: 'closed', listener: () => void): this
   on(event: 'resize', listener: () => void): this
   on(event: 'move', listener: () => void): this
+  off(event: 'closed', listener: () => void): this
 }
 
 // The screen rect the placement pipeline computes, expressed in the host
@@ -137,6 +143,57 @@ export function forwardedMouseEvent(
   return { ...base, type: input.type as Exclude<ForwardedMouseType, 'mouseWheel'> }
 }
 
+export interface HeldMouseButtons {
+  left: boolean
+  middle: boolean
+  right: boolean
+}
+
+export const NO_HELD_MOUSE_BUTTONS: Readonly<HeldMouseButtons> = Object.freeze({
+  left: false,
+  middle: false,
+  right: false
+})
+
+const HELD_BUTTON_MODIFIERS: Record<keyof HeldMouseButtons, string> = {
+  left: 'leftbuttondown',
+  middle: 'middlebuttondown',
+  right: 'rightbuttondown'
+}
+
+// The buttons the host believes are down after this event: a press puts its
+// button down, a release lifts it.
+export function heldButtonsAfter(
+  input: ObservedInputEvent,
+  held: Readonly<HeldMouseButtons>
+): HeldMouseButtons {
+  if ((input.type !== 'mouseDown' && input.type !== 'mouseUp') || !input.button) {
+    return { ...held }
+  }
+  return { ...held, [input.button]: input.type === 'mouseDown' }
+}
+
+// Blink reads a pointer event's `buttons` from the mouse event's own
+// modifiers, not from an earlier press, and a move that arrives with no
+// button down while the stage holds pointer capture ends the drag. The view's
+// `before-mouse-event` payload does not carry the button-down modifiers on a
+// move (Electron 39, macOS: every forwarded pointermove reached the stage with
+// buttons 0 while the press had 1, plan 216 C), so the forwarder marks each
+// event with the buttons it has pressed on the host and not yet released. The
+// view's own modifiers are kept, lowercased the way sendInputEvent reads them.
+export function withHeldButtons(
+  input: ObservedInputEvent,
+  held: Readonly<HeldMouseButtons>
+): ObservedInputEvent {
+  const modifiers = new Set((input.modifiers ?? []).map((modifier) => modifier.toLowerCase()))
+  for (const button of Object.keys(HELD_BUTTON_MODIFIERS) as (keyof HeldMouseButtons)[]) {
+    if (held[button]) {
+      modifiers.add(HELD_BUTTON_MODIFIERS[button])
+    }
+  }
+  return { ...input, modifiers: [...modifiers] }
+}
+
 export interface InWindowProofSurfaceOptions {
   createView: () => WebContentsView
   // The window that hosts the surface right now: main while docked, preview
@@ -155,6 +212,17 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
   private appliedCornerRadius: number | null = null
   private visible = false
   private destroyed = false
+  private held: HeldMouseButtons = { ...NO_HELD_MOUSE_BUTTONS }
+  private lastObserved: ObservedInputEvent | null = null
+  // What the view saw and replayed on its host, per type (diagnostics: the
+  // preview-window-state smoke command and plan 216 C probe read it).
+  private readonly forwarded: Record<ForwardedMouseType, number> = {
+    mouseDown: 0,
+    mouseUp: 0,
+    mouseMove: 0,
+    mouseWheel: 0,
+    contextMenu: 0
+  }
 
   constructor(private readonly options: InWindowProofSurfaceOptions) {
     super()
@@ -188,6 +256,18 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
     return this.parent
   }
 
+  // How many mouse events of each type the view cancelled and replayed on its
+  // host so far.
+  forwardedInputCounts(): Record<ForwardedMouseType, number> {
+    return { ...this.forwarded }
+  }
+
+  // The last mouse event the view saw, as Electron handed it over (diagnostics:
+  // what the payload carries, before the held buttons are added).
+  lastObservedInput(): ObservedInputEvent | null {
+    return this.lastObserved ? { ...this.lastObserved } : null
+  }
+
   isDestroyed(): boolean {
     return this.destroyed || this.view.webContents.isDestroyed()
   }
@@ -213,6 +293,8 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
 
   hide(): void {
     this.visible = false
+    // A surface hidden mid-press never sees the release.
+    this.held = { ...NO_HELD_MOUSE_BUTTONS }
     if (!this.isDestroyed()) {
       this.view.setVisible(false)
     }
@@ -334,14 +416,34 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
       return
     }
     event.preventDefault()
+    this.lastObserved = { ...input }
+    this.held = heldButtonsAfter(input, this.held)
     const parent = this.parent
     const origin = this.viewBounds
     if (!parent || parent.isDestroyed() || parent.webContents.isDestroyed() || !origin) {
       return
     }
-    const forwarded = forwardedMouseEvent(input, origin)
+    const forwarded = forwardedMouseEvent(withHeldButtons(input, this.held), origin)
     if (forwarded) {
+      // The type passed the FORWARDED_MOUSE_TYPES check above.
+      this.forwarded[input.type as ForwardedMouseType] += 1
       parent.webContents.sendInputEvent(forwarded)
     }
+  }
+}
+
+/**
+ * The surface status message's note on where the surface lives, so Health
+ * and the support bundle say which host a fallback preview had (never a
+ * silent change of host). Empty where the surface is its own window.
+ */
+export function proofSurfaceHostNote(platform: NodeJS.Platform): string {
+  switch (platform) {
+    case 'linux':
+      return ' Hosted inside the app window (Wayland cannot place a separate surface window).'
+    case 'darwin':
+      return ' Hosted inside the app window (the Scene canvas keeps the mouse).'
+    default:
+      return ''
   }
 }

@@ -271,7 +271,9 @@ Backend:
   `USERPROFILE`/`HOME`. `secrets.rs` needed no logic change — it was
   already a plain-JSON per-user store (the keychain was abandoned); the
   0600 hardening stays `cfg(unix)` and Windows leans on the `%APPDATA%`
-  ACL. The recordings-dir test now asserts per-platform.
+  ACL. The recordings-dir test now asserts per-platform. **Superseded
+  2026-11-04 (#1078):** Windows defaults to the `dpapi` store; see
+  `docs/distribution.md` → Credential Storage.
 - Replace Unix signal handling/orphan watchdog in `main.rs` with
   `tokio::signal::ctrl_c` + a Job Object ("kill on job close") so the
   backend and its ffmpeg children die with the app — this is _better_ than

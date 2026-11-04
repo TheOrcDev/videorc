@@ -18,7 +18,7 @@
 //
 // No recording is started.
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import WebSocket from 'ws'
@@ -27,6 +27,7 @@ import { RemoteClient, parseFragment } from '../crates/videorc-backend/remote_we
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { connectRemote, remoteRequest } from './lib/remote-control-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-remote-lan-user-data-'))
@@ -303,6 +304,6 @@ try {
   try {
     await stopApp()
   } finally {
-    rmSync(userDataDir, { recursive: true, force: true })
+    await removeProfileDir(userDataDir, { label: 'remote-lan smoke' })
   }
 }

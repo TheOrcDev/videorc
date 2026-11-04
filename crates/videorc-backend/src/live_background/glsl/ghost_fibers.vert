@@ -32,8 +32,20 @@ const vec4 PLACEMENTS[3] = vec4[3](vec4(0.0, 0.0, 0.0, 0.0), vec4(1.9, -4.6, -0.
 const float RIBBON_GAIN[3] = float[3](1.0, 0.5, 0.55);
 const float RIBBON_TINT[3] = float[3](0.0, 0.75, 0.35);
 
-float hash11(float n) {
-  return fract(sin(n * 91.3458) * 47453.5453);
+// PCG (Jarzynski and Olano 2020) over whole numbers, then the top 24 bits as
+// a value in [0, 1): a mote, fiber or bead number, a ribbon and a salt that
+// names the use, the same bits on every GPU and API. Plan 194 hashed with
+// fract(sin(n * 91.3458) * 47453.5453) of arguments up to 1e7 rad, whose sin
+// lands differently per driver, so the strands sat elsewhere on Linux and
+// Windows (#987, #1077).
+uint pcg(uint v) {
+  uint state = v * 747796405u + 2891336453u;
+  uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+
+float hash11(uint a, uint b, uint c, uint salt) {
+  return float(pcg(pcg(pcg(pcg(a) + b) + c) + salt) >> 8u) * (1.0 / 16777216.0);
 }
 
 // React Bits' `fit`: the canvas aspect over 1.5, clamped to 0.6–1.
@@ -57,8 +69,8 @@ void main() {
   vec2 viewport = u[0].xy;
   float dpr = u[0].w;
   float uTime = u[0].z;
-  float id = float(gl_InstanceID);
-  vec3 seed = vec3(hash11(id * 1.37 + 0.3), hash11(id * 2.91 + 1.7), hash11(id * 4.17 + 2.9));
+  uint id = uint(gl_InstanceID);
+  vec3 seed = vec3(hash11(id, 0u, 0u, 1u), hash11(id, 0u, 0u, 2u), hash11(id, 0u, 0u, 3u));
   vec3 box = vec3(9.0, 5.4, 6.0);
   vec3 p = (seed - 0.5) * box;
   p.z -= 0.6;
@@ -67,7 +79,7 @@ void main() {
   float depth;
   vec3 projected = project(p, viewport, depth);
   vec2 px = projected.xy;
-  float size = u[8].x * mix(0.5, 1.4, hash11(id * 7.7));
+  float size = u[8].x * mix(0.5, 1.4, hash11(id, 0u, 0u, 4u));
   float baseRadius = max(0.5 * size * dpr * CAMERA / max(depth, 0.1), 0.45);
   float coc = min(u[4].w * abs(1.0 - u[4].z / max(depth, 0.1)) * viewport.y * 0.035, 22.0 * dpr * 1.6);
   float radius = baseRadius + coc;
@@ -137,21 +149,23 @@ void main() {
   int withinRibbon = gl_InstanceID - ribbon * perRibbon;
   int fiber = withinRibbon / perFiber;
   int bead = withinRibbon - fiber * perFiber;
-  float uRibbon = float(ribbon);
   vec4 place = PLACEMENTS[ribbon];
   float uGain = RIBBON_GAIN[ribbon] * u[5].w;
   float uTint = RIBBON_TINT[ribbon];
   float fi = float(fiber);
   float fk = float(bead);
+  uint fiberId = uint(fiber);
+  uint beadId = uint(bead);
+  uint ribbonId = uint(ribbon);
 
-  float seed = hash11(fi * 1.731 + uRibbon * 17.0);
+  float seed = hash11(fiberId, ribbonId, 0u, 1u);
   float s = fract((fk + uFlow + seed * uDots) / uDots) - 0.5;
   float sNext = s + 1.0 / uDots;
   float layer = mod(fi, 3.0) - 1.0;
   float slot = floor(fi / 3.0);
   float perLayer = max(floor(uFibers / 3.0), 1.0);
-  float v = ((slot + 0.5) / perLayer) * 2.0 - 1.0 + (hash11(fi * 3.113 + 4.0) - 0.5) * (1.6 / perLayer) + layer * 0.12 / perLayer;
-  float depthOffset = (hash11(fi * 7.919 + 2.0) - 0.5) * DEPTH_SPREAD * (0.35 + 6.0 * s * s);
+  float v = ((slot + 0.5) / perLayer) * 2.0 - 1.0 + (hash11(fiberId, 0u, 0u, 2u) - 0.5) * (1.6 / perLayer) + layer * 0.12 / perLayer;
+  float depthOffset = (hash11(fiberId, 0u, 0u, 3u) - 0.5) * DEPTH_SPREAD * (0.35 + 6.0 * s * s);
 
   vec3 normal;
   vec3 world = ribbonPoint(s, v, depthOffset, layer, place, orient, scale, normal);
@@ -186,16 +200,16 @@ void main() {
   float fold = pow(1.0 - facing, 6.0) * u[6].z;
   float endFade = smoothstep(0.5, 0.4, abs(s)) * smoothstep(1.6, 4.2, depth);
   float uTips = u[6].x;
-  float tipEnd = mix(0.6, 0.06 + 0.26 * hash11(fi * 9.137 + place.w * 3.0), uTips);
+  float tipEnd = mix(0.6, 0.06 + 0.26 * hash11(fiberId, ribbonId, 0u, 4u), uTips);
   // Squared by hand: GLSL leaves pow() of a negative base undefined (HLSL gives NaN).
   float tipOffset = (s - tipEnd) / 0.0065;
   float tip = exp(-tipOffset * tipOffset) * uTips;
   endFade *= smoothstep(tipEnd + 0.003, tipEnd - 0.001, s);
   // The intro is finished (React Bits' appear = 1) and no click pulses.
   float uDotLength = u[5].y;
-  float twinklePhase = hash11(fi * 13.7 + fk * 0.917 + uRibbon * 3.0);
+  float twinklePhase = hash11(fiberId, beadId, ribbonId, 5u);
   float twinkle = pow(max(sin(uTime * (1.2 + 2.6 * twinklePhase) * 3.0 + twinklePhase * 61.0), 0.0), 36.0) * u[5].z * (1.0 - 0.85 * uDotLength);
-  float strength = mix(0.45, 1.0, hash11(fi * 5.37 + 1.0)) * mix(1.0, 0.72, abs(layer) * u[3].y);
+  float strength = mix(0.45, 1.0, hash11(fiberId, 0u, 0u, 6u)) * mix(1.0, 0.72, abs(layer) * u[3].y);
   float intensity = energy * crowd * strength * endFade * 0.8 * uGain * (1.0 + fold * 7.0 + twinkle * 5.0 + tip * 7.0);
   float highlight = clamp(fold * 0.55 + twinkle + tip, 0.0, 1.0);
 

@@ -791,4 +791,46 @@ Windows CI for D3D11.
 
 ## As built
 
-_Empty until a workstream lands._
+- **G (chat on stream), BUILT 2026-11-03, draft PR, not merged.**
+  - G1 (backend, `3e5f25e3`): `OverlayItem::Chat`, `chat` in
+    `OverlayLayout` under `#[serde(default)]`, its slot per orientation,
+    and `chat.overlay.set` / `clear` / `canvases`.
+  - G2 (`lib/chat-overlay.ts`, the painter `renderChatOverlayCards` in
+    `lib/caption-overlay.ts`, both lazy): the newest five chat or paid
+    messages of the livestream, never a tombstone, a system, membership,
+    moderation or activity-only row. Each row is the platform icon, the
+    name, and words and emotes (at most three lines). The box is the rect's
+    width, and the oldest rows leave first when the rect is short. It
+    repaints at most twice a second, never resends the same box, and clears
+    when chat empties, both switches go off or the livestream ends. The
+    vertical leg gets its own box, its canvas read once per livestream.
+  - The TS contract now defaults a missing `chat` (it refused one), so an
+    old layout validates with its placement intact.
+  - G3: the Scene page's Chat item (generic from G1, now tested), and a
+    Chat on stream switch in the chat pane's filter bar (its own chunk).
+    It rides the Buddy's relay as `chat-show-on-stream`, and Studio relays
+    `chatOnStream`.
+  - Since `chat` is in `OVERLAY_ITEMS`, the Scene stage and the agents'
+    scene tools (`get_scene_layout`, `move_on_scene`, `set_scene_item`)
+    list the box like the Buddy, so an agent can switch it on. That is an
+    owner call (D5 is off by default, for privacy).
+  - The smoke's chat-box assertion is written but not run. It skips the
+    top-right split scenario, where the box would sit in the highlight
+    gate's mirrored corner.
+  - Owed: Rust tests and clippy (CI), the smokes (G2, G4), and checking it
+    by eye in both themes and both orientations.
+  - **Dual-orientation fix (2026-11-03).** `pnpm smoke:comment-highlight-stream`
+    found two things wrong with a vertical leg on. (1) The horizontal stream
+    rides the primary leg at the session's own size (1280x720 in the smoke),
+    not the stream profile's 1920, but the renderer painted the landscape box
+    for the stream settings; the box is exactly its rect's width and the
+    blit keeps pixel size, so the backend centre-cropped it and the icon and
+    first letters were gone. Now `chat.overlay.canvases` also names the
+    landscape canvas the box lands on (the smallest landscape leg,
+    `recording::chat_overlay_horizontal_canvas`), the driver paints for it,
+    and the stream settings are only the fallback. (2) The vertical box was
+    right (one message is a one-line strip at the top of its rect), but the
+    gate compared the rect's glass against its mirror, and the 80%-wide
+    portrait rect overlaps its own mirror. The gate now reads the box's left
+    edge instead: the emote, the leading YouTube icon and the glass padding
+    before it inside the rect, so the cropped horizontal box fails too.

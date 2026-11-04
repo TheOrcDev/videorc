@@ -6,6 +6,8 @@ import { DIR_MODE } from './config.mjs'
 import {
   LINUX_EXECUTABLE,
   LINUX_REQUIRED_FILES,
+  LINUX_TEST_BUILD_COMMAND,
+  assertLinuxTestBuild,
   extractAppImage,
   fetchLinuxFile,
   fetchLinuxRelease,
@@ -211,7 +213,7 @@ async function installLinuxBuild({
   if (spec.kind === 'candidate') {
     refuse(
       'linux-candidate-unavailable',
-      'There is no Linux lab-candidate workflow yet. Build the branch on this machine (pnpm package:desktop:linux) and use --build local:apps/desktop/release/linux-unpacked, or download an AppImage and use --build file:<AppImage>.'
+      `There is no Linux lab-candidate workflow yet. Build the branch on this machine (${LINUX_TEST_BUILD_COMMAND}) and use --build local:apps/desktop/release/linux-unpacked, or download an AppImage and use --build file:<AppImage>.`
     )
   }
   if (!['release', 'file', 'local'].includes(spec.kind)) {
@@ -253,6 +255,7 @@ async function installLinuxBuild({
       ? await stageLocalBuild(fetched.localDir, stagingDir)
       : await extractAppImage(runner, fetched.appImagePath, stagingDir)
     const verified = await verifyLinuxApp(stagedApp, { expectedVersion: fetched.expectedVersion })
+    if (fetched.localDir) assertLinuxTestBuild(stagedApp)
     log(
       `Verified: ${LINUX_REQUIRED_FILES.join(', ')} present; version ${verified.version ?? '(unknown)'}.`
     )

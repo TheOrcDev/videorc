@@ -586,6 +586,48 @@ describe('RemoteSurfacePublisher', () => {
       vi.useRealTimers()
     }
   })
+
+  it('never records an older in-flight publish as what the backend holds (issue #1068)', async () => {
+    vi.useFakeTimers()
+    try {
+      const resolvers: Array<() => void> = []
+      const published: unknown[] = []
+      const publisher = new RemoteSurfacePublisher()
+      publisher.attach({
+        request: (_method, params) =>
+          new Promise<never>((resolve) => {
+            published.push(params)
+            resolvers.push(() => resolve({ ok: true } as never))
+          })
+      })
+      publisher.markConnected()
+      publisher.syncValues(values('available', true))
+      await vi.advanceTimersByTimeAsync(30)
+      expect(published).toHaveLength(1)
+      // A change while the first publish is in flight sends a second one.
+      publisher.syncValues(values('available', false))
+      await vi.advanceTimersByTimeAsync(30)
+      expect(published).toHaveLength(2)
+      // The older publish resolves after the newer was sent: the backend
+      // keeps the newer (issue #1068 supersedes a queued older one), so
+      // flipping back to the older state must publish again.
+      resolvers[0]?.()
+      await vi.advanceTimersByTimeAsync(0)
+      publisher.syncValues(values('available', true))
+      resolvers[1]?.()
+      await vi.advanceTimersByTimeAsync(30)
+      expect(published).toHaveLength(3)
+      // The newest resolve records its body: the same state is deduped.
+      resolvers[2]?.()
+      await vi.advanceTimersByTimeAsync(0)
+      publisher.syncValues(values('available', true))
+      await vi.advanceTimersByTimeAsync(30)
+      expect(published).toHaveLength(3)
+      publisher.detach()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('remoteLayoutLabels (plan 174 I-14)', () => {

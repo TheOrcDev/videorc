@@ -17,9 +17,14 @@ import {
   mirrorCommentHighlightAnchor,
   captionStimulusPngBase64,
   analyzeCommentHighlightArtifact,
+  chatBoxRegions,
   classifyCommentHighlightResult,
   commentHighlightStimulusPngBase64,
+  evaluateChatBoxArtifactMetrics,
+  isChatBoxGlassPixel,
+  isChatBoxIconPixel,
   evaluateCommentHighlightArtifactMetrics,
+  measureChatBoxArtifactRgb,
   measureCommentHighlightArtifactRgb
 } from './comment-highlight-artifact.mjs'
 import { ffmpegAvailable } from './ffmpeg-available.mjs'
@@ -562,3 +567,97 @@ function fillRect(rgb, frameWidth, startColumn, startRow, endColumn, endRow, col
     }
   }
 }
+
+describe('chat box artifact (plan 215 G)', () => {
+  // A 20x10 frame; the left half is the chat rect (10x10). The box there: two
+  // columns of glass, the YouTube icon (red) over columns 2-4 of rows 2-5,
+  // then the emote. `iconLeft` moves the icon; a box cropped at its left
+  // edge (the dual-orientation bug) lands the icon on the rect's edge.
+  const rect = { x: 0, y: 0, w: 0.5, h: 1 }
+  const WIDTH = 20
+  const HEIGHT = 10
+  const GLASS = [20, 22, 26]
+  const YOUTUBE_RED = [254, 0, 49]
+  const frame = ({ emote = true, icon = true, iconLeft = 2, glass = true } = {}) => {
+    const rgb = new Uint8Array(WIDTH * HEIGHT * 3).fill(128)
+    const paint = (x, y, [red, green, blue]) => {
+      const offset = (y * WIDTH + x) * 3
+      rgb[offset] = red
+      rgb[offset + 1] = green
+      rgb[offset + 2] = blue
+    }
+    for (let y = 1; y < 7; y += 1) {
+      for (let x = 0; x < 10; x += 1) paint(x, y, glass ? GLASS : [200, 200, 200])
+    }
+    if (icon) {
+      for (let y = 2; y < 6; y += 1) {
+        for (let x = iconLeft; x < iconLeft + 3; x += 1) paint(x, y, YOUTUBE_RED)
+      }
+    }
+    if (emote) paint(7, 3, COMMENT_HIGHLIGHT_EMOTE_RGB)
+    return rgb
+  }
+  const frames = (...parts) => {
+    const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0))
+    let offset = 0
+    for (const part of parts) {
+      out.set(part, offset)
+      offset += part.length
+    }
+    return out
+  }
+  const verdict = (...parts) =>
+    evaluateChatBoxArtifactMetrics(
+      measureChatBoxArtifactRgb(frames(...parts), { width: WIDTH, height: HEIGHT, rect })
+    )
+
+  it('maps the rect to sampled pixels', () => {
+    assert.deepEqual(
+      chatBoxRegions({ x: 0.1, y: 0.2, w: 0.3, h: 0.4 }, { width: 10, height: 10 }),
+      { box: { xStart: 1, xEnd: 4, yStart: 2, yEnd: 6 } }
+    )
+  })
+
+  it('tells the icon and the glass from the pattern and the other markers', () => {
+    assert.equal(isChatBoxIconPixel(...YOUTUBE_RED), true)
+    assert.equal(isChatBoxIconPixel(...COMMENT_HIGHLIGHT_MARKER_RGB), false, 'highlight marker')
+    assert.equal(isChatBoxIconPixel(218, 90, 179), false, 'the pattern pink')
+    assert.equal(isChatBoxIconPixel(...COMMENT_HIGHLIGHT_EMOTE_RGB), false)
+    assert.equal(isChatBoxGlassPixel(...GLASS), true)
+    assert.equal(isChatBoxGlassPixel(68, 62, 38), true, 'glass over the yellow marker')
+    assert.equal(isChatBoxGlassPixel(128, 128, 128), false)
+  })
+
+  it('passes when the whole box sits in the chat rect: emote, icon and the padding before it', () => {
+    const result = verdict(frame(), frame())
+    assert.equal(result.pass, true, result.failures.join('; '))
+    assert.equal(result.observations.boxFrames, 2)
+    assert.equal(result.observations.maxChatLeadingPaddingRatio, 0.2)
+    assert.equal(result.observations.maxChatLeadingGlassRatio, 1)
+  })
+
+  it('fails a box cropped at its left edge: the icon gone, or on the rect edge with no glass before it', () => {
+    for (const [label, parts] of [
+      ['no icon', [frame({ icon: false }), frame({ icon: false })]],
+      ['icon on the edge', [frame({ iconLeft: 0 }), frame({ iconLeft: 0 })]],
+      ['no glass before the icon', [frame({ glass: false }), frame({ glass: false })]]
+    ]) {
+      const result = verdict(...parts)
+      assert.equal(result.pass, false, label)
+      assert.equal(result.observations.boxFrames, 0, label)
+    }
+  })
+
+  it('fails without the emote or with one frame, and names what was missing', () => {
+    assert.equal(verdict(frame({ emote: false }), frame({ emote: false })).pass, false)
+    const one = verdict(frame(), frame({ icon: false }))
+    assert.equal(one.pass, false)
+    assert.match(
+      one.failures[0],
+      /showed in 1 frame\(s\), expected at least 2 \(emote in 2, icon in 1/
+    )
+    assert.deepEqual(evaluateChatBoxArtifactMetrics({ sampledFrames: 0, frames: [] }).failures, [
+      'chat box: no frames were sampled'
+    ])
+  })
+})

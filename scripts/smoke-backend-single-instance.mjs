@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-backend-single-instance-'))
 const appDataDir = join(stateRoot, 'app-data')
@@ -69,7 +69,7 @@ try {
   if (first) {
     await first.stop()
   }
-  await rm(stateRoot, { recursive: true, force: true })
+  await removeProfileDir(stateRoot, { label: 'backend-single-instance smoke' })
 }
 
 function launchIsolatedApp(name, onLine) {

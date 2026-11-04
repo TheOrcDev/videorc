@@ -206,6 +206,12 @@ leave alone. The smoke showed why it cannot stay: with only the stream
 waiting, a freeze between 2 s and 30 s kept the stream and condemned the
 recording. Media Foundation and the raw fallback keep their existing limits.
 
+2026-11-03: the raw stream writer (the production path on Linux) now waits
+the same 30 s (`raw_video_fifo_write_budget`). Its 2 s budget ended live-lab
+streams on ogre each time FFmpeg fell below realtime and paused its reads for
+4-6 s: the writer cut a frame short and the rawvideo demuxer hit EOF. Raw
+recording and Media Foundation keep their limits.
+
 Both incident failures map to these changes: session 1 died on the 2 s FIFO
 write timeout, session 2 on the 2 s sustained-budget window.
 
@@ -278,6 +284,12 @@ Mac, then owner acceptance: live to a private destination, open OBS with the
   not done (S3 is macOS-only).
 - Operational, no code: background agent builds on the streaming Mac can run
   under `taskpolicy -b` until S3 ships.
+- The session audio writer still gives up after 5 s (`WRITE_DEADLINE` in
+  `session_audio.rs`). On ogre (2026-11-04), a 6 s FFmpeg `SIGSTOP` ended the
+  audio transport 5.5 s in with no health event, so the stream carried `apad`
+  silence for the rest of the session. With the replay ring on, FFmpeg then
+  exited about 15 s later on the ring's audio (`[af#1:1]`, `-28` "No space
+  left on device", the disk not full) and took the stream with it.
 
 ## Evidence locations
 

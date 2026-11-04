@@ -160,7 +160,10 @@ function PowerSlider({
             />
           ) : null}
           <Label className="min-w-0" id={labelId}>
-            <span className="truncate">{label}</span>
+            {/* Its own 20 px line: Label is `leading-none`, and a truncating
+                span clips at its line box, below which Segoe UI's descenders
+                (1.33 em) fall. */}
+            <span className="truncate leading-5">{label}</span>
           </Label>
           {status ? <Badge variant={status.tone ?? 'default'}>{status.label}</Badge> : null}
         </div>

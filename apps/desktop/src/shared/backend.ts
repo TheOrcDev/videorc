@@ -357,6 +357,17 @@ export type VideorcAccountRefreshResult =
   | { outcome: 'refreshed'; snapshot: VideorcAccountSnapshot }
   | { outcome: 'deferred' }
 
+/** Why the desktop's Videorc account changed (plan 215 A5). */
+export type AccountChangeReason = 'signed-in' | 'signed-out' | 'session-expired'
+
+/** The `account.changed` event (plan 215 A5): the account as the backend now
+ * holds it, and why it changed. `session-expired` means the server refused
+ * the stored session and the desktop signed itself out. */
+export interface AccountChangedEvent {
+  account: VideorcAccountSnapshot
+  reason: AccountChangeReason
+}
+
 export type DeviceKind = 'screen' | 'window' | 'camera' | 'microphone' | 'system-audio'
 export type DeviceStatus = 'available' | 'unavailable' | 'permission-required'
 
@@ -479,6 +490,27 @@ export interface CameraSelectionDiagnostics {
   state: PreviewCameraState
 }
 
+/**
+ * Plan 216 A5: one user-facing error the renderer showed, so the support
+ * bundle explains the last toast. The backend redacts `raw` with the rest of
+ * the bundle (paths, URLs, secrets).
+ */
+export interface RendererUserErrorRecord {
+  /** When it was shown, ISO 8601. */
+  at: string
+  /** The verb the streamer asked for ("switch") and its object ("the scene"). */
+  action?: string
+  object?: string
+  /** The backend's error code, when the error carried one. */
+  code?: string
+  /** How the copy read it: a known cause, Videorc offline, or unknown. */
+  kind: 'offline' | 'known' | 'canceled' | 'unknown'
+  /** The toast title the streamer read. */
+  title: string
+  /** The raw text behind it. */
+  raw: string
+}
+
 export interface RendererDiagnosticsSnapshot {
   cameraSelection?: CameraSelectionDiagnostics
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
@@ -486,6 +518,8 @@ export interface RendererDiagnosticsSnapshot {
   runtimeInfo?: RuntimeInfo
   /** Plan 214 E3: Videorc Camera's line. */
   virtualCamera?: VirtualCameraBundleLine
+  /** Plan 216 A5: the newest user-facing errors, oldest first. */
+  recentUserErrors?: RendererUserErrorRecord[]
 }
 
 export type AudioTrackSource = 'microphone' | 'test-tone' | 'system-audio'
@@ -2972,6 +3006,11 @@ export interface PreviewCameraStatus {
   sequence?: number
   updatedAt: string
   message?: string
+  /**
+   * Plan 216 D2: true while the camera is Live but has sent no frame past
+   * the backend's first-frame grace. Absent otherwise.
+   */
+  noVideo?: boolean
 }
 
 export interface CameraCapabilityFormat {
@@ -3095,6 +3134,11 @@ export interface AudioLevelsEvent {
   master?: AudioLevelReading
   /** Samples the mix clipped since the previous event. */
   masterClippedSamples: number
+  /**
+   * Issue 1064: the session's silence watchdog reports the captured
+   * microphone as digital silence (sent only while true).
+   */
+  microphoneSilent?: boolean
 }
 
 export interface AudioMeterSampleSnapshot {
@@ -4523,11 +4567,32 @@ export interface RuntimeInfo {
    * supervisor restarts and app relaunches so a support bundle exported after
    * "Backend crashed, restarting" still names the exit and its last stderr. */
   backendCrashes?: BackendCrashRecord[]
+  /** Plan 216 D3: the Preview's first-frame watchdog's last decisions
+   * (oldest first, last 20), so a bundle says why the Preview fell back. */
+  firstFrameDecisions?: FirstFrameDecisionRecord[]
 }
 
-/** One backend process exit worth keeping: every non-intentional exit plus
- * intentional shutdowns that still reported a non-zero code. Written by the
- * main-process supervisor to `userData/backend-crashes.json`. */
+/** Flat evidence a watchdog decision saw: numbers, flags and short words. */
+export type FirstFrameDecisionEvidence = Record<string, string | number | boolean | null>
+
+/** One decision of the Preview's first-frame watchdog, kept in main (plan 216 D3). */
+export interface FirstFrameDecisionRecord {
+  /** ISO timestamp of the decision. */
+  at: string
+  /** Which watch decided: the first frame, the steady presenting watch, the
+   * Windows proof surface, or the presenter itself being retired. */
+  watch: 'first-frame' | 'presenting-watch' | 'proof-preview' | 'presenter'
+  decision: 'met' | 'heal' | 'fallback' | 'stalled' | 'recovered' | 'presenter-retired'
+  /** The healing action fired, for a heal. */
+  action?: 'present-kick' | 'resync-scene' | 'reset-native-path'
+  reason?: string
+  evidence?: FirstFrameDecisionEvidence
+}
+
+/** One backend process exit worth keeping: every exit main did not ask for
+ * (a backend recycle is kept as intentional) plus stops main asked for that
+ * still reported a non-zero code. Written by the main-process supervisor to
+ * `userData/backend-crashes.json`. */
 export interface BackendCrashRecord {
   /** ISO timestamp of the exit observation. */
   at: string
@@ -4539,7 +4604,12 @@ export interface BackendCrashRecord {
    * was scheduled (app quitting, intentional stop with a non-zero code). */
   attempt: number | null
   uptimeMs: number
+  /** Videorc ended it: main stopped it, or the backend recycled itself
+   * (exit 0, no signal). False for crashes and for kills from outside. */
   intentional: boolean
+  /** NTSTATUS name when Windows reported a crash code, e.g.
+   * `STATUS_ACCESS_VIOLATION`. Absent otherwise and on older records. */
+  windowsStatus?: string
   /** Last stderr lines of that process (each line truncated). */
   stderrTail: string[]
 }
@@ -4795,6 +4865,49 @@ export interface SetCommentHighlightParams {
 export interface CommentHighlightCanvases {
   vertical?: { width: number; height: number }
 }
+
+// --- Chat on stream (plan 215 G, D5) -----------------------------------------
+// The last five chat messages as one card the renderer paints
+// (`lib/chat-overlay.ts`) and the backend draws on every leg the overlay
+// layout's `chat` switches carry, like the highlight card. Off by default.
+
+/** `chat.overlay.set`: mirrors Rust `SetChatOverlayParams`. */
+export interface SetChatOverlayParams {
+  pngBase64: string
+  /** The placed chat rect for the horizontal canvas; omitted keeps the
+   *  default corner. */
+  rect?: OverlayRect
+  /** The box rasterized for the vertical simulcast leg; sent only when
+   *  `chat.overlay.canvases` reports a vertical canvas. */
+  verticalPngBase64?: string
+  /** The placed chat rect for the vertical leg. */
+  verticalRect?: OverlayRect
+}
+
+/** What `chat.overlay.set` and `chat.overlay.clear` answer: mirrors Rust
+ *  `ChatOverlayInfo`. */
+export interface ChatOverlayInfo {
+  active: boolean
+  width: number
+  height: number
+  revision: number
+  /** A portrait raster is installed beside the landscape one. */
+  vertical: boolean
+}
+
+/** `chat.overlay.canvases`: the canvases of the running session the box is
+ *  rasterized for, whatever the chat switches say. Mirrors Rust
+ *  `ChatOverlayCanvases`. Both absent without a session, or off the
+ *  compositor bridge. */
+export interface ChatOverlayCanvases {
+  /** The landscape leg the box lands on: with a vertical leg the horizontal
+   *  stream is the primary leg at the session's own size, not the stream
+   *  profile's, and a box painted for the wrong width is cropped. */
+  horizontal?: { width: number; height: number }
+  /** The vertical simulcast leg's portrait canvas, for its own box. */
+  vertical?: { width: number; height: number }
+}
+// --- end chat on stream (plan 215 G) -----------------------------------------
 
 export interface CommentsCommandResolution<T> {
   requestId: string
@@ -5390,6 +5503,10 @@ export interface VideorcApi {
    * main shows the main window and opens that destination in Livestream →
    * Setup through `livestream:open-destination`. Resolves once sent. */
   openDestinationFromCommentsWindow: (command: OpenDestinationCommand) => Promise<boolean>
+  /** "Sign in to Videorc" on a chat row that waits on it (plan 215 A3): main
+   * shows the main window and asks it to start the sign-in it owns, through
+   * `account:sign-in-request`. Resolves once sent. */
+  signInToVideorcFromCommentsWindow: (command: SignInToVideorcCommand) => Promise<boolean>
   /** Chat removal relay (plan 140, S6): the Stream Manager's "Remove from
    * chat" and its removal-card answers. The MAIN renderer owns the backend
    * socket and makes the `liveChat.moderation.*` call; the reply is the
@@ -5605,6 +5722,11 @@ export interface VideorcApi {
    */
   onOpenDestination: (callback: (navigation: { targetId: string }) => void) => () => void
   /**
+   * Plan 215 A3: the Stream Manager asked for the Videorc sign-in. Main has
+   * shown the window; the shell starts the sign-in it owns.
+   */
+  onAccountSignInRequest: (callback: () => void) => () => void
+  /**
    * Main was asked to quit (⌘Q, the Dock) or to close the main window (⌘W)
    * while on air (plan 174 S3.1, D2). The shell asks "End livestream and
    * quit?" with "Keep streaming" focused, ends the livestream on a yes and
@@ -5734,6 +5856,10 @@ export type CommentsReadState =
   /** A stream-key destination whose platform shares chat only with apps you
    * sign in to (X): Sign in brings it. Not a failure (plan 213 J1). */
   | 'needs-sign-in'
+  /** The Videorc sign-in is missing or no longer accepted, so the relay that
+   * reads X and Kick chat has nothing to show (plan 215 A1). Not a failure:
+   * the connector parks and attaches again when you sign in (A4). */
+  | 'needs-videorc-sign-in'
 
 export type CommentsWriteState = 'ready' | 'missing-scope' | 'read-only' | 'failed' | 'unavailable'
 
@@ -6390,7 +6516,9 @@ export interface OverlayItemLayout {
   showInRecording: boolean
 }
 
-export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy'] as const
+/** The placeable overlay items; `chat` (plan 215 G) is the chat box, off by
+ * default because it shows viewers' names. */
+export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy', 'chat'] as const
 export type OverlayItem = (typeof OVERLAY_ITEMS)[number]
 
 export type OverlayLayout = Record<OverlayItem, OverlayItemLayout>
@@ -7593,6 +7721,10 @@ export interface CohostWindowState {
    * and operates. Absent from a relay seeded without it (older Studio,
    * smokes); the window then shows no header. */
   buddy?: CohostWindowBuddy
+  /** Chat on stream (plan 215 G, D5): `overlayLayout.chat.showOnStream`, for
+   * the chat pane's switch. Absent from a relay seeded without it (older
+   * Studio, smokes); the window then shows no switch. */
+  chatOnStream?: boolean
 }
 
 /** The Buddy as the Stream Manager operates it (plan 164 S-C4). The window
@@ -7677,11 +7809,15 @@ export type CohostBuddyActionCommand =
   /** Plan 168 S-D3: a reaction chip beside the Say box; Studio routes it to
    * `cohost.pet.react`. `reaction` is a reaction id (`[a-z0-9-]{1,40}`). */
   | { requestId: string; kind: 'buddy-react'; reaction: string }
+  /** Plan 215 G (D5): the chat pane's Chat on stream switch. It rides this
+   * relay like the Buddy's switch; Studio writes `overlayLayout.chat`. */
+  | { requestId: string; kind: 'chat-show-on-stream'; showOnStream: boolean }
 
 export const COHOST_BUDDY_ACTION_KINDS = [
   'buddy-say',
   'buddy-show-on-stream',
-  'buddy-react'
+  'buddy-react',
+  'chat-show-on-stream'
 ] as const
 
 /** Correlated co-host action from the Comments window, brokered through main
@@ -7766,6 +7902,13 @@ export interface OpenBuddyTabCommand {
 export interface OpenDestinationCommand {
   requestId: string
   targetId: string
+}
+
+/** "Sign in to Videorc" from the Stream Manager (plan 215 A3): nothing but
+ * the request id. Main shows the main window, which starts the sign-in it
+ * owns; the Chat window never sees the authorize URL. */
+export interface SignInToVideorcCommand {
+  requestId: string
 }
 
 /** The part of `autoChat` the Stream Manager may change (plan 164 S-D6,

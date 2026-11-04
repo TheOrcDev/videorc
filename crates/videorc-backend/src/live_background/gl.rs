@@ -629,13 +629,15 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
     let node = pick_node()?;
     let live = live_quarantine();
     // No sentinel, no GPU: a context that hangs the host must be remembered.
-    live.begin_probe(&node, SENTINEL_PROBE).map_err(|error| {
+    // The armed probe is held until the node proves itself; dropping it in
+    // process clears the sentinel, so only a hang that kills the process
+    // leaves it behind.
+    let mut armed = Some(live.begin_probe(&node, SENTINEL_PROBE).map_err(|error| {
         Failure::gpu(
             LiveBackgroundStillReason::NoGpu,
             format!("could not arm the live background sentinel: {error}"),
         )
-    })?;
-    let mut sentinel_armed = true;
+    })?);
     let result = (|| {
         let context = unsafe { GlesContext::open(&node.path) }?;
         let gl = &context.gl;
@@ -671,11 +673,10 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
                         sequence: frame_tag(request.id, counter),
                         rendering: request.rendering,
                     }));
-                    if sentinel_armed {
+                    if let Some(probe) = armed.take() {
                         // The node drew a frame: the sentinel no longer means
                         // a hang.
-                        let _ = live.finish_probe();
-                        sentinel_armed = false;
+                        let _ = probe.finish();
                     }
                     let mut stats = lock(&shared.stats);
                     stats.last_render_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
@@ -696,9 +697,9 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
         unsafe { state.destroy(gl) };
         Ok(())
     })();
-    if sentinel_armed {
+    if let Some(probe) = armed.take() {
         // The thread ended without hanging: whatever failed, it returned.
-        let _ = live.finish_probe();
+        let _ = probe.finish();
     }
     result
 }
@@ -1727,6 +1728,7 @@ mod tests {
         ))
         .unwrap();
         let (width, height) = (640u32, 360u32);
+        let mut failures = Vec::new();
         for frame in fixture["frames"].as_array().unwrap() {
             let id: LiveBackgroundId = serde_json::from_value(frame["id"].clone()).unwrap();
             let (look, _) = super::super::looks::look_or_first(id, frame["look"].as_str().unwrap());
@@ -1744,44 +1746,31 @@ mod tests {
             };
             let expected = base64_decode(frame["rgb"].as_str().unwrap());
             let (mean, max) = grid_error(&bgra, width, height, &expected);
-            let (mean_limit, max_cell) = golden_bound(id);
-            assert!(
-                mean <= mean_limit && max <= max_cell,
-                "{id:?} {}: mean {mean:.3}, max {max}",
-                look.id
-            );
+            let name = format!("{id:?} {}@{}", look.id, frame["phase"]);
+            eprintln!("golden {name}: mean {mean:.3}, max cell {max}");
+            // Every frame is checked before the test fails, so one miss
+            // cannot hide the rest (#987).
+            if mean > GOLDEN_BOUND.0 || max > GOLDEN_BOUND.1 {
+                failures.push(format!("{name}: mean {mean:.3}, max {max}"));
+            }
         }
         unsafe { state.destroy(gl) };
+        assert!(failures.is_empty(), "golden grids off: {failures:?}");
     }
 
-    /// The (mean, max cell) bound a golden frame stays inside, in 0–255
-    /// units: mean 2.0 and cell 10, except Beams and Ghost Fibers.
+    /// The (mean, max cell) bound every golden frame stays inside, in 0–255
+    /// units: mean 2.0 and cell 10, the Metal port's bound on an Apple GPU.
     ///
-    /// Those two hash with `fract(sin(x) * 47453.5453)` of large arguments
-    /// (Beams' lanes reach about 950 rad, Ghost Fibers' about 1e7), so one
-    /// ulp of `sin` moves a Beams lane's glints by about a sixth of a noise
-    /// period. The goldens hold the last bits of ANGLE on an Apple GPU, which
-    /// no GLES driver has to reproduce: radeonsi's `sin` scales into
-    /// revolutions first (about 1e-4 rad off at 900 rad), llvmpipe rounds
-    /// differently again, and WARP and the paravirtual Metal GPU miss the
-    /// same way (see their golden tests). Beams' Perlin gradients also land
-    /// exactly on `step(0, 0)` for one hash in seven, which divide rounding
-    /// decides. On 2026-11-03 radeonsi (RX 9070 XT) measured Beams at means
-    /// 9.1–21.2 with a worst cell of 227 and Ghost Fibers at means up to 1.69
-    /// with a worst cell of 82; llvmpipe 4.8–11.4 / 220 and 0.82 / 16. With
-    /// Beams' lane hash made an integer one and its gradient choice exact,
-    /// radeonsi and llvmpipe agreed on Beams to a grid mean of 0.11 and a
-    /// cell of 1, so the GL setup (the mipmapped half-float field included)
-    /// is not the cause. The bounds are the paravirtual Metal ones; a mean
-    /// over them is a port bug.
+    /// Beams and Ghost Fibers once had wider bounds here (24 / 240 and
+    /// 2 / 96): they hashed with `fract(sin(x) * 47453.5453)` of hundreds to
+    /// 1e7 rad, whose last bits no two drivers share (radeonsi scales into
+    /// revolutions first, llvmpipe rounds differently again), and Beams'
+    /// Perlin gradient was decided by divide rounding. Both now hash in
+    /// integers and split the gradient in whole numbers (#987, #1077), so
+    /// every GLES driver draws the goldens' lanes and strands; a miss is a
+    /// port bug.
     #[cfg(target_os = "linux")]
-    fn golden_bound(id: LiveBackgroundId) -> (f64, u8) {
-        match id {
-            LiveBackgroundId::Beams => (24.0, 240),
-            LiveBackgroundId::GhostFibers => (2.0, 96),
-            _ => (2.0, 10),
-        }
-    }
+    const GOLDEN_BOUND: (f64, u8) = (2.0, 10);
 
     #[cfg(target_os = "linux")]
     fn base64_decode(text: &str) -> Vec<u8> {
