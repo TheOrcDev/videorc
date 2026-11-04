@@ -17481,6 +17481,52 @@ mod tests {
         )
     }
 
+    /// Stops the state's synthetic compositor run when a test unwinds
+    /// (#1069). A failed assertion otherwise drops the test runtime, whose
+    /// blocking pool waits forever for the thread running
+    /// `run_synthetic_compositor_loop`, which nothing told to stop: the
+    /// failure is never reported and the test just runs on. Declared right
+    /// after the state so it drops last, the guard signals the current run's
+    /// stop channel and waits for its worker, so the panic reports instead.
+    /// A test that returns normally has stopped its run itself; the guard
+    /// then finds nothing to do.
+    struct StopSyntheticRunOnDrop {
+        state: AppState,
+    }
+
+    impl StopSyntheticRunOnDrop {
+        fn new(state: AppState) -> Self {
+            Self { state }
+        }
+    }
+
+    impl Drop for StopSyntheticRunOnDrop {
+        fn drop(&mut self) {
+            // Drop cannot await: the runtime lock is tried until the loop
+            // lets go of it (it holds the lock for one frame's bookkeeping
+            // at most), and the worker is joined by polling its handle.
+            let deadline = Instant::now() + COMPOSITOR_WORKER_STOP_TIMEOUT;
+            let task = loop {
+                if let Ok(mut compositor) = self.state.compositor.try_lock() {
+                    if let Some(stop_tx) = compositor.stop_tx.take() {
+                        let _ = stop_tx.send(true);
+                    }
+                    break compositor.render_task.take();
+                }
+                if Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let Some(task) = task else {
+                return;
+            };
+            while !task.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
     fn tiny_video() -> VideoSettings {
         VideoSettings {
             preset: VideoPreset::Custom,
@@ -18541,6 +18587,7 @@ mod tests {
     #[tokio::test]
     async fn synthetic_compositor_reports_render_cadence() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -18601,6 +18648,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_publishes_auxiliary_stream_output_store() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -18700,6 +18748,7 @@ mod tests {
     #[tokio::test]
     async fn simulcast_bound_aux_composes_its_own_vertical_scene() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -19731,6 +19780,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_start_replaces_stale_frame_store() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let old_store = compositor_frame_store(&state).await;
         {
             let mut store = old_store
@@ -19780,6 +19830,7 @@ mod tests {
     #[tokio::test]
     async fn rapid_compositor_replacement_awaits_the_previous_blocking_worker() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let params = |width| CompositorStartParams {
             benchmark: false,
             target_fps: 60,
@@ -19890,6 +19941,7 @@ mod tests {
     #[tokio::test]
     async fn arm_compositor_for_capture_keeps_the_run_and_swaps_the_loop_config() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
         let preview_run_id = preview.run_id.clone().expect("preview run id");
         let before = wait_for_frame_dimensions(&state, 64, 36, 0).await;
@@ -19989,6 +20041,7 @@ mod tests {
         assert!(!idle.buddy_on_aux);
 
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -20101,6 +20154,7 @@ mod tests {
         );
 
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -20181,6 +20235,7 @@ mod tests {
     #[tokio::test]
     async fn a_layout_saved_at_idle_swaps_the_idle_runs_flags() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let idle = idle_overlay_flags(&state);
         assert!(!idle.buddy_on_primary);
         start_synthetic_compositor(
@@ -20265,14 +20320,8 @@ mod tests {
     #[tokio::test]
     async fn a_benchmark_arm_leaves_the_users_scene_in_place_on_both_paths() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "TEMP-DIAG benchmark arm: preview run started"
-            );
-        }
         // The user's scene: one plain test pattern (the only source a test
         // can draw), committed the way the idle Preview commits it.
         let (user_scene, user_sources) = test_pattern_scene(64, 36);
@@ -20289,13 +20338,6 @@ mod tests {
         )
         .await;
         let before = wait_for_frame_at_revision(&state, Some(10)).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "TEMP-DIAG benchmark arm: user frame at 10"
-            );
-        }
         let user_status = compositor_status(&state).await;
         assert_eq!(user_status.scene_revision, Some(10));
         assert_eq!(
@@ -20340,10 +20382,6 @@ mod tests {
         )
         .await
         .expect("arms in place");
-        {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: armed");
-        }
         assert!(
             commit_benchmark_scene(
                 &state,
@@ -20354,19 +20392,10 @@ mod tests {
             )
             .await
         );
-        let benchmark_frame = wait_for_frame_dimensions(&state, 128, 72, before.sequence).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "TEMP-DIAG benchmark arm: benchmark frame"
-            );
-        }
-        assert_eq!(
-            benchmark_frame.scene_revision,
-            Some(11),
-            "the barrier reads the benchmark scene's revision"
-        );
+        // The arm resizes the loop at once and the commit lands a tick or
+        // two later, so a frame of the user's scene at the benchmark's size
+        // is possible in between: the wait names the revision too.
+        wait_for_frame_dimensions_at_revision(&state, 128, 72, Some(11), before.sequence).await;
         {
             let compositor = state.compositor.lock().await;
             assert_eq!(compositor.status.scene_revision, Some(10));
@@ -20411,10 +20440,6 @@ mod tests {
         // the user's scene at its own revision (no surface: the run stops).
         release_compositor_capture_lease(&state, "benchmark").await;
         {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: released");
-        }
-        {
             let compositor = state.compositor.lock().await;
             assert!(compositor.benchmark_scene.is_none());
             assert_eq!(
@@ -20424,13 +20449,6 @@ mod tests {
             );
         }
 
-        {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "TEMP-DIAG benchmark arm: before fresh run"
-            );
-        }
         // Fresh run: the benchmark starts its own run.
         start_synthetic_compositor(
             state.clone(),
@@ -20451,12 +20469,7 @@ mod tests {
             )
             .await
         );
-        let fresh_frame = wait_for_frame_dimensions(&state, 128, 72, 0).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: fresh frame");
-        }
-        assert_eq!(fresh_frame.scene_revision, Some(12));
+        wait_for_frame_dimensions_at_revision(&state, 128, 72, Some(12), 0).await;
         {
             let compositor = state.compositor.lock().await;
             assert_ne!(
@@ -20477,11 +20490,49 @@ mod tests {
             );
         }
         stop_compositor(&state).await;
-        {
-            use std::io::Write as _;
-            let _ = writeln!(std::io::stderr(), "TEMP-DIAG benchmark arm: stopped");
-        }
         assert!(state.compositor.lock().await.benchmark_scene.is_none());
+    }
+
+    /// #1069: a failed assertion while a synthetic run is live reports as a
+    /// failure instead of hanging the whole test binary in the runtime's
+    /// blocking-pool shutdown (the guard stops the run as the test unwinds).
+    #[tokio::test]
+    #[should_panic(expected = "a failure during a live synthetic run reports")]
+    async fn a_panic_during_a_live_synthetic_run_reports_instead_of_hanging() {
+        let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
+        start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        wait_for_frame_dimensions(&state, 64, 36, 0).await;
+        panic!("a failure during a live synthetic run reports");
+    }
+
+    /// The first frame at `width`x`height` that also carries `revision`: a
+    /// run resized in place (or started) before a scene commit renders the
+    /// previous scene at the new size until the commit reaches it.
+    async fn wait_for_frame_dimensions_at_revision(
+        state: &AppState,
+        width: u32,
+        height: u32,
+        revision: Option<u64>,
+        after_sequence: u64,
+    ) -> CompositorFrameEvidence {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let latest = compositor_latest_frame_evidence(state).await;
+            if let Some(evidence) = latest
+                && evidence.width == width
+                && evidence.height == height
+                && evidence.scene_revision == revision
+                && evidence.sequence > after_sequence
+            {
+                return evidence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "compositor never published a {width}x{height} frame at revision {revision:?} after {after_sequence} (latest {latest:?})"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn wait_for_frame_at_revision(
@@ -20515,6 +20566,7 @@ mod tests {
     #[tokio::test]
     async fn arm_compositor_for_capture_refuses_non_preview_runs() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         assert_eq!(
             arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
             Err(CompositorArmRefusal::NoLiveRun)
@@ -20562,6 +20614,7 @@ mod tests {
     #[tokio::test]
     async fn stopping_a_leased_run_clears_the_lease() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
         let run_id = preview.run_id.expect("preview run id");
         arm_compositor_for_capture(&state, "session-arm", arm_params(128, 72))
@@ -20579,6 +20632,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_shutdown_joins_the_compositor_blocking_worker() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
@@ -20623,6 +20677,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_compositor_starts_serialize_the_full_worker_handoff() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         let params = |width| CompositorStartParams {
             benchmark: false,
             target_fps: 60,
@@ -20663,6 +20718,7 @@ mod tests {
     #[tokio::test]
     async fn compositor_restart_publishes_requested_recording_dimensions_after_preview_size() {
         let state = test_state();
+        let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
         start_synthetic_compositor(
             state.clone(),
             CompositorStartParams {
