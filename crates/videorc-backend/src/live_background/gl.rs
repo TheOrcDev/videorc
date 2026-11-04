@@ -629,13 +629,15 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
     let node = pick_node()?;
     let live = live_quarantine();
     // No sentinel, no GPU: a context that hangs the host must be remembered.
-    live.begin_probe(&node, SENTINEL_PROBE).map_err(|error| {
+    // The armed probe is held until the node proves itself; dropping it in
+    // process clears the sentinel, so only a hang that kills the process
+    // leaves it behind.
+    let mut armed = Some(live.begin_probe(&node, SENTINEL_PROBE).map_err(|error| {
         Failure::gpu(
             LiveBackgroundStillReason::NoGpu,
             format!("could not arm the live background sentinel: {error}"),
         )
-    })?;
-    let mut sentinel_armed = true;
+    })?);
     let result = (|| {
         let context = unsafe { GlesContext::open(&node.path) }?;
         let gl = &context.gl;
@@ -671,11 +673,10 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
                         sequence: frame_tag(request.id, counter),
                         rendering: request.rendering,
                     }));
-                    if sentinel_armed {
+                    if let Some(probe) = armed.take() {
                         // The node drew a frame: the sentinel no longer means
                         // a hang.
-                        let _ = live.finish_probe();
-                        sentinel_armed = false;
+                        let _ = probe.finish();
                     }
                     let mut stats = lock(&shared.stats);
                     stats.last_render_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
@@ -696,9 +697,9 @@ fn run_worker(shared: &Arc<Shared>) -> Result<(), Failure> {
         unsafe { state.destroy(gl) };
         Ok(())
     })();
-    if sentinel_armed {
+    if let Some(probe) = armed.take() {
         // The thread ended without hanging: whatever failed, it returned.
-        let _ = live.finish_probe();
+        let _ = probe.finish();
     }
     result
 }
