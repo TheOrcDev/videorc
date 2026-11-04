@@ -170,6 +170,46 @@ export function composeDockedScreenRect(slot: Rect, mainContentBounds: Rect): Re
   }
 }
 
+export interface Size {
+  width: number
+  height: number
+}
+
+/** The size a slot report measured, or null when it has none to give: no
+ * report, a slot that unmounted (another tab), or a collapsed rect. */
+export function usableDockSlotSize(slot: DockSlotReport | null): Size | null {
+  if (!slot || !slot.mounted || slot.width < 1 || slot.height < 1) {
+    return null
+  }
+  return { width: Math.round(slot.width), height: Math.round(slot.height) }
+}
+
+/**
+ * The in-window dock's video rect (the Linux proof surface, the macOS
+ * in-process layer): the slot while it has a rect, else the content origin at
+ * `fallback`, the last size a slot measured. With no usable slot the surface
+ * is hidden anyway (decideDockVisibility), but the backend sizes the idle
+ * program from these bounds (preview_surface.rs), so a 1×1 rect would make
+ * the program a single pixel on every other tab: what `get_picture` hands an
+ * agent, and what the Preview first shows on return. 1×1 only before any
+ * size is known at all.
+ */
+export function inWindowDockedRect(
+  slot: DockSlotReport | null,
+  mainContentBounds: Rect,
+  fallback: Size | null
+): Rect {
+  if (slot && usableDockSlotSize(slot)) {
+    return composeDockedScreenRect(slot, mainContentBounds)
+  }
+  return {
+    x: Math.round(mainContentBounds.x),
+    y: Math.round(mainContentBounds.y),
+    width: Math.max(1, Math.round(fallback?.width ?? 1)),
+    height: Math.max(1, Math.round(fallback?.height ?? 1))
+  }
+}
+
 export interface DockVisibilityInput {
   slot: DockSlotReport | null
   currentEpoch: number

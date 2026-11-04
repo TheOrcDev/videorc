@@ -5,6 +5,7 @@ import {
   evaluateFirstRunSmokeStep,
   FIRST_RUN_SMOKE_LIMITS,
   FIRST_RUN_SOURCE_START_PATTERNS,
+  firstRunPerformanceCheckSettled,
   firstRunSourceStartLines
 } from './first-run-smoke-gate.mjs'
 
@@ -531,4 +532,32 @@ test('replay can retain an existing source, but never admits a new source', () =
     }).pass,
     false
   )
+})
+
+test("the look waits for setup's performance check to finish, never for one about to start", () => {
+  const idle = { state: 'idle' }
+  const verdict = { capabilityKey: 'performance-check-v3:mac', rungs: [] }
+  const settled = (check, recording = idle, completed = false) =>
+    firstRunPerformanceCheckSettled({ check, recording, completed })
+  // Setup has not started it yet: a fresh profile has no verdict.
+  assert.equal(settled({ running: false, stale: false }), false)
+  assert.equal(settled({ running: true, stale: false }), false)
+  assert.equal(settled({ running: true, stale: false, result: verdict }), false)
+  assert.equal(settled({ running: false, stale: false, result: verdict }), true)
+  assert.equal(settled({ running: false, stale: false, lastRunNotRecorded: 'host-busy' }), true)
+  // A run that failed keeps no verdict; its completed event still ends it.
+  assert.equal(settled({ running: false, stale: false }, idle, true), true)
+  // A benchmark session still leaving holds the look.
+  for (const state of ['starting', 'recording', 'streaming', 'stopping'])
+    assert.equal(settled({ running: false, stale: false, result: verdict }, { state }), false)
+  assert.equal(
+    settled({ running: false, stale: false, result: verdict }, { state: 'failed' }),
+    true
+  )
+  assert.equal(settled(undefined), false)
+  assert.equal(
+    firstRunPerformanceCheckSettled({ check: { running: false, stale: false, result: verdict } }),
+    false
+  )
+  assert.ok(FIRST_RUN_SMOKE_LIMITS.performanceCheckSettleMs >= 60000)
 })

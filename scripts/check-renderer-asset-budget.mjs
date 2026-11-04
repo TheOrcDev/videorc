@@ -107,9 +107,23 @@ const htmlPath = resolve(
 // unminified. Raise raw to 2,310,000 (~2.5%) and gzip to 470,000 (~2.4%),
 // the usual challenge margin; the entry ceilings hold (946,770 raw /
 // 196,998 gzip). Keep re-splitting the answer for net-new UI.
+// Raised 2026-11-03 (owner-approved): plan 216 A (#1100) and plan 215 G
+// (#1095) each fit, and together put main (e2509fe2) at 2,300,398 raw /
+// 470,565 gzip; plan 216 B (#1102) on top measures 2,302,646 / 471,209.
+// None of it is a new eager screen: it is wiring in use-studio (layout
+// switch state, the chat-on-stream setting, the screen's picture size)
+// plus the contract fields it reads. No inlined image is left to split
+// out, and the next candidates (captions-preflight, performance-check)
+// are called during render. Raise gzip to 475,000 (~3.8 KB over B); raw
+// and the entry ceilings hold.
+// 2026-11-04 (owner-approved): the issue sweep (#1118–#1153) merged 26 fixes
+// that each fit alone; together main measures 2,315,909 raw / 474,854 gzip.
+// The additions are small Studio wiring (the recent-drop window, the camera
+// frame-rate tracker, the silent-mic meter source, the bridge envelope, the
+// page-scoped loading line). Raise raw to 2,320,000; gzip holds at 475,000.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_310_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 470_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_320_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 475_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

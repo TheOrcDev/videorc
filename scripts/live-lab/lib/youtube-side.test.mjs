@@ -7,7 +7,11 @@ import test from 'node:test'
 import { createFakeClock } from './harness-test-fakes.mjs'
 import { createQuotaLedger } from './quota-ledger.mjs'
 import { createEventBus } from './step-engine.mjs'
-import { createYoutubeSide, isLiveJournalState } from './youtube-side.mjs'
+import {
+  BROADCASTER_NOT_AUTHORIZED,
+  createYoutubeSide,
+  isLiveJournalState
+} from './youtube-side.mjs'
 
 // The live lab runs on macOS and Linux only (POSIX paths, modes and shells).
 const posixOnly = {
@@ -50,7 +54,9 @@ function fakeObserver({ snapshots, studioEndedAt = null }) {
   })
 }
 
-async function rig({ clipPull = false, snapshots, studioEndedAt, pull } = {}) {
+const AUTHORIZED = { roles: { broadcaster: { refreshToken: 'stored' } } }
+
+async function rig({ clipPull = false, snapshots, studioEndedAt, pull, config = AUTHORIZED } = {}) {
   const runDir = await mkdtemp(join(tmpdir(), 'videorc-yt-side-'))
   const ledger = createQuotaLedger({ dir: runDir, now: () => NOW })
   const bus = createEventBus()
@@ -58,7 +64,7 @@ async function rig({ clipPull = false, snapshots, studioEndedAt, pull } = {}) {
   bus.on((type, payload) => events.push([type, payload]))
   const pulls = []
   const side = createYoutubeSide({
-    config: {},
+    config,
     policy: { clipPull },
     ledger,
     runDir,
@@ -199,3 +205,27 @@ test(
     }
   }
 )
+
+test('without a broadcaster token the observer stays off: no polls, no charges, clips skipped', async () => {
+  const { side, runDir, ledger, pulls, events, cleanup } = await rig({ clipPull: true, config: {} })
+  try {
+    assert.equal(side.observer.unavailable, BROADCASTER_NOT_AUTHORIZED)
+    await side.start()
+    await assert.rejects(side.observer.poll(), /observer is off: the broadcaster role/)
+    assert.deepEqual(await side.observer.pullClip({ reason: 'step' }), {
+      status: 'skipped',
+      reason: 'broadcaster-not-authorized'
+    })
+    assert.equal(pulls.length, 0)
+    const summary = await side.stop()
+    assert.equal(summary.polls, 0)
+    assert.equal(summary.stoppedBy, 'never-started')
+    assert.equal(summary.unavailable, BROADCASTER_NOT_AUTHORIZED)
+    assert.equal(events.filter(([type]) => type === 'observer').length, 0)
+    assert.equal(ledger.today().units, 0)
+    const quota = JSON.parse(await readFile(join(runDir, 'quota.json'), 'utf8'))
+    assert.equal(quota.labUnits, 0)
+  } finally {
+    await cleanup()
+  }
+})

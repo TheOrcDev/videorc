@@ -47,6 +47,29 @@ export async function configureWindowsD3d11RendererSources(smokeCommand, screenI
   return state
 }
 
+/** Retries until the renderer's device refresh lists `screenId`. */
+export async function configureWindowsD3d11RendererSourcesWhenListed(
+  smokeCommand,
+  screenId,
+  deadline,
+  retryMs = 250
+) {
+  // A NaN deadline (an unparseable VIDEORC_SMOKE_TIMEOUT_MS) never passes.
+  if (!Number.isFinite(deadline)) {
+    throw new TypeError(`Windows D3D11 source configure deadline is not a finite time: ${deadline}`)
+  }
+  for (;;) {
+    try {
+      return await configureWindowsD3d11RendererSources(smokeCommand, screenId)
+    } catch (error) {
+      if (!windowsD3d11HarnessScreenNotListed(error) || Date.now() >= deadline) throw error
+      // No attempt starts past the deadline: each one opens its own timeout.
+      await new Promise((resolve) => setTimeout(resolve, Math.min(retryMs, deadline - Date.now())))
+      if (Date.now() >= deadline) throw error
+    }
+  }
+}
+
 /**
  * The renderer's capture config alone does not retire the backend's committed
  * camera scene; a scene with a camera and no camera frames marks every
@@ -189,15 +212,7 @@ export async function configureWindowsD3d11ProbeSources({
     })
     const intent = windowsD3d11ScreenOnlyLayoutIntent({ intentId: Date.now(), screenId, video })
     await commitScreenOnlyScene(ws, intent, deadline, timeoutMs)
-    for (;;) {
-      try {
-        await configureWindowsD3d11RendererSources(smokeCommand, screenId)
-        break
-      } catch (error) {
-        if (!windowsD3d11HarnessScreenNotListed(error) || Date.now() >= deadline) throw error
-        await new Promise((resolve) => setTimeout(resolve, 250))
-      }
-    }
+    await configureWindowsD3d11RendererSourcesWhenListed(smokeCommand, screenId, deadline)
     // Opening Preview before the generation is live leaves the proof surface
     // polling until the claim, so the probes start from a live generation
     // whose committed scene is still ours.

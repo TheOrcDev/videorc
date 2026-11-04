@@ -151,6 +151,8 @@ export interface StudioActionSource extends Omit<
   patchVideo: (patch: Partial<VideoSettings>) => void
   setSettings: (update: (current: SettingsState) => SettingsState) => void
   setReplayEnabled: (enabled: boolean) => void
+  /** Output → Videorc Camera (plan 214 E2), for the agents' settings tool. */
+  virtualCamera?: import('./context').StudioVirtualCameraAccess
   sessions: readonly SessionSummary[]
   deleteSessions: (targets: readonly { id: string }[]) => Promise<void>
   refreshSessions: (client: BackendClient) => Promise<unknown>
@@ -434,7 +436,8 @@ export function studioActionContext(studio: StudioActionSource): StudioActionCon
       setCaptureConfig: studio.setCaptureConfig,
       setSettings: studio.setSettings,
       setClipsEnabled: studio.setReplayEnabled,
-      setTheme: studio.setTheme
+      setTheme: studio.setTheme,
+      virtualCamera: studio.virtualCamera
     },
     library: {
       recordings: studio.sessions,

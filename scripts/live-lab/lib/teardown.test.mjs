@@ -102,6 +102,22 @@ test('teardown runs every part in order even after a failure and reports clean o
   assert.equal(result.streamEndedMs, 1500)
 })
 
+test('the quit-app step keeps how the app itself quit next to the sweep result', async () => {
+  const bus = createEventBus()
+  const clock = createFakeClock()
+  const promise = teardown({
+    remote: remote({ bus, clock }),
+    waitFor: createWaitFor({ bus, clock }),
+    quitApp: async () => ({ state: 'skipped', quit: 'exited' }),
+    ledgerPaths: [],
+    assertClean: async () => ({ clean: true }),
+    clock
+  })
+  await clock.advance(1500)
+  const result = await promise
+  assert.equal(result.steps.find((step) => step.name === 'quit-app').detail, 'skipped (app exited)')
+})
+
 test('assertCleanLedgers reaps only live PIDs recorded in the ledgers', async () => {
   const signalled = []
   await assert.rejects(

@@ -18,6 +18,13 @@ export type BackendAudioLevelsStore = {
   /** True while events keep arriving (each within the stale window). */
   isLive: () => boolean
   subscribeLive: (listener: () => void) => () => void
+  /**
+   * Issue 1064: the latest event's silence report (the bus's watchdog found
+   * the captured microphone to be digital silence); false once levels stop.
+   * Notifies on change only, like liveness.
+   */
+  isMicrophoneSilent: () => boolean
+  subscribeMicrophoneSilent: (listener: () => void) => () => void
 }
 
 type StoreClock = {
@@ -35,13 +42,23 @@ export function createBackendAudioLevelsStore(
 ): BackendAudioLevelsStore {
   const listeners = new Set<LevelsListener>()
   const liveListeners = new Set<() => void>()
+  const silentListeners = new Set<() => void>()
   let live = false
+  let microphoneSilent = false
   let lastAt = Number.NEGATIVE_INFINITY
   let timerPending = false
+
+  const setMicrophoneSilent = (next: boolean): void => {
+    if (microphoneSilent === next) return
+    microphoneSilent = next
+    for (const listener of silentListeners) listener()
+  }
 
   const setLive = (next: boolean): void => {
     if (live === next) return
     live = next
+    // No levels, no report: a stale bus says nothing about the microphone.
+    if (!next) setMicrophoneSilent(false)
     for (const listener of liveListeners) listener()
   }
 
@@ -65,6 +82,7 @@ export function createBackendAudioLevelsStore(
       lastAt = clock.now()
       if (!timerPending) watchStaleness(BACKEND_AUDIO_LEVELS_STALE_MS)
       setLive(true)
+      setMicrophoneSilent(event.microphoneSilent === true)
       for (const listener of listeners) listener(event)
     },
     subscribe(listener) {
@@ -78,6 +96,13 @@ export function createBackendAudioLevelsStore(
       liveListeners.add(listener)
       return () => {
         liveListeners.delete(listener)
+      }
+    },
+    isMicrophoneSilent: () => microphoneSilent,
+    subscribeMicrophoneSilent(listener) {
+      silentListeners.add(listener)
+      return () => {
+        silentListeners.delete(listener)
       }
     }
   }

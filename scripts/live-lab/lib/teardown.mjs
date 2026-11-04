@@ -231,7 +231,9 @@ export async function teardown({
     async () => {
       if (!quitApp) return 'not launched'
       const result = await quitApp()
-      return result?.state ?? 'quit'
+      const state = result?.state ?? 'quit'
+      // Linux quits the app first and sweeps its group after: keep both.
+      return result?.quit ? `${state} (app ${result.quit})` : state
     },
     clock,
     steps

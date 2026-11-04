@@ -8,6 +8,7 @@ import {
   type TransformCommitResult
 } from './stage-gesture'
 import { stageSnapTargets, type StageRect } from './stage-transform'
+import { scenePictureRect } from '../../../../shared/scene-picture-geometry'
 const rect: StageRect = { x: 0.3, y: 0.3, width: 0.3, height: 0.3 }
 const modifiers = { shiftKey: false, altKey: false }
 const empty = { x: [], y: [] }
@@ -443,5 +444,93 @@ describe('⌥-drag crop gestures (plan 213 G2)', () => {
     edits.submit('screen', rect)
     await tick()
     expect(commit).toHaveBeenLastCalledWith('screen', rect)
+  })
+})
+
+// Plan 216 B4 (owner decision D2): in Freeform a screen's box is its
+// picture. The gesture starts from the picture, its aspect is forced like a
+// shaped camera's, and an ⌥-crop from a box that IS the picture is exact:
+// what the released crop keeps of the picture fits the released box.
+describe('box = picture gestures (plan 216 B4)', () => {
+  // The streamer's picture: a 2228x1440 display Fit on a 2560x1440 canvas,
+  // 2021x1306 px at (389, 134).
+  const canvas = { width: 2560, height: 1440 }
+  const macbook = { width: 2228, height: 1440 }
+  const picture: StageRect = {
+    x: 389 / 2560,
+    y: 134 / 1440,
+    width: 2021 / 2560,
+    height: 1306 / 1440
+  }
+  const pixels = { width: 800, height: 450 }
+  const point = { x: picture.x + picture.width, y: picture.y + picture.height }
+
+  it('a forced aspect keeps the picture shape through a corner pull, Shift or not', () => {
+    const gesture = new StageGesture(
+      'screen',
+      1,
+      'se',
+      picture,
+      point,
+      pixels,
+      empty,
+      false,
+      false,
+      true
+    )
+    const aspect = (rect: StageRect): number =>
+      (rect.width * canvas.width) / (rect.height * canvas.height)
+    const pulled = gesture.sample({ x: point.x + 0.1, y: point.y - 0.02 }, modifiers).rect
+    expect(aspect(pulled)).toBeCloseTo(aspect(picture), 6)
+    expect(pulled.width).toBeGreaterThan(picture.width)
+    const shifted = gesture.sample(
+      { x: point.x + 0.12, y: point.y },
+      { shiftKey: true, altKey: false }
+    ).rect
+    expect(aspect(shifted)).toBeCloseTo(aspect(picture), 6)
+    // The anchor (the opposite corner) never moves.
+    expect(shifted.x).toBeCloseTo(picture.x, 6)
+    expect(shifted.y).toBeCloseTo(picture.y, 6)
+  })
+
+  it('an ⌥-crop from the picture is exact: the kept picture fits the released box', () => {
+    const crop = { cropLeft: 0, cropTop: 0, cropRight: 0, cropBottom: 0 }
+    const west = { x: picture.x, y: picture.y + picture.height / 2 }
+    const gesture = new StageGesture(
+      'screen',
+      1,
+      'w',
+      picture,
+      west,
+      pixels,
+      empty,
+      false,
+      true,
+      true,
+      crop
+    )
+    const released = gesture.sample(
+      { x: west.x + 0.1, y: west.y },
+      { shiftKey: false, altKey: true }
+    )
+    expect(gesture.crop).not.toBeNull()
+    const cropped = gesture.crop!
+    // The left edge moved 0.1 of the canvas: that share of the picture is cut.
+    expect(cropped.cropLeft).toBeCloseTo(0.1 / picture.width, 6)
+    expect(released.rect.x).toBeCloseTo(picture.x + 0.1, 6)
+    expect(released.rect.width).toBeCloseTo(picture.width - 0.1, 6)
+    // Fitting what the crop keeps into the released box gives the box back
+    // (within a pixel: the fit rounds), so the box is still the picture.
+    const refit = scenePictureRect({
+      frame: released.rect,
+      kind: 'screen',
+      fit: 'contain',
+      source: macbook,
+      crop: cropped,
+      canvas
+    })
+    expect(Math.abs(refit.x - released.rect.x) * canvas.width).toBeLessThanOrEqual(1)
+    expect(Math.abs(refit.width - released.rect.width) * canvas.width).toBeLessThanOrEqual(1)
+    expect(Math.abs(refit.height - released.rect.height) * canvas.height).toBeLessThanOrEqual(1)
   })
 })

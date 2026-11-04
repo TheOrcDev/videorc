@@ -6,13 +6,13 @@
 // Run: pnpm smoke:obs-import
 
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { isRetryableSmokeCommandError, requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const fixtures = join(repoRoot, 'apps/desktop/src/main/obs-fixtures')
@@ -141,8 +141,8 @@ export async function runObsImportSmoke({
       }
       log('[obs-import] owned teardown complete')
       if (!operationFailure && !evidenceDirectory) {
-        await rm(runDirectory, { recursive: true, force: true })
-        log('[obs-import] fixture/profile cleanup complete')
+        const removal = await removeProfileDir(runDirectory, { label: '[obs-import]' })
+        if (removal.removed) log('[obs-import] fixture/profile cleanup complete')
       }
     }
     if (operationFailure || evidenceDirectory) {

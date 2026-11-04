@@ -117,10 +117,10 @@ use crate::repair::{
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
 use crate::scene_geometry::{
-    PixelRect, SceneFit, SceneMask, background_stage_margin, camera_chroma_key, camera_mask,
-    circle_geometry, resolved_camera_transform, rounded_rect_geometry, scaled_camera_box_size,
-    scaled_camera_margin, scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
-    scene_source_render_transform, side_by_side_widths,
+    PixelRect, SceneFit, SceneMask, SignedPixelRect, background_stage_margin, camera_chroma_key,
+    camera_mask, circle_geometry, resolved_camera_transform, rounded_rect_geometry,
+    scaled_camera_box_size, scaled_camera_margin, scene_crop_from_transform, scene_source_fit,
+    scene_source_rect_pixels, scene_source_render_transform, side_by_side_widths,
 };
 use crate::screen_capture::{
     is_windows_gdigrab_desktop_screen_id, parse_screencapturekit_display_id,
@@ -2203,6 +2203,9 @@ pub struct ActiveRecording {
     native_audio_silent_drain: bool,
     capture_notice: Option<String>,
     pub native_audio: Option<NativeAudioCaptureSession>,
+    /// The debug FFmpeg-tone incident control's writer (#1008); always None
+    /// outside that opted-in smoke session.
+    _incident_tone: Option<crate::incident_tone::IncidentToneWriter>,
     /// Reduced evidence from this process's final arguments, never an argv or
     /// destination cache. Only the authenticated debug disconnect can read it.
     #[cfg(debug_assertions)]
@@ -2268,6 +2271,18 @@ pub struct ActiveRecording {
     /// Portrait canvas `(width, height)` of the vertical simulcast leg when it
     /// burns the comment card. The renderer rasterizes a second card for it.
     pub comment_highlight_vertical_canvas: Option<(u32, u32)>,
+    /// Portrait canvas `(width, height)` of the vertical simulcast leg
+    /// whenever the session has one (plan 215 G): the renderer rasterizes a
+    /// second chat box for it, whatever the chat switches say at start, so a
+    /// switch flipped mid-session lands on the next repaint.
+    pub simulcast_vertical_canvas: Option<(u32, u32)>,
+    /// Landscape canvas `(width, height)` the renderer rasterizes the chat
+    /// box for (plan 215 G): the smallest landscape leg of the session. The
+    /// box is exactly its rect's width and the blit keeps pixel size, so a
+    /// box painted for a wider canvas than the leg it lands on is cropped
+    /// (the dual-orientation fix). None off the compositor bridge, where no
+    /// leg draws it.
+    pub chat_overlay_horizontal_canvas: Option<(u32, u32)>,
     /// The session shape the overlay leg plan was built for (plan 164), kept
     /// so a layout saved mid-session can re-plan the compositor flags. None
     /// on paths without the compositor bridge (nothing draws overlays there).
@@ -2278,6 +2293,17 @@ pub struct ActiveRecording {
     /// recording draws nothing over the screen. `banners.show` refuses a new
     /// banner while this is false.
     accepts_banners: bool,
+    /// Plan 215 D1: whether a scene edit (a source's position, size or crop)
+    /// committed after the start reaches this session's picture. The
+    /// compositor paths (Metal, CPU, the Windows D3D11 media session) read
+    /// the installed scene every tick; the legacy FFmpeg graph is static and
+    /// the direct D3D11 recording composes nothing. `scene.source.transform.update`,
+    /// `.nudge` and `.reset` refuse while this is false on a session the user
+    /// is recording or streaming, and `recording.status` carries it so the
+    /// Scene page unlocks only when the edit would land. A replay-only Clips
+    /// ring (plan 181) reports it too but never refuses: the page is idle,
+    /// the edit lands in the Preview, and the ring keeps what it started with.
+    accepts_live_scene_edits: bool,
     pub _capture_permit: Option<CapturePermit>,
     /// Signals the process monitor at the exact user-stop edge. The monitor
     /// orders this against FFmpeg exit readiness before it touches the shared
@@ -2378,6 +2404,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         native_audio_silent_drain: false,
         capture_notice: None,
         native_audio: None,
+        _incident_tone: None,
         #[cfg(debug_assertions)]
         source_switch_output_audio_timing: None,
         system_audio: None,
@@ -2406,8 +2433,11 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         performance_check: false,
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
+        simulcast_vertical_canvas: None,
+        chat_overlay_horizontal_canvas: None,
         overlay_session_shape: None,
         accepts_banners: true,
+        accepts_live_scene_edits: true,
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
@@ -3013,6 +3043,7 @@ impl ActiveRecording {
             duration_ms: None,
             message,
             replay_only: self.replay_only,
+            accepts_live_scene_edits: Some(self.accepts_live_scene_edits),
         }
     }
 
@@ -3095,6 +3126,18 @@ impl ActiveRecording {
     pub(crate) fn set_accepts_banners_for_test(&mut self, accepts: bool) {
         self.accepts_banners = accepts;
     }
+
+    /// See the `accepts_live_scene_edits` field (plan 215 D1).
+    pub(crate) fn accepts_live_scene_edits(&self) -> bool {
+        self.accepts_live_scene_edits
+    }
+
+    /// A stub session on the legacy FFmpeg graph (a fixed picture), for the
+    /// RPC tests of the scene edit refusal.
+    #[cfg(test)]
+    pub(crate) fn set_accepts_live_scene_edits_for_test(&mut self, accepts: bool) {
+        self.accepts_live_scene_edits = accepts;
+    }
 }
 
 /// Whether a session can take a banner shown after it started (plan 186 S4).
@@ -3120,6 +3163,46 @@ fn session_accepts_banners(
 pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {
     let recording = state.recording.lock().await;
     recording.as_ref().map(ActiveRecording::accepts_banners)
+}
+
+/// Plan 215 D1: whether a session takes a scene edit (a source's position,
+/// size or crop) committed after its start. Every compositor path reads the
+/// installed scene on its next tick, so a transform commit lands "hot" there
+/// (`live_layout::commit_scene_with_current_layout`); the legacy FFmpeg graph
+/// builds its filter graph once and the direct D3D11 recording composes
+/// nothing, so neither can move a source until the session ends.
+fn session_accepts_live_scene_edits(
+    use_encoder_bridge: bool,
+    direct_d3d11_recording: bool,
+) -> bool {
+    use_encoder_bridge && !direct_d3d11_recording
+}
+
+/// The error code `scene.source.transform.update`, `scene.source.nudge` and
+/// `scene.source.transform.reset` answer while the running session cannot
+/// take the edit (plan 215 D1). The renderer never sends one: the Scene page
+/// keeps its lock while `recording.status.acceptsLiveSceneEdits` is false.
+pub const LIVE_SCENE_EDIT_REFUSED_CODE: &str = "scene-edit-refused";
+
+/// The one sentence for that refusal, on the wire and under the locked
+/// controls (the Hide screen precedent, plan 210 S7.5).
+pub const LIVE_SCENE_EDIT_REFUSED_MESSAGE: &str =
+    "Moving and resizing isn't available on this recording. Stop and record again.";
+
+/// `Some(reason)` while a recording or livestream that cannot take a scene
+/// edit runs: the edit is refused before it touches the scene, so the
+/// committed scene, the session and its picture all stay as they were.
+/// `None` while nothing runs, the session composes live, or the only session
+/// is the replay-only Clips ring (plan 181): the user is idle then, the Scene
+/// page is unlocked, and an idle edit must keep landing in the Preview even
+/// when the ring itself runs on the legacy graph (a profile outside the
+/// bridge envelope) and keeps the picture it started with.
+pub async fn live_scene_edit_refusal(state: &AppState) -> Option<&'static str> {
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()
+        .filter(|active| !active.replay_only && !active.accepts_live_scene_edits())
+        .map(|_| LIVE_SCENE_EDIT_REFUSED_MESSAGE)
 }
 
 /// Plan 210 S7.5: whether this session's screen reaches its output through
@@ -3676,6 +3759,7 @@ pub fn idle_status() -> RecordingStatus {
         duration_ms: None,
         message: Some("Ready to start a capture session.".to_string()),
         replay_only: false,
+        accepts_live_scene_edits: None,
     }
 }
 
@@ -3700,6 +3784,7 @@ fn recording_start_rejected_status(
         duration_ms: None,
         message: Some(message.to_string()),
         replay_only: false,
+        accepts_live_scene_edits: None,
     }
 }
 
@@ -3822,6 +3907,26 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
 /// start the software-encoder guard may refuse.
 fn replay_auto_start_requested(replay_only: bool, params: &StartSessionParams) -> bool {
     replay_only && params.replay.as_ref().is_some_and(|replay| replay.auto)
+}
+
+/// Plan 181 guard for Record and Go Live: they carry the default ring
+/// (`auto`) too, and on a software encoder path it is a second encode beside
+/// the one the user pressed for (live lab 2026-11-04 on ogre: Go Live came
+/// before the launch's buffer-only start was refused, so one FFmpeg child ran
+/// two OpenH264 1080p30 encodes). The press is the user's, so the session
+/// starts without the ring instead of failing. A ring the user turned on
+/// (`auto: false`) still rides along. Returns why the ring was dropped.
+fn drop_automatic_ring_on_software_encoder(
+    replay_only: bool,
+    params: &mut StartSessionParams,
+    backend: EncodeBackend,
+) -> Option<crate::replay_buffer::AutoStartRefused> {
+    if replay_only || !params.replay.as_ref().is_some_and(|replay| replay.auto) {
+        return None;
+    }
+    let refusal = crate::replay_buffer::auto_start_refusal(backend)?;
+    params.replay = None;
+    Some(refusal)
 }
 
 /// An automatic ring on the bridge waits for a visible camera's first frame:
@@ -4428,7 +4533,8 @@ async fn start_session_with_timeline(
         authorize_session_start_publication(&state, &session_id, &params, has_native_audio).await?;
     // Input topology is fixed for the lifetime of this output process. An empty
     // selection has a real paced zero-PCM producer. The separately opted-in
-    // debug control below deliberately bypasses that bus with FFmpeg tone.
+    // debug control below deliberately bypasses that bus: its own writer
+    // feeds an 880 Hz tone through the same paced PCM FIFO shape (#1008).
     let diagnostic_ffmpeg_tone = incident_ffmpeg_tone_allowed(
         cfg!(debug_assertions),
         std::env::var("VIDEORC_ENABLE_SMOKE_RPC").as_deref() == Ok("1"),
@@ -4436,16 +4542,25 @@ async fn start_session_with_timeline(
         params.sources.microphone_id.is_some(),
         capture.microphone.is_some(),
     );
-    if diagnostic_ffmpeg_tone {
+    let incident_tone_fifo = if diagnostic_ffmpeg_tone {
         emit_health_event(
             &state,
             Some(&session_id),
             HealthLevel::Info,
             "incident-ffmpeg-tone-enabled",
-            "Diagnostic control: FFmpeg lavfi 880 Hz tone; native PCM and physical microphone capture are not used.",
+            "Diagnostic control: 880 Hz tone on a paced PCM FIFO of its own; the native audio bus and physical microphone capture are not used.",
         )?;
-    }
-    let silent_audio_fifo = if capture.microphone.is_none() && !diagnostic_ffmpeg_tone {
+        let path = native_audio_fifo_path(&session_id);
+        create_native_audio_fifo(&path)?;
+        startup_resources.track_fifo(&path);
+        capture.microphone = Some(MicrophoneInput::SessionPcm {
+            fifo_path: path.clone(),
+        });
+        Some(path)
+    } else {
+        None
+    };
+    let silent_audio_fifo = if capture.microphone.is_none() {
         let path = native_audio_fifo_path(&session_id);
         create_native_audio_fifo(&path)?;
         startup_resources.track_fifo(&path);
@@ -4585,6 +4700,22 @@ async fn start_session_with_timeline(
     {
         return Err(refusal.into());
     }
+    if let Some(refusal) = drop_automatic_ring_on_software_encoder(
+        replay_only,
+        &mut params,
+        windows_encoded_bridge_decision.effective_encode_backend,
+    ) {
+        // The ring's status carries the reason, as after a refused
+        // buffer-only start, so the renderer stops offering it.
+        crate::replay_buffer::note_auto_start_refused(&state, &refusal.message);
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            "replay-buffer-software-encoder",
+            &format!("Clips are off for this session: {}", refusal.message),
+        );
+    }
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
     if source_iso_plan.is_some() {
         anyhow::ensure!(
@@ -4721,6 +4852,9 @@ async fn start_session_with_timeline(
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
+    // The chat box too (plan 215 G): a new session never inherits the last
+    // session's messages; the renderer repaints it from this session's chat.
+    let _ = crate::chat_overlay::clear_chat_overlay(&state);
     // The Buddy's bubble too (plan 164): the avatar stays (its raster is the
     // renderer's, re-pushed for this session's canvases), the words do not.
     let _ = crate::buddy_overlay::clear(&state).await;
@@ -4911,18 +5045,28 @@ async fn start_session_with_timeline(
                     overlay_layout.buddy.show_on_stream,
                     overlay_layout.buddy.show_in_recording,
                 );
+                // Plan 215 G: the chat box rides the same plan as the card.
+                let chat_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.chat.show_on_stream,
+                    overlay_layout.chat.show_in_recording,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
+                    chat: state.chat_overlay.clone(),
                     buddy: state.buddy_overlay.clone(),
                     buddy_sprite: state.buddy_sprite.clone(),
                     caption_on_primary: session_caption_plan.primary,
                     caption_on_auxiliary: session_caption_plan.aux,
                     highlight_on_primary,
                     highlight_on_auxiliary,
+                    chat_on_primary: d3d11_overlay_plans.chat.primary,
+                    chat_on_auxiliary: d3d11_overlay_plans.chat.aux,
                     buddy_on_primary: d3d11_overlay_plans.buddy.primary,
                     buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
                     highlight_in_program,
+                    chat_in_program,
                     buddy_in_program,
                     // Plan 186 S4: banners follow this session's leg plan
                     // live, from the compositor's banner set.
@@ -5293,6 +5437,8 @@ async fn start_session_with_timeline(
             aux = highlight_overlay_plan.1,
             buddy_primary = overlay_plans.buddy.primary,
             buddy_aux = overlay_plans.buddy.aux,
+            chat_primary = overlay_plans.chat.primary,
+            chat_aux = overlay_plans.chat.aux,
             // S-B2.2: any item (not only captions) whose switches disagree
             // on a shared leg asks for the split; the topology decides.
             needs_split = crate::overlay_layout::overlay_layout_needs_split(
@@ -5370,6 +5516,8 @@ async fn start_session_with_timeline(
         && !highlight_overlay_plan.1
         && !overlay_plans.buddy.primary
         && !overlay_plans.buddy.aux
+        && !overlay_plans.chat.primary
+        && !overlay_plans.chat.aux
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
@@ -5387,11 +5535,17 @@ async fn start_session_with_timeline(
                 .and_then(|source| {
                     let transform =
                         scene_source_render_transform(&source.transform, &source.kind, 0.0);
+                    // The video processor's destination rect is on-canvas
+                    // only; a camera box that hangs off the canvas (plan
+                    // 215 E2) keeps the D3D11 scene compositor, which clips.
                     scene_source_rect_pixels(
                         &transform,
                         params.output.video.width,
                         params.output.video.height,
                     )
+                    .and_then(|rect| {
+                        rect.whole_on_canvas(params.output.video.width, params.output.video.height)
+                    })
                     .map(|destination| (destination, scene_crop_from_transform(&transform)))
                 });
             match (preview_camera_frame_source(&state).await, destination) {
@@ -5521,6 +5675,9 @@ async fn start_session_with_timeline(
                         width: params.output.video.width,
                         height: params.output.video.height,
                         frame_consumer: compositor_frame_consumer,
+                        // Plan 214 A3: a session's lease is strong; it arms
+                        // over Videorc Camera's weak one in place.
+                        lease: crate::compositor::CompositorLeaseKind::Capture,
                         replay_only,
                         caption_overlay_on_primary: session_caption_plan.primary,
                         caption_overlay_on_aux: session_caption_plan.aux,
@@ -5528,8 +5685,11 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        chat_overlay_on_primary: overlay_plans.chat.primary,
+                        chat_overlay_on_aux: overlay_plans.chat.aux,
                         highlight_overlay_on_program: overlay_flags.highlight_on_program,
                         buddy_overlay_on_program: overlay_flags.buddy_on_program,
+                        chat_overlay_on_program: overlay_flags.chat_on_program,
                     },
                 )
                 .await
@@ -5614,6 +5774,8 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        chat_overlay_on_primary: overlay_plans.chat.primary,
+                        chat_overlay_on_aux: overlay_plans.chat.aux,
                         // Plan 205 S6: the same program verdict the in-place
                         // arm carries. A buffer-only session lands here on a
                         // cold launch (the ring starts before the Preview's
@@ -5623,6 +5785,7 @@ async fn start_session_with_timeline(
                         replay_only,
                         highlight_overlay_on_program: overlay_flags.highlight_on_program,
                         buddy_overlay_on_program: overlay_flags.buddy_on_program,
+                        chat_overlay_on_program: overlay_flags.chat_on_program,
                     },
                 )
                 .await;
@@ -6022,6 +6185,7 @@ async fn start_session_with_timeline(
             duration_ms: None,
             message: Some(format!("Starting {mode} session.")),
             replay_only,
+            accepts_live_scene_edits: None,
         },
         &session_start_publication_permit,
     );
@@ -6159,6 +6323,18 @@ async fn start_session_with_timeline(
                 )
             })
         });
+    // The debug tone attaches at the same point as the bus and waits on the
+    // same video epoch, so FFmpeg's audio input starts exactly as it does
+    // for a microphone.
+    let incident_tone = incident_tone_fifo
+        .map(|path| {
+            crate::incident_tone::IncidentToneWriter::spawn(
+                path,
+                use_encoder_bridge.then(|| video_epoch.clone()),
+            )
+        })
+        .transpose()
+        .context("Could not start the diagnostic tone writer")?;
     if let (Some(audio), Some(taps)) = (attached_native_audio.as_ref(), source_iso_taps.as_ref()) {
         audio.set_source_taps(taps.clone());
     }
@@ -6866,6 +7042,23 @@ async fn start_session_with_timeline(
         direct_d3d11_recording,
         screen_overlay.is_some(),
     );
+    // Plan 215 D1: whether a source moved from now on reaches this picture.
+    let accepts_live_scene_edits =
+        session_accepts_live_scene_edits(use_encoder_bridge, direct_d3d11_recording);
+    if !accepts_live_scene_edits {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Info,
+            "recording-scene-fixed-at-start",
+            if direct_d3d11_recording {
+                "Direct D3D11 screen recording composes no scene; a source moved now is refused until the session ends."
+            } else {
+                "This FFmpeg session composes a fixed scene; a source moved now is refused until the session ends."
+            },
+            None,
+        );
+    }
     if !accepts_banners {
         let _ = emit_session_log(
             &state,
@@ -6904,6 +7097,7 @@ async fn start_session_with_timeline(
             encoder_bridge.is_some(),
         ),
         native_audio: attached_native_audio,
+        _incident_tone: incident_tone,
         #[cfg(debug_assertions)]
         source_switch_output_audio_timing,
         system_audio: session_system_audio,
@@ -6933,8 +7127,16 @@ async fn start_session_with_timeline(
             highlight_overlay_plan,
         ),
         comment_highlight_vertical_canvas,
+        simulcast_vertical_canvas: simulcast_vertical_canvas(encoder_bridge_stream_output.as_ref()),
+        chat_overlay_horizontal_canvas: use_encoder_bridge.then(|| {
+            chat_overlay_horizontal_canvas(
+                (params.output.video.width, params.output.video.height),
+                encoder_bridge_stream_output.as_ref(),
+            )
+        }),
         overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
         accepts_banners,
+        accepts_live_scene_edits,
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
@@ -8037,7 +8239,7 @@ impl Mp4FinalizationFault {
     fn after_workspace_create(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterWorkspaceCreate);
+            matches!(self, Self::AfterWorkspaceCreate)
         }
         #[cfg(not(test))]
         false
@@ -8046,7 +8248,7 @@ impl Mp4FinalizationFault {
     fn after_ffmpeg(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterFfmpeg);
+            matches!(self, Self::AfterFfmpeg)
         }
         #[cfg(not(test))]
         false
@@ -8055,7 +8257,7 @@ impl Mp4FinalizationFault {
     fn after_publication(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterPublication);
+            matches!(self, Self::AfterPublication)
         }
         #[cfg(not(test))]
         false
@@ -8064,7 +8266,7 @@ impl Mp4FinalizationFault {
     fn after_database_commit(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterDatabaseCommit);
+            matches!(self, Self::AfterDatabaseCommit)
         }
         #[cfg(not(test))]
         false
@@ -10382,6 +10584,7 @@ fn audio_levels_event(
         sounds: levels.sounds,
         master: levels.master,
         master_clipped_samples: levels.master_clipped_samples,
+        microphone_silent: levels.microphone_silent,
     })
 }
 
@@ -10417,6 +10620,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             system_audio_sample(active),
                             observation.recoveries,
                             observation.output_stalls,
+                            observation.silence_events,
                         )
                     })
                 }
@@ -10437,6 +10641,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             system_audio,
             recoveries,
             output_stalls,
+            silence_events,
         )) = counters
         else {
             return;
@@ -10460,6 +10665,13 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         if generation != microphone_generation {
             microphone_generation = generation;
             silent_mic_reported = false;
+        }
+        // Issue 1064: the watchdog's report is the news; the once-per-session
+        // check below would only repeat it for this microphone.
+        for change in &silence_events {
+            silent_mic_reported |= change.generation == generation
+                && change.change == crate::session_audio::MicrophoneSilenceChange::Silent;
+            emit_microphone_silence_health_event(&state, &session_id, change);
         }
         for source_loss_after_ms in source_loss_event_after_ms {
             silent_mic_reported |= source_loss_after_ms.generation == generation;
@@ -10664,6 +10876,58 @@ fn emit_microphone_recovered_health_event(
 }
 
 const MICROPHONE_TIMELINE_RECOVERED_CODE: &str = "microphone-timeline-recovered";
+
+/// Issue 1064: the captured microphone held nothing but digital silence for
+/// the watchdog's hold, and sound came back after such a run. The renderer
+/// shows the first through the microphone-loss notice and clears it on the
+/// second (its code ends in `-recovered`, like the loss flow's).
+pub(crate) const MICROPHONE_SILENT_CODE: &str = "microphone-silent";
+pub(crate) const MICROPHONE_SIGNAL_RECOVERED_CODE: &str = "microphone-signal-recovered";
+
+fn emit_microphone_silence_health_event(
+    state: &AppState,
+    session_id: &str,
+    change: &crate::session_audio::MicrophoneSilenceEvent,
+) {
+    use crate::session_audio::MicrophoneSilenceChange;
+    let (level, code, message) = match change.change {
+        MicrophoneSilenceChange::Silent => (
+            HealthLevel::Warn,
+            MICROPHONE_SILENT_CODE,
+            microphone_silent_message(&change.device_name, change.after_ms, change.silent_ms),
+        ),
+        MicrophoneSilenceChange::Recovered => (
+            HealthLevel::Info,
+            MICROPHONE_SIGNAL_RECOVERED_CODE,
+            microphone_signal_recovered_message(&change.device_name, change.silent_ms),
+        ),
+    };
+    state.emit_log(
+        if matches!(level, HealthLevel::Warn) {
+            "warn"
+        } else {
+            "info"
+        },
+        &message,
+    );
+    let _ = emit_health_event(state, Some(session_id), level, code, &message);
+}
+
+/// Activity-neutral, like the loss message: the renderer's title says
+/// whether a recording, a livestream or Clips is affected.
+fn microphone_silent_message(device_name: &str, after_ms: u64, silent_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" has sent only silence since {:.1} seconds into this session. Try choosing it again.",
+        after_ms.saturating_sub(silent_ms) as f64 / 1_000.0
+    )
+}
+
+fn microphone_signal_recovered_message(device_name: &str, silent_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" has sound again after {:.1} seconds of silence.",
+        silent_ms as f64 / 1_000.0
+    )
+}
 
 /// Plan 076: system audio places again after a timeline loss.
 fn emit_system_audio_recovered_health_event(
@@ -11489,6 +11753,9 @@ async fn monitor_session(
     // session's card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &session_id)
         .await;
+    // The chat box (plan 215 G) leaves with the session like the caption bars
+    // above; a newer session's renderer repaints it on its next message.
+    let _ = crate::chat_overlay::clear_chat_overlay(&state);
     state.soundboard.session_ended(&state, &session_id);
 
     if let Some(native_audio_stats) = monitored_recording.native_audio_stats.as_ref() {
@@ -11771,6 +12038,7 @@ async fn monitor_session(
                             duration_ms,
                             message: Some(message),
                             replay_only: monitored_recording.replay_only,
+                            accepts_live_scene_edits: None,
                         }
                     }
                     Ok(()) => {
@@ -11831,6 +12099,7 @@ async fn monitor_session(
                                 "Recording saved; exporting the MP4 in the background.".to_string(),
                             ),
                             replay_only: monitored_recording.replay_only,
+                            accepts_live_scene_edits: None,
                         }
                     }
                 }
@@ -12038,6 +12307,7 @@ async fn monitor_session(
                             .unwrap_or_else(|| "Capture session finalized.".to_string()),
                     ),
                     replay_only: monitored_recording.replay_only,
+                    accepts_live_scene_edits: None,
                 };
                 // Slice 8: check (and, if needed, repair in place) the finalized file off
                 // the hot path. The recording is already marked complete; the gate only ever
@@ -12131,6 +12401,7 @@ async fn monitor_session(
                 duration_ms,
                 message: Some(message),
                 replay_only: monitored_recording.replay_only,
+                accepts_live_scene_edits: None,
             };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
@@ -12176,6 +12447,7 @@ async fn monitor_session(
                 duration_ms,
                 message: Some(message),
                 replay_only: monitored_recording.replay_only,
+                accepts_live_scene_edits: None,
             };
             let discarded = crate::captions::discard_failed_caption_capture(&state).await;
             if discarded > 0 {
@@ -15974,10 +16246,154 @@ fn select_linux_h264_encoder(
     })
 }
 
+/// What one FFmpeg run of the VAAPI probe came back with. The process glue
+/// (`run_linux_vaapi_probe`) produces these on Linux; the decision over them
+/// (`probe_linux_vaapi_candidates`) is platform-independent so it is tested
+/// with fakes on every host and never touches a render node from a test.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LinuxVaapiProbeOutcome {
+    /// FFmpeg encoded the probe frames and exited 0.
+    Passed,
+    /// FFmpeg returned non-zero: the driver rejected this argument profile.
+    Rejected(String),
+    /// FFmpeg could not be spawned or waited on; nothing reached the GPU.
+    Failed(String),
+    /// FFmpeg was still running at the probe deadline: the node hung.
+    TimedOut,
+}
+
+/// 30 frames of 1080p30 take a healthy node well under a second; a node that
+/// has not answered in 20 s is the one the quarantine exists for (amdgpu's
+/// own ring timeout fires at 10 s).
+#[cfg(any(test, target_os = "linux"))]
+const LINUX_VAAPI_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Probes the planned nodes in order and stops at the first success. Every
 /// probe is wrapped in the quarantine sentinel: if the host hangs mid-probe,
 /// the next start quarantines that node instead of trying it again. A node
 /// whose sentinel cannot be armed is not probed at all.
+///
+/// A probe that times out is the same hang seen from inside the process
+/// (#1027): the node is quarantined on the spot, the `Compat` profile is
+/// never tried on it (a timeout is not an argument rejection), and no further
+/// node is probed this lifetime, because the timed-out FFmpeg may still hold
+/// its GPU and the driver may be mid-reset. The nodes left over are reported
+/// as skipped and probed at the next start, when the quarantine already
+/// names the one that hung.
+#[cfg(any(test, target_os = "linux"))]
+async fn probe_linux_vaapi_candidates<Run, Fut>(
+    ffmpeg_path: &str,
+    candidates: &[crate::linux_vaapi::RenderNodeCandidate],
+    quarantine: &crate::linux_vaapi::ProbeQuarantine,
+    mut run_probe: Run,
+) -> (
+    Option<(PathBuf, LinuxVaapiArgProfile)>,
+    Option<String>,
+    Vec<LinuxRenderNodeDiagnostic>,
+)
+where
+    Run: FnMut(crate::linux_vaapi::RenderNodeCandidate, LinuxVaapiArgProfile) -> Fut,
+    Fut: std::future::Future<Output = LinuxVaapiProbeOutcome>,
+{
+    use crate::protocol::LinuxRenderNodeState;
+    let mut rejections = Vec::new();
+    let mut reports = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let mut profile_rejections = Vec::new();
+        let mut timed_out = None;
+        // Standard first; Compat only after the standard set was rejected on
+        // this same node, so a compat selection is always evidence-backed.
+        for profile in [LinuxVaapiArgProfile::Standard, LinuxVaapiArgProfile::Compat] {
+            let armed = match quarantine.begin_probe(candidate, ffmpeg_path) {
+                Ok(armed) => armed,
+                Err(error) => {
+                    let detail = format!("probe sentinel could not be armed: {error}");
+                    profile_rejections.push(format!("{}: {detail}", profile));
+                    break;
+                }
+            };
+            let outcome = run_probe(candidate.clone(), profile).await;
+            // The probe returned (pass or reject): the sentinel no longer
+            // means a hang.
+            let returned = |armed: crate::linux_vaapi::ArmedProbe<'_>| {
+                if let Err(error) = armed.finish() {
+                    tracing::warn!(
+                        "Could not clear the VAAPI probe sentinel for {}: {error}",
+                        candidate.node_name()
+                    );
+                }
+            };
+            match outcome {
+                LinuxVaapiProbeOutcome::Passed => {
+                    returned(armed);
+                    reports.push(candidate.report(
+                        LinuxRenderNodeState::ProbedOk,
+                        Some(format!("{} argument profile", profile)),
+                    ));
+                    return (Some((candidate.path.clone(), profile)), None, reports);
+                }
+                LinuxVaapiProbeOutcome::Rejected(reason) => {
+                    returned(armed);
+                    profile_rejections.push(format!("{}: {reason}", profile));
+                }
+                LinuxVaapiProbeOutcome::Failed(error) => {
+                    returned(armed);
+                    // Nothing reached the driver, so there is no rejection
+                    // for Compat to answer.
+                    profile_rejections.push(format!("{}: {error}", profile));
+                    break;
+                }
+                LinuxVaapiProbeOutcome::TimedOut => {
+                    let detail = match armed.quarantine_timed_out(LINUX_VAAPI_PROBE_TIMEOUT) {
+                        Ok(entry) => {
+                            tracing::error!(
+                                "Quarantined Linux render node {} ({}): its VAAPI probe did not return within {} s. It will not be probed again unless {} names it.",
+                                entry.node,
+                                entry.driver.as_deref().unwrap_or("driver unknown"),
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs(),
+                                crate::linux_vaapi::DEVICE_PIN_ENV
+                            );
+                            entry.detail()
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                "The VAAPI probe of {} did not return within {} s and its quarantine entry could not be written: {error}",
+                                candidate.node_name(),
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+                            );
+                            format!(
+                                "a VAAPI probe of this node did not return within {} s; the quarantine entry could not be written ({error})",
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+                            )
+                        }
+                    };
+                    timed_out = Some(detail);
+                    break;
+                }
+            }
+        }
+        if let Some(detail) = timed_out {
+            rejections.push(format!("{}: {detail}", candidate.node_name()));
+            reports.push(candidate.report(LinuxRenderNodeState::Quarantined, Some(detail)));
+            let skipped = format!(
+                "not probed: {} did not return within {} s and may still hold its GPU; probed at the next start",
+                candidate.node_name(),
+                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+            );
+            for left in &candidates[index + 1..] {
+                reports.push(left.report(LinuxRenderNodeState::Skipped, Some(skipped.clone())));
+            }
+            break;
+        }
+        let detail = profile_rejections.join(" | ");
+        rejections.push(format!("{}: {detail}", candidate.node_name()));
+        reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
+    }
+    let reason = (!rejections.is_empty()).then(|| rejections.join("; "));
+    (None, reason, reports)
+}
+
 #[cfg(target_os = "linux")]
 async fn probe_linux_vaapi_encoder(
     ffmpeg_path: &str,
@@ -15988,64 +16404,94 @@ async fn probe_linux_vaapi_encoder(
     Option<String>,
     Vec<LinuxRenderNodeDiagnostic>,
 ) {
-    use crate::protocol::LinuxRenderNodeState;
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut rejections = Vec::new();
-    let mut reports = Vec::new();
-    for candidate in candidates {
-        let mut profile_rejections = Vec::new();
-        // Standard first; Compat only after the standard set was rejected on
-        // this same node, so a compat selection is always evidence-backed.
-        for profile in [LinuxVaapiArgProfile::Standard, LinuxVaapiArgProfile::Compat] {
-            if let Err(error) = quarantine.begin_probe(candidate, ffmpeg_path) {
-                let detail = format!("probe sentinel could not be armed: {error}");
-                profile_rejections.push(format!("{}: {detail}", profile));
-                break;
+    probe_linux_vaapi_candidates(
+        ffmpeg_path,
+        candidates,
+        quarantine,
+        |candidate, profile| async move {
+            run_linux_vaapi_probe(ffmpeg_path, &candidate, profile).await
+        },
+    )
+    .await
+}
+
+/// One FFmpeg run of the real-args probe, bounded by the probe deadline. The
+/// child is killed if this future is dropped and killed and reaped on a
+/// timeout, so a probe never leaves FFmpeg running on the GPU (#1027: two
+/// timed-out probes outlived the test binary on the Arch T2 box).
+#[cfg(target_os = "linux")]
+async fn run_linux_vaapi_probe(
+    ffmpeg_path: &str,
+    candidate: &crate::linux_vaapi::RenderNodeCandidate,
+    profile: LinuxVaapiArgProfile,
+) -> LinuxVaapiProbeOutcome {
+    const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+    let probe_args = linux_vaapi_probe_args(&candidate.path, profile);
+    // The exact command, so a tester can bisect it verbatim on the box.
+    tracing::info!(
+        "VAAPI probe on {} ({} profile): {} {}",
+        candidate.node_name(),
+        profile,
+        ffmpeg_path,
+        probe_args.join(" ")
+    );
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .args(&probe_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return LinuxVaapiProbeOutcome::Failed(format!("ffmpeg could not be spawned: {error}"));
+        }
+    };
+    // Drained beside the wait so a chatty driver never blocks FFmpeg on a
+    // full pipe and reads as a hang.
+    let stderr = child.stderr.take();
+    let stderr_drain = tokio::spawn(async move {
+        let mut collected = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let _ = stderr.read_to_end(&mut collected).await;
+        }
+        collected
+    });
+    match timeout(LINUX_VAAPI_PROBE_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => {
+            let stderr = stderr_drain.await.unwrap_or_default();
+            if status.success() {
+                LinuxVaapiProbeOutcome::Passed
+            } else {
+                LinuxVaapiProbeOutcome::Rejected(bounded_stream_output_topology_fallback_reason(
+                    &String::from_utf8_lossy(&stderr),
+                ))
             }
-            let probe_args = linux_vaapi_probe_args(&candidate.path, profile);
-            // The exact command, so a tester can bisect it verbatim on the box.
-            tracing::info!(
-                "VAAPI probe on {} ({} profile): {} {}",
-                candidate.node_name(),
-                profile,
-                ffmpeg_path,
-                probe_args.join(" ")
-            );
-            let mut command = Command::new(ffmpeg_path);
-            command
-                .args(&probe_args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-            let outcome = timeout(PROBE_TIMEOUT, command.output()).await;
-            if let Err(error) = quarantine.finish_probe() {
-                tracing::warn!(
-                    "Could not clear the VAAPI probe sentinel for {}: {error}",
-                    candidate.node_name()
+        }
+        Ok(Err(error)) => {
+            stderr_drain.abort();
+            LinuxVaapiProbeOutcome::Failed(format!("ffmpeg could not be waited on: {error}"))
+        }
+        Err(_) => {
+            // SIGKILL, then a short bounded reap. A child wedged in the driver
+            // (D state) ignores even SIGKILL until the kernel lets go; tokio
+            // keeps it as an orphan and reaps it on SIGCHLD when it finally
+            // exits, so this wait stays bounded and no zombie is left behind
+            // by this process.
+            let _ = child.start_kill();
+            if timeout(REAP_TIMEOUT, child.wait()).await.is_err() {
+                tracing::error!(
+                    "The VAAPI probe of {} ({} profile) did not exit within {} s of SIGKILL; it is stuck in the driver and is reaped when it exits",
+                    candidate.node_name(),
+                    profile,
+                    REAP_TIMEOUT.as_secs()
                 );
             }
-            let detail = match outcome {
-                Ok(Ok(output)) if output.status.success() => {
-                    reports.push(candidate.report(
-                        LinuxRenderNodeState::ProbedOk,
-                        Some(format!("{} argument profile", profile)),
-                    ));
-                    return (Some((candidate.path.clone(), profile)), None, reports);
-                }
-                Ok(Ok(output)) => bounded_stream_output_topology_fallback_reason(
-                    &String::from_utf8_lossy(&output.stderr),
-                ),
-                Ok(Err(error)) => error.to_string(),
-                Err(_) => "probe timed out".to_string(),
-            };
-            profile_rejections.push(format!("{}: {detail}", profile));
+            stderr_drain.abort();
+            LinuxVaapiProbeOutcome::TimedOut
         }
-        let detail = profile_rejections.join(" | ");
-        rejections.push(format!("{}: {detail}", candidate.node_name()));
-        reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
     }
-    let reason = (!rejections.is_empty()).then(|| rejections.join("; "));
-    (None, reason, reports)
 }
 
 /// One decision per backend lifetime per FFmpeg binary, preference and pin.
@@ -16218,6 +16664,21 @@ async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpeg
                 .as_deref(),
         )
         .map_err(anyhow::Error::msg)?;
+        // A unit test never probes a render node it did not name: the backend
+        // suite reached this resolver with a bare `ffmpeg`, probed every node
+        // on the Arch T2 box and hung its AMD GPU (#1027). A pin is the
+        // tester's explicit opt-in, the same one the quarantine honours.
+        #[cfg(test)]
+        if pin.is_none() {
+            return select_linux_h264_encoder(
+                preference,
+                None,
+                Some(format!(
+                    "unit tests never probe render nodes; set {} to the one node a test may use",
+                    crate::linux_vaapi::DEVICE_PIN_ENV
+                )),
+            );
+        }
         let key = format!(
             "{ffmpeg_path}|{preference:?}|{}",
             pin.as_deref()
@@ -16921,6 +17382,17 @@ fn tee_output_args(spec: String) -> Vec<String> {
     ]
 }
 
+/// The encoder bridge's proven envelopes above 30 fps, as (long side, short
+/// side) in either orientation. The renderer mirrors them in
+/// `lib/bridge-envelope.ts`, so a change here changes both.
+const RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES: (u32, u32) = (2560, 1440);
+const STREAMING_BRIDGE_60FPS_MAX_SIDES: (u32, u32) = (1920, 1080);
+const BRIDGE_60FPS_MAX_FPS: u32 = 60;
+
+fn video_fits_sides(video: &VideoSettings, (long_side, short_side): (u32, u32)) -> bool {
+    video.width.max(video.height) <= long_side && video.width.min(video.height) <= short_side
+}
+
 /// Record-only 60fps recordings ride the encoder bridge up to 1440p (the
 /// perf-gated envelope): same compositor the preview shows, platform encoder,
 /// epoch-trimmed start, and bounded stop. 4K60 remains outside that envelope.
@@ -16928,12 +17400,10 @@ fn record_only_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
     if params.output.stream_enabled {
         return false;
     }
-    if params.output.video.fps > 60 {
+    if params.output.video.fps > BRIDGE_60FPS_MAX_FPS {
         return false;
     }
-    let long_side = params.output.video.width.max(params.output.video.height);
-    let short_side = params.output.video.width.min(params.output.video.height);
-    long_side <= 2560 && short_side <= 1440
+    video_fits_sides(&params.output.video, RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES)
 }
 
 /// Livestreaming has a narrower proven 60fps bridge envelope than local
@@ -16957,9 +17427,8 @@ fn streaming_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
         profiles.push(params.output.video.clone());
     }
     profiles.into_iter().all(|profile| {
-        profile.fps <= 60
-            && profile.width.max(profile.height) <= 1920
-            && profile.width.min(profile.height) <= 1080
+        profile.fps <= BRIDGE_60FPS_MAX_FPS
+            && video_fits_sides(&profile, STREAMING_BRIDGE_60FPS_MAX_SIDES)
     })
 }
 
@@ -17038,8 +17507,80 @@ fn compositor_encoder_bridge_ruled_out(params: &StartSessionParams) -> bool {
     // The bridge cap: record-only runs to 1440p60; livestreaming runs to
     // 1080p60 across every encoded role. Profiles outside those measured
     // envelopes retain the legacy path, and the session log says so.
+    outside_compositor_bridge_60fps_envelope(params)
+}
+
+/// The request asks for more than 30 fps at a profile outside both measured
+/// bridge envelopes: the only reason, short of the developer env override,
+/// that a validated request takes the legacy path.
+fn outside_compositor_bridge_60fps_envelope(params: &StartSessionParams) -> bool {
     requested_compositor_bridge_fps(params) > 30
         && !(record_only_bridge_60fps_eligible(params) || streaming_bridge_60fps_eligible(params))
+}
+
+/// The resolution class in the renderer's one spelling (`formatVideoQuality`):
+/// "4K" or the short edge ("1440p") for a landscape canvas, both sides
+/// ("1440 × 2560") for a portrait one.
+#[cfg(any(test, target_os = "windows"))]
+fn video_size_name(video: &VideoSettings) -> String {
+    if video.height > video.width {
+        return format!("{} × {}", video.width, video.height);
+    }
+    match video.width.min(video.height) {
+        2160 => "4K".to_string(),
+        short_side => format!("{short_side}p"),
+    }
+}
+
+/// The largest canvas of `video`'s orientation inside an envelope, named.
+#[cfg(any(test, target_os = "windows"))]
+fn envelope_size_name(video: &VideoSettings, (long_side, short_side): (u32, u32)) -> String {
+    let (width, height) = if video.height > video.width {
+        (short_side, long_side)
+    } else {
+        (long_side, short_side)
+    };
+    video_size_name(&VideoSettings {
+        preset: VideoPreset::Custom,
+        width,
+        height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+    })
+}
+
+/// Issue #1062: on Windows the legacy FFmpeg path encodes with software
+/// OpenH264, which ran 4K60 at about 0.35x realtime and wrote a truncated,
+/// time-compressed file with no warning. A request the envelope rules out of
+/// the bridge is refused at validation instead, with the choices that stay
+/// inside it. `bridge_disabled_by_env` is the developer override, which keeps
+/// its legacy path. Pure and cross-platform so every host unit-tests it;
+/// only a Windows start consults it.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_bridge_envelope_refusal(
+    params: &StartSessionParams,
+    bridge_disabled_by_env: bool,
+) -> Option<String> {
+    if bridge_disabled_by_env || !outside_compositor_bridge_60fps_envelope(params) {
+        return None;
+    }
+    let fps = requested_compositor_bridge_fps(params);
+    let video = &params.output.video;
+    if params.output.stream_enabled {
+        // Not reached after `validate_video_profile_policy`: a livestream
+        // above 30 fps shares one encode at or below 1080p, or splits only
+        // inside the envelope. Kept so no validated request takes the legacy
+        // path, whatever a later policy allows.
+        let cap = envelope_size_name(video, STREAMING_BRIDGE_60FPS_MAX_SIDES);
+        return Some(format!(
+            "Livestreaming at {fps} fps on Windows works up to {cap} for the recording and every destination. Choose {cap}, or 30 fps."
+        ));
+    }
+    let name = video_size_name(video);
+    let cap = envelope_size_name(video, RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES);
+    Some(format!(
+        "{name} at {fps} fps isn't supported on Windows yet. Choose {name} at 30 fps or {cap} at {fps} fps."
+    ))
 }
 
 /// The video output the encoder bridge is asked for, or the raw legacy
@@ -23130,7 +23671,11 @@ fn scene_video_filter(
         let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
             continue;
         };
-        let PixelRect {
+        // Plan 215 E2 (D2): the layer is the UNCUT box at its true size, and
+        // the overlay places it at its true (signed) origin; `overlay` clips
+        // what hangs off the canvas. A mask runs over the whole layer, so a
+        // bigger-than-canvas camera keeps its true circle or corners.
+        let SignedPixelRect {
             x,
             y,
             width: layer_width,
@@ -23916,6 +24461,19 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     validate_caption_output_policy(params)?;
     validate_video_profile_policy(params)?;
     crate::source_iso::validate_separate_source_recordings(params)?;
+    // Issue #1062: Windows has no hardware legacy path, so a request outside
+    // the bridge envelope is refused here, before the clip buffer hands over
+    // and before any probe, rather than recorded through software OpenH264.
+    #[cfg(target_os = "windows")]
+    if let Some(message) = windows_bridge_envelope_refusal(
+        params,
+        compositor_encoder_bridge_disabled(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        ),
+    ) {
+        bail!(message);
+    }
 
     Ok(())
 }
@@ -24297,8 +24855,11 @@ pub async fn apply_overlay_layout_to_active_session(
         highlight_aux = plans.highlight.aux,
         buddy_primary = plans.buddy.primary,
         buddy_aux = plans.buddy.aux,
+        chat_primary = plans.chat.primary,
+        chat_aux = plans.chat.aux,
         highlight_program = flags.highlight_on_program,
         buddy_program = flags.buddy_on_program,
+        chat_program = flags.chat_on_program,
         buddy_legs_prepared = buddy_canvases,
         swapped,
         "overlay layout changed mid-session"
@@ -24332,6 +24893,7 @@ async fn apply_overlay_layout_to_idle_preview(
     tracing::info!(
         highlight_primary = flags.highlight_on_primary,
         buddy_primary = flags.buddy_on_primary,
+        chat_primary = flags.chat_on_primary,
         swapped,
         "overlay layout changed while nothing runs"
     );
@@ -24391,6 +24953,36 @@ fn comment_highlight_vertical_canvas(
     stream_output
         .filter(|output| output.composes_simulcast_scene && leg_plan.1)
         .map(|output| (output.width, output.height))
+}
+
+/// Portrait canvas of the vertical simulcast leg whenever the session runs
+/// one (plan 215 G): the chat box is rasterized for it whatever the chat
+/// switches say at start (`chat_overlay::chat_overlay_canvases`).
+fn simulcast_vertical_canvas(
+    stream_output: Option<&CompositorAuxiliaryOutput>,
+) -> Option<(u32, u32)> {
+    stream_output
+        .filter(|output| output.composes_simulcast_scene)
+        .map(|output| (output.width, output.height))
+}
+
+/// The landscape canvas the renderer rasterizes the chat box for (plan 215
+/// G): the primary leg's, or a split stream leg's when that is smaller. The
+/// box is exactly its rect's width and every leg blits it at pixel size, so
+/// one landscape raster can only be complete on both legs when it is painted
+/// for the smaller one (on the larger it then hugs the rect's edge, whole).
+/// The vertical simulcast leg has its own portrait raster and never counts.
+/// Fixed for the run: leg sizes never change mid-session, so the renderer
+/// reads it once per livestream, whatever the chat switches say at start.
+fn chat_overlay_horizontal_canvas(
+    primary: (u32, u32),
+    stream_output: Option<&CompositorAuxiliaryOutput>,
+) -> (u32, u32) {
+    stream_output
+        .filter(|output| !output.composes_simulcast_scene)
+        .map(|output| (output.width, output.height))
+        .filter(|aux| aux.0 * aux.1 < primary.0 * primary.1)
+        .unwrap_or(primary)
 }
 
 #[cfg(test)]
@@ -27199,6 +27791,7 @@ mod tests {
                 sounds: None,
                 master: Some(reading),
                 master_clipped_samples: 3,
+                microphone_silent: true,
             },
         )
         .expect("an event");
@@ -27206,9 +27799,14 @@ mod tests {
         assert_eq!(event.microphone, Some(reading));
         assert_eq!(event.system_audio, None);
         assert_eq!(event.master_clipped_samples, 3);
+        assert!(event.microphone_silent);
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the std lock also serializes the sync lifecycle tests; this test owns its current-thread runtime, so the guard blocks no other task"
+    )]
     async fn shutdown_and_partial_start_share_signal_all_absolute_deadline_path() {
         let _serial = crate::encoder_bridge::ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -27435,6 +28033,26 @@ mod tests {
     }
 
     #[test]
+    fn microphone_silence_messages_name_the_device_and_the_run() {
+        // Issue 1064: the report arrives at the end of the hold, so the
+        // silence began a hold earlier.
+        assert_eq!(
+            microphone_silent_message("HD Pro Webcam C920", 15_300, 3_000),
+            "Microphone \"HD Pro Webcam C920\" has sent only silence since 12.3 seconds into this session. Try choosing it again."
+        );
+        assert_eq!(
+            microphone_silent_message("Desk Mic", 1_000, 3_000),
+            "Microphone \"Desk Mic\" has sent only silence since 0.0 seconds into this session. Try choosing it again."
+        );
+        assert_eq!(
+            microphone_signal_recovered_message("Desk Mic", 7_450),
+            "Microphone \"Desk Mic\" has sound again after 7.5 seconds of silence."
+        );
+        assert_eq!(MICROPHONE_SILENT_CODE, "microphone-silent");
+        assert!(MICROPHONE_SIGNAL_RECOVERED_CODE.ends_with("-recovered"));
+    }
+
+    #[test]
     fn a_stopped_linux_microphone_is_reopened_a_bounded_number_of_times() {
         use crate::session_audio::SourceLossReason::{CaptureStopped, TimelineRejected};
         // Retest 151: a starved Pulse worker stopped and the session stayed
@@ -27503,6 +28121,7 @@ mod tests {
             duration_ms: None,
             message: Some("Starting stream session.".to_string()),
             replay_only: false,
+            accepts_live_scene_edits: None,
         }
     }
 
@@ -28365,6 +28984,18 @@ mod tests {
         // The legacy FFmpeg graph: only with its overlay FIFO.
         assert!(session_accepts_banners(false, false, true));
         assert!(!session_accepts_banners(false, false, false));
+    }
+
+    /// Plan 215 D1: which sessions take a source moved after their start.
+    #[test]
+    fn session_accepts_live_scene_edits_follows_the_render_path() {
+        // The compositor bridge (Metal, CPU, the Windows D3D11 media session)
+        // reads the installed scene every tick.
+        assert!(session_accepts_live_scene_edits(true, false));
+        // The direct D3D11 recording composes nothing.
+        assert!(!session_accepts_live_scene_edits(true, true));
+        // The legacy FFmpeg graph is built once, overlay FIFO or not.
+        assert!(!session_accepts_live_scene_edits(false, false));
     }
 
     #[derive(Debug)]
@@ -29845,6 +30476,327 @@ mod tests {
         assert!(matches!(recovered, BlockingProbeOutcome::Finished("ok")));
     }
 
+    /// A scripted stand-in for `run_linux_vaapi_probe`: the outcome per
+    /// (node, profile), every call recorded, and a missing script entry is a
+    /// probe that must never have run (a timed-out node's Compat profile, a
+    /// node after a timeout).
+    struct ScriptedVaapiProbe {
+        outcomes: Vec<((&'static str, LinuxVaapiArgProfile), LinuxVaapiProbeOutcome)>,
+        calls: std::rc::Rc<std::cell::RefCell<Vec<(String, LinuxVaapiArgProfile)>>>,
+        quarantine_directory: PathBuf,
+    }
+
+    impl ScriptedVaapiProbe {
+        fn new(
+            label: &str,
+            outcomes: Vec<((&'static str, LinuxVaapiArgProfile), LinuxVaapiProbeOutcome)>,
+        ) -> Self {
+            Self {
+                outcomes,
+                calls: Default::default(),
+                quarantine_directory: std::env::temp_dir().join(format!(
+                    "videorc-vaapi-probe-decision-{label}-{}",
+                    uuid::Uuid::new_v4()
+                )),
+            }
+        }
+
+        fn quarantine(&self) -> crate::linux_vaapi::ProbeQuarantine {
+            crate::linux_vaapi::ProbeQuarantine::new(self.quarantine_directory.clone())
+        }
+
+        fn sentinel_armed(&self) -> bool {
+            self.quarantine_directory
+                .join("probe-in-progress.json")
+                .exists()
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn runner(
+            &self,
+        ) -> Box<
+            dyn FnMut(
+                crate::linux_vaapi::RenderNodeCandidate,
+                LinuxVaapiArgProfile,
+            ) -> std::future::Ready<LinuxVaapiProbeOutcome>,
+        > {
+            let outcomes = self.outcomes.clone();
+            let calls = self.calls.clone();
+            Box::new(move |candidate, profile| {
+                let node = candidate.node_name();
+                calls.borrow_mut().push((node.clone(), profile));
+                let outcome = outcomes
+                    .iter()
+                    .find(|((scripted, scripted_profile), _)| {
+                        *scripted == node && *scripted_profile == profile
+                    })
+                    .map(|(_, outcome)| outcome.clone())
+                    .unwrap_or_else(|| {
+                        panic!("{node} was probed with {profile}, which must never run")
+                    });
+                std::future::ready(outcome)
+            })
+        }
+
+        fn calls(&self) -> Vec<(String, LinuxVaapiArgProfile)> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Drop for ScriptedVaapiProbe {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.quarantine_directory).ok();
+        }
+    }
+
+    fn render_node(node: &str, driver: &str) -> crate::linux_vaapi::RenderNodeCandidate {
+        crate::linux_vaapi::RenderNodeCandidate {
+            path: PathBuf::from("/dev/dri").join(node),
+            driver: Some(driver.to_string()),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_timed_out_probe_quarantines_its_node_and_probes_nothing_else() {
+        use crate::protocol::LinuxRenderNodeState;
+        // The Arch T2 box: amdgpu first in probe order, i915 behind it. The
+        // AMD probe hangs; before #1027 Compat ran on the same hung GPU and
+        // the node was probed again at the next launch.
+        let amd = render_node("renderD128", "amdgpu");
+        let intel = render_node("renderD129", "i915");
+        let probe = ScriptedVaapiProbe::new(
+            "timeout",
+            vec![(
+                ("renderD128", LinuxVaapiArgProfile::Standard),
+                LinuxVaapiProbeOutcome::TimedOut,
+            )],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, reason, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[amd.clone(), intel.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, None);
+        assert_eq!(
+            probe.calls(),
+            vec![("renderD128".to_string(), LinuxVaapiArgProfile::Standard)],
+            "Compat on the hung node or any probe of the next node"
+        );
+        assert!(!probe.sentinel_armed(), "the sentinel outlived the probe");
+        let quarantined = quarantine.quarantined();
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(quarantined[0].node, "renderD128");
+        assert_eq!(quarantined[0].driver.as_deref(), Some("amdgpu"));
+        assert_eq!(quarantined[0].ffmpeg_path, "/opt/ffmpeg");
+        assert_eq!(
+            quarantined[0].timed_out_after_secs,
+            Some(LINUX_VAAPI_PROBE_TIMEOUT.as_secs())
+        );
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].node, "renderD128");
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Quarantined);
+        assert!(
+            reports[0]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("did not return within 20 s"))
+        );
+        assert_eq!(reports[1].node, "renderD129");
+        assert_eq!(reports[1].state, LinuxRenderNodeState::Skipped);
+        assert!(
+            reports[1]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("renderD128 did not return"))
+        );
+        let reason = reason.expect("the fallback names the hang");
+        assert!(reason.contains("renderD128"), "{reason}");
+        assert!(reason.contains("did not return within 20 s"), "{reason}");
+
+        // The next start plans around the hung node and reaches the healthy
+        // one; the quarantine is read from disk, not remembered in memory.
+        let (to_probe, planned) = crate::linux_vaapi::plan_probe_order(
+            &[amd, intel.clone()],
+            None,
+            &probe.quarantine().quarantined(),
+        )
+        .expect("plan");
+        assert_eq!(to_probe, vec![intel]);
+        assert_eq!(planned[0].state, LinuxRenderNodeState::Quarantined);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_rejected_standard_profile_tries_compat_on_the_same_node_only() {
+        use crate::protocol::LinuxRenderNodeState;
+        let intel = render_node("renderD128", "i915");
+        let amd = render_node("renderD129", "amdgpu");
+        let probe = ScriptedVaapiProbe::new(
+            "rejection",
+            vec![
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Rejected("no CQP support".to_string()),
+                ),
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Compat),
+                    LinuxVaapiProbeOutcome::Rejected("level 4 refused".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Rejected("hwupload failed".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Compat),
+                    LinuxVaapiProbeOutcome::Passed,
+                ),
+            ],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, reason, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[intel, amd.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, Some((amd.path, LinuxVaapiArgProfile::Compat)));
+        assert_eq!(reason, None);
+        assert_eq!(
+            probe.calls(),
+            vec![
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Compat),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Compat),
+            ]
+        );
+        assert!(!probe.sentinel_armed());
+        assert!(
+            quarantine.quarantined().is_empty(),
+            "a rejection is not a hang"
+        );
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Rejected);
+        assert_eq!(
+            reports[0].detail.as_deref(),
+            Some("standard: no CQP support | compat: level 4 refused")
+        );
+        assert_eq!(reports[1].state, LinuxRenderNodeState::ProbedOk);
+        assert_eq!(
+            reports[1].detail.as_deref(),
+            Some("compat argument profile")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_probe_that_never_spawned_has_no_rejection_for_compat_to_answer() {
+        use crate::protocol::LinuxRenderNodeState;
+        let intel = render_node("renderD128", "i915");
+        let amd = render_node("renderD129", "amdgpu");
+        let probe = ScriptedVaapiProbe::new(
+            "spawn-failure",
+            vec![
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Failed("ffmpeg could not be spawned".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Passed,
+                ),
+            ],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, _, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[intel, amd.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, Some((amd.path, LinuxVaapiArgProfile::Standard)));
+        assert_eq!(
+            probe.calls(),
+            vec![
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Standard),
+            ]
+        );
+        assert!(quarantine.quarantined().is_empty());
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Rejected);
+        assert_eq!(
+            reports[0].detail.as_deref(),
+            Some("standard: ffmpeg could not be spawned")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cancelled_probe_leaves_no_sentinel_for_the_next_resolve_to_adopt() {
+        // The resolve future is dropped mid-probe (a test runtime ending, a
+        // timeout around start_session, quit). This process is alive, so
+        // the node did not hang the host: nothing may be left for the next
+        // start to adopt. The Arch T2 box lost its healthy Intel node to
+        // exactly this (#1027, problem 2).
+        let intel = render_node("renderD128", "i915");
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-vaapi-probe-cancelled-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let quarantine = crate::linux_vaapi::ProbeQuarantine::new(directory.clone());
+        let (armed_tx, armed) = oneshot::channel::<()>();
+        let mut armed_tx = Some(armed_tx);
+        let sentinel_path = directory.join("probe-in-progress.json");
+        let sentinel_path_in_probe = sentinel_path.clone();
+        let never_returns = move |_: crate::linux_vaapi::RenderNodeCandidate,
+                                  _: LinuxVaapiArgProfile| {
+            // The sentinel is on disk while the probe runs.
+            assert!(
+                sentinel_path_in_probe.exists(),
+                "probe ran without a sentinel"
+            );
+            if let Some(armed_tx) = armed_tx.take() {
+                let _ = armed_tx.send(());
+            }
+            std::future::pending::<LinuxVaapiProbeOutcome>()
+        };
+
+        {
+            let resolve = probe_linux_vaapi_candidates(
+                "/opt/ffmpeg",
+                std::slice::from_ref(&intel),
+                &quarantine,
+                never_returns,
+            );
+            tokio::pin!(resolve);
+            tokio::select! {
+                _ = &mut resolve => panic!("a pending probe resolved"),
+                armed = armed => armed.expect("the probe armed its sentinel"),
+            }
+            // The resolve future is dropped here, mid-probe.
+        }
+
+        assert!(
+            !sentinel_path.exists(),
+            "the cancelled probe left its sentinel armed"
+        );
+        assert_eq!(
+            quarantine.adopt_stale_sentinel().expect("no sentinel"),
+            None,
+            "the next resolve quarantined a node that never hung"
+        );
+        assert!(quarantine.quarantined().is_empty());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "current_thread")]
     async fn a_decision_asked_for_during_a_probe_waits_and_never_quarantines_that_node() {
@@ -29869,14 +30821,14 @@ mod tests {
             async move {
                 resolutions.fetch_add(1, Ordering::SeqCst);
                 quarantine.adopt_stale_sentinel()?;
-                quarantine.begin_probe(intel, "/opt/ffmpeg")?;
+                let probing = quarantine.begin_probe(intel, "/opt/ffmpeg")?;
                 if let Some(armed) = armed {
                     let _ = armed.send(());
                 }
                 if let Some(probe_returns) = probe_returns {
                     let _ = probe_returns.await;
                 }
-                quarantine.finish_probe()?;
+                probing.finish()?;
                 select_linux_h264_encoder(
                     LinuxH264EncoderPreference::Auto,
                     Some((intel.path.clone(), LinuxVaapiArgProfile::Standard)),
@@ -31104,6 +32056,100 @@ mod tests {
         let mut streaming = base_params(true, true);
         streaming.output.video.fps = 60;
         assert!(!record_only_bridge_60fps_eligible(&streaming));
+    }
+
+    /// Issue #1062: a Windows request the envelope rules out of the bridge
+    /// is refused with the choices that stay inside it, never recorded
+    /// through software OpenH264 at a third of realtime.
+    #[test]
+    fn windows_refuses_a_60fps_recording_outside_the_bridge_envelope() {
+        let mut params = base_params(true, false);
+        params.output.video = video_preset_defaults(VideoPreset::Record4k60Experimental);
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "4K at 60 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 60 fps."
+            )
+        );
+        // The developer env override keeps its legacy path.
+        assert_eq!(windows_bridge_envelope_refusal(&params, true), None);
+
+        // The advice keeps the requested rate: every rate up to 60 fits.
+        params.output.video.fps = 48;
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "4K at 48 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 48 fps."
+            )
+        );
+
+        // A portrait canvas is named by both sides, like the renderer.
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2160,
+            height: 3840,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "2160 × 3840 at 60 fps isn't supported on Windows yet. Choose 2160 × 3840 at 30 fps or 1440 × 2560 at 60 fps."
+            )
+        );
+    }
+
+    #[test]
+    fn windows_keeps_every_request_inside_the_bridge_envelope() {
+        let mut params = base_params(true, false);
+        for preset in [
+            VideoPreset::Record4k30,
+            VideoPreset::Tutorial1440p30,
+            VideoPreset::Tutorial1080p30,
+            VideoPreset::StreamSafe1080p60,
+            VideoPreset::Vertical1080x1920,
+        ] {
+            params.output.video = video_preset_defaults(preset.clone());
+            assert_eq!(
+                windows_bridge_envelope_refusal(&params, false),
+                None,
+                "{preset:?} rides the bridge"
+            );
+        }
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2560,
+            height: 1440,
+            fps: 60,
+            bitrate_kbps: 16_000,
+        };
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+        params.output.video.width = 1440;
+        params.output.video.height = 2560;
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+    }
+
+    #[test]
+    fn windows_keeps_a_livestream_inside_the_streaming_envelope() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p60;
+        streaming.default_bitrate_kbps = 12_000;
+        params.streaming = Some(streaming);
+        normalize_stream_only_output_video(&mut params).unwrap();
+        assert_eq!(requested_compositor_bridge_fps(&params), 60);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+
+        // The recording beside it at 1080p: the proven streaming envelope.
+        params.output.record_enabled = true;
+        params.output.video = video_preset_defaults(VideoPreset::Tutorial1080p30);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+        params.output.video = video_preset_defaults(VideoPreset::StreamYoutube1080p60);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
     }
 
     #[tokio::test]
@@ -32643,6 +33689,7 @@ mod tests {
             native_audio_silent_drain: false,
             capture_notice: None,
             native_audio: None,
+            _incident_tone: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
             system_audio: None,
@@ -32668,8 +33715,11 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            simulcast_vertical_canvas: None,
+            chat_overlay_horizontal_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
+            accepts_live_scene_edits: true,
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
@@ -36683,8 +37733,7 @@ mod tests {
             let segment = position(&args, "segment");
             let ring_video = args[..segment]
                 .windows(2)
-                .filter(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
-                .last()
+                .rfind(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
                 .unwrap()[1]
                 .clone();
             assert_eq!(ring_video, format!("{recording_input}:v"));
@@ -39644,9 +40693,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -40448,6 +41500,84 @@ mod tests {
         assert!(
             !replay_auto_start_requested(true, &params),
             "a ring the user turned on runs anywhere"
+        );
+    }
+
+    #[test]
+    fn record_and_go_live_drop_the_automatic_ring_on_a_software_encoder() {
+        let automatic = |params: &mut StartSessionParams| {
+            params.replay = Some(crate::protocol::ReplayParams {
+                seconds: 60,
+                auto: true,
+            });
+        };
+        for backend in [
+            EncodeBackend::SoftwareOpenH264,
+            EncodeBackend::SoftwareMediaFoundation,
+            EncodeBackend::SoftwareX264,
+        ] {
+            let mut go_live = base_params(false, true);
+            automatic(&mut go_live);
+            let refusal = drop_automatic_ring_on_software_encoder(false, &mut go_live, backend)
+                .expect("a second encode beside the stream");
+            assert!(
+                refusal.message.contains("second encode"),
+                "{}",
+                refusal.message
+            );
+            assert!(
+                go_live.replay.is_none(),
+                "{backend:?}: the stream starts without the ring"
+            );
+        }
+
+        let mut record = base_params(true, false);
+        automatic(&mut record);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut record,
+                EncodeBackend::HardwareVaapi
+            )
+            .is_none()
+        );
+        assert!(record.replay.is_some(), "a hardware encoder keeps the ring");
+
+        record.replay.as_mut().unwrap().auto = false;
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut record,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none()
+        );
+        assert!(
+            record.replay.is_some(),
+            "a ring the user turned on runs anywhere"
+        );
+
+        let mut buffer_only = base_params(true, false);
+        automatic(&mut buffer_only);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                true,
+                &mut buffer_only,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none(),
+            "a buffer-only start is refused by the guard above, never started bare"
+        );
+        assert!(buffer_only.replay.is_some());
+
+        let mut no_ring = base_params(true, false);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut no_ring,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none()
         );
     }
 
@@ -41684,6 +42814,7 @@ mod tests {
             native_audio_silent_drain: false,
             capture_notice: None,
             native_audio: None,
+            _incident_tone: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
             system_audio: None,
@@ -41712,8 +42843,11 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            simulcast_vertical_canvas: None,
+            chat_overlay_horizontal_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
+            accepts_live_scene_edits: true,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,
@@ -42338,6 +43472,7 @@ mod tests {
                     duration_ms: None,
                     message: Some("Stopping.".to_string()),
                     replay_only: false,
+                    accepts_live_scene_edits: None,
                 },
             ))
             .unwrap();
@@ -42355,6 +43490,7 @@ mod tests {
                     duration_ms: None,
                     message: Some("Capture session finalized.".to_string()),
                     replay_only: false,
+                    accepts_live_scene_edits: None,
                 },
             ))
             .unwrap();
@@ -42747,8 +43883,38 @@ mod tests {
     /// skips with a line where FFmpeg is not on PATH (the Rust CI job).
     #[test]
     fn ffmpeg_legacy_graph_draws_the_screen_crop_fixture() {
+        use crate::scene_geometry::screen_crop_fixture::{expected_samples, transform};
+        ffmpeg_draws_the_screen_fixture(
+            "ffmpeg_legacy_graph_draws_the_screen_crop_fixture",
+            transform(),
+            &expected_samples(),
+        );
+    }
+
+    /// Plan 215 E2 (D2): the legacy FFmpeg graph places the uncut layer at
+    /// its signed origin (`overlay=x=-32:y=-18`) and FFmpeg clips what hangs
+    /// off the canvas: cut, never squashed, like the compositor.
+    #[test]
+    fn ffmpeg_legacy_graph_cuts_the_screen_beyond_the_canvas() {
+        use crate::scene_geometry::screen_beyond_canvas_fixture::{expected_samples, transform};
+        ffmpeg_draws_the_screen_fixture(
+            "ffmpeg_legacy_graph_cuts_the_screen_beyond_the_canvas",
+            transform(),
+            &expected_samples(),
+        );
+    }
+
+    /// The scene graph for one screen source at `transform` on a 128x72
+    /// canvas, run on the fixture picture in a real FFmpeg, and the samples
+    /// read back; skips with a line where FFmpeg is not on PATH (the Rust CI
+    /// job).
+    fn ffmpeg_draws_the_screen_fixture(
+        name: &str,
+        transform: crate::protocol::SceneTransform,
+        samples: &[((f64, f64), [u8; 3])],
+    ) {
         use crate::scene_geometry::screen_crop_fixture::{
-            SOURCE_HEIGHT, SOURCE_WIDTH, expected_samples, sample_pixel, source_bgra, transform,
+            SOURCE_HEIGHT, SOURCE_WIDTH, sample_pixel, source_bgra,
         };
         use std::io::Write as _;
         let ffmpeg_runs = std::process::Command::new("ffmpeg")
@@ -42758,9 +43924,7 @@ mod tests {
             .status()
             .is_ok_and(|status| status.success());
         if !ffmpeg_runs {
-            eprintln!(
-                "ffmpeg_legacy_graph_draws_the_screen_crop_fixture: skipped, ffmpeg is not on PATH"
-            );
+            eprintln!("{name}: skipped, ffmpeg is not on PATH");
             return;
         }
         let (width, height) = (128_u32, 72_u32);
@@ -42772,7 +43936,7 @@ mod tests {
         let scene = scene_with_sources(vec![scene_source(
             "source:base",
             SceneSourceKind::Screen,
-            transform(),
+            transform,
             true,
         )]);
         let graph = scene_video_filter(
@@ -42818,7 +43982,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(output.stdout.len(), (width * height * 3) as usize);
-        for (point, expected) in expected_samples() {
+        for &(point, expected) in samples {
             let (x, y) = sample_pixel(point, width, height);
             let offset = (y * width as usize + x) * 3;
             let actual = &output.stdout[offset..offset + 3];
@@ -42829,9 +43993,46 @@ mod tests {
                     .all(
                         |(actual, expected)| (i16::from(*actual) - i16::from(expected)).abs() <= 12
                     ),
-                "ffmpeg: at {point:?} ({x}, {y}) expected {expected:?}, got {actual:?}"
+                "{name}: at {point:?} ({x}, {y}) expected {expected:?}, got {actual:?}"
             );
         }
+    }
+
+    /// Plan 215 E2: the graph itself, without FFmpeg: the layer keeps its
+    /// true size and the overlay's x and y go negative.
+    #[test]
+    fn scene_filter_places_an_oversized_layer_at_its_signed_origin() {
+        use crate::scene_geometry::screen_beyond_canvas_fixture::transform;
+        let mut params = base_params(true, false);
+        params.output.video.width = 128;
+        params.output.video.height = 72;
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        let scene = scene_with_sources(vec![scene_source(
+            "source:base",
+            SceneSourceKind::Screen,
+            transform(),
+            true,
+        )]);
+        let graph = scene_video_filter(
+            &scene,
+            &CaptureInputs {
+                video: VideoInput::MacScreen { index: 3 },
+                camera_index: None,
+                microphone: None,
+            },
+            &InputLayout {
+                video_input_index: 0,
+                camera_input_index: None,
+                screen_overlay_input_index: None,
+                audio_inputs: Vec::new(),
+                microphone_graph_gain: false,
+                microphone_is_linux_pulse: false,
+            },
+            &params,
+        );
+        assert!(graph.contains("scale=192:108"), "{graph}");
+        assert!(graph.contains("overlay=x=-32:y=-18:"), "{graph}");
     }
 
     #[test]
@@ -43309,15 +44510,19 @@ mod tests {
             -STREAM_OUTPUT_AUDIO_ADVANCE_MS
         );
 
-        let mut tuned = AudioSettings::default();
-        tuned.microphone_sync_offset_ms = 80;
+        let tuned = AudioSettings {
+            microphone_sync_offset_ms: 80,
+            ..Default::default()
+        };
         assert_eq!(
             stream_output_audio_settings(&tuned).microphone_sync_offset_ms,
             80 - STREAM_OUTPUT_AUDIO_ADVANCE_MS
         );
 
-        let mut near_min = AudioSettings::default();
-        near_min.microphone_sync_offset_ms = MICROPHONE_SYNC_OFFSET_MIN_MS + 10;
+        let near_min = AudioSettings {
+            microphone_sync_offset_ms: MICROPHONE_SYNC_OFFSET_MIN_MS + 10,
+            ..Default::default()
+        };
         assert_eq!(
             stream_output_audio_settings(&near_min).microphone_sync_offset_ms,
             MICROPHONE_SYNC_OFFSET_MIN_MS
@@ -46015,6 +47220,50 @@ mod tests {
         assert_eq!(comment_highlight_vertical_canvas(None, (true, false)), None);
     }
 
+    /// Plan 215 G, the dual-orientation fix: the chat box is painted for the
+    /// landscape leg it lands on. With a vertical leg the horizontal stream
+    /// rides the primary (the session's own size, not the stream profile's);
+    /// a smaller split stream leg wins over the recording; a larger one does
+    /// not, so the raster is never wider than the rect of any leg.
+    #[test]
+    fn chat_overlay_horizontal_canvas_is_the_smallest_landscape_leg() {
+        let vertical = CompositorAuxiliaryOutput {
+            width: 720,
+            height: 1280,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            composes_simulcast_scene: true,
+        };
+        let smaller_split = CompositorAuxiliaryOutput {
+            composes_simulcast_scene: false,
+            width: 1280,
+            height: 720,
+            ..vertical
+        };
+        let larger_split = CompositorAuxiliaryOutput {
+            composes_simulcast_scene: false,
+            width: 2560,
+            height: 1440,
+            ..vertical
+        };
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1280, 720), Some(&vertical)),
+            (1280, 720),
+            "the dual-orientation horizontal stream is the primary leg"
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), None),
+            (1920, 1080)
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), Some(&smaller_split)),
+            (1280, 720)
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), Some(&larger_split)),
+            (1920, 1080)
+        );
+    }
+
     #[test]
     fn captioned_stream_uses_the_isolated_same_profile_stream_leg_without_touching_recording() {
         // Same-profile record+stream now uses independent encoded roles even
@@ -47412,9 +48661,11 @@ mod tests {
 
         #[test]
         fn the_bus_runs_the_system_audio_timing_only_where_it_can_mix() {
-            let mut audio = AudioSettings::default();
-            audio.microphone_sync_offset_ms = 120;
-            audio.system_audio_gain_db = -9.0;
+            let mut audio = AudioSettings {
+                microphone_sync_offset_ms: 120,
+                system_audio_gain_db: -9.0,
+                ..Default::default()
+            };
             let capable = session_audio_options(&audio, true);
             assert_eq!(
                 capable.playout_delay,
@@ -47498,8 +48749,10 @@ mod tests {
         fn moving_a_positive_offset_into_the_bus_keeps_every_leg_timing() {
             for offset in (MICROPHONE_SYNC_OFFSET_MIN_MS..=MICROPHONE_SYNC_OFFSET_MAX_MS).step_by(5)
             {
-                let mut audio = AudioSettings::default();
-                audio.microphone_sync_offset_ms = offset;
+                let audio = AudioSettings {
+                    microphone_sync_offset_ms: offset,
+                    ..Default::default()
+                };
                 let split = session_audio_sync(&audio, true).unwrap();
                 let bus_delay_ms = (split.microphone_delay_frames / 48) as i32;
                 assert_eq!(split.microphone_delay_frames % 48, 0);
@@ -47756,8 +49009,10 @@ mod tests {
                 let mut buffer = [0_u8; 16_384];
                 while matches!(file.read(&mut buffer), Ok(read) if read > 0) {}
             });
-            let mut audio = AudioSettings::default();
-            audio.system_audio_enabled = false;
+            let audio = AudioSettings {
+                system_audio_enabled: false,
+                ..Default::default()
+            };
             let session_audio = crate::session_audio::attach_prepared_with(
                 None,
                 path,
@@ -47923,8 +49178,10 @@ mod tests {
         async fn start_on_joins_after_publication_and_start_off_opens_nothing() {
             let session = live_session("system-audio-start-on").await;
             let mut events = session.state.events.subscribe();
-            let mut off = AudioSettings::default();
-            off.system_audio_enabled = false;
+            let off = AudioSettings {
+                system_audio_enabled: false,
+                ..Default::default()
+            };
             {
                 let recording = session.state.recording.lock().await;
                 request_initial_system_audio(recording.as_ref().unwrap(), &off);
@@ -47932,8 +49189,10 @@ mod tests {
             sleep(Duration::from_millis(100)).await;
             assert_eq!(session.fake.opens(), 0, "Off means not captured at all");
 
-            let mut on = AudioSettings::default();
-            on.system_audio_enabled = true;
+            let on = AudioSettings {
+                system_audio_enabled: true,
+                ..Default::default()
+            };
             {
                 let recording = session.state.recording.lock().await;
                 request_initial_system_audio(recording.as_ref().unwrap(), &on);

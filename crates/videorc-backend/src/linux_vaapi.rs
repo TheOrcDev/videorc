@@ -8,7 +8,8 @@
 //! - an explicit pin (`VIDEORC_LINUX_VAAPI_DEVICE`) limits probing to one node;
 //! - a crash-safe sentinel is written before each probe and removed after it
 //!   returns, so a probe that never came back (the host hung) quarantines that
-//!   node on the next start instead of being tried again; and
+//!   node on the next start instead of being tried again; a probe that times
+//!   out in-process quarantines its node on the spot; and
 //! - the driver behind every node is listed in diagnostics so the evidence says
 //!   which GPU encoded, without any driver blocklist in the product.
 //!
@@ -16,7 +17,7 @@
 //! the bridge's own filter chain so a probe pass predicts a session pass.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -179,12 +180,21 @@ pub(crate) struct QuarantineEntry {
     pub(crate) ffmpeg_path: String,
     pub(crate) probe_started_at_unix_secs: u64,
     pub(crate) quarantined_at_unix_secs: u64,
+    /// Set when the probe was still running at its deadline and the backend
+    /// quarantined the node itself; absent when a stale sentinel was adopted
+    /// after the process died mid-probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) timed_out_after_secs: Option<u64>,
 }
 
 impl QuarantineEntry {
     pub(crate) fn detail(&self) -> String {
+        let outcome = match self.timed_out_after_secs {
+            Some(secs) => format!("did not return within {secs} s"),
+            None => "never returned".to_string(),
+        };
         format!(
-            "quarantined: a VAAPI probe of this node started at unix {} and never returned (delete {} under the app data directory, or pin the node with {}, to try it again)",
+            "quarantined: a VAAPI probe of this node started at unix {} and {outcome} (delete {} under the app data directory, or pin the node with {}, to try it again)",
             self.probe_started_at_unix_secs, QUARANTINED_FILE, DEVICE_PIN_ENV
         )
     }
@@ -233,12 +243,15 @@ impl ProbeQuarantine {
     /// Beside the database, so smokes with an isolated
     /// `VIDEORC_DATABASE_PATH` never read or write the owner's quarantine.
     pub(crate) fn default_directory() -> PathBuf {
-        let database = crate::storage::default_database_path();
-        database
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(QUARANTINE_DIRECTORY_NAME)
+        // A unit test that resolves the encoder without isolating the
+        // database must never read or write the developer's real quarantine
+        // (the secret store makes the same promise, #974): `cargo test` on
+        // the Arch T2 box quarantined its healthy Intel node (#1027).
+        #[cfg(test)]
+        if std::env::var_os("VIDEORC_DATABASE_PATH").is_none() {
+            return unit_test_directory();
+        }
+        directory_beside(&crate::storage::default_database_path())
     }
 
     fn sentinel_path(&self) -> PathBuf {
@@ -249,8 +262,11 @@ impl ProbeQuarantine {
         self.directory.join(QUARANTINED_FILE)
     }
 
-    /// A sentinel left over from a previous process means that probe never
-    /// returned. Move it into the quarantine list and report it.
+    /// A sentinel left over from a previous process means that process died
+    /// mid-probe without running destructors: the host hung or was rebooted,
+    /// or the backend was killed or aborted. Move the node into the
+    /// quarantine list and report it. (A probe future dropped in-process
+    /// clears its own sentinel, see [`ArmedProbe`].)
     pub(crate) fn adopt_stale_sentinel(&self) -> std::io::Result<Option<QuarantineEntry>> {
         let sentinel_path = self.sentinel_path();
         let raw = match std::fs::read(&sentinel_path) {
@@ -273,13 +289,18 @@ impl ProbeQuarantine {
             ffmpeg_path: sentinel.ffmpeg_path,
             probe_started_at_unix_secs: sentinel.started_at_unix_secs,
             quarantined_at_unix_secs: unix_now(),
+            timed_out_after_secs: None,
         };
-        let mut entries = self.quarantined();
-        entries.retain(|existing| existing.node != entry.node);
-        entries.push(entry.clone());
-        self.write_quarantined(&entries)?;
+        self.add_quarantined(entry.clone())?;
         std::fs::remove_file(&sentinel_path)?;
         Ok(Some(entry))
+    }
+
+    fn add_quarantined(&self, entry: QuarantineEntry) -> std::io::Result<()> {
+        let mut entries = self.quarantined();
+        entries.retain(|existing| !existing.names(&entry.node));
+        entries.push(entry);
+        self.write_quarantined(&entries)
     }
 
     /// Missing or unreadable lists read as empty; an unreadable list is
@@ -303,7 +324,7 @@ impl ProbeQuarantine {
         &self,
         candidate: &RenderNodeCandidate,
         ffmpeg_path: &str,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<ArmedProbe<'_>> {
         std::fs::create_dir_all(&self.directory)?;
         let sentinel = ProbeSentinel {
             node: candidate.node_name(),
@@ -312,16 +333,108 @@ impl ProbeQuarantine {
             started_at_unix_secs: unix_now(),
         };
         let json = serde_json::to_vec_pretty(&sentinel)?;
-        write_atomic(&self.sentinel_path(), &json)
+        write_atomic(&self.sentinel_path(), &json)?;
+        Ok(ArmedProbe {
+            quarantine: self,
+            sentinel,
+            disarmed: false,
+        })
     }
 
-    /// The probe returned (pass or fail): the sentinel no longer means a hang.
-    pub(crate) fn finish_probe(&self) -> std::io::Result<()> {
+    fn remove_sentinel(&self) -> std::io::Result<()> {
         match std::fs::remove_file(self.sentinel_path()) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             result => result,
         }
     }
+}
+
+/// The sentinel armed for one probe, held for as long as the probe runs.
+///
+/// Two ways a probe can end without returning look alike from the outside
+/// and must not be treated alike:
+///
+/// - The future was dropped in-process (a test runtime ended, a `timeout`
+///   around the session start fired, the runtime shut down at quit). This
+///   process is still running Rust code, so the GPU did not take the host
+///   down; `Drop` clears the sentinel and the node is simply unproven. Any
+///   FFmpeg still running is killed by its own `kill_on_drop`.
+/// - The process died without running destructors (the host hung or was
+///   rebooted, the backend was SIGKILLed or aborted). No `Drop` runs, the
+///   sentinel survives, and the next start adopts it as a quarantine: that
+///   is the hang the sentinel exists for.
+///
+/// A probe that is still running at its deadline is the hang seen from
+/// inside the process: [`ArmedProbe::quarantine_timed_out`] writes the
+/// quarantine entry before the sentinel is cleared, so a crash between the
+/// two still leaves the node remembered.
+#[must_use = "dropping the armed probe clears its sentinel"]
+pub(crate) struct ArmedProbe<'a> {
+    quarantine: &'a ProbeQuarantine,
+    sentinel: ProbeSentinel,
+    disarmed: bool,
+}
+
+impl ArmedProbe<'_> {
+    /// The probe returned (pass or reject): the sentinel no longer means a
+    /// hang.
+    pub(crate) fn finish(mut self) -> std::io::Result<()> {
+        self.disarmed = true;
+        self.quarantine.remove_sentinel()
+    }
+
+    /// The probe was still running `after` its start: quarantine the node
+    /// now, then clear the sentinel. The entry carries the deadline so the
+    /// diagnostics say "did not return within 20 s" rather than "never
+    /// returned".
+    pub(crate) fn quarantine_timed_out(
+        mut self,
+        after: Duration,
+    ) -> std::io::Result<QuarantineEntry> {
+        let entry = QuarantineEntry {
+            node: self.sentinel.node.clone(),
+            driver: self.sentinel.driver.clone(),
+            ffmpeg_path: self.sentinel.ffmpeg_path.clone(),
+            probe_started_at_unix_secs: self.sentinel.started_at_unix_secs,
+            quarantined_at_unix_secs: unix_now(),
+            timed_out_after_secs: Some(after.as_secs()),
+        };
+        self.quarantine.add_quarantined(entry.clone())?;
+        self.disarmed = true;
+        self.quarantine.remove_sentinel()?;
+        Ok(entry)
+    }
+}
+
+impl Drop for ArmedProbe<'_> {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        // Best effort: a sentinel that cannot be removed here is reported by
+        // the next start as a quarantine, the conservative reading.
+        let _ = self.quarantine.remove_sentinel();
+    }
+}
+
+/// `<database directory>/linux-vaapi`.
+fn directory_beside(database: &Path) -> PathBuf {
+    database
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(QUARANTINE_DIRECTORY_NAME)
+}
+
+/// One throwaway quarantine per test process, outside every real profile.
+#[cfg(test)]
+fn unit_test_directory() -> PathBuf {
+    std::env::temp_dir()
+        .join(format!(
+            "videorc-unit-test-linux-vaapi-{}",
+            std::process::id()
+        ))
+        .join(QUARANTINE_DIRECTORY_NAME)
 }
 
 /// Which nodes get probed, and the diagnostics rows for the ones that do not.
@@ -451,15 +564,27 @@ mod tests {
 
     #[test]
     fn the_quarantine_directory_sits_beside_the_database() {
-        let directory = ProbeQuarantine::default_directory();
+        let directory = directory_beside(Path::new("/profile/videorc.sqlite3"));
+        assert_eq!(directory, PathBuf::from("/profile/linux-vaapi"));
         assert_eq!(
             directory.file_name().and_then(|name| name.to_str()),
             Some(QUARANTINE_DIRECTORY_NAME)
         );
-        assert_eq!(
-            directory.parent(),
-            crate::storage::default_database_path().parent()
-        );
+    }
+
+    #[test]
+    fn a_unit_test_never_sees_the_real_quarantine() {
+        let directory = ProbeQuarantine::default_directory();
+        let database = crate::storage::default_database_path();
+        if std::env::var_os("VIDEORC_DATABASE_PATH").is_some() {
+            // The test run isolated its database by hand; the quarantine
+            // follows it.
+            assert_eq!(directory, directory_beside(&database));
+            return;
+        }
+        assert_eq!(directory, unit_test_directory());
+        assert!(directory.starts_with(std::env::temp_dir()));
+        assert_ne!(directory, directory_beside(&database));
     }
 
     #[test]
@@ -544,10 +669,13 @@ mod tests {
         );
         assert!(quarantine.quarantined().is_empty());
 
-        // The probe was armed and the host "hung": finish_probe never ran.
-        quarantine
-            .begin_probe(&amd, "/opt/ffmpeg")
-            .expect("arm the sentinel");
+        // The probe was armed and the host "hung": no destructor ran, so the
+        // armed probe is forgotten rather than dropped.
+        std::mem::forget(
+            quarantine
+                .begin_probe(&amd, "/opt/ffmpeg")
+                .expect("arm the sentinel"),
+        );
         let adopted = quarantine
             .adopt_stale_sentinel()
             .expect("adopt the sentinel")
@@ -581,13 +709,97 @@ mod tests {
         );
 
         // A probe that returns leaves nothing behind.
-        quarantine.begin_probe(&intel, "/opt/ffmpeg").expect("arm");
-        quarantine.finish_probe().expect("disarm");
+        quarantine
+            .begin_probe(&intel, "/opt/ffmpeg")
+            .expect("arm")
+            .finish()
+            .expect("disarm");
         assert_eq!(
             quarantine.adopt_stale_sentinel().expect("no sentinel"),
             None
         );
-        quarantine.finish_probe().expect("disarming twice is fine");
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_probe_dropped_in_process_leaves_no_sentinel_to_adopt() {
+        // The resolve future was cancelled (a test runtime ended, a timeout
+        // around start_session fired): this process is alive, so the node
+        // did not hang the host and must not be quarantined at the next
+        // start. The Arch T2 box lost its healthy Intel node this way.
+        let directory = fixture_directory("cancelled");
+        let quarantine = ProbeQuarantine::new(directory.clone());
+        let intel = candidate("renderD128", Some("i915"));
+
+        let armed = quarantine
+            .begin_probe(&intel, "/opt/ffmpeg")
+            .expect("arm the sentinel");
+        assert!(directory.join(PROBE_IN_PROGRESS_FILE).exists());
+        drop(armed);
+        assert!(!directory.join(PROBE_IN_PROGRESS_FILE).exists());
+        assert_eq!(
+            quarantine.adopt_stale_sentinel().expect("no sentinel"),
+            None
+        );
+        assert!(quarantine.quarantined().is_empty());
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_timed_out_probe_is_quarantined_on_the_spot_and_says_so() {
+        let directory = fixture_directory("timed-out");
+        let quarantine = ProbeQuarantine::new(directory.clone());
+        let amd = candidate("renderD129", Some("amdgpu"));
+        let intel = candidate("renderD128", Some("i915"));
+
+        let entry = quarantine
+            .begin_probe(&amd, "/opt/ffmpeg")
+            .expect("arm the sentinel")
+            .quarantine_timed_out(Duration::from_secs(20))
+            .expect("quarantine the node");
+        assert_eq!(entry.node, "renderD129");
+        assert_eq!(entry.timed_out_after_secs, Some(20));
+        assert!(entry.detail().contains("did not return within 20 s"));
+        assert!(!directory.join(PROBE_IN_PROGRESS_FILE).exists());
+        assert_eq!(quarantine.quarantined(), vec![entry.clone()]);
+        // Nothing is left for the next start to adopt; the list already
+        // carries the node.
+        assert_eq!(
+            quarantine.adopt_stale_sentinel().expect("no sentinel"),
+            None
+        );
+
+        // The next start plans around it without a pin.
+        let (to_probe, reports) = plan_probe_order(
+            &[intel.clone(), amd.clone()],
+            None,
+            &quarantine.quarantined(),
+        )
+        .expect("plan");
+        assert_eq!(to_probe, vec![intel]);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Quarantined);
+
+        // An entry written by an older backend (no timeout field) still
+        // reads, and a second quarantine of the same node replaces it.
+        std::fs::write(
+            directory.join(QUARANTINED_FILE),
+            r#"[{"node": "renderD129", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#,
+        )
+        .expect("plant the older entry");
+        let older = quarantine.quarantined();
+        assert_eq!(older.len(), 1);
+        assert_eq!(older[0].timed_out_after_secs, None);
+        assert!(older[0].detail().contains("never returned"));
+        quarantine
+            .begin_probe(&amd, "/opt/ffmpeg")
+            .expect("arm")
+            .quarantine_timed_out(Duration::from_secs(20))
+            .expect("quarantine again");
+        assert_eq!(quarantine.quarantined().len(), 1);
+        assert_eq!(quarantine.quarantined()[0].timed_out_after_secs, Some(20));
 
         std::fs::remove_dir_all(directory).ok();
     }
@@ -602,6 +814,7 @@ mod tests {
             ffmpeg_path: "/opt/ffmpeg".to_string(),
             probe_started_at_unix_secs: 1,
             quarantined_at_unix_secs: 2,
+            timed_out_after_secs: None,
         }];
 
         let (to_probe, reports) = plan_probe_order(

@@ -20,7 +20,12 @@
   "orphans": { "graceSeconds": 10 },
   "droppedFrames": { "maxPercent": 0.5, "windowMinutes": 5 },
   "encoderSpeed": { "min": 0.97, "forSeconds": 60 },
-  "bitrate": { "minFractionOfTarget": 0.7, "forSeconds": 60, "defaultTargetKbps": 6000 },
+  "bitrate": {
+    "minFractionOfTarget": 0.7,
+    "forSeconds": 60,
+    "defaultTargetKbps": 6000,
+    "contentLimitedMinFpsFraction": 0.97
+  },
   "destination": {
     "codes": [
       "stream-target-reconnecting",

@@ -50,6 +50,7 @@ import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
 import {
   classifyStreamHealthAttribution,
   liveProblemLabel,
+  type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
 import { cn } from '@/lib/utils'
@@ -85,7 +86,7 @@ export function GoLivePanel({
     streamSharedEncodeFallbackVideo,
     streamTargets
   } = useStudioCore()
-  const { diagnosticStats, streamHealth } = useStudioDiagnostics()
+  const { diagnosticStats, recentStreamDrops, streamHealth } = useStudioDiagnostics()
   const streaming = captureConfig.streaming
   // No separate stream encoder on this computer: the session records at the
   // stream's profile, so show that instead of the Output setting.
@@ -167,6 +168,7 @@ export function GoLivePanel({
         preflight={streamOutputTopologyPreflight}
         profileCompatible={!compatibility.blockingReason}
         providerPlan={providerPlan}
+        recentStreamDrops={recentStreamDrops}
         recordEnabled={captureConfig.recordEnabled}
         recordingMatchesStream={streamSharedEncodeFallbackVideo !== null}
         recordingVideo={video}
@@ -181,6 +183,7 @@ export function GoLivePanel({
         liveOutputActive={liveOutputActive}
         preflight={streamOutputTopologyPreflight}
         providerPlan={providerPlan}
+        recentStreamDrops={recentStreamDrops}
         streamHealth={currentStreamHealth}
         streamTargets={streamTargets}
       />
@@ -223,6 +226,7 @@ export function ReadyToGoLive({
   preflight,
   liveOutputActive,
   diagnosticStats,
+  recentStreamDrops,
   streamHealth,
   streamTargets,
   onOpenDestination,
@@ -244,6 +248,7 @@ export function ReadyToGoLive({
   preflight: StreamOutputTopologyPreflight
   liveOutputActive: boolean
   diagnosticStats: DiagnosticStats
+  recentStreamDrops: RecentStreamDrops
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
   onOpenDestination: (targetId: string) => void
@@ -306,6 +311,7 @@ export function ReadyToGoLive({
       {liveOutputActive ? (
         <LiveStreamRow
           diagnosticStats={diagnosticStats}
+          recentStreamDrops={recentStreamDrops}
           streamHealth={streamHealth}
           streamTargets={streamTargets}
         />
@@ -417,14 +423,21 @@ function StreamCheckRow({
 /** While live: quiet when healthy, the problem in a few words when not. */
 function LiveStreamRow({
   diagnosticStats,
+  recentStreamDrops,
   streamHealth,
   streamTargets
 }: {
   diagnosticStats: DiagnosticStats
+  recentStreamDrops: RecentStreamDrops
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
 }): ReactElement {
-  const attribution = classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets)
+  const attribution = classifyStreamHealthAttribution(
+    diagnosticStats,
+    streamHealth,
+    streamTargets,
+    recentStreamDrops
+  )
   const healthy = attribution === 'healthy'
   return (
     <ChecklistRow
@@ -442,6 +455,7 @@ export function TechnicalDetails({
   liveOutputActive,
   preflight,
   providerPlan,
+  recentStreamDrops,
   streamHealth,
   streamTargets
 }: {
@@ -449,12 +463,18 @@ export function TechnicalDetails({
   liveOutputActive: boolean
   preflight: StreamOutputTopologyPreflight
   providerPlan: ProviderStreamOutputPlan
+  recentStreamDrops: RecentStreamDrops
   streamHealth: StreamHealth | null
   streamTargets: StreamTargetRuntime[]
 }): ReactElement {
   const [open, setOpen] = useState(readTechnicalDetailsOpen)
   const attribution = liveOutputActive
-    ? classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets)
+    ? classifyStreamHealthAttribution(
+        diagnosticStats,
+        streamHealth,
+        streamTargets,
+        recentStreamDrops
+      )
     : preflightAttribution(preflight)
   const badge = streamHealthBadge(attribution, liveOutputActive)
   const probeResult = !liveOutputActive && preflight.state === 'ready' ? preflight.result : null

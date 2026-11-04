@@ -149,14 +149,69 @@ export async function hyprctlJson(args, { sessionEnv, exec = defaultExec } = {})
   }
 }
 
-export async function hyprctlDispatch(args, { sessionEnv, exec = defaultExec } = {}) {
-  const result = await exec('hyprctl', ['dispatch', ...args], {
-    env: { ...process.env, ...sessionEnv }
-  })
-  const said = `${result.stdout}${result.stderr}`.trim()
-  if (result.code !== 0 || (said && said !== 'ok')) {
-    throw new Error(`hyprctl dispatch ${args.join(' ')}: ${said || `exit ${result.code}`}`)
+// A Hyprland configured in Lua (hyprland.lua, Omarchy since Hyprland 0.56)
+// reads `hyprctl dispatch <x>` as Lua: `focusmonitor eDP-1` comes back as a
+// syntax error in `return hl.dispatch(focusmonitor eDP-1)`. Nothing ran, so
+// the same dispatch is sent again in the Lua form.
+const LUA_DISPATCH_REFUSAL = /hl\.dispatch\(/
+
+function luaString(value) {
+  if ([...value].some((char) => char < ' ')) return null
+  return `"${value.replace(/[\\"]/g, '\\$&')}"`
+}
+
+/**
+ * The Lua form of the legacy dispatches the harness sends (pure), or null for
+ * any other. `fullscreen` keeps the legacy toggle, like Omarchy's Super+F.
+ */
+export function luaDispatch(args) {
+  const [dispatcher, argument = ''] = args
+  if (dispatcher === 'focusmonitor') {
+    const monitor = luaString(argument)
+    return monitor && `hl.dsp.focus({ monitor = ${monitor} })`
   }
+  if (dispatcher === 'focuswindow') {
+    const window = luaString(argument)
+    return window && `hl.dsp.focus({ window = ${window} })`
+  }
+  if (dispatcher === 'fullscreen') {
+    const mode = { 0: 'fullscreen', 1: 'maximized' }[argument]
+    return mode ? `hl.dsp.window.fullscreen({ mode = "${mode}" })` : null
+  }
+  if (dispatcher === 'movetoworkspacesilent') {
+    const comma = argument.indexOf(',')
+    const workspace = luaString(comma === -1 ? argument : argument.slice(0, comma))
+    if (!workspace) return null
+    if (comma === -1) return `hl.dsp.window.move({ workspace = ${workspace}, follow = false })`
+    const window = luaString(argument.slice(comma + 1))
+    return (
+      window &&
+      `hl.dsp.window.move({ workspace = ${workspace}, window = ${window}, follow = false })`
+    )
+  }
+  return null
+}
+
+export async function hyprctlDispatch(args, { sessionEnv, exec = defaultExec } = {}) {
+  const send = async (dispatchArgs) => {
+    const result = await exec('hyprctl', ['dispatch', ...dispatchArgs], {
+      env: { ...process.env, ...sessionEnv }
+    })
+    const said = `${result.stdout}${result.stderr}`.trim()
+    return {
+      ok: result.code === 0 && (!said || said === 'ok'),
+      said: said || `exit ${result.code}`
+    }
+  }
+  let sent = await send(args)
+  if (sent.ok) return
+  const lua = LUA_DISPATCH_REFUSAL.test(sent.said) ? luaDispatch(args) : null
+  if (lua) {
+    sent = await send([lua])
+    if (sent.ok) return
+    throw new Error(`hyprctl dispatch '${lua}': ${sent.said}`)
+  }
+  throw new Error(`hyprctl dispatch ${args.join(' ')}: ${sent.said}`)
 }
 
 const HEADLESS_OUTPUT = /^headless-\d+$|videorc|lab/i

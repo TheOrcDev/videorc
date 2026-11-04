@@ -1,6 +1,6 @@
 ---
 name: videorc-live-lab
-description: Run real live-stream tests of Videorc on the Videorc YouTube test channel - attended on the owner's Mac (plan the run, get the owner's go, go live, drive features, check both what the app did and what YouTube actually received, tear down, report) or unattended on the lab machine inside the owner's policy file (plan 178). Use ONLY when the user explicitly asks for a real live test, e.g. "test it live", "live lab", "do a real stream test", "go live on the test channel", "live acceptance", "test PR #N live", or invokes /videorc-live-lab. Do NOT use for ordinary e2e smokes, fake-provider smokes, recording-studio gates, or any routine verification; those never go live.
+description: Run real live-stream tests of Videorc on the Videorc YouTube test channel - attended on the owner's Mac or the Linux lab box (plan the run, get the owner's go, go live, drive features, check both what the app did and what YouTube actually received, tear down, report) or unattended on the lab machine inside the owner's policy file (plan 178). Use ONLY when the user explicitly asks for a real live test, e.g. "test it live", "live lab", "do a real stream test", "go live on the test channel", "live acceptance", "test PR #N live", or invokes /videorc-live-lab. Do NOT use for ordinary e2e smokes, fake-provider smokes, recording-studio gates, or any routine verification; those never go live.
 ---
 
 # Videorc live lab
@@ -11,8 +11,10 @@ on the offline gates in `AGENTS.md`.
 
 Two modes:
 
-- **Attended** (the owner's Mac, plan 176): the owner is present and gives
-  a go per run sheet.
+- **Attended** (the owner's Mac, plan 176, or the Linux lab box with a
+  Claude session on it, plan 179): the owner is present and gives a go per
+  run sheet. On the Linux box also read "Attended runs on the Linux lab
+  box" below.
 - **Unattended** (the lab machine, plan 178): a dedicated Mac with nobody at
   it. The owner's policy file is the standing authorization; `canStart`
   decides, not a chat message.
@@ -76,11 +78,12 @@ build there is one built on the box (`live:install --build local:...`), and
 harness drives the app over CDP, which a release build refuses: lab
 candidates are packaged test builds (`VIDEORC_PACKAGED_TEST_HOOKS=1`, set
 by `lab-candidate-macos.yml`; on Linux build with
-`pnpm --filter @videorc/desktop package:linux:test-hooks`), and
-`--build release` cannot be driven (docs/distribution.md, "Packaged
-hardening"). The
-harness checks the policy, the run lock and the kill switches before every
-run and every step:
+`VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop:linux` and install with
+`pnpm live:install --build local:apps/desktop/release/linux-unpacked`, which
+refuses a plain build), and `--build release` cannot be driven
+(docs/distribution.md, "Packaged hardening"). The harness checks the
+policy, the run lock and the kill switches before every run and every
+step:
 
 - `loadPolicy()` refuses a policy that is missing, invalid, or owned or
   writable by the current user.
@@ -154,7 +157,8 @@ What this means for Claude:
    `--publish` on `live:remote` does that right after the run. Say which
    owed live acceptance (other plans) the run closes.
 
-Attended mode (below) is unchanged; it is what runs on the owner's Mac.
+Attended mode (below) is what runs on the owner's Mac, and on the Linux lab
+box when a session there was asked for a run with the owner present.
 
 ## Triage a run
 
@@ -271,8 +275,16 @@ Then wait for "go".
 ### 4a. Run it (harness built)
 
 ```sh
-pnpm live:run --scenario <name> [--privacy unlisted|public] [--build <path-or-release>]
+VIDEORC_LIVE_LAB_SCENARIO_PARAMS='{"minutes":10,"profile":"1080p30"}' \
+  pnpm live:run --scenario <name> --trigger manual [--privacy unlisted|public|private] [--build release|candidate]
 ```
+
+Params are a JSON object in `VIDEORC_LIVE_LAB_SCENARIO_PARAMS` (each
+scenario reads its own; `first-light` takes `profile` and `minutes`). Exit
+0 pass, 1 failures, a crash or an unclean teardown, 2 `REFUSED (<reason>)`
+(report it and stop), 3 stopped by a kill switch. The last stdout line is
+`RUN_DIR=<path>`: watch `journal.ndjson` and `health.ndjson` there while it
+runs. `--build candidate` is whatever `live:install` put in place.
 
 Keep the owner posted in one-liners (live, step N, incident). Relay each 👁
 prompt with AskUserQuestion and record the answer. Watch the journal,
@@ -319,6 +331,129 @@ For failures:
 
 Fixes go through the normal plan / PR flow, not inside the live session.
 
+## Attended runs on the Linux lab box
+
+The Linux lab box (plan 179; today ogre, Omarchy on Hyprland 0.56 with a Lua
+config) is set up per "Linux lab machine" in `docs/live-lab-machine.md`;
+this section does not repeat that setup. A Claude session on the box runs
+`live:run` itself and follows the attended workflow, with these additions,
+learned from the first real runs (November 2026).
+
+**Owner's hands (once per box or per key):**
+
+- `/etc/videorc-lab/policy.json` is root-owned and the owner's; the doctor
+  reads it, Claude never edits it. Read the kill switch with
+  `gh api repos/TheOrcDev/videorc-live-lab-reports/contents/control.json -q .content | base64 -d`
+  (the reports repo is private, so the raw URL answers 404).
+- YouTube sign-in: the owner runs `! pnpm live:hookup --role broadcaster`,
+  then `--role viewer`, at the box (it opens a browser).
+- A stream key, when the owner cannot type into the hidden prompt: call T3's
+  `request_secret` with `delivery: "file"` (you never see the value), run
+  `wl-copy --trim-newline < "$F" && pnpm -s live:hookup --stream-key horizontal --from-clipboard`,
+  check `wl-paste --no-newline | wc -c` prints 0, then delete the file.
+  Hookup prints the key's last 4.
+
+**Stream keys (put these on the run sheet):**
+
+- The key's name ("Videorc lab") exists only in the lab config; YouTube
+  goes by the value. Compare the last 4 that `live:hookup` prints with the
+  key in Studio (Create > Go live > Stream > Select stream key). A key that
+  matches nothing there sends the stream nowhere anyone can see.
+- An extra key is live only while it is the one selected on Studio's Stream
+  tab, and that tab sets the broadcast's title and visibility: the app and
+  `--privacy` do not (`--privacy` only feeds the policy). Before the go,
+  ask the owner (AskUserQuestion) to confirm the lab key is selected, the
+  visibility is Unlisted and the title starts with `Automated test`.
+- Private needs the OAuth Go Live path (`oauth-golive`, broadcaster signed
+  in). A stream-key run cannot be Private.
+
+**Without the broadcaster sign-in:**
+
+- Claude has no watch link, and an Unlisted stream does not show on the
+  channel page. The owner copies the link from Studio > Content > Live.
+- The observer is off and spends no quota (#1143). `youtube-health`,
+  `clip-early`, `clip-late` and `vod` skip, `youtube:health` and
+  `stream:noData-while-live` read `not checked: <reason>`, and the hold
+  runs its full `minutes`. Step 5's "complete, with a VOD" becomes a 👁
+  question.
+
+**The build under test:**
+
+- Test builds only, built at the commit under test from the harness clone
+  (`~/videorc`): `VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop:linux`,
+  then `pnpm live:install --build local:apps/desktop/release/linux-unpacked`.
+  A plain build never opens CDP ("CDP port not ready in 30 s"), and
+  `live:install` refuses it. On ogre a build takes 20-35 minutes; run it
+  under the box's build lock.
+- Run with `--build candidate`. `--build release` is refused on Linux until
+  the Linux feed is public.
+
+**Before every run (on top of step 2):**
+
+- `pnpm live:doctor --machine`. A FAIL the owner has already accepted is not
+  a blocker (on ogre in November 2026: the broadcaster and viewer roles,
+  disk under 100 GB, lab-user sudo). Any other FAIL is.
+- The kill switch (above) reads enabled, there is no
+  `~/videorc-live-lab/STOP`, and `systemctl --user list-units 'videorc-lab*'`
+  shows no run still active.
+- Notifications: Omarchy's shell draws its toasts on every output, the lab
+  output included, and the doctor only knows mako, dunst and swaync, so it
+  misses them. An early VOD showed toasts with account names. Check
+  `omarchy-shell notifications dndState`; with the owner's ok,
+  `omarchy-shell notifications setDnd on` and `dismissAll`. Critical alerts
+  (low battery) get through DND: keep a laptop box on power.
+- Audio: the harness starts the card's Chromium with
+  `PULSE_SINK=videorc_lab_speech`, and the lab mic is that sink's monitor.
+  A sink left over from a smoke (`pactl list short sinks`; names such as
+  `videorc_monitor_sink`, described "(test)") can still take the card's
+  output, and then the stream goes out silent. Once the card is up,
+  `pw-link -l` must show Chromium's output on `videorc_lab_speech`. Never
+  unload a sink another session owns without asking.
+- The daily count: manual and on-demand runs started today, the `dry`
+  scenario included, count against `onDemand.maxRunsPerDay`; scheduled
+  runs do not. Ask before spending one on a check.
+
+**Starting and watching:**
+
+- Start the run so it outlives the Claude session; a `setsid` or `&` job
+  dies with the session's scope. A small local wrapper (not in the repo)
+  loads the box's environment, changes to `~/videorc` and appends
+  `pnpm -s live:run "$@"` to `~/videorc-live-lab/logs/run.log`:
+  `systemd-run --user --unit=videorc-lab-run-<n> --collect --setenv=VIDEORC_LIVE_LAB_SCENARIO_PARAMS='{"minutes":10}' bash <wrapper> --scenario first-light --trigger manual --privacy unlisted`.
+  Close any lock descriptor the session holds (`9>&-`) so the unit does not
+  inherit it.
+- Stop on request with `touch ~/videorc-live-lab/STOP` (hard rule 7), not by
+  killing the unit.
+- Once on air, look at the lab output only:
+  `grim -o videorc-lab -s 0.5 /tmp/lab-check.png`, with the session's
+  `WAYLAND_DISPLAY` and `HYPRLAND_INSTANCE_SIGNATURE` taken from
+  `systemctl --user show-environment`. Never grab the whole desktop (hard
+  rule 3). The Lua config refuses classic `hyprctl dispatch` forms; use
+  `hyprctl dispatch 'hl.dsp.focus({ monitor = "eDP-1" })'`.
+
+**Reading a run on ogre:**
+
+- 1080p30 is the profile the box holds. `host:overloaded` is expected (the
+  Linux CPU compositor alone takes about 4.7 cores at 1080p30). It is a
+  regression only when speed, fps or drops move off the first passing run:
+  encoder speed min 0.888 / median 1.000, fps min 26.8 / median 30.1, 0
+  dropped frames, queue age peak 199 ms.
+- OpenH264 on a still card sends far under the target bitrate (median 1005
+  kbps against 6000). With fps, speed and frames on target, that reads as
+  content-limited (#1144), not a failure.
+- On a software encoder, Record and Go Live drop the automatic replay ring
+  (#1151, health event `replay-buffer-software-encoder`). A ring turned on
+  by hand still runs.
+- A `crash:electron` after a clean quit was fixed by #1142; a new one is
+  real.
+- The FFmpeg logs and the app journal carry the RTMPS URL with the key.
+  Redact it before quoting either.
+
+**After the run:** step 5 as usual. If anything private showed on the lab
+output (a toast, a window), tell the owner and recommend deleting or
+trimming that VOD in Studio. Put Do Not Disturb back the way the owner
+wants it.
+
 ## Owner hookup (first time only)
 
 The full checklist is in plan 176 under "What hook me up means" and in
@@ -328,7 +463,10 @@ vertical"; Unlisted, Auto-start and Auto-stop on); a `videorc-live-lab`
 Google Cloud project (YouTube Data API v3, the channel account + the
 owner's personal account as test users, `youtube.force-ssl`, a Desktop
 OAuth client); `! pnpm live:hookup`; a virtual lab display; `brew install
-yt-dlp ffmpeg blackhole-2ch`; TCC grants for the build under test.
+yt-dlp ffmpeg blackhole-2ch`; TCC grants for the build under test. On the
+Linux box the tools, the lab display, the screen grant and the lab audio
+come from L3 and L4 of "Linux lab machine" in `docs/live-lab-machine.md`
+instead.
 
 The lab machine's one-time visit (accounts, auto-login, sleep, Focus,
 Tailscale, tools, the policy file, the doctor's machine section) is

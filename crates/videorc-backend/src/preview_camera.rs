@@ -1113,6 +1113,7 @@ async fn start_preview_camera_with_owner(
         sequence: None,
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Starting native camera preview.".to_string()),
+        no_video: None,
     };
     let start_key = PreviewCameraStartKey {
         source_key: source_key.clone(),
@@ -1726,6 +1727,7 @@ async fn start_registered_preview_camera(
                 sequence: None,
                 updated_at: Utc::now().to_rfc3339(),
                 message,
+                no_video: None,
             };
             let capture_target = camera_capture_target_dimensions(&params.layout, &params.video);
             let installed = {
@@ -1818,6 +1820,7 @@ async fn start_registered_preview_camera(
                 sequence: None,
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
+                no_video: None,
             };
             if set_camera_status_for_start(&state, &start_lease, recovery_epoch, status.clone())
                 .await
@@ -1857,6 +1860,7 @@ async fn start_registered_preview_camera(
                 sequence: None,
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
+                no_video: None,
             };
             if set_camera_status_for_start(&state, &start_lease, recovery_epoch, status.clone())
                 .await
@@ -2491,6 +2495,7 @@ async fn begin_forced_camera_restart(
             message: Some(
                 "Restarting native camera capture after verified degradation.".to_string(),
             ),
+            no_video: None,
         };
         slot.status = starting.clone();
         slot.run_id = None;
@@ -2598,6 +2603,7 @@ async fn begin_failed_camera_recovery_retry(
             sequence: None,
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Retrying the failed native camera recovery generation.".to_string()),
+            no_video: None,
         };
         slot.status = starting.clone();
         slot.run_id = None;
@@ -2641,6 +2647,43 @@ async fn begin_failed_camera_recovery_retry(
 pub async fn stop_preview_camera(state: &AppState) -> PreviewCameraStatus {
     let stop = begin_preview_camera_stop(state).await;
     finish_preview_camera_stop(stop).await
+}
+
+/// The status message when the renderer's stop is refused because a separate
+/// source take still records the camera.
+pub const CAMERA_STOP_REFUSED_BY_SOURCE_TAKE_MESSAGE: &str =
+    "Camera kept running: the separate Camera file of the current take records it.";
+
+/// `preview.camera.stop` from a client. The renderer stops the preview camera
+/// whenever its own scene shows none (an app scene, screen-only), but a
+/// record+stream take armed with Separate source recordings and a camera
+/// composes that camera into its Camera file on every tick: the compositor's
+/// completed-batch store promotes a tick only when every live member rendered
+/// (`SourceIsoBatchStore::publish`), so a torn-down camera leaves the Combined
+/// recording, the Screen file and the Clips ring on their first frame for the
+/// whole take while the stream leg stays live (2026-11-03, smoke:smart-scenes
+/// `hide`). Layout transactions own source retirement during a take
+/// (`retire_unused_camera_after_grace` rechecks the take's demand); the
+/// client's stop honours the same demand and is refused while the take needs
+/// the camera. The status reports the refusal.
+pub async fn stop_preview_camera_from_client(state: &AppState) -> PreviewCameraStatus {
+    if source_take_records_camera(state).await {
+        let mut status = preview_camera_status(state).await;
+        status.message = Some(CAMERA_STOP_REFUSED_BY_SOURCE_TAKE_MESSAGE.to_string());
+        return status;
+    }
+    stop_preview_camera(state).await
+}
+
+/// True while the installed program scene names a camera that an armed
+/// separate source take still records (the Camera member is active).
+pub(crate) async fn source_take_records_camera(state: &AppState) -> bool {
+    state
+        .compositor
+        .lock()
+        .await
+        .source_iso_capture_needs()
+        .camera
 }
 
 pub(crate) async fn begin_preview_camera_stop(state: &AppState) -> PreviewCameraStop {
@@ -3686,6 +3729,14 @@ fn camera_slot_is_frameless_zombie(slot: &PreviewCameraRuntime) -> bool {
         .is_none_or(|acked| acked.elapsed() >= CAMERA_FIRST_FRAME_REUSE_GRACE)
 }
 
+/// Plan 216 D2: mark the status of a Live session that has sent no frame
+/// past the grace, by the same rule reuse and capture recovery use, so the
+/// streamer is told which camera sends no video. The metrics poll calls this
+/// every tick; any frame evidence clears it.
+fn refresh_camera_no_video(slot: &mut PreviewCameraRuntime) {
+    slot.status.no_video = camera_slot_is_frameless_zombie(slot).then_some(true);
+}
+
 /// Test-only: install a healthy Live camera slot whose capture target was
 /// derived from `layout`, so cross-module tests (live_layout's geometry
 /// resync) can arm a staleness scenario without reaching into private slot
@@ -3697,16 +3748,43 @@ pub(crate) async fn test_install_live_camera_for_layout(
     layout: &LayoutSettings,
     video: &VideoSettings,
 ) {
+    test_install_live_camera_slot_for_layout(state, camera_id, layout, video, true).await;
+}
+
+/// Test-only: a camera that acked Live and never delivered a frame, past the
+/// reuse grace (the streamer's MacBook camera in plan 216). Zero frames and
+/// sequence, an empty frame store, and a `live_acked_at` old enough that
+/// `camera_live_session_is_frameless_zombie` says so.
+#[cfg(test)]
+pub(crate) async fn test_install_frameless_live_camera_for_layout(
+    state: &AppState,
+    camera_id: &str,
+    layout: &LayoutSettings,
+    video: &VideoSettings,
+) {
+    test_install_live_camera_slot_for_layout(state, camera_id, layout, video, false).await;
+}
+
+#[cfg(test)]
+async fn test_install_live_camera_slot_for_layout(
+    state: &AppState,
+    camera_id: &str,
+    layout: &LayoutSettings,
+    video: &VideoSettings,
+    fresh_frame: bool,
+) {
     let (stop_tx, _stop_rx) = std_mpsc::channel();
     let shared = Arc::new(StdMutex::new(PreviewCameraShared::default()));
-    shared.lock().unwrap().frame_store.publish(
-        42,
-        video.width,
-        video.height,
-        PreviewCameraPixelFormat::Bgra8,
-        Instant::now(),
-        vec![0; video.width as usize * video.height as usize * 4],
-    );
+    if fresh_frame {
+        shared.lock().unwrap().frame_store.publish(
+            42,
+            video.width,
+            video.height,
+            PreviewCameraPixelFormat::Bgra8,
+            Instant::now(),
+            vec![0; video.width as usize * video.height as usize * 4],
+        );
+    }
     let mut slot = state.preview_camera.lock().await;
     slot.source_key = Some(SourceKey::camera(camera_id.to_string()));
     slot.status.state = PreviewCameraState::Live;
@@ -3719,12 +3797,16 @@ pub(crate) async fn test_install_live_camera_for_layout(
     slot.status.requested_height = Some(video.height);
     slot.status.actual_width = Some(video.width);
     slot.status.actual_height = Some(video.height);
-    slot.status.frames_captured = 42;
-    slot.status.sequence = Some(42);
+    slot.status.frames_captured = if fresh_frame { 42 } else { 0 };
+    slot.status.sequence = fresh_frame.then_some(42);
     slot.disconnected = None;
     slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
     slot.active_generation = Some(slot.start_generation);
-    slot.live_acked_at = Some(Instant::now());
+    slot.live_acked_at = Some(if fresh_frame {
+        Instant::now()
+    } else {
+        Instant::now() - CAMERA_FIRST_FRAME_REUSE_GRACE - Duration::from_secs(1)
+    });
     slot.active = Some(NativeCameraPreviewThread {
         stop_tx,
         join_handle: None,
@@ -4104,6 +4186,7 @@ async fn poll_camera_metrics(
                     PreviewCameraPixelFormat::Bgra8 => {}
                 }
             }
+            refresh_camera_no_video(&mut slot);
             slot.status.updated_at = Utc::now().to_rfc3339();
             slot.status.clone()
         };
@@ -4168,6 +4251,7 @@ fn idle_status(message: Option<String>) -> PreviewCameraStatus {
         sequence: None,
         updated_at: Utc::now().to_rfc3339(),
         message,
+        no_video: None,
     }
 }
 
@@ -4194,6 +4278,7 @@ fn status_for_missing_camera(camera_id: Option<String>, message: &str) -> Previe
         sequence: None,
         updated_at: Utc::now().to_rfc3339(),
         message: Some(message.to_string()),
+        no_video: None,
     }
 }
 
@@ -4225,6 +4310,7 @@ fn failed_status(
         sequence: None,
         updated_at: Utc::now().to_rfc3339(),
         message: Some(message),
+        no_video: None,
     }
 }
 
@@ -4345,6 +4431,25 @@ fn selected_camera_source(camera_id: &str) -> Option<SelectedCameraSource> {
             crate::linux_v4l2_camera::parse_linux_v4l2_camera_id(camera_id)
                 .map(|device_path| SelectedCameraSource::LinuxV4l2 { device_path })
         })
+        // Plan 214 A5: a saved id naming Videorc Camera resolves to nothing
+        // (no silent substitute, plan 213 E): the camera never captures itself.
+        .filter(|source| !source.is_videorc_camera())
+}
+
+impl SelectedCameraSource {
+    fn is_videorc_camera(&self) -> bool {
+        match self {
+            Self::MacAvFoundation { unique_id } => {
+                crate::virtual_camera::is_videorc_camera_macos(unique_id, "")
+            }
+            Self::WindowsDshow { device_name } => {
+                crate::virtual_camera::is_videorc_camera_windows(None, device_name)
+            }
+            Self::LinuxV4l2 { device_path } => {
+                crate::virtual_camera::is_videorc_camera_linux_path(device_path)
+            }
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -6764,6 +6869,7 @@ mod tests {
             sequence: None,
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Starting fake native camera.".to_string()),
+            no_video: None,
         }
     }
 
@@ -6956,6 +7062,7 @@ mod tests {
             sequence: Some(1),
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Fake native camera live.".to_string()),
+            no_video: None,
         };
         slot.active = Some(NativeCameraPreviewThread {
             stop_tx,
@@ -8468,6 +8575,7 @@ mod tests {
             sequence: Some(1),
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Live".to_string()),
+            no_video: None,
         };
         slot.active = Some(NativeCameraPreviewThread {
             stop_tx,
@@ -9946,6 +10054,25 @@ Error opening input file video=HP HD Camera."#;
     fn rejects_unsupported_camera_source_ids() {
         assert!(selected_camera_source("camera:avfoundation:0").is_none());
         assert!(selected_camera_source("camera:windows-dshow:not-hex").is_none());
+        // Plan 214 A5: a saved id naming Videorc Camera resolves to nothing.
+        assert!(
+            selected_camera_source(&crate::camera_capture::native_camera_device_id(
+                crate::virtual_camera::VIRTUAL_CAMERA_MACOS_DEVICE_UUID
+            ))
+            .is_none()
+        );
+        assert!(
+            selected_camera_source(&crate::camera_capture::windows_dshow_camera_device_id(
+                "Videorc Camera Windows Virtual Camera"
+            ))
+            .is_none()
+        );
+        assert!(
+            selected_camera_source(&crate::linux_v4l2_camera::linux_v4l2_camera_id(
+                "/dev/video42"
+            ))
+            .is_none()
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -10139,6 +10266,7 @@ Error opening input file video=HP HD Camera."#;
             sequence: None,
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Starting native camera preview.".to_string()),
+            no_video: None,
         };
 
         let lease = match begin_camera_start(&state, start_key, &layout, starting, None).await {
@@ -10201,6 +10329,7 @@ Error opening input file video=HP HD Camera."#;
                 sequence: Some(42),
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some("Live".to_string()),
+                no_video: None,
             };
             slot.start_generation = 1;
             slot.active_generation = Some(1);
@@ -10353,6 +10482,42 @@ Error opening input file video=HP HD Camera."#;
                 Some(Instant::now() - CAMERA_FIRST_FRAME_REUSE_GRACE - Duration::from_millis(1));
         }
         assert!(camera_live_session_is_frameless_zombie(&state).await);
+    }
+
+    #[tokio::test]
+    async fn frameless_live_slot_past_grace_reports_no_video() {
+        // Plan 216 D2: the streamer's bundle shape. Live, zero callbacks,
+        // nothing in the frame store, the grace gone: the status says so.
+        let state = test_state();
+        let mut slot = state.preview_camera.lock().await;
+        slot.status.state = PreviewCameraState::Live;
+        slot.status.frames_captured = 0;
+        slot.status.sequence = None;
+        slot.live_acked_at =
+            Some(Instant::now() - CAMERA_FIRST_FRAME_REUSE_GRACE - Duration::from_millis(1));
+        refresh_camera_no_video(&mut slot);
+        assert_eq!(slot.status.no_video, Some(true));
+        let json = serde_json::to_value(&slot.status).unwrap();
+        assert_eq!(json["noVideo"], serde_json::json!(true));
+
+        // The first frame clears it on the next tick.
+        slot.status.frames_captured = 1;
+        refresh_camera_no_video(&mut slot);
+        assert_eq!(slot.status.no_video, None);
+        let json = serde_json::to_value(&slot.status).unwrap();
+        assert!(json.get("noVideo").is_none());
+    }
+
+    #[tokio::test]
+    async fn frameless_live_slot_within_grace_reports_video_pending() {
+        // Starting up is not "no video": macOS acks Live before any frame.
+        let state = test_state();
+        let mut slot = state.preview_camera.lock().await;
+        slot.status.state = PreviewCameraState::Live;
+        slot.status.no_video = Some(true);
+        slot.live_acked_at = Some(Instant::now());
+        refresh_camera_no_video(&mut slot);
+        assert_eq!(slot.status.no_video, None);
     }
 
     #[tokio::test]

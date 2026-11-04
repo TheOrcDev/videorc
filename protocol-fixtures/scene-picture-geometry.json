@@ -1,0 +1,333 @@
+{
+  "schemaVersion": 1,
+  "description": "Plan 216 B1: where a scene source's PICTURE lands inside its frame. Rust scene_geometry::scene_picture_rect_pixels and TS scenePictureRectPixels must both reproduce every case within 1 px; the compositor's own fit (source_fit) is the same arithmetic.",
+  "cases": [
+    {
+      "name": "the streamer's MacBook display, Fit in a 16:9 frame",
+      "frame": {
+        "x": 0.0932,
+        "y": 0.0932,
+        "width": 0.9068,
+        "height": 0.9068
+      },
+      "kind": "screen",
+      "fit": "contain",
+      "source": {
+        "width": 2228,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 2560,
+        "height": 1440
+      },
+      "expected": {
+        "x": 389,
+        "y": 134,
+        "width": 2021,
+        "height": 1306
+      }
+    },
+    {
+      "name": "the same frame on Fill is the frame",
+      "frame": {
+        "x": 0.0932,
+        "y": 0.0932,
+        "width": 0.9068,
+        "height": 0.9068
+      },
+      "kind": "screen",
+      "fit": "cover",
+      "source": {
+        "width": 2228,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 2560,
+        "height": 1440
+      },
+      "expected": {
+        "x": 239,
+        "y": 134,
+        "width": 2321,
+        "height": 1306
+      }
+    },
+    {
+      "name": "a left crop narrows the picture and keeps it centred",
+      "frame": {
+        "x": 0.0932,
+        "y": 0.0932,
+        "width": 0.9068,
+        "height": 0.9068
+      },
+      "kind": "screen",
+      "fit": "contain",
+      "source": {
+        "width": 2228,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 2560,
+        "height": 1440
+      },
+      "expected": {
+        "x": 641,
+        "y": 134,
+        "width": 1516,
+        "height": 1306
+      },
+      "crop": {
+        "cropLeft": 0.25
+      }
+    },
+    {
+      "name": "a scene background's 0.1 stage margin shrinks the frame before the fit",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1
+      },
+      "kind": "screen",
+      "fit": "contain",
+      "source": {
+        "width": 2228,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 2560,
+        "height": 1440
+      },
+      "expected": {
+        "x": 389,
+        "y": 144,
+        "width": 1782,
+        "height": 1152
+      },
+      "stageMargin": 0.1
+    },
+    {
+      "name": "the camera never sits on the stage margin",
+      "frame": {
+        "x": 0.7,
+        "y": 0.65,
+        "width": 0.25,
+        "height": 0.25
+      },
+      "kind": "camera",
+      "fit": "contain",
+      "source": {
+        "width": 1280,
+        "height": 720
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 1344,
+        "y": 702,
+        "width": 480,
+        "height": 270
+      },
+      "stageMargin": 0.1
+    },
+    {
+      "name": "vertical Fit: a 16:9 screen in a 1080x1920 band",
+      "frame": {
+        "x": 0,
+        "y": 0.1,
+        "width": 1,
+        "height": 0.4
+      },
+      "kind": "screen",
+      "fit": "contain",
+      "source": {
+        "width": 2560,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 1080,
+        "height": 1920
+      },
+      "expected": {
+        "x": 0,
+        "y": 272,
+        "width": 1080,
+        "height": 608
+      }
+    },
+    {
+      "name": "a 4:3 camera on Fit in a 16:9 box",
+      "frame": {
+        "x": 0.7,
+        "y": 0.65,
+        "width": 0.25,
+        "height": 0.25
+      },
+      "kind": "camera",
+      "fit": "contain",
+      "source": {
+        "width": 640,
+        "height": 480
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 1404,
+        "y": 702,
+        "width": 360,
+        "height": 270
+      }
+    },
+    {
+      "name": "a box past every canvas edge keeps its true origin (plan 215 E)",
+      "frame": {
+        "x": -0.25,
+        "y": -0.25,
+        "width": 1.5,
+        "height": 1.5
+      },
+      "kind": "screen",
+      "fit": "contain",
+      "source": {
+        "width": 2228,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": -294,
+        "y": -270,
+        "width": 2507,
+        "height": 1620
+      }
+    },
+    {
+      "name": "an unknown source size returns the frame",
+      "frame": {
+        "x": 0.0932,
+        "y": 0.0932,
+        "width": 0.9068,
+        "height": 0.9068
+      },
+      "kind": "screen",
+      "fit": "contain",
+      "source": null,
+      "canvas": {
+        "width": 2560,
+        "height": 1440
+      },
+      "expected": {
+        "x": 239,
+        "y": 134,
+        "width": 2321,
+        "height": 1306
+      }
+    },
+    {
+      "name": "the test pattern is drawn at the canvas size, so it is its frame",
+      "frame": {
+        "x": 0.0932,
+        "y": 0.0932,
+        "width": 0.9068,
+        "height": 0.9068
+      },
+      "kind": "test-pattern",
+      "fit": "cover",
+      "source": {
+        "width": 2560,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 2560,
+        "height": 1440
+      },
+      "expected": {
+        "x": 239,
+        "y": 134,
+        "width": 2321,
+        "height": 1306
+      }
+    },
+    {
+      "name": "D3: the ultrawide's saved frame with the MacBook display swapped in",
+      "frame": {
+        "x": 0,
+        "y": 0.12777777777777777,
+        "width": 1,
+        "height": 0.7444444444444445
+      },
+      "kind": "screen",
+      "fit": "contain",
+      "source": {
+        "width": 2228,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 2560,
+        "height": 1440
+      },
+      "expected": {
+        "x": 450,
+        "y": 184,
+        "width": 1659,
+        "height": 1072
+      }
+    },
+    {
+      "name": "D3: the ultrawide back on its own frame is exact",
+      "frame": {
+        "x": 0,
+        "y": 0.12777777777777777,
+        "width": 1,
+        "height": 0.7444444444444445
+      },
+      "kind": "screen",
+      "fit": "contain",
+      "source": {
+        "width": 3440,
+        "height": 1440
+      },
+      "canvas": {
+        "width": 2560,
+        "height": 1440
+      },
+      "expected": {
+        "x": 0,
+        "y": 184,
+        "width": 2560,
+        "height": 1072
+      }
+    },
+    {
+      "name": "a window source fits like a screen",
+      "frame": {
+        "x": 0.1,
+        "y": 0.1,
+        "width": 0.5,
+        "height": 0.5
+      },
+      "kind": "window",
+      "fit": "contain",
+      "source": {
+        "width": 1200,
+        "height": 1600
+      },
+      "canvas": {
+        "width": 1920,
+        "height": 1080
+      },
+      "expected": {
+        "x": 469,
+        "y": 108,
+        "width": 405,
+        "height": 540
+      }
+    }
+  ]
+}

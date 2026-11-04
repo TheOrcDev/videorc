@@ -1,4 +1,5 @@
 import type { PreviewCameraStatus, PreviewScreenStatus } from '@/lib/backend'
+import { cameraExpectedFps } from '@/lib/camera-frame-rate'
 import { formatFrameRate, formatResolution } from '@/lib/format-video'
 
 // Plan 173: the facts line under a live video source's picker. Only what the
@@ -48,9 +49,8 @@ export function cameraFacts(
     dimensions(status.selectedFormatWidth, status.selectedFormatHeight) ??
     dimensions(status.actualWidth, status.actualHeight)
   if (!size) return null
-  const caps = [status.targetFps, status.selectedFormatMaxFps].filter(
-    (fps): fps is number => typeof fps === 'number' && Number.isFinite(fps) && fps > 0
-  )
-  if (caps.length === 0) return size
-  return `${size} · ${formatFrameRate(Math.round(Math.min(...caps)))}`
+  // The same rate a slow camera is measured against (issue #1066).
+  const fps = cameraExpectedFps(status)
+  if (fps === undefined) return size
+  return `${size} · ${formatFrameRate(Math.round(fps))}`
 }

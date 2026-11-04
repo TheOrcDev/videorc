@@ -131,8 +131,10 @@ describe('pageChunk', () => {
     const page = pageChunk(load)
 
     await expect(page.preload()).rejects.toThrow('chunk failed')
+    expect(page.isLoaded()).toBe(false)
     await Promise.all([page.preload(), page.preload()])
 
     expect(load).toHaveBeenCalledTimes(2)
+    expect(page.isLoaded()).toBe(true)
   })
 })

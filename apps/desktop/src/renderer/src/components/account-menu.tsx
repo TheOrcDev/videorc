@@ -42,6 +42,7 @@ export function AccountMenu({
   statusLabel,
   statusPulse,
   live,
+  needsSignIn = false,
   onOpenHealth,
   onOpenSettings
 }: {
@@ -50,6 +51,9 @@ export function AccountMenu({
   statusLabel: string
   statusPulse: boolean
   live: boolean
+  /** Chat or Buddy waits on the Videorc sign-in (plan 215 A5, D7): a dot on
+   * the trigger, because "Sign in" alone was easy to miss while live. */
+  needsSignIn?: boolean
   onOpenHealth: () => void
   onOpenSettings: () => void
 }): ReactElement {
@@ -107,6 +111,14 @@ export function AccountMenu({
           <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
         )}
         <span className="truncate text-xs font-medium">{displayName}</span>
+        {/* Plan 215 A5 (D7): a dot while chat or Buddy waits on the sign-in.
+            Bare, so the trigger's name stays the words it shows; the Go Live
+            check, the toast and the chat row carry the sentence. */}
+        {needsSignIn ? (
+          <span data-slot="account-needs-sign-in">
+            <StatusDot tone="warn" />
+          </span>
+        ) : null}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-56">
         <DropdownMenuLabel className="flex items-center justify-between gap-2 py-1.5">

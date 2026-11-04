@@ -23,6 +23,7 @@ import type {
   CommentsViewSnapshot,
   LiveChatMessage,
   ModerationOperation,
+  StreamManagerHideMethod,
   ViewerSample
 } from '@/lib/backend'
 import {
@@ -89,6 +90,8 @@ function buddyActionContext(command: BuddyActionBody): UserErrorContext {
       return { action: command.showOnStream ? 'show' : 'hide', object: 'Buddy on stream' }
     case 'buddy-react':
       return { action: 'play', object: "Buddy's reaction" }
+    case 'chat-show-on-stream':
+      return { action: command.showOnStream ? 'show' : 'hide', object: 'chat on stream' }
   }
 }
 
@@ -249,6 +252,11 @@ function CommentsWindowApp(): ReactElement {
     return window.videorc.buddyActFromCommentsWindow({ requestId: crypto.randomUUID(), sentence })
   }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
+  // Hide from stream (plan 215 D6): main owns the value and the platform's
+  // way of hiding; this window renders and flips the switch.
+  const [hiddenFromStream, setHiddenFromStream] = useState(false)
+  const [hideFromStreamMethod, setHideFromStreamMethod] =
+    useState<StreamManagerHideMethod>('unsupported')
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
     DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
   )
@@ -366,6 +374,8 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => {
         if (!state) return
         setAlwaysOnTop(state.alwaysOnTop)
+        setHiddenFromStream(state.hiddenFromStream === true)
+        setHideFromStreamMethod(state.hideFromStreamMethod)
         setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
         setAutoShowActivity(state.autoShowActivity === true)
       })
@@ -394,6 +404,8 @@ function CommentsWindowApp(): ReactElement {
     const offDashboard = window.videorc?.onDashboard?.((state) => setDashboard(state))
     const offState = window.videorc?.onCommentsWindowState?.((state) => {
       setAlwaysOnTop(state.alwaysOnTop)
+      setHiddenFromStream(state.hiddenFromStream === true)
+      setHideFromStreamMethod(state.hideFromStreamMethod)
       setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
       setAutoShowActivity(state.autoShowActivity === true)
     })
@@ -629,6 +641,10 @@ function CommentsWindowApp(): ReactElement {
   const setBuddyShowOnStream = (showOnStream: boolean): void => {
     void sendBuddyAction({ kind: 'buddy-show-on-stream', showOnStream })
   }
+  // Plan 215 G (D5): Chat on stream rides the same relay to Studio.
+  const setChatOnStream = (showOnStream: boolean): void => {
+    void sendBuddyAction({ kind: 'chat-show-on-stream', showOnStream })
+  }
   // Plan 168 S-D3: a reaction chip plays on air (Studio calls cohost.pet.react).
   const reactBuddy = (reaction: string): void => {
     void sendBuddyAction({ kind: 'buddy-react', reaction })
@@ -701,6 +717,21 @@ function CommentsWindowApp(): ReactElement {
           error,
           { action: 'open', object: 'the destination' },
           { id: 'open-destination' }
+        )
+      )
+  }
+
+  // Plan 215 A3: "Sign in to Videorc" on a chat row the relay parked. Main
+  // shows the main window, which starts the account sign-in it owns; this
+  // window never sees the authorize URL.
+  const signInToVideorc = (): void => {
+    void window.videorc
+      ?.signInToVideorcFromCommentsWindow?.({ requestId: crypto.randomUUID() })
+      .catch((error) =>
+        toastUserError(
+          error,
+          { action: 'start', object: 'the Videorc sign-in' },
+          { id: 'sign-in-videorc' }
         )
       )
   }
@@ -817,6 +848,8 @@ function CommentsWindowApp(): ReactElement {
           buddyPending={buddyPending}
           onBuddySay={sayBuddy}
           onBuddyShowOnStream={setBuddyShowOnStream}
+          chatOnStream={cohost.chatOnStream}
+          onChatOnStream={setChatOnStream}
           onBuddyReact={reactBuddy}
           moderationOperations={moderationOperations}
           removalAnsweringIds={removalAnsweringIds}
@@ -897,6 +930,7 @@ function CommentsWindowApp(): ReactElement {
           onBuddy={runBuddy}
           onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
           onUseSignIn={openDestination}
+          onSignInToVideorc={signInToVideorc}
           onShowFollowNames={() => {
             void window.videorc
               ?.showFollowNamesFromCommentsWindow?.({
@@ -1046,6 +1080,13 @@ function CommentsWindowApp(): ReactElement {
           onToggleAlwaysOnTop={() =>
             void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)
           }
+          hiddenFromStream={hiddenFromStream}
+          hideFromStreamMethod={hideFromStreamMethod}
+          onToggleHiddenFromStream={() => {
+            // Optimistic, like the pin: main's state event is the truth.
+            setHiddenFromStream(!hiddenFromStream)
+            void window.videorc?.setCommentsWindowHiddenFromStream?.(!hiddenFromStream)
+          }}
         />
       </ChatGifModeProvider>
       <BuddyConsentDialog open={buddyConsentAsked} onAnswer={answerBuddyConsent} />

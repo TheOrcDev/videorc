@@ -66,6 +66,7 @@ import type {
   LiveChatSnapshot,
   ModerationOperation,
   ScopeReconnectPlatform,
+  StreamManagerHideMethod,
   ViewerSample
 } from '@/lib/backend'
 import { isActivityOnlyEvent } from '@/lib/backend'
@@ -271,6 +272,11 @@ export interface StreamManagerProps {
   viewerSample?: ViewerSample | null
   alwaysOnTop?: boolean
   onToggleAlwaysOnTop?: () => void
+  /** Hide from stream (plan 215 D6): the switch's state and this platform's
+   * way of hiding the window, from main's window state. */
+  hiddenFromStream?: boolean
+  hideFromStreamMethod?: StreamManagerHideMethod
+  onToggleHiddenFromStream?: () => void
   highlightAnchor?: CommentHighlightAnchor
   onHighlightAnchorChange?: (anchor: CommentHighlightAnchor) => void
   highlightedId?: string | null
@@ -317,6 +323,9 @@ export interface StreamManagerProps {
   /** "Use Sign in" on a stream-key destination's chat row (plan 213 J1):
    * the main window opens that destination in Livestream → Setup. */
   onUseSignIn?: (targetId: string) => void
+  /** "Sign in to Videorc" on a chat row the relay parked (plan 215 A3): the
+   * main window starts the account sign-in. */
+  onSignInToVideorc?: () => void
   /** Auto-show Activity celebrations on stream (plan 156): the one switch,
    * owned by Electron main; the Studio renderer runs the engine. */
   autoShowActivity?: boolean
@@ -362,6 +371,10 @@ export interface StreamManagerProps {
   onBuddySay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   /** `overlayLayout.buddy.showOnStream`, through the Studio relay. */
   onBuddyShowOnStream?: (showOnStream: boolean) => void
+  /** Chat on stream (plan 215 G, D5): `overlayLayout.chat.showOnStream` and
+   * its switch in the chat pane, through the Studio relay. */
+  chatOnStream?: boolean
+  onChatOnStream?: (showOnStream: boolean) => void
   /** A reaction chip (plan 168 S-D3), through the Studio relay. */
   onBuddyReact?: (reaction: string) => void
   /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's
@@ -410,6 +423,9 @@ export function StreamManager({
   viewerSample = null,
   alwaysOnTop = false,
   onToggleAlwaysOnTop,
+  hiddenFromStream = false,
+  hideFromStreamMethod = 'unsupported',
+  onToggleHiddenFromStream,
   highlightAnchor,
   onHighlightAnchorChange,
   highlightedId = null,
@@ -433,6 +449,7 @@ export function StreamManager({
   onOpenPreview,
   onShowFollowNames,
   onUseSignIn,
+  onSignInToVideorc,
   autoShowActivity = false,
   onAutoShowActivityChange,
   onReconnectScopes,
@@ -460,6 +477,8 @@ export function StreamManager({
   onBuddySay,
   onBuddyShowOnStream,
   onBuddyReact,
+  chatOnStream,
+  onChatOnStream,
   cohostAutoChat,
   onCohostAutoChatChange,
   onCohostOpenChatSettings,
@@ -1270,6 +1289,9 @@ export function StreamManager({
             onSound={inHistory ? undefined : onSound}
             onBuddy={inHistory ? undefined : onBuddy}
             onUseSignIn={inHistory ? undefined : onUseSignIn}
+            chatOnStream={inHistory ? undefined : chatOnStream}
+            onChatOnStreamChange={inHistory ? undefined : onChatOnStream}
+            onSignInToVideorc={inHistory ? undefined : onSignInToVideorc}
             onSend={onSend}
           />
         </div>
@@ -1309,6 +1331,9 @@ export function StreamManager({
 
       <StreamManagerStatusBar
         alwaysOnTop={alwaysOnTop}
+        hiddenFromStream={hiddenFromStream}
+        hideFromStreamMethod={hideFromStreamMethod}
+        onToggleHiddenFromStream={onToggleHiddenFromStream}
         audience={inHistory ? (history?.audience ?? null) : (dashboard?.audience ?? null)}
         highlightAnchor={onHighlightAnchorChange && !inHistory ? highlightAnchor : undefined}
         providers={snapshot.providers}

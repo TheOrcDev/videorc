@@ -8,13 +8,18 @@ import { pathToFileURL } from 'node:url'
 import {
   OUTPUT_PROFILES,
   chatArrivals,
+  chatSteps,
+  clipPullStep,
   evaluateYoutubeHealth,
   liveHoldStep,
   matchCaption,
   needsEyes,
+  outputProfileStep,
   recordFeature,
   runSubSteps,
-  sceneSwitchStep
+  sceneSwitchStep,
+  vodStep,
+  youtubeHealthStep
 } from './scenario-steps.mjs'
 import { createEventBus, createWaitFor } from './step-engine.mjs'
 import { createFakeClock } from './harness-test-fakes.mjs'
@@ -175,6 +180,78 @@ test('sceneSwitchStep applies the preset and records a feature with the scene id
     await recordFeature(ctx, { id: 'x', kind: 'mic', muted: true })
     const all = (await readFile(join(runDir, 'features.ndjson'), 'utf8')).trim().split('\n')
     assert.equal(all.length, 3)
+  } finally {
+    await rm(runDir, { recursive: true, force: true })
+  }
+})
+
+test('with the observer off, the YouTube checks skip at once with the reason and chat fails fast', async () => {
+  const off = 'the broadcaster role is not authorized (pnpm live:hookup --role broadcaster)'
+  const logs = []
+  const observer = {
+    unavailable: off,
+    latest: () => assert.fail('no observer reading without a broadcaster'),
+    poll: async () => assert.fail('no observer poll without a broadcaster'),
+    pullClip: async () => ({ status: 'skipped', reason: 'broadcaster-not-authorized' })
+  }
+  const ctx = { observer, params: { profile: '1080p30' }, log: (line) => logs.push(line) }
+  assert.deepEqual(await youtubeHealthStep().run(ctx), { skipped: true, reason: off })
+  assert.deepEqual(await vodStep().run(ctx), { skipped: true, reason: off })
+  assert.deepEqual(await clipPullStep().run(ctx), {
+    skipped: true,
+    reason: 'broadcaster-not-authorized'
+  })
+  await assert.rejects(chatSteps()[0].run(ctx), /observer is off: the broadcaster role/)
+  assert.deepEqual(logs, [
+    `youtube-health: skipped (${off})`,
+    `vod: skipped (${off})`,
+    'clip: skipped (broadcaster-not-authorized)'
+  ])
+  await assert.rejects(youtubeHealthStep().run({ log: () => {} }), /observer is not running/)
+})
+
+test('outputProfileStep waits for the reloaded renderer before the next intent', async () => {
+  const runDir = await mkdtemp(join(tmpdir(), 'videorc-steps-'))
+  try {
+    const clock = createFakeClock()
+    const bus = createEventBus()
+    const ctx = fakeCtx({ clock, bus, runDir })
+    let stored = JSON.stringify({
+      streaming: {
+        targets: [
+          { id: 'youtube', enabled: true },
+          { id: 'off', enabled: false }
+        ]
+      }
+    })
+    // The reloaded renderer reconnects a turn after the load event.
+    let reloaded = false
+    let rendererBack = false
+    const readsBeforeBack = []
+    ctx.ui = {
+      async evaluate(expression) {
+        const set = /localStorage\.setItem\("[^"]+", (".*")\); return true/.exec(expression)
+        if (set) stored = JSON.parse(set[1])
+        else if (reloaded && !rendererBack) readsBeforeBack.push(expression)
+        return set ? true : stored
+      },
+      async reload() {
+        reloaded = true
+        setImmediate(() => {
+          rendererBack = true
+          bus.emit('remote.state', { layoutPreset: 'screen-only' })
+        })
+        return true
+      }
+    }
+    const evidence = await outputProfileStep().run(ctx)
+    assert.deepEqual(readsBeforeBack, [], 'the step is not done before the renderer is back')
+    assert.equal(evidence.applied, true)
+    assert.equal(evidence.preset, 'tutorial-1080p30')
+    const saved = JSON.parse(stored)
+    assert.equal(saved.streaming.defaultOutputPreset, 'tutorial-1080p30')
+    assert.equal(saved.streaming.targets[0].bitrateKbps, 6000)
+    assert.equal(saved.streaming.targets[1].outputPreset, undefined)
   } finally {
     await rm(runDir, { recursive: true, force: true })
   }

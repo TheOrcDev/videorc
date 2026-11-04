@@ -20,6 +20,8 @@ export type PageLoad = {
    * already saw the load finish).
    */
   pendingLoad: () => Promise<unknown> | null
+  /** Whether the chunk is in: a page has opened in this window. */
+  isLoaded: () => boolean
 }
 
 export type PageChunk<P extends object> = PageLoad & {
@@ -60,7 +62,7 @@ export function pageChunk<P extends object>(load: () => Promise<ComponentType<P>
       : preload().then(() => {
           settled = true
         })
-  return { Page, preload, pendingLoad }
+  return { Page, preload, pendingLoad, isLoaded: () => loaded !== null }
 }
 
 function resolvedThenable<T>(value: T): PromiseLike<T> {

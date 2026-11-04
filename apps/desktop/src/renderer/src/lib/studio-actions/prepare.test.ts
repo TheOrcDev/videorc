@@ -11,6 +11,9 @@ import { executeAgentIntent, type AgentIntent } from './agent'
 import type { StudioActionContext, StudioPrepareAccess, StudioSettingsAccess } from './context'
 import { PREPARE_TOOL_COPY } from './prepare'
 import { CURATED_SETTINGS, SETTINGS_TOOL_COPY, curatedSettings } from './settings'
+import { OFFLINE_LOCK_REASON } from '@/lib/lock-reason'
+import type { VirtualCameraStatus } from '@/lib/backend'
+import type { StudioVirtualCameraAccess } from './context'
 
 // Plan 209 S14: Stream details, Destinations and the curated settings (D16),
 // each through the control the streamer would use.
@@ -304,7 +307,8 @@ describe('get_settings and update_settings (plan 209 S14, D16)', () => {
         clips: true,
         captionsLanguage: 'auto',
         chatInStudio: false,
-        theme: 'dark'
+        theme: 'dark',
+        videorcCamera: false
       }
     })
     expect(Object.keys(curatedSettings(settingsAccess())).sort()).toEqual(
@@ -425,5 +429,181 @@ describe('get_settings and update_settings (plan 209 S14, D16)', () => {
     expect(
       await executeAgentIntent(call('update_settings', {}), context({ settings: settingsAccess() }))
     ).toEqual({ ok: false, message: SETTINGS_TOOL_COPY.empty })
+  })
+})
+
+// --- Plan 214 E2: Videorc Camera in update_settings ----------------------------
+
+function cameraAccess(
+  status: VirtualCameraStatus | null,
+  overrides: Partial<StudioVirtualCameraAccess> = {}
+): StudioVirtualCameraAccess {
+  return {
+    status,
+    connected: true,
+    platform: 'darwin',
+    osRelease: '25.5.0',
+    setOn: vi.fn(async () => ({ ok: true })),
+    ...overrides
+  }
+}
+
+describe('videorcCamera in the settings tool (plan 214 E2)', () => {
+  const off: VirtualCameraStatus = { on: false, available: true, state: 'off' }
+
+  it('reads the saved switch, and false where the camera is hidden', () => {
+    const on: VirtualCameraStatus = { on: true, available: true, state: 'ready', viewers: 0 }
+    expect(curatedSettings(settingsAccess({ virtualCamera: cameraAccess(on) })).videorcCamera).toBe(
+      true
+    )
+    expect(
+      curatedSettings(settingsAccess({ virtualCamera: cameraAccess(off) })).videorcCamera
+    ).toBe(false)
+    expect(
+      curatedSettings(
+        settingsAccess({
+          virtualCamera: cameraAccess({
+            ...on,
+            available: false,
+            state: 'unavailable',
+            platformStep: 'unsupported'
+          })
+        })
+      ).videorcCamera
+    ).toBe(false)
+    expect(curatedSettings(settingsAccess()).videorcCamera).toBe(false)
+  })
+
+  it('turns the camera on and off through the Output switch, before anything else', async () => {
+    const camera = cameraAccess(off)
+    const access = settingsAccess({ virtualCamera: camera })
+    const outcome = await executeAgentIntent(
+      call('update_settings', { videorcCamera: true, theme: 'light' }),
+      context({ settings: access })
+    )
+    expect(outcome).toEqual({
+      ok: true,
+      message: 'Theme: light. Videorc Camera on.',
+      result: { changed: { videorcCamera: true, theme: 'light' } }
+    })
+    expect(camera.setOn).toHaveBeenCalledWith(true)
+    expect(access.setTheme).toHaveBeenCalledWith('light')
+
+    const turnOff = cameraAccess({ on: true, available: true, state: 'streaming', viewers: 1 })
+    expect(
+      await executeAgentIntent(
+        call('update_settings', { videorcCamera: false }),
+        context({ settings: settingsAccess({ virtualCamera: turnOff }) })
+      )
+    ).toMatchObject({ ok: true, message: 'Videorc Camera off.' })
+    expect(turnOff.setOn).toHaveBeenCalledWith(false)
+  })
+
+  it('turns it on while macOS still waits for approval: the switch saves the intent', async () => {
+    const camera = cameraAccess({
+      on: false,
+      available: true,
+      state: 'needs-approval',
+      platformStep: 'needs-approval'
+    })
+    expect(
+      await executeAgentIntent(
+        call('update_settings', { videorcCamera: true }),
+        context({ settings: settingsAccess({ virtualCamera: camera }) })
+      )
+    ).toMatchObject({ ok: true })
+    expect(camera.setOn).toHaveBeenCalledWith(true)
+  })
+
+  it("refuses where the camera is hidden, in the hide rule's words", async () => {
+    for (const platform of ['win32', 'linux']) {
+      const camera = cameraAccess(
+        { on: false, available: false, state: 'unavailable', platformStep: 'unsupported' },
+        { platform }
+      )
+      for (const on of [true, false]) {
+        expect(
+          await executeAgentIntent(
+            call('update_settings', { videorcCamera: on, theme: 'light' }),
+            context({ settings: settingsAccess({ platform, virtualCamera: camera }) })
+          )
+        ).toEqual({ ok: false, message: "Videorc Camera isn't available on this computer." })
+      }
+      expect(camera.setOn).not.toHaveBeenCalled()
+    }
+  })
+
+  it("refuses an on the Output row can't take, in the row's own words, and changes nothing", async () => {
+    const access = settingsAccess({
+      virtualCamera: cameraAccess({
+        on: false,
+        available: false,
+        state: 'unavailable',
+        platformStep: 'failed',
+        message: 'Move Videorc to the Applications folder.'
+      })
+    })
+    expect(
+      await executeAgentIntent(
+        call('update_settings', { videorcCamera: true, theme: 'light' }),
+        context({ settings: access })
+      )
+    ).toEqual({ ok: false, message: 'Move Videorc to the Applications folder.' })
+    expect(access.setTheme).not.toHaveBeenCalled()
+
+    const sinkless = settingsAccess({
+      virtualCamera: cameraAccess({
+        on: true,
+        available: false,
+        state: 'unavailable',
+        message: 'A message with internals in it.'
+      })
+    })
+    expect(
+      await executeAgentIntent(
+        call('update_settings', { videorcCamera: true }),
+        context({ settings: sinkless })
+      )
+    ).toEqual({ ok: false, message: "Videorc Camera can't run on this Mac." })
+  })
+
+  it('refuses offline, without a Studio camera, and on a non-boolean', async () => {
+    expect(
+      await executeAgentIntent(
+        call('update_settings', { videorcCamera: true }),
+        context({
+          settings: settingsAccess({ virtualCamera: cameraAccess(off, { connected: false }) })
+        })
+      )
+    ).toEqual({ ok: false, message: OFFLINE_LOCK_REASON })
+    expect(
+      await executeAgentIntent(
+        call('update_settings', { videorcCamera: true }),
+        context({ settings: settingsAccess() })
+      )
+    ).toEqual({ ok: false, message: "Videorc Camera isn't available in this Studio." })
+    expect(
+      await executeAgentIntent(
+        call('update_settings', { videorcCamera: 'on' }),
+        context({ settings: settingsAccess({ virtualCamera: cameraAccess(off) }) })
+      )
+    ).toEqual({ ok: false, message: 'videorcCamera must be true or false.' })
+  })
+
+  it("answers the switch's failure and changes nothing else", async () => {
+    const camera = cameraAccess(off, {
+      setOn: vi.fn(async () => ({
+        ok: false,
+        message: "Couldn't turn on Videorc Camera. Try again in a moment."
+      }))
+    })
+    const access = settingsAccess({ virtualCamera: camera })
+    expect(
+      await executeAgentIntent(
+        call('update_settings', { videorcCamera: true, theme: 'light' }),
+        context({ settings: access })
+      )
+    ).toEqual({ ok: false, message: "Couldn't turn on Videorc Camera. Try again in a moment." })
+    expect(access.setTheme).not.toHaveBeenCalled()
   })
 })

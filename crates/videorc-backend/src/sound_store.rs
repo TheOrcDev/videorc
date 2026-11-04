@@ -603,11 +603,10 @@ pub(crate) fn on_sounds_changed(state: &AppState) -> Result<SoundboardState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_temp_dir::TestTempDir;
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("videorc-sounds-{label}-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(label: &str) -> TestTempDir {
+        TestTempDir::new(&format!("sounds-{label}"))
     }
 
     fn database_in(dir: &Path) -> Database {
@@ -898,7 +897,11 @@ mod tests {
         );
 
         // Reorder must name every sound once.
-        assert!(database.reorder_sounds(&[first.id.clone()]).is_err());
+        assert!(
+            database
+                .reorder_sounds(std::slice::from_ref(&first.id))
+                .is_err()
+        );
         let reordered = database
             .reorder_sounds(&[tada.id.clone(), first.id.clone(), airhorn.id.clone()])
             .unwrap();
@@ -967,7 +970,8 @@ mod tests {
             database.insert_sound(new(1_000)).unwrap_err().to_string(),
             REFUSAL_SOUND_TOO_MANY
         );
-        let full = database_in(&temp_dir("caps-total"));
+        let full_dir = temp_dir("caps-total");
+        let full = database_in(&full_dir);
         for _ in 0..10 {
             full.insert_sound(new(29_000)).unwrap();
         }
