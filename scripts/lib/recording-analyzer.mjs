@@ -69,10 +69,11 @@ export const DEFAULT_GATES = Object.freeze({
   requireNoDigitalZeroRuns: false,
   // Silent track (issue 1064): a Windows take whose DirectShow microphone
   // returned 1-LSB silence read "silence 11285 ms" over the whole take and
-  // still PASSED. When the run declares a microphone (expectAudio), a track
-  // that sits under -80 dBFS (digital silence; a quiet room's floor is far
-  // above it) for nearly all of its length fails: the microphone recorded
-  // nothing. Runs without a microphone are untouched.
+  // still PASSED. When the run declares a microphone (expectMicrophoneSignal),
+  // a track that sits under -80 dBFS (digital silence; a quiet room's floor is
+  // far above it) for nearly all of its length fails: the microphone recorded
+  // nothing. Runs without a microphone are untouched (issue 1165: a session
+  // with no microphone correctly records the paced-silence bus).
   silentTrackNoiseDb: -80,
   silentTrackMinRunMs: 100,
   silentTrackMinCoverage: 0.95,
@@ -676,7 +677,7 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
     // Issue 1064: a declared microphone whose track is digital silence from
     // start to end recorded nothing, whatever the meter showed.
     if (
-      metrics.expectAudio &&
+      (metrics.expectMicrophoneSignal ?? metrics.expectAudio) &&
       metrics.silentTrackCoverage != null &&
       metrics.silentTrackCoverage >= gates.silentTrackMinCoverage
     ) {
@@ -1017,7 +1018,10 @@ export async function runAudioPackets(filePath, { ffprobePath = 'ffprobe' } = {}
  * @param {string} [options.ffmpegPath]
  * @param {string} [options.ffprobePath]
  * @param {number} [options.intendedFps] - the session's selected fps (for the frame-count gate)
- * @param {boolean} [options.expectAudio] - whether a mic was selected (default: infer from stream)
+ * @param {boolean} [options.expectAudio] - whether the file must carry an audio stream (default: infer from stream)
+ * @param {boolean} [options.expectMicrophoneSignal] - whether a microphone was selected, so a
+ *   digitally silent track fails (default: expectAudio). Pass false for a session with no
+ *   microphone, which records the paced-silence bus.
  * @param {object} [options.gates] - overrides for DEFAULT_GATES
  * @returns {Promise<object>} the full report (verdict + metrics + raw findings)
  */
@@ -1034,6 +1038,7 @@ export async function analyzeRecording(filePath, options = {}) {
   const hasVideo = probe.video != null
   const hasAudio = probe.audio.length > 0
   const expectAudio = options.expectAudio ?? hasAudio
+  const expectMicrophoneSignal = options.expectMicrophoneSignal ?? expectAudio
 
   // Run the video passes (freeze, exact-dup frames, pacing) and the audio passes
   // (packet gaps, silence) concurrently. A frozen/black source can still produce a
@@ -1141,6 +1146,7 @@ export async function analyzeRecording(filePath, options = {}) {
     hasVideo,
     hasAudio,
     expectAudio,
+    expectMicrophoneSignal,
     intendedFps,
     durationSeconds: durationForCount,
     codec: probe.video?.codec ?? null,

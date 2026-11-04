@@ -577,6 +577,18 @@ describe('evaluateGates', () => {
     assert.equal(evaluateGates({ ...clean, silentTrackCoverage: null }).pass, true)
   })
 
+  // Issue 1165: the packaged smoke needs an audio stream but selects no
+  // microphone, so a runner without one records the paced-silence bus.
+  it('judges the silent-track gate by the declared microphone, not by expectAudio', () => {
+    const silent = { ...clean, silentTrackMs: 5_526, silentTrackCoverage: 1 }
+    assert.equal(evaluateGates({ ...silent, expectMicrophoneSignal: false }).pass, true)
+    assert.equal(evaluateGates({ ...silent, expectMicrophoneSignal: true }).pass, false)
+    // A missing stream still fails when only the microphone is waived.
+    const v = evaluateGates({ ...clean, hasAudio: false, expectMicrophoneSignal: false })
+    assert.equal(v.pass, false)
+    assert.match(v.failures.join(' '), /audio expected but no audio stream present/)
+  })
+
   it('warns on missing color tags by default and fails under requireColorTags', () => {
     const untagged = {
       ...clean,
@@ -1140,6 +1152,23 @@ describe(
         intendedFps: 30,
         expectAudio: false
       })
+      assert.equal(
+        report.verdict.pass,
+        true,
+        `unexpected failures: ${report.verdict.failures.join('; ')}`
+      )
+    })
+
+    // Issue 1165: an audio stream is required, but no microphone was selected.
+    it('PASSES a digitally silent audio track required without a microphone', async () => {
+      const report = await analyzeRecording(silenttrack, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        expectAudio: true,
+        expectMicrophoneSignal: false
+      })
+      assert.equal(report.metrics.expectMicrophoneSignal, false)
       assert.equal(
         report.verdict.pass,
         true,

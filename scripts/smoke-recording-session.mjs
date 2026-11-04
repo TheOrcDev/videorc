@@ -298,6 +298,9 @@ export async function recordScenario({
     ffprobePath,
     intendedFps: SMOKE_VIDEO_FPS,
     expectAudio: true,
+    // `sessionParams` selects no microphone, so a silent track is the
+    // paced-silence bus doing its job, not a dead microphone (issue 1165).
+    expectMicrophoneSignal: false,
     gates: TEST_PATTERN_GATES
   })
   const reportPaths = writeReports(quality)
