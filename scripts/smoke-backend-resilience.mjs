@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import { crashRecordShowsHarnessKill } from './lib/backend-crash-record.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -47,6 +48,7 @@ try {
   await waitForBadge(smoke, 'Ready', 'initial Ready badge')
   console.log(`Backend resilience: initial badge Ready (backend pid ${backend.pid}).`)
 
+  const killedAtMs = Date.now()
   process.kill(backend.pid, 'SIGKILL')
   console.log('Backend resilience: sent SIGKILL to the backend.')
 
@@ -56,9 +58,9 @@ try {
   await waitForBadge(smoke, 'Ready', 'Ready badge after supervisor restart', 60_000)
   console.log('Backend resilience: supervisor restarted, badge healed to Ready.')
 
-  const record = await waitForCrashRecord(backend.pid)
+  const record = await waitForCrashRecord(backend.pid, killedAtMs)
   console.log(
-    `Backend resilience: crash record persisted (generation ${record.generation}, signal ${record.signal}, attempt ${record.attempt}, ${record.stderrTail.length} stderr lines).`
+    `Backend resilience: crash record persisted (generation ${record.generation}, signal ${record.signal}, code ${record.code}, attempt ${record.attempt}, ${record.stderrTail.length} stderr lines).`
   )
   if (!existsSync(backendLogPath) || statSync(backendLogPath).size === 0) {
     throw new Error(`Expected a non-empty backend log at ${backendLogPath}.`)
@@ -90,7 +92,7 @@ try {
 // (same pattern as preview-lifecycle-probe.mjs).
 process.exit(0)
 
-async function waitForCrashRecord(killedPid, budgetMs = 15_000) {
+async function waitForCrashRecord(killedPid, killedAtMs, budgetMs = 15_000) {
   const deadline = Date.now() + budgetMs
   let last = null
   while (Date.now() < deadline) {
@@ -100,16 +102,11 @@ async function waitForCrashRecord(killedPid, budgetMs = 15_000) {
       last = records
       const record = records.find((entry) => entry?.intentional === false)
       if (record) {
-        // Packaged: the supervisor's child IS the backend → signal SIGKILL.
-        // Dev: the child is `cargo run`, which exits 101 and prints the
-        // backend's "(signal: 9, SIGKILL: kill)" line — captured in the tail.
-        const namesKill =
-          record.signal === 'SIGKILL' ||
-          (Array.isArray(record.stderrTail) &&
-            record.stderrTail.some((line) => /SIGKILL|signal: 9\b/.test(line)))
-        if (!namesKill) {
+        // POSIX names SIGKILL; Windows' TerminateProcess reads code 1 after
+        // our kill (backend-crash-record.mjs).
+        if (!crashRecordShowsHarnessKill(record, { killedAtMs })) {
           throw new Error(
-            `Crash record for the killed backend (pid ${killedPid}) must name SIGKILL (signal or stderr tail), saw ${JSON.stringify(record)}`
+            `Crash record for the killed backend (pid ${killedPid}) must show the harness kill (SIGKILL, or code 1 on Windows), saw ${JSON.stringify(record)}`
           )
         }
         if (!Array.isArray(record.stderrTail) || record.stderrTail.length === 0) {

@@ -1,9 +1,6 @@
-import { acquireHostSmokeLock, waitForHostMemory } from './lib/host-lock.mjs'
-import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp } from './lib/app-launcher.mjs'
 import {
   assertFakeActivityTotals,
   waitForFakeActivityReceipts
@@ -17,7 +14,6 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 // OAuth live smokes and the gated X smoke are documented in
 // docs/live-chat-live-smoke-checklist.md (they need live accounts + a real stream).
 
-const repoRoot = resolve(import.meta.dirname, '..')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 // The reference-shaped Twitch GIF (plan 155; scripts/fixtures/stream-manager/
 // twitch-chat-gif.json). The backend never fetches it; only the Stream
@@ -45,8 +41,7 @@ const BUDDY_ACTIVITY_KINDS = [
   'redemption'
 ]
 
-let appProcess
-let stopping = false
+let launched
 
 try {
   const connection = await launchAndReadConnection()
@@ -1056,62 +1051,28 @@ function waitFor(predicate, deadlineMs, label) {
 }
 
 async function launchAndReadConnection() {
-  await acquireHostSmokeLock()
-  await waitForHostMemory()
-  return new Promise((resolveConnection, rejectConnection) => {
-    const timer = setTimeout(() => {
-      rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
-    }, timeoutMs)
-
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    appProcess.stdout.setEncoding('utf8')
-    appProcess.stderr.setEncoding('utf8')
-    appProcess.stdout.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.stderr.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.on('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-    appProcess.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      rejectConnection(
-        new Error(
-          `Dev app exited before the live-chat smoke completed: code=${code} signal=${signal}`
-        )
-      )
-    })
+  // The shared launcher spawns `pnpm` the way each platform needs (Windows
+  // has only `pnpm.cmd`), and holds the host lock and memory gate.
+  launched = await launchDevApp({
+    env: { VIDEORC_SMOKE_PRINT_BACKEND_READY: '1' },
+    timeoutMs,
+    requiredMarkers: ['backend-ready'],
+    onLine: printAppLine
   })
+  return launched.connections['backend-ready']
 }
 
-function handleAppOutput(text, resolveConnection, timer) {
-  for (const line of text.split(/\r?\n/)) {
-    const marker = '[smoke] backend-ready '
-    const index = line.indexOf(marker)
-    if (line.trim() && !stopping) {
-      console.log(
-        index === -1 ? line : `${line.slice(0, index)}${marker}[ephemeral connection redacted]`
-      )
-    }
-    if (index === -1) {
-      continue
-    }
-    clearTimeout(timer)
-    resolveConnection(JSON.parse(line.slice(index + marker.length)))
-  }
+function printAppLine(line) {
+  const marker = '[smoke] backend-ready '
+  const index = line.indexOf(marker)
+  console.log(
+    index === -1 ? line : `${line.slice(0, index)}${marker}[ephemeral connection redacted]`
+  )
 }
 
 async function stopApp() {
-  if (!appProcess?.pid || appProcess.killed) {
+  if (!launched) {
     return
   }
-  stopping = true
-  await stopProcess(appProcess)
+  await launched.stop()
 }

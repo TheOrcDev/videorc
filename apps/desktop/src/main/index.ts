@@ -12767,8 +12767,12 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'comments-window-state') {
+    // The client area too: a framed Windows window's outer bounds include its
+    // invisible resize border, so the renderer is narrower than `bounds`.
+    const window = commentsWindow
     return {
       ...commentsWindowState(),
+      contentBounds: commentsWindowIsOpen() && window ? window.getContentBounds() : null,
       ...smokeNativeWindowIdentity(commentsWindow)
     }
   }

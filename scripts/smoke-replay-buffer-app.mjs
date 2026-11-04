@@ -55,6 +55,7 @@ import {
   waitForPublishedMp4
 } from './lib/record-latency-events.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import { isClipUnderRecordingsClips, isReplayClipFileName } from './lib/replay-clip-path.mjs'
 import {
   connectRemote,
   enableRemoteControl,
@@ -204,10 +205,10 @@ async function verifyReplay(event, label, clipSeconds) {
   if (!path || !existsSync(path)) fail(`${label}: replay missing on disk: ${path}`)
   // The smoke's recordings folder is the harness's isolated one
   // (smokeAppEnv: <state>/app-data/recordings); clips go under its Clips.
-  if (!path.startsWith(outputDirectory) || !path.includes(join('recordings', 'Clips') + '/')) {
+  if (!isClipUnderRecordingsClips(path, outputDirectory)) {
     fail(`${label}: clip is outside <recordings>/Clips: ${path}`)
   }
-  if (!/\/Clip \d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}( \(\d+\))?\.mp4$/.test(path)) {
+  if (!isReplayClipFileName(path)) {
     fail(`${label}: clip is not named Clip YYYY-MM-DD HH-MM-SS.mp4: ${path}`)
   }
   if (saved.seconds !== clipSeconds) {
