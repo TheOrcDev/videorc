@@ -4813,6 +4813,10 @@ const WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY: usize = 32;
 const WEBSOCKET_ACCOUNT_MAINTENANCE_QUEUE_CAPACITY: usize = 8;
 const WEBSOCKET_ISOLATED_LANE_QUEUE_CAPACITY: usize = 16;
 const WEBSOCKET_STOP_LANE_QUEUE_CAPACITY: usize = 4;
+// Issue #1063: imports a socket may have admitted at once, the running one
+// included. They still run one at a time process-wide; the rest wait their
+// turn inside the ordered queue age instead of being refused at once.
+const WEBSOCKET_ASSET_IMPORT_LANE_QUEUE_CAPACITY: usize = 4;
 const WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_ACCOUNT_MAINTENANCE_MAX_QUEUE_AGE: Duration = Duration::from_secs(15);
 const WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
@@ -6078,10 +6082,23 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
     }
 }
 
+/// Issue #1063: a starter sound decoding is "another import" too, so the copy
+/// never names an image. The smokes retry on "already being imported".
+const ASSET_IMPORT_BUSY_MESSAGE: &str =
+    "Another file is already being imported. Wait for it to finish, then try again.";
+
+fn asset_import_busy_error(command_id: String) -> ServerResponse {
+    ServerResponse::error(command_id, "screen-import-busy", ASSET_IMPORT_BUSY_MESSAGE)
+}
+
 #[derive(Clone)]
 struct WebSocketIsolatedCommandLane {
     kind: WebSocketIsolatedCommandLaneKind,
     capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    /// A process-wide turn a dispatched command waits for (bounded by its
+    /// dispatch deadline) and holds until it finishes. Admission (`capacity`)
+    /// stays per socket.
+    execution: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     sender: mpsc::Sender<WebSocketQueuedLaneCommand>,
     max_queue_age: Duration,
     metrics: TrackedWebSocketCommandLaneMetrics,
@@ -6100,6 +6117,7 @@ impl WebSocketIsolatedCommandLane {
             Self {
                 kind,
                 capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(capacity)),
+                execution: None,
                 sender,
                 max_queue_age,
                 metrics,
@@ -6113,11 +6131,7 @@ impl WebSocketIsolatedCommandLane {
 
     fn full_error(&self, command_id: String) -> ServerResponse {
         match self.kind {
-            WebSocketIsolatedCommandLaneKind::AssetImport => ServerResponse::error(
-                command_id,
-                "screen-import-busy",
-                "An image is already being imported. Wait for it to finish, then try again.",
-            ),
+            WebSocketIsolatedCommandLaneKind::AssetImport => asset_import_busy_error(command_id),
             WebSocketIsolatedCommandLaneKind::Observation => ServerResponse::error(
                 command_id,
                 "observation-lane-full",
@@ -6142,6 +6156,7 @@ impl WebSocketIsolatedCommandLane {
 
 struct WebSocketLaneAdmissionGuard {
     _capacity_permit: tokio::sync::OwnedSemaphorePermit,
+    _execution_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     account_refresh_pending: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     _operator_mutation: Option<WebSocketOperatorMutationGuard>,
     live_control_order: Option<WebSocketOperatorMutationGuard>,
@@ -6161,6 +6176,7 @@ struct WebSocketQueuedLaneCommand {
     dispatch_deadline: tokio::time::Instant,
     queue_ticket: WebSocketQueueTicket,
     dispatch_fence: Option<WebSocketCommandDispatchFence>,
+    execution: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     _admission: WebSocketLaneAdmissionGuard,
 }
 
@@ -6295,11 +6311,11 @@ impl WebSocketIsolatedCommandLanes {
     ) -> (Self, WebSocketIsolatedCommandLaneReceivers) {
         let (mut asset_import, asset_import_rx) = WebSocketIsolatedCommandLane::new(
             WebSocketIsolatedCommandLaneKind::AssetImport,
-            1,
+            WEBSOCKET_ASSET_IMPORT_LANE_QUEUE_CAPACITY,
             WEBSOCKET_ORDERED_MAX_QUEUE_AGE,
             transport.register_command_lane("assetImport"),
         );
-        asset_import.capacity = import_capacity;
+        asset_import.execution = Some(import_capacity);
         let (observation, observation_rx) = WebSocketIsolatedCommandLane::new(
             WebSocketIsolatedCommandLaneKind::Observation,
             WEBSOCKET_OBSERVATION_LANE_QUEUE_CAPACITY,
@@ -6819,8 +6835,10 @@ fn try_enqueue_websocket_lane_command(
         dispatch_deadline,
         queue_ticket,
         dispatch_fence,
+        execution: lane.execution.clone(),
         _admission: WebSocketLaneAdmissionGuard {
             _capacity_permit: capacity_permit,
+            _execution_permit: None,
             account_refresh_pending,
             _operator_mutation: operator_mutation,
             live_control_order,
@@ -6970,9 +6988,38 @@ async fn run_websocket_command_lane_worker(
                     dispatch_deadline,
                     queue_ticket,
                     dispatch_fence,
-                    _admission,
+                    execution,
+                    mut _admission,
                     ..
                 } = command;
+                // Issue #1063: an import waits for the one process-wide import
+                // turn (a starter sound may hold it) inside its queue age; one
+                // that never gets it is told the import slot was busy.
+                if let Some(execution) = execution {
+                    match tokio::time::timeout_at(dispatch_deadline, execution.acquire_owned())
+                        .await
+                    {
+                        Ok(Ok(permit)) => _admission._execution_permit = Some(permit),
+                        Ok(Err(_)) | Err(_) => {
+                            lane_metrics.record_expired_before_dispatch();
+                            warn_command_expired_before_dispatch(
+                                websocket_lane_label(&text),
+                                &text,
+                                Some(queue_ticket.queued_for(std::time::Instant::now())),
+                                "execution turn",
+                            );
+                            drop(_admission);
+                            let _ = queue_websocket_response(
+                                &response_tx,
+                                &response_metrics,
+                                &response_pressure,
+                                asset_import_busy_error(command_id),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
                 let order_ready = match _admission.live_control_order.as_ref() {
                     Some(order) => {
                         tokio::time::timeout_at(dispatch_deadline, order.wait_for_turn())
@@ -18161,11 +18208,11 @@ mod tests {
             .unwrap()
             .forget();
         // Every request below must reply BEFORE the optimizer is released.
-        // Includes the same socket's ordered controls and another socket.
+        // Includes the same socket's ordered controls and another socket. A
+        // second import waits its turn instead (issue #1063, tested below).
         let result = async {
             for (tx, rx, metrics) in &mut clients {
                 for method in [
-                    "screens.importImage",
                     "health.ping",
                     "screens.activate",
                     "screens.clear",
@@ -18191,11 +18238,7 @@ mod tests {
                     metrics.reliable_response_queue.record_dequeue_oldest();
                     let response: serde_json::Value = serde_json::from_str(&text).unwrap();
                     assert_eq!(response["id"], method);
-                    if method == "screens.importImage" {
-                        assert_eq!(response["error"]["code"], "screen-import-busy");
-                    } else {
-                        assert_eq!(response["ok"], true, "{response}");
-                    }
+                    assert_eq!(response["ok"], true, "{response}");
                 }
             }
             Ok::<(), String>(())
@@ -18274,13 +18317,11 @@ mod tests {
             .unwrap()
             .forget();
         // Every request below must reply BEFORE the decode is released. A
-        // second import of either kind shares the one import slot and is
-        // refused at once instead of queueing behind it.
+        // second import of either kind shares the one import turn and waits
+        // for it (issue #1063, tested below).
         let result = async {
             for (tx, rx, metrics) in &mut clients {
                 for method in [
-                    "banners.importImage",
-                    "screens.importImage",
                     "health.ping",
                     "banners.show",
                     "banners.hide",
@@ -18305,11 +18346,7 @@ mod tests {
                     metrics.reliable_response_queue.record_dequeue_oldest();
                     let response: serde_json::Value = serde_json::from_str(&text).unwrap();
                     assert_eq!(response["id"], method);
-                    if method.ends_with(".importImage") {
-                        assert_eq!(response["error"]["code"], "screen-import-busy");
-                    } else {
-                        assert_eq!(response["ok"], true, "{response}");
-                    }
+                    assert_eq!(response["ok"], true, "{response}");
                 }
             }
             Ok::<(), String>(())
@@ -18325,6 +18362,238 @@ mod tests {
         }
         result.unwrap();
         assert_eq!(entered.available_permits(), 0);
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    type TestImportClient = (
+        mpsc::Sender<WebSocketAcceptedCommand>,
+        mpsc::Receiver<Message>,
+        crate::state::WebSocketConnectionTransportMetrics,
+    );
+
+    /// Sockets whose imports hold the handler open until `release` gets a
+    /// permit, recording which import entered and the most that ran at once.
+    fn spawn_test_import_clients(
+        state: &AppState,
+        count: usize,
+        entered: std::sync::Arc<tokio::sync::Semaphore>,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+        log: std::sync::Arc<std::sync::Mutex<(Vec<String>, usize, usize)>>,
+    ) -> (Vec<TestImportClient>, Vec<tokio::task::JoinHandle<()>>) {
+        let handler: WebSocketCommandHandler = std::sync::Arc::new(move |_state, text| {
+            let entered = entered.clone();
+            let release = release.clone();
+            let log = log.clone();
+            Box::pin(async move {
+                let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                if websocket_isolated_command_lane(&text)
+                    == Some(WebSocketIsolatedCommandLaneKind::AssetImport)
+                {
+                    {
+                        let mut log = log.lock().unwrap();
+                        log.0.push(command.id.clone());
+                        log.1 += 1;
+                        log.2 = log.2.max(log.1);
+                    }
+                    entered.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    log.lock().unwrap().1 -= 1;
+                }
+                ServerResponse::ok(command.id, json!({}))
+            })
+        });
+        let mut clients = Vec::new();
+        let mut dispatchers = Vec::new();
+        for _ in 0..count {
+            let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+            let connection = transport.register_connection();
+            let (tx, rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+            let (out_tx, out_rx) = mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+            let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+            dispatchers.push(tokio::spawn(run_websocket_command_dispatcher(
+                state.clone(),
+                rx,
+                connection.incoming_command_queue.clone(),
+                out_tx,
+                connection.reliable_response_queue.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler.clone(),
+            )));
+            clients.push((tx, out_rx, connection));
+        }
+        (clients, dispatchers)
+    }
+
+    async fn send_test_import(state: &AppState, client: &TestImportClient, id: &str, method: &str) {
+        send_test_websocket_command(
+            state,
+            &client.0,
+            &client.2.incoming_command_queue,
+            json!({"id": id, "method": method, "params": {}}).to_string(),
+        )
+        .await;
+    }
+
+    async fn wait_test_import_entered(entered: &tokio::sync::Semaphore) {
+        timeout(Duration::from_secs(2), entered.acquire())
+            .await
+            .expect("import entered its handler")
+            .unwrap()
+            .forget();
+    }
+
+    async fn recv_test_import_response(
+        client: &mut TestImportClient,
+        within: Duration,
+    ) -> Option<serde_json::Value> {
+        let Message::Text(text) = timeout(within, client.1.recv()).await.ok()?? else {
+            panic!("response")
+        };
+        client.2.reliable_response_queue.record_dequeue_oldest();
+        Some(serde_json::from_str(&text).unwrap())
+    }
+
+    /// Issue #1063: on a fresh profile the renderer seeds starter sounds
+    /// through `sounds.import`. An image import sent meanwhile, from that
+    /// socket or another, waits for the import turn and then runs; it is
+    /// never refused, and imports still run one at a time.
+    #[tokio::test]
+    async fn websocket_image_import_waits_behind_a_sound_import_then_runs() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let log = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), 0, 0)));
+        let (mut clients, dispatchers) =
+            spawn_test_import_clients(&state, 2, entered.clone(), release.clone(), log.clone());
+
+        send_test_import(&state, &clients[0], "starter", "sounds.import").await;
+        wait_test_import_entered(&entered).await;
+        send_test_import(&state, &clients[1], "banner", "banners.importImage").await;
+        send_test_import(&state, &clients[0], "takeover", "screens.importImage").await;
+        for client in &mut clients {
+            assert_eq!(
+                recv_test_import_response(client, Duration::from_millis(300)).await,
+                None,
+                "an import behind the starter sound waits instead of being refused"
+            );
+        }
+        assert_eq!(entered.available_permits(), 0);
+
+        for (client, id) in [(0, "starter"), (1, "banner"), (0, "takeover")] {
+            release.add_permits(1);
+            let response = recv_test_import_response(&mut clients[client], Duration::from_secs(2))
+                .await
+                .unwrap_or_else(|| panic!("{id} replied"));
+            assert_eq!(response["id"], id);
+            assert_eq!(response["ok"], true, "{response}");
+            if id != "takeover" {
+                wait_test_import_entered(&entered).await;
+            }
+        }
+
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let log = log.lock().unwrap();
+        assert_eq!(log.0, ["starter", "banner", "takeover"]);
+        assert_eq!(log.2, 1, "imports still run one at a time");
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    /// Issue #1063: the queue is bounded. Past it an import is refused at
+    /// once, in copy that does not blame an image import that isn't running.
+    #[tokio::test]
+    async fn websocket_asset_import_queue_overflow_is_refused_as_busy() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let log = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), 0, 0)));
+        let (mut clients, dispatchers) =
+            spawn_test_import_clients(&state, 1, entered.clone(), release.clone(), log.clone());
+        let client = &mut clients[0];
+
+        send_test_import(&state, client, "starter", "sounds.import").await;
+        wait_test_import_entered(&entered).await;
+        let queued = ["banner", "takeover", "sound"];
+        for (id, method) in queued.iter().zip([
+            "banners.importImage",
+            "screens.importImage",
+            "sounds.import",
+        ]) {
+            send_test_import(&state, client, id, method).await;
+        }
+        assert_eq!(
+            recv_test_import_response(client, Duration::from_millis(300)).await,
+            None
+        );
+        send_test_import(&state, client, "overflow", "screens.importImage").await;
+        let refused = recv_test_import_response(client, Duration::from_secs(2))
+            .await
+            .expect("overflow refused at once");
+        assert_eq!(refused["id"], "overflow");
+        assert_eq!(refused["error"]["code"], "screen-import-busy");
+        assert_eq!(refused["error"]["message"], ASSET_IMPORT_BUSY_MESSAGE);
+
+        release.add_permits(1 + queued.len());
+        for id in std::iter::once("starter").chain(queued) {
+            let response = recv_test_import_response(client, Duration::from_secs(2))
+                .await
+                .unwrap_or_else(|| panic!("{id} replied"));
+            assert_eq!(response["id"], id);
+            assert_eq!(response["ok"], true, "{response}");
+        }
+
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(log.lock().unwrap().2, 1);
+        assert_eq!(state.screen_import_capacity.available_permits(), 1);
+    }
+
+    /// Issue #1063: an import that waits out its queue age without getting
+    /// the import turn is refused as busy and never reaches the handler.
+    #[tokio::test]
+    async fn websocket_asset_import_that_never_gets_its_turn_is_refused_as_busy() {
+        let state = test_state();
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let log = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), 0, 0)));
+        let (mut clients, dispatchers) =
+            spawn_test_import_clients(&state, 1, entered, release, log.clone());
+        let held = state
+            .screen_import_capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+
+        send_test_import(&state, &clients[0], "banner", "banners.importImage").await;
+        let refused = recv_test_import_response(
+            &mut clients[0],
+            WEBSOCKET_ORDERED_MAX_QUEUE_AGE + Duration::from_secs(3),
+        )
+        .await
+        .expect("refused after its queue age");
+        assert_eq!(refused["id"], "banner");
+        assert_eq!(refused["error"]["code"], "screen-import-busy");
+        assert!(log.lock().unwrap().0.is_empty());
+
+        drop(held);
+        drop(clients);
+        for dispatcher in dispatchers {
+            timeout(Duration::from_secs(3), dispatcher)
+                .await
+                .unwrap()
+                .unwrap();
+        }
         assert_eq!(state.screen_import_capacity.available_permits(), 1);
     }
 
