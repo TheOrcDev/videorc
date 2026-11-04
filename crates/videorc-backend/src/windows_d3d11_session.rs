@@ -5005,11 +5005,13 @@ mod tests {
         let zs: Vec<i32> = (0..6).map(windows_d3d11_banner_z_index).collect();
         assert_eq!(zs, vec![6, 7, 8, 9, 9, 9]);
         assert!(zs.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0);
-        assert!(
-            WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
-            "captions draw at z 10"
-        );
+        const { assert!(WINDOWS_D3D11_BANNER_Z_INDEX_BASE > 0) };
+        const {
+            assert!(
+                WINDOWS_D3D11_BANNER_Z_INDEX_TOP < 10,
+                "captions draw at z 10"
+            )
+        };
     }
 
     fn draws_on(

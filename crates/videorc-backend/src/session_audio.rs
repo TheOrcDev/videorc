@@ -1628,6 +1628,7 @@ struct AudioShared {
     #[cfg(test)]
     after_ramp: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     #[cfg(test)]
+    #[allow(clippy::type_complexity)]
     cancellation_input: Option<(u64, fn(&mut AudioTimeline))>,
     #[cfg(test)]
     mix_observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
@@ -3242,7 +3243,7 @@ impl MixWindowTrace {
             "availableFrames": available, "inspectedFramesPerChannel": covered,
             "missingFramesPerChannel": (to - from).saturating_sub(covered),
             "complete": omitted == 0 && covered == to - from,
-            "trailingUnpairedSample": samples.len() % 2 != 0
+            "trailingUnpairedSample": !samples.len().is_multiple_of(2)
         })
     }
 
@@ -8758,10 +8759,10 @@ mod tests {
                 task_count,
                 spawn_owner,
                 move |phase| {
-                    if phase == OwnerPhase::BeforeOpened {
-                        if let Some(tx) = opened_tx.lock().unwrap().take() {
-                            let _ = tx.send(());
-                        }
+                    if phase == OwnerPhase::BeforeOpened
+                        && let Some(tx) = opened_tx.lock().unwrap().take()
+                    {
+                        let _ = tx.send(());
                     }
                 },
                 Some(ReadinessPolicy {
@@ -8855,10 +8856,10 @@ mod tests {
                 task_count,
                 spawn_owner,
                 move |phase| {
-                    if phase == OwnerPhase::BeforeOpened {
-                        if let Some(tx) = opened_tx.lock().unwrap().take() {
-                            let _ = tx.send(());
-                        }
+                    if phase == OwnerPhase::BeforeOpened
+                        && let Some(tx) = opened_tx.lock().unwrap().take()
+                    {
+                        let _ = tx.send(());
                     }
                 },
                 Some(ReadinessPolicy {
@@ -12701,7 +12702,7 @@ mod mix_tests {
             PeakLimiter::default(),
         );
         assert_eq!(write.microphone, mixed.microphone);
-        assert!(write.microphone.iter().any(|sample| *sample == 1.0));
+        assert!(write.microphone.contains(&1.0));
         assert!(
             write
                 .written

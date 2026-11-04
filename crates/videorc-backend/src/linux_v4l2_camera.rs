@@ -56,9 +56,11 @@ impl Default for V4l2Roots {
 pub enum NodeAccess {
     Ok,
     PermissionDenied,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only a real node open says so
     Missing,
 }
 
+#[cfg(target_os = "linux")]
 pub fn node_access(path: &Path) -> NodeAccess {
     // Opening a V4L2 node does not start streaming, so this never contends
     // with a running capture.

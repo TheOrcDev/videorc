@@ -350,6 +350,7 @@ fn presign(
 
 /// The uploaded objects of a plan, checked by size and SHA-256 as the web's
 /// commit does; `Err` is the web's answer.
+#[allow(clippy::result_large_err, clippy::type_complexity)]
 fn committed_files(
     fake: &mut FakeLibraryState,
     upload_id: &str,

@@ -7260,6 +7260,7 @@ async fn run_synthetic_compositor_loop(
                             .as_ref()
                             .map(|source| f64::from(source.target_fps()))
                             .filter(|fps| fps.is_finite() && *fps > 0.0);
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let (mut camera_producer, exact_frameless_zombie) = if camera_is_consumed {
                             match preview_camera_restart_snapshot(&state).await {
                                 Some(snapshot) => {
@@ -7303,6 +7304,7 @@ async fn run_synthetic_compositor_loop(
                         } else {
                             (None, false)
                         };
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let mut camera_fresh_serves = fetch.camera_fresh_serves;
                         #[cfg(debug_assertions)]
                         if let Some(producer) = camera_producer.as_mut()
@@ -7328,6 +7330,7 @@ async fn run_synthetic_compositor_loop(
                             producer.frame_store_publications = stall.frame_store_publications;
                         }
                         let screen_is_consumed = capture_needs.screen;
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let (screen_target_fps, mut screen_producer) = if screen_is_consumed {
                             match preview_screen_restart_snapshot(&state).await {
                                 Some(snapshot) => {
@@ -7361,6 +7364,7 @@ async fn run_synthetic_compositor_loop(
                         } else {
                             (None, None)
                         };
+                        #[cfg_attr(not(debug_assertions), allow(unused_mut))] // the smoke fault below
                         let mut screen_fresh_serves = fetch.screen_fresh_serves;
                         #[cfg(debug_assertions)]
                         if let Some(producer) = screen_producer.as_mut()
@@ -15917,6 +15921,7 @@ mod tests {
         ));
         // Canvas (1, 1) is box (5, 3) -> source centre (2.25, 1.25): mostly
         // source (2, 1), a shade toward (3, 2).
+        #[allow(clippy::identity_op, reason = "row * stride + column names the pixel")]
         let centre = bytes[1 * 4 + 1];
         assert!(
             (i16::from(centre) - i16::from(expected_y(2, 1))).abs() <= 24,
@@ -18552,6 +18557,7 @@ mod tests {
         .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn set_latest_frame_evidence_for_scene(
         state: &AppState,
         sequence: u64,
@@ -25798,14 +25804,13 @@ mod program_leg_tests {
             );
             // Captions exist only in a session; their program is any leg,
             // so an aux-only bar needs the twin and a primary bar never does.
-            assert_eq!(
+            assert!(
                 preview_needs_program_leg(
                     session,
                     replay_only,
                     overlays(OverlayLegFlags::default_for_test(), (false, true)),
                     &none
                 ),
-                true,
                 "{name}: captions on the aux leg only"
             );
             assert!(!preview_needs_program_leg(

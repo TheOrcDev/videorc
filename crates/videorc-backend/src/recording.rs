@@ -8212,7 +8212,7 @@ impl Mp4FinalizationFault {
     fn after_workspace_create(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterWorkspaceCreate);
+            matches!(self, Self::AfterWorkspaceCreate)
         }
         #[cfg(not(test))]
         false
@@ -8221,7 +8221,7 @@ impl Mp4FinalizationFault {
     fn after_ffmpeg(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterFfmpeg);
+            matches!(self, Self::AfterFfmpeg)
         }
         #[cfg(not(test))]
         false
@@ -8230,7 +8230,7 @@ impl Mp4FinalizationFault {
     fn after_publication(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterPublication);
+            matches!(self, Self::AfterPublication)
         }
         #[cfg(not(test))]
         false
@@ -8239,7 +8239,7 @@ impl Mp4FinalizationFault {
     fn after_database_commit(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterDatabaseCommit);
+            matches!(self, Self::AfterDatabaseCommit)
         }
         #[cfg(not(test))]
         false
@@ -27769,6 +27769,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the std lock also serializes the sync lifecycle tests; this test owns its current-thread runtime, so the guard blocks no other task"
+    )]
     async fn shutdown_and_partial_start_share_signal_all_absolute_deadline_path() {
         let _serial = crate::encoder_bridge::ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -37651,8 +37655,7 @@ mod tests {
             let segment = position(&args, "segment");
             let ring_video = args[..segment]
                 .windows(2)
-                .filter(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
-                .last()
+                .rfind(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
                 .unwrap()[1]
                 .clone();
             assert_eq!(ring_video, format!("{recording_input}:v"));
@@ -44428,15 +44431,19 @@ mod tests {
             -STREAM_OUTPUT_AUDIO_ADVANCE_MS
         );
 
-        let mut tuned = AudioSettings::default();
-        tuned.microphone_sync_offset_ms = 80;
+        let tuned = AudioSettings {
+            microphone_sync_offset_ms: 80,
+            ..Default::default()
+        };
         assert_eq!(
             stream_output_audio_settings(&tuned).microphone_sync_offset_ms,
             80 - STREAM_OUTPUT_AUDIO_ADVANCE_MS
         );
 
-        let mut near_min = AudioSettings::default();
-        near_min.microphone_sync_offset_ms = MICROPHONE_SYNC_OFFSET_MIN_MS + 10;
+        let near_min = AudioSettings {
+            microphone_sync_offset_ms: MICROPHONE_SYNC_OFFSET_MIN_MS + 10,
+            ..Default::default()
+        };
         assert_eq!(
             stream_output_audio_settings(&near_min).microphone_sync_offset_ms,
             MICROPHONE_SYNC_OFFSET_MIN_MS
@@ -48575,9 +48582,11 @@ mod tests {
 
         #[test]
         fn the_bus_runs_the_system_audio_timing_only_where_it_can_mix() {
-            let mut audio = AudioSettings::default();
-            audio.microphone_sync_offset_ms = 120;
-            audio.system_audio_gain_db = -9.0;
+            let mut audio = AudioSettings {
+                microphone_sync_offset_ms: 120,
+                system_audio_gain_db: -9.0,
+                ..Default::default()
+            };
             let capable = session_audio_options(&audio, true);
             assert_eq!(
                 capable.playout_delay,
@@ -48661,8 +48670,10 @@ mod tests {
         fn moving_a_positive_offset_into_the_bus_keeps_every_leg_timing() {
             for offset in (MICROPHONE_SYNC_OFFSET_MIN_MS..=MICROPHONE_SYNC_OFFSET_MAX_MS).step_by(5)
             {
-                let mut audio = AudioSettings::default();
-                audio.microphone_sync_offset_ms = offset;
+                let audio = AudioSettings {
+                    microphone_sync_offset_ms: offset,
+                    ..Default::default()
+                };
                 let split = session_audio_sync(&audio, true).unwrap();
                 let bus_delay_ms = (split.microphone_delay_frames / 48) as i32;
                 assert_eq!(split.microphone_delay_frames % 48, 0);
@@ -48919,8 +48930,10 @@ mod tests {
                 let mut buffer = [0_u8; 16_384];
                 while matches!(file.read(&mut buffer), Ok(read) if read > 0) {}
             });
-            let mut audio = AudioSettings::default();
-            audio.system_audio_enabled = false;
+            let audio = AudioSettings {
+                system_audio_enabled: false,
+                ..Default::default()
+            };
             let session_audio = crate::session_audio::attach_prepared_with(
                 None,
                 path,
@@ -49086,8 +49099,10 @@ mod tests {
         async fn start_on_joins_after_publication_and_start_off_opens_nothing() {
             let session = live_session("system-audio-start-on").await;
             let mut events = session.state.events.subscribe();
-            let mut off = AudioSettings::default();
-            off.system_audio_enabled = false;
+            let off = AudioSettings {
+                system_audio_enabled: false,
+                ..Default::default()
+            };
             {
                 let recording = session.state.recording.lock().await;
                 request_initial_system_audio(recording.as_ref().unwrap(), &off);
@@ -49095,8 +49110,10 @@ mod tests {
             sleep(Duration::from_millis(100)).await;
             assert_eq!(session.fake.opens(), 0, "Off means not captured at all");
 
-            let mut on = AudioSettings::default();
-            on.system_audio_enabled = true;
+            let on = AudioSettings {
+                system_audio_enabled: true,
+                ..Default::default()
+            };
             {
                 let recording = session.state.recording.lock().await;
                 request_initial_system_audio(recording.as_ref().unwrap(), &on);

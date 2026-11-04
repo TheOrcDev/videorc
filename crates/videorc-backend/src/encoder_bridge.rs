@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Write as StdWrite};
 use std::path::{Path, PathBuf};
+#[cfg(any(test, debug_assertions))]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -10,11 +11,17 @@ use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+#[cfg(any(test, debug_assertions))]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(any(test, debug_assertions))]
 use tokio::process::Command;
-use tokio::sync::{Mutex, oneshot, watch};
+#[cfg(any(test, debug_assertions))]
+use tokio::sync::Mutex;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle as TokioJoinHandle;
-use tokio::time::{Duration, MissedTickBehavior};
+use tokio::time::Duration;
+#[cfg(any(test, debug_assertions))]
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 #[cfg(target_os = "windows")]
@@ -29,17 +36,21 @@ use crate::diagnostics::{
     EncoderBridgeDiagnosticSnapshot, apply_encoder_bridge_stats,
     apply_runtime_diagnostics_snapshot, starting_diagnostics,
 };
+#[cfg(any(test, debug_assertions))]
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::FrameHandle;
 use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 #[cfg(target_os = "windows")]
 use crate::preview_camera::PreviewCameraFrameSource;
 use crate::preview_screen::PreviewScreenD3D11FrameSource;
+#[cfg(any(test, debug_assertions))]
 use crate::process_job::spawn_owned_tokio;
 use crate::protocol::{
     DiagnosticStats, EncoderBridgeRoleDiagnosticStats, EncoderBridgeRoleOutputPressureStats,
-    EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult, HealthLevel,
+    HealthLevel,
 };
+#[cfg(any(test, debug_assertions))]
+use crate::protocol::{EncoderBridgeSyntheticParams, EncoderBridgeSyntheticResult};
 #[cfg(target_os = "windows")]
 use crate::scene_geometry::{PixelRect, SceneCrop, SceneMask};
 use crate::state::AppState;
@@ -1397,6 +1408,7 @@ impl Default for EncoderBridgeDiagnosticsContext {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EncoderBridgeSettings {
     ffmpeg_path: String,
@@ -1408,6 +1420,7 @@ struct EncoderBridgeSettings {
     bitrate_kbps: u32,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Default, Clone)]
 struct EncoderBridgeProgress {
     encoded_fps: Option<f64>,
@@ -2846,6 +2859,7 @@ impl EncoderBridgeShutdownBatch {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 pub async fn run_synthetic_encoder_bridge(
     state: AppState,
     params: EncoderBridgeSyntheticParams,
@@ -3323,6 +3337,7 @@ pub fn start_synthetic_recording_bridge(
     })
 }
 
+#[cfg(any(test, debug_assertions))]
 impl EncoderBridgeSettings {
     fn from_params(params: EncoderBridgeSyntheticParams) -> Result<Self> {
         let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path);
@@ -3362,6 +3377,7 @@ impl EncoderBridgeSettings {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn encoder_bridge_ffmpeg_args(settings: &EncoderBridgeSettings) -> Vec<String> {
     vec![
         "-y".to_string(),
@@ -3398,6 +3414,7 @@ fn encoder_bridge_ffmpeg_args(settings: &EncoderBridgeSettings) -> Vec<String> {
     ]
 }
 
+#[cfg(any(test, debug_assertions))]
 fn render_synthetic_rgba_frame(frame: &SyntheticCompositorFrame, bytes: &mut [u8]) {
     let width = frame.width as usize;
     let height = frame.height as usize;
@@ -3464,6 +3481,7 @@ fn render_synthetic_yuv420p_frame(frame: &SyntheticCompositorFrame, bytes: &mut 
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn raw_rgba_len(width: u32, height: u32) -> Result<usize> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
@@ -3920,21 +3938,22 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // first loop tries to catch up the setup delay by immediately re-feeding
     // one compositor frame, creating a visible startup freeze.
     #[cfg(test)]
-    if start_barrier.is_some() && {
-        let role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE")
-            .unwrap_or_else(|_| "camera".into());
-        let path = fifo_path.to_string_lossy();
-        match role.as_str() {
-            "screen" => path.contains("iso-screen-"),
-            "combined" => !path.contains("iso-"),
-            _ => path.contains("iso-camera-"),
-        }
-    } {
-        if let Ok(delay) = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS") {
-            // Deliberate fault injection, not a readiness handshake.
-            if let Ok(delay) = delay.parse::<u64>() {
-                thread::sleep(Duration::from_millis(delay.min(1000)));
+    if start_barrier.is_some()
+        && {
+            let role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE")
+                .unwrap_or_else(|_| "camera".into());
+            let path = fifo_path.to_string_lossy();
+            match role.as_str() {
+                "screen" => path.contains("iso-screen-"),
+                "combined" => !path.contains("iso-"),
+                _ => path.contains("iso-camera-"),
             }
+        }
+        && let Ok(delay) = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS")
+    {
+        // Deliberate fault injection, not a readiness handshake.
+        if let Ok(delay) = delay.parse::<u64>() {
+            thread::sleep(Duration::from_millis(delay.min(1000)));
         }
     }
     let (clock_start, mut initial_frame) = if let Some(barrier) = start_barrier.as_ref() {
@@ -8182,6 +8201,7 @@ fn emit_encoder_bridge_diagnostics_from_thread(
     });
 }
 
+#[cfg(any(test, debug_assertions))]
 async fn read_encoder_progress(
     stderr: tokio::process::ChildStderr,
     progress: Arc<Mutex<EncoderBridgeProgress>>,
@@ -8208,6 +8228,7 @@ async fn read_encoder_progress(
     progress.lock().await.clone()
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Default, PartialEq)]
 struct EncoderProgressUpdate {
     encoded_fps: Option<f64>,
@@ -8215,6 +8236,7 @@ struct EncoderProgressUpdate {
     dropped_frames: Option<u64>,
 }
 
+#[cfg(any(test, debug_assertions))]
 fn parse_encoder_progress_line(line: &str) -> Option<EncoderProgressUpdate> {
     let update = EncoderProgressUpdate {
         encoded_fps: parse_stat_f64(line, "fps="),
@@ -8231,6 +8253,7 @@ fn parse_encoder_progress_line(line: &str) -> Option<EncoderProgressUpdate> {
     Some(update)
 }
 
+#[cfg(any(test, debug_assertions))]
 fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
     let value = stat_value(line, label)?
         .trim_end_matches('x')
@@ -8239,10 +8262,12 @@ fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
     (value.is_finite() && value >= 0.0).then_some(value)
 }
 
+#[cfg(any(test, debug_assertions))]
 fn parse_stat_u64(line: &str, label: &str) -> Option<u64> {
     stat_value(line, label)?.parse::<u64>().ok()
 }
 
+#[cfg(any(test, debug_assertions))]
 fn stat_value<'line>(line: &'line str, label: &str) -> Option<&'line str> {
     let start = line.find(label)? + label.len();
     let tail = &line[start..];
@@ -8254,6 +8279,7 @@ fn stat_value<'line>(line: &'line str, label: &str) -> Option<&'line str> {
     }
 }
 
+#[cfg(any(test, debug_assertions))]
 fn is_ffmpeg_error_line(line: &str) -> bool {
     let normalized = line.to_lowercase();
     normalized.contains("error") || normalized.contains("failed") || normalized.contains("invalid")
@@ -8922,6 +8948,7 @@ fn p95_ms(values: &[f64]) -> Option<f64> {
     Some(sorted[index])
 }
 
+#[cfg(any(test, debug_assertions))]
 fn frame_count(duration_ms: u64, fps: u32) -> u64 {
     duration_ms
         .saturating_mul(u64::from(fps))
@@ -9466,6 +9493,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the std lock also serializes the sync lifecycle tests; this test owns its current-thread runtime, so the guard blocks no other task"
+    )]
     async fn shutdown_batch_signals_both_bridges_and_shares_one_absolute_deadline() {
         let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -9600,6 +9631,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the std lock also serializes the sync lifecycle tests; this test owns its current-thread runtime, so the guard blocks no other task"
+    )]
     async fn encoder_bridge_lifecycle_start_admission_refuses_live_resource() {
         let _serial = ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -10257,7 +10292,8 @@ mod tests {
                 ),
                 EncoderBridgePreEncodeAdmission::FailOutput
             );
-            for role in [EncoderBridgeOutputRole::Stream] {
+            {
+                let role = EncoderBridgeOutputRole::Stream;
                 let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
                     role,
                     ..Default::default()
@@ -13822,12 +13858,8 @@ mod tests {
         let y_len = 32 * 24;
         let uv_len = 16 * 12;
         assert_eq!(bytes.len(), y_len + uv_len * 2);
-        assert!(bytes[..y_len].iter().any(|value| *value == 235));
-        assert!(
-            bytes[y_len..y_len + uv_len]
-                .iter()
-                .any(|value| *value == 60)
-        );
+        assert!(bytes[..y_len].contains(&235));
+        assert!(bytes[y_len..y_len + uv_len].contains(&60));
     }
 
     #[test]
@@ -13939,11 +13971,7 @@ mod tests {
         }
 
         let timeline = interval * frames as u32;
-        let drift = if timeline > wall {
-            timeline - wall
-        } else {
-            wall - timeline
-        };
+        let drift = timeline.abs_diff(wall);
         assert!(
             drift <= Duration::from_millis(100),
             "video timeline drifted {}ms from wall clock over 60s (frames {frames})",

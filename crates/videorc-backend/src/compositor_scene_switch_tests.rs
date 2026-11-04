@@ -851,7 +851,7 @@ async fn a_swap_while_hidden_cuts_to_a_frosted_still_never_the_live_window() {
     let stripes = || {
         let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
         for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
-            let value = if (index % WIDTH as usize) / 2 % 2 == 0 {
+            let value = if ((index % WIDTH as usize) / 2).is_multiple_of(2) {
                 255
             } else {
                 0
@@ -941,7 +941,7 @@ async fn a_hide_during_an_in_flight_swap_never_keeps_the_previous_window_live() 
     let stripes = |phase: usize| {
         let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
         for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
-            let value = if ((index % WIDTH as usize) / 2 + phase) % 2 == 0 {
+            let value = if ((index % WIDTH as usize) / 2 + phase).is_multiple_of(2) {
                 255
             } else {
                 0
@@ -2302,7 +2302,7 @@ async fn hidden_screen_frost_reaches_every_leg() {
     let stripes = || {
         let mut bytes = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
         for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
-            let value = if (index % WIDTH as usize) / 2 % 2 == 0 {
+            let value = if ((index % WIDTH as usize) / 2).is_multiple_of(2) {
                 255
             } else {
                 0
