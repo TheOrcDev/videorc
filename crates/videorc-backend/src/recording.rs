@@ -10518,6 +10518,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     let mut ticker = tokio::time::interval(NATIVE_AUDIO_SAMPLE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
+    let mut audio_output_failure_reported = false;
     let mut microphone_generation = 0;
     let microphone_reopen_attempts = Arc::new(AtomicU32::new(0));
     loop {
@@ -10542,6 +10543,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             system_audio_sample(active),
                             observation.recoveries,
                             observation.output_stalls,
+                            active.stop_requested,
                         )
                     })
                 }
@@ -10562,10 +10564,30 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             system_audio,
             recoveries,
             output_stalls,
+            stop_requested,
         )) = counters
         else {
             return;
         };
+
+        // The bus gave up writing PCM because FFmpeg stopped reading it for
+        // its 5 s write deadline (2026-11-03 Iris Xe take: 2.8 s of
+        // microphone, then a silent take that reported nothing). It does not
+        // come back within this session, so say it once, as an error.
+        if audio_transport_failed_mid_session(input_state, stop_requested)
+            && !audio_output_failure_reported
+        {
+            audio_output_failure_reported = true;
+            let message = audio_output_failed_message(capture_elapsed_secs);
+            state.emit_log("error", &message);
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Error,
+                AUDIO_OUTPUT_FAILED_CODE,
+                &message,
+            );
+        }
 
         // Plan 069: a system-audio stream the platform stopped mid-session.
         // The bus already ramped it out; the session keeps its microphone.
@@ -10758,6 +10780,27 @@ fn emit_audio_output_stalled_health_event(
 }
 
 const AUDIO_OUTPUT_STALLED_CODE: &str = "audio-output-stalled";
+
+pub(crate) const AUDIO_OUTPUT_FAILED_CODE: &str = "audio-output-failed";
+
+/// The session audio bus ends with `DownstreamClosed` only when FFmpeg
+/// stopped taking its PCM and the session was not stopping; a stop marks it
+/// `Stopped` instead.
+fn audio_transport_failed_mid_session(
+    input_state: NativeAudioInputState,
+    stop_requested: bool,
+) -> bool {
+    input_state == NativeAudioInputState::DownstreamClosed && !stop_requested
+}
+
+fn audio_output_failed_message(elapsed_secs: Option<f64>) -> String {
+    let when = elapsed_secs
+        .map(|secs| format!(" after {secs:.1} seconds"))
+        .unwrap_or_default();
+    format!(
+        "Recording audio stopped{when}: the encoder stopped accepting sound because this computer could not keep up, so the rest of this take is silent. Stop and record again, at a lower resolution or with the Auto encoder in Settings."
+    )
+}
 
 fn audio_output_stalled_message(report: &crate::session_audio::OutputStallReport) -> String {
     format!(
@@ -26302,6 +26345,129 @@ pub(crate) fn publish_stream_output_failure_if_active(
         STREAM_OUTPUT_FAILED_CODE,
         &stream_output_failed_message(stream_error),
     );
+}
+
+pub(crate) const RECORDING_OUTPUT_FAILED_CODE: &str = "recording-output-failed";
+
+/// What a running session does when its recording writer has died.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingOutputFailureAction {
+    /// Not this session's business: stopping already, a performance check
+    /// (which owns its own stop), a Clips-only ring, or no terminal failure.
+    Ignore,
+    /// A separate, healthy stream leg is live: say the recording died and
+    /// keep the stream on air.
+    AnnounceKeepStreaming,
+    /// Nothing else is being produced: say so and end the take, so the file
+    /// up to the failure is recovered instead of the session recording
+    /// nothing until the user presses Stop.
+    EndTake,
+}
+
+fn recording_output_failure_action(
+    stop_requested: bool,
+    performance_check: bool,
+    replay_only: bool,
+    recording_terminal_failure: bool,
+    healthy_stream_leg: bool,
+) -> RecordingOutputFailureAction {
+    if stop_requested || performance_check || replay_only || !recording_terminal_failure {
+        RecordingOutputFailureAction::Ignore
+    } else if healthy_stream_leg {
+        RecordingOutputFailureAction::AnnounceKeepStreaming
+    } else {
+        RecordingOutputFailureAction::EndTake
+    }
+}
+
+fn recording_output_failed_message(error: &str, ending_take: bool) -> String {
+    if ending_take {
+        format!(
+            "Recording stopped: the video encoder stopped accepting frames ({error}), so Videorc ended the take. The recording up to this point is being saved. This computer could not keep up with the selected output; try a lower resolution or the Auto encoder in Settings."
+        )
+    } else {
+        format!(
+            "Recording stopped: the video encoder stopped accepting frames ({error}). Your stream is still live; the recording up to this point will be saved when you stop."
+        )
+    }
+}
+
+/// The session whose dead recording output was already announced.
+static RECORDING_OUTPUT_FAILURE_ANNOUNCED: StdMutex<Option<String>> = StdMutex::new(None);
+
+fn announce_recording_output_failure_once(session_id: &str) -> bool {
+    let mut announced = RECORDING_OUTPUT_FAILURE_ANNOUNCED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if announced.as_deref() == Some(session_id) {
+        return false;
+    }
+    *announced = Some(session_id.to_string());
+    true
+}
+
+/// The recording leg's writer gave up mid-take (2026-11-03 Iris Xe bundle:
+/// "Encoder FIFO write exceeded the complete-frame delivery budget" at
+/// 1:35). Until now nothing reacted: the session kept "recording" with no
+/// video for 47 s, then Stop waited 18 s on FFmpeg and forced it. Announce
+/// it when it happens, and end the take unless a healthy stream is on air.
+pub(crate) fn handle_recording_output_failure_if_active(state: &AppState, session_id: &str) {
+    let (action, failure) = {
+        let Ok(recording) = state.recording.try_lock() else {
+            return;
+        };
+        let Some(active) = recording
+            .as_ref()
+            .filter(|active| active.session_id == session_id)
+        else {
+            return;
+        };
+        let failure = active.recording_bridge_terminal_failure();
+        let healthy_stream_leg = active.encoder_bridge_stream.is_some()
+            && active.stream_bridge_terminal_failure().is_none();
+        (
+            recording_output_failure_action(
+                active.stop_requested,
+                active.performance_check,
+                active.replay_only,
+                failure.is_some(),
+                healthy_stream_leg,
+            ),
+            failure,
+        )
+    };
+    let Some(failure) = failure else {
+        return;
+    };
+    if action == RecordingOutputFailureAction::Ignore
+        || !announce_recording_output_failure_once(session_id)
+    {
+        return;
+    }
+    let ending_take = action == RecordingOutputFailureAction::EndTake;
+    tracing::error!(
+        session_id,
+        failure = failure.as_str(),
+        ending_take,
+        "recording output stopped mid-session"
+    );
+    let message = recording_output_failed_message(&failure, ending_take);
+    state.emit_log("error", &message);
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Error,
+        RECORDING_OUTPUT_FAILED_CODE,
+        &message,
+    );
+    if ending_take {
+        let stop_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = stop_recording(stop_state).await {
+                tracing::warn!("Ending the take after a dead recording output failed: {error:#}");
+            }
+        });
+    }
 }
 
 async fn publish_ffmpeg_health_event_if_active(state: &AppState, session_id: &str, message: &str) {
@@ -42620,6 +42786,77 @@ mod tests {
             Some("recording raw-video encoder output stopped: FIFO timed out"),
             None
         ));
+    }
+
+    #[test]
+    fn a_dead_recording_output_ends_the_take_unless_a_stream_is_on_air() {
+        use RecordingOutputFailureAction::*;
+        // The 2026-11-03 Iris Xe take: record-only, writer gave up.
+        assert_eq!(
+            recording_output_failure_action(false, false, false, true, false),
+            EndTake
+        );
+        // Record + a separate healthy stream leg: the stream stays live.
+        assert_eq!(
+            recording_output_failure_action(false, false, false, true, true),
+            AnnounceKeepStreaming
+        );
+        // Already stopping, a performance check, Clips only, or no terminal
+        // failure (a writer that only saw FFmpeg exit): nothing to do here.
+        for (stop, check, replay, failed) in [
+            (true, false, false, true),
+            (false, true, false, true),
+            (false, false, true, true),
+            (false, false, false, false),
+        ] {
+            assert_eq!(
+                recording_output_failure_action(stop, check, replay, failed, false),
+                Ignore,
+                "stop={stop} check={check} replay={replay} failed={failed}"
+            );
+        }
+        let ending = recording_output_failed_message("FIFO timed out", true);
+        assert!(ending.contains("ended the take"), "{ending}");
+        assert!(ending.contains("FIFO timed out"), "{ending}");
+        let streaming = recording_output_failed_message("FIFO timed out", false);
+        assert!(streaming.contains("stream is still live"), "{streaming}");
+    }
+
+    #[test]
+    fn a_closed_audio_transport_is_an_error_only_when_not_stopping() {
+        assert!(audio_transport_failed_mid_session(
+            NativeAudioInputState::DownstreamClosed,
+            false
+        ));
+        assert!(!audio_transport_failed_mid_session(
+            NativeAudioInputState::DownstreamClosed,
+            true
+        ));
+        for state in [
+            NativeAudioInputState::Starting,
+            NativeAudioInputState::Live,
+            NativeAudioInputState::Silent,
+            NativeAudioInputState::SourceLost,
+            NativeAudioInputState::Stopped,
+        ] {
+            assert!(
+                !audio_transport_failed_mid_session(state, false),
+                "{state:?}"
+            );
+        }
+        let message = audio_output_failed_message(Some(2.76));
+        assert!(message.contains("after 2.8 seconds"), "{message}");
+        assert!(message.contains("rest of this take is silent"), "{message}");
+        assert!(!audio_output_failed_message(None).contains("after"));
+    }
+
+    #[test]
+    fn a_dead_recording_output_is_announced_once_per_session() {
+        let session = format!("announce-{}", Uuid::new_v4());
+        assert!(announce_recording_output_failure_once(&session));
+        assert!(!announce_recording_output_failure_once(&session));
+        let next = format!("announce-{}", Uuid::new_v4());
+        assert!(announce_recording_output_failure_once(&next));
     }
 
     #[test]
