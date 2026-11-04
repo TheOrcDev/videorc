@@ -1,7 +1,11 @@
 RNNoise Rust implementation
 
-Repository: https://github.com/lovelace-labs/rnnoise-rs
-Revision: 74b46b1065630f68464ee60dd542e3ce175743db
+Repository: https://github.com/TheOrcDev/rnnoise-rs (branch videorc)
+Revision: c915940e94e2ec1ca07a1af22c769a33c3fb1ce6
+Upstream: https://github.com/lovelace-labs/rnnoise-rs
+Upstream revision: 74b46b1065630f68464ee60dd542e3ce175743db
+The fork adds one change: Cargo builds only the Rust library, not the C
+static and dynamic libraries.
 Cargo package: rnnoise-rs 0.1.0, default features disabled
 Runtime: pure Rust, default floating-point model, no C ABI
 
@@ -21,4 +25,4 @@ DSP files and headers. Each preserved header identifies its upstream filename;
 coverage includes FFT, pitch/LPC, denoising, neural-network kernels, model
 loading, and generated-table source.
 Source revision: https://github.com/xiph/rnnoise/tree/70f1d256acd4b34a572f999a05c87bf00b67730d
-Research and verification: docs/rnnoise-rust-research.md and docs/rnnoise.md
+Verification: docs/rnnoise.md
