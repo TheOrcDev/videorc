@@ -232,6 +232,21 @@ export function droppedFrameWindows(journal, windowMs) {
   return windows
 }
 
+/**
+ * Pure: did any leg drop or duplicate frames between two journal samples?
+ * Both counters are cumulative per leg; a leg new in `line` has lost nothing.
+ */
+export function lostFramesBetween(previous, line) {
+  const before = new Map((previous?.legs ?? []).map((leg) => [leg.targetId, leg]))
+  return (line?.legs ?? []).some((leg) => {
+    const prior = before.get(leg.targetId)
+    if (!prior) return false
+    return ['droppedFrames', 'duplicatedFrames'].some(
+      (key) => Number.isFinite(leg[key]) && Number.isFinite(prior[key]) && leg[key] > prior[key]
+    )
+  })
+}
+
 /** Pure: least-squares slope of `values` against their index. */
 export function slopePerIndex(values) {
   const n = values.length
@@ -461,12 +476,19 @@ export async function computeVerdict(
   // or no speed is a gap that ends a run, so a bad sample after it is not
   // counted from a good one before it. The charts, the minimum and the
   // median read only measured ones.
-  const bitrateSamples = samples.map((line) => ({
-    atMs: line.tsMs,
-    value: isLive(line)
-      ? (line.legs ?? []).reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0)
-      : null
-  }))
+  const bitrateSamples = samples.map((line, index) => {
+    const live = isLive(line)
+    const legs = line.legs ?? []
+    const fpsValues = live ? legs.map((leg) => leg.fps).filter(Number.isFinite) : []
+    const speeds = live ? legs.map((leg) => leg.speed).filter(Number.isFinite) : []
+    return {
+      atMs: line.tsMs,
+      value: live ? legs.reduce((sum, leg) => sum + (leg.bitrateKbps ?? 0), 0) : null,
+      fps: fpsValues.length ? Math.min(...fpsValues) : null,
+      speed: speeds.length ? Math.min(...speeds) : null,
+      lostFrames: index > 0 && lostFramesBetween(samples[index - 1], line)
+    }
+  })
   series.bitrate = bitrateSamples.filter((p) => p.value !== null)
   const speedSamples = samples.map((line) => {
     const speeds = isLive(line)
@@ -550,11 +572,26 @@ export async function computeVerdict(
       6000
     const fraction = thresholds.bitrate?.minFractionOfTarget ?? 0.7
     const bitrateFor = (thresholds.bitrate?.forSeconds ?? 60) * 1000
-    const low = longestBadRunMs(
-      bitrateSamples,
-      (p) => p.value < target * fraction,
-      (p) => p.value !== null
-    )
+    // An encoder in bitrate mode spends only what the picture needs: OpenH264
+    // at 6000k reads ~6 Mbps on moving content and ~0.35 Mbps on a still
+    // (ogre, 2026-11-04). A low reading is a stream fault only when something
+    // else shows starvation too: frames under the profile rate, encoding
+    // slower than realtime, or frames dropped. Without that proof it counts.
+    const targetFps = Number(profile?.fps) || null
+    const fpsFloor = targetFps
+      ? targetFps * (thresholds.bitrate?.contentLimitedMinFpsFraction ?? 0.97)
+      : null
+    const contentLimited = (p) =>
+      fpsFloor !== null &&
+      p.fps !== null &&
+      p.fps >= fpsFloor &&
+      p.speed !== null &&
+      p.speed >= speedMin &&
+      !p.lostFrames
+    const isLow = (p) => p.value < target * fraction
+    const measured = (p) => p.value !== null
+    const low = longestBadRunMs(bitrateSamples, (p) => isLow(p) && !contentLimited(p), measured)
+    const lowAtAll = longestBadRunMs(bitrateSamples, isLow, measured)
     const bitrateBreach = low >= bitrateFor
     const bitrateJudge = judge(bitrateBreach, 'P1')
     const medianBitrate = series.bitrate.map((p) => p.value).sort((a, b) => a - b)[
@@ -567,7 +604,9 @@ export async function computeVerdict(
         signature: bitrateBreach ? 'stream:bitrate' : null,
         summary: bitrateBreach
           ? `bitrate under ${Math.round(fraction * 100)}% of ${target} kbps for ${Math.round(low / 1000)} s`
-          : `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target`,
+          : lowAtAll >= bitrateFor
+            ? `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target: content-limited (fps, speed and frames held while it was under ${Math.round(fraction * 100)}%)`
+            : `median bitrate ${Math.round(medianBitrate)} kbps against a ${target} kbps target`,
         value: Math.round(medianBitrate),
         threshold: Math.round(target * fraction),
         unit: 'kbps',
