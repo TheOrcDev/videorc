@@ -286,6 +286,64 @@ test('a reconnect gap ends a slow or low-bitrate run instead of counting toward 
   }
 })
 
+test('observer polls that never read the stream check nothing: the YouTube signals skip with the reason', async () => {
+  const dir = await fixtureCopy('clean')
+  try {
+    const run = await readRunFolder(dir)
+    const thresholds = await loadThresholds()
+    const failedRead = (snapshot) => ({
+      ...snapshot,
+      broadcast: null,
+      stream: null,
+      errors: [
+        { call: 'liveBroadcasts.list', message: 'The broadcaster role is not authorized.' },
+        { call: 'liveStreams.list', message: 'The broadcaster role is not authorized.' }
+      ],
+      incidents: []
+    })
+    const verdictFor = async (overrides) =>
+      (await computeVerdict({ ...run, ...overrides }, thresholds, { runFrames: false })).verdict
+
+    const unread = await verdictFor({ observer: run.observer.map(failedRead) })
+    for (const id of ['stream:noData-while-live', 'youtube:health']) {
+      assert.equal(byId(unread, id).status, 'skipped', id)
+      assert.match(
+        byId(unread, id).summary,
+        /not checked: none of \d+ observer polls read the stream \(The broadcaster role is not authorized/
+      )
+    }
+
+    const off = 'the broadcaster role is not authorized (pnpm live:hookup --role broadcaster)'
+    const offVerdict = await verdictFor({
+      observer: [],
+      manifest: {
+        ...run.manifest,
+        session: { ...run.manifest.session, youtube: { unavailable: off } }
+      }
+    })
+    assert.equal(byId(offVerdict, 'youtube:health').status, 'skipped')
+    assert.equal(byId(offVerdict, 'youtube:health').summary, `not checked: ${off}`)
+    assert.equal(byId(offVerdict, 'stream:noData-while-live').summary, `not checked: ${off}`)
+
+    // One unreadable poll among good ones still passes, and says so.
+    const mixed = await verdictFor({
+      observer: [failedRead(run.observer[0]), ...run.observer.slice(1)]
+    })
+    const readable = run.observer.length - 1
+    assert.equal(byId(mixed, 'youtube:health').status, 'pass')
+    assert.equal(byId(mixed, 'youtube:health').value, readable)
+    assert.match(
+      byId(mixed, 'youtube:health').summary,
+      new RegExp(
+        `over ${readable} readable polls \\(1 of ${run.observer.length} polls unreadable\\)`
+      )
+    )
+    assert.equal(byId(mixed, 'stream:noData-while-live').status, 'pass')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a synthetic renderer leak over a long run warns in report mode and fails in gate mode', async () => {
   const dir = await fixtureCopy('clean')
   try {

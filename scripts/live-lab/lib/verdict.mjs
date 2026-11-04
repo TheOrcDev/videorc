@@ -7,6 +7,7 @@ import { summarizeNumericSeries } from '../../lib/performance-contract.mjs'
 import { DEFAULT_FRAME_OPTIONS, runFrameChecks } from './frame-checks.mjs'
 import { parseJournalLine, flattenHealthEvents } from './app-observer.mjs'
 import { redactValue } from './redact.mjs'
+import { isStreamReadable } from './youtube-observer.mjs'
 
 // Plan 178 U9 step 4 (plan 166 S8 steps 1-2). The verdict engine: every
 // signal of plan 166's "Incident signals and first thresholds" computed from
@@ -643,17 +644,29 @@ export async function computeVerdict(
   // --- observer: noData while live, Studio end, YouTube health --------------------
   const observerIncidents = observer.flatMap((snapshot) => snapshot.incidents ?? [])
   const firstOf = (type) => observerIncidents.find((incident) => incident.type === type) ?? null
+  // Only a poll that read the stream proves anything: a run whose every poll
+  // failed (no broadcaster token, say) checked nothing on YouTube.
+  const readable = observer.filter(isStreamReadable)
+  const unreadable = observer.length - readable.length
+  const firstReadError = observer.flatMap((snapshot) => snapshot.errors ?? [])[0]?.message
+  const observerOff = manifest.session?.youtube?.unavailable ?? null
+  const notChecked = observerOff
+    ? `not checked: ${observerOff}`
+    : observer.length
+      ? `not checked: none of ${observer.length} observer polls read the stream (${String(firstReadError ?? 'no error').slice(0, 160)})`
+      : 'no observer snapshots (local sink or observer off)'
+  const readableNote = unreadable ? ` (${unreadable} of ${observer.length} polls unreadable)` : ''
   const noData = firstOf('stream:noData-while-live')
   signals.push(
     signal('stream:noData-while-live', {
-      status: noData ? 'fail' : observer.length ? 'pass' : 'skipped',
+      status: noData ? 'fail' : readable.length ? 'pass' : 'skipped',
       severity: noData ? 'P0' : null,
       signature: noData ? 'stream:noData-while-live' : null,
       summary: noData
         ? `P0: ${noData.detail}`
-        : observer.length
-          ? 'YouTube had data on every poll while the app was On air'
-          : 'no observer snapshots (local sink or observer off)',
+        : readable.length
+          ? `YouTube had data on every readable poll while the app was On air${readableNote}`
+          : notChecked,
       threshold: thresholds.noDataWhileLive?.polls ?? 2,
       unit: 'polls',
       evidence: ['observer.ndjson', 'journal.ndjson']
@@ -688,19 +701,19 @@ export async function computeVerdict(
   const healthIncidents = observerIncidents.filter((incident) =>
     /^youtube-(health|config)/.test(incident.type)
   )
-  if (observer.length === 0) {
+  if (readable.length === 0 && healthIncidents.length === 0) {
     signals.push(
       signal('youtube:health', {
         status: 'skipped',
-        summary: 'no observer snapshots',
+        summary: notChecked,
         evidence: ['observer.ndjson']
       })
     )
   } else if (healthIncidents.length === 0) {
     signals.push(
       signal('youtube:health', {
-        summary: `YouTube health stayed good over ${observer.length} polls`,
-        value: observer.length,
+        summary: `YouTube health stayed good over ${readable.length} readable polls${readableNote}`,
+        value: readable.length,
         unit: 'polls',
         evidence: ['observer.ndjson', 'charts/youtube-health.png']
       })
