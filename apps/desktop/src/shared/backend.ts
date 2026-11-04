@@ -4584,9 +4584,10 @@ export interface FirstFrameDecisionRecord {
   evidence?: FirstFrameDecisionEvidence
 }
 
-/** One backend process exit worth keeping: every non-intentional exit plus
- * intentional shutdowns that still reported a non-zero code. Written by the
- * main-process supervisor to `userData/backend-crashes.json`. */
+/** One backend process exit worth keeping: every exit main did not ask for
+ * (a backend recycle is kept as intentional) plus stops main asked for that
+ * still reported a non-zero code. Written by the main-process supervisor to
+ * `userData/backend-crashes.json`. */
 export interface BackendCrashRecord {
   /** ISO timestamp of the exit observation. */
   at: string
@@ -4598,7 +4599,12 @@ export interface BackendCrashRecord {
    * was scheduled (app quitting, intentional stop with a non-zero code). */
   attempt: number | null
   uptimeMs: number
+  /** Videorc ended it: main stopped it, or the backend recycled itself
+   * (exit 0, no signal). False for crashes and for kills from outside. */
   intentional: boolean
+  /** NTSTATUS name when Windows reported a crash code, e.g.
+   * `STATUS_ACCESS_VIOLATION`. Absent otherwise and on older records. */
+  windowsStatus?: string
   /** Last stderr lines of that process (each line truncated). */
   stderrTail: string[]
 }

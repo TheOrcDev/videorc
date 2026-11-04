@@ -12,11 +12,18 @@ import {
   appendBackendCrashRecord,
   backendCrashLogPath,
   buildBackendCrashRecord,
+  classifyBackendExit,
   describeBackendCrashRecord,
   readBackendCrashLog,
   shouldRecordBackendExit,
+  windowsCrashStatusName,
   type BackendCrashRecord
 } from './backend-crash-log'
+import {
+  BackendRuntimeOwner,
+  claimDurableBackendPid,
+  settleBackendRuntimeExit
+} from './backend-runtime-owner'
 
 const tempDirs: string[] = []
 
@@ -47,22 +54,164 @@ function record(overrides: Partial<BackendCrashRecord> = {}): BackendCrashRecord
 }
 
 describe('shouldRecordBackendExit', () => {
-  it('records every non-intentional exit, even a clean-looking one', () => {
-    expect(shouldRecordBackendExit({ intentional: false, code: 0, signal: null })).toBe(true)
-    expect(shouldRecordBackendExit({ intentional: false, code: null, signal: 'SIGKILL' })).toBe(
-      true
-    )
+  it('records every exit main did not ask for, a clean recycle included', () => {
+    expect(shouldRecordBackendExit({ cause: 'unexpected', code: 1 })).toBe(true)
+    expect(shouldRecordBackendExit({ cause: 'unexpected', code: null })).toBe(true)
+    expect(shouldRecordBackendExit({ cause: 'crashed', code: 3221225477 })).toBe(true)
+    expect(shouldRecordBackendExit({ cause: 'recycled', code: 0 })).toBe(true)
   })
 
-  it('skips intentional clean stops and signal-only intentional stops', () => {
-    expect(shouldRecordBackendExit({ intentional: true, code: 0, signal: null })).toBe(false)
-    expect(shouldRecordBackendExit({ intentional: true, code: null, signal: 'SIGTERM' })).toBe(
-      false
-    )
+  it('skips clean and signal-only stops main asked for', () => {
+    expect(shouldRecordBackendExit({ cause: 'stopped', code: 0 })).toBe(false)
+    expect(shouldRecordBackendExit({ cause: 'stopped', code: null })).toBe(false)
   })
 
-  it('keeps intentional stops that still reported a non-zero code', () => {
-    expect(shouldRecordBackendExit({ intentional: true, code: 101, signal: null })).toBe(true)
+  it('keeps stops main asked for that still reported a non-zero code', () => {
+    expect(shouldRecordBackendExit({ cause: 'stopped', code: 101 })).toBe(true)
+  })
+})
+
+describe('classifyBackendExit', () => {
+  it("marks main's own stop intentional whatever the exit reports", () => {
+    for (const [code, signal, platform] of [
+      [0, null, 'darwin'],
+      [null, 'SIGKILL', 'darwin'],
+      // TerminateProcess / taskkill from main report code 1 on Windows.
+      [1, null, 'win32'],
+      [null, 'SIGKILL', 'win32']
+    ] as const) {
+      expect(classifyBackendExit({ markedByMain: true, code, signal, platform })).toEqual({
+        cause: 'stopped',
+        intentional: true,
+        windowsStatus: null
+      })
+    }
+  })
+
+  it('marks a planned recycle (exit 0, no signal, nobody asked) intentional', () => {
+    for (const platform of ['win32', 'darwin', 'linux'] as const) {
+      expect(classifyBackendExit({ markedByMain: false, code: 0, signal: null, platform })).toEqual(
+        { cause: 'recycled', intentional: true, windowsStatus: null }
+      )
+    }
+  })
+
+  it('keeps an outside kill on Windows (code 1, unmarked) unintentional', () => {
+    expect(
+      classifyBackendExit({ markedByMain: false, code: 1, signal: null, platform: 'win32' })
+    ).toEqual({ cause: 'unexpected', intentional: false, windowsStatus: null })
+    expect(
+      classifyBackendExit({
+        markedByMain: false,
+        code: null,
+        signal: 'SIGKILL',
+        platform: 'darwin'
+      })
+    ).toEqual({ cause: 'unexpected', intentional: false, windowsStatus: null })
+    expect(
+      classifyBackendExit({ markedByMain: false, code: 101, signal: null, platform: 'darwin' })
+    ).toEqual({ cause: 'unexpected', intentional: false, windowsStatus: null })
+  })
+
+  it('names Windows crash codes in both forms Node reports, even during a stop', () => {
+    for (const [code, name] of [
+      [3221225477, 'STATUS_ACCESS_VIOLATION'],
+      [-1073741819, 'STATUS_ACCESS_VIOLATION'],
+      [3221226356, 'STATUS_HEAP_CORRUPTION'],
+      [-1073740940, 'STATUS_HEAP_CORRUPTION'],
+      [0xc0000409, 'STATUS_STACK_BUFFER_OVERRUN']
+    ] as const) {
+      expect(windowsCrashStatusName(code, 'win32')).toBe(name)
+      for (const markedByMain of [false, true]) {
+        expect(
+          classifyBackendExit({ markedByMain, code, signal: null, platform: 'win32' })
+        ).toEqual({ cause: 'crashed', intentional: false, windowsStatus: name })
+      }
+    }
+  })
+
+  it('names nothing off Windows or for ordinary codes', () => {
+    expect(windowsCrashStatusName(3221225477, 'darwin')).toBeNull()
+    expect(windowsCrashStatusName(1, 'win32')).toBeNull()
+    expect(windowsCrashStatusName(0, 'win32')).toBeNull()
+    expect(windowsCrashStatusName(null, 'win32')).toBeNull()
+  })
+})
+
+// The supervisor reads the mark from the runtime state at the exit event.
+// Each of main's own termination paths must have set it before it signals,
+// so an exit delivered during the kill itself already sees it.
+describe('supervisor exit marks', () => {
+  function exitIsIntentional(
+    owner: BackendRuntimeOwner<object>,
+    runtime: ReturnType<BackendRuntimeOwner<object>['start']>,
+    code: number | null,
+    signal: NodeJS.Signals | null
+  ): boolean {
+    const settlement = settleBackendRuntimeExit(owner, runtime, 101, () => false)
+    return classifyBackendExit({
+      markedByMain: settlement.wasIntentional,
+      code,
+      signal,
+      platform: 'win32'
+    }).intentional
+  }
+
+  it('reads an own stop as intentional (pre-READY and receipt-wait stops)', () => {
+    for (const begin of ['beginShutdown', 'beginShutdownReceiptWait'] as const) {
+      const owner = new BackendRuntimeOwner<object>()
+      const runtime = owner.start({})
+      owner.recordOwnedPid(runtime, 101)
+      owner[begin](runtime)
+      expect(exitIsIntentional(owner, runtime, 1, null)).toBe(true)
+    }
+  })
+
+  it('reads the kill after a failed ownership claim as intentional, even mid-kill', () => {
+    const owner = new BackendRuntimeOwner<object>()
+    const runtime = owner.start({})
+    let intentional: boolean | null = null
+    expect(() =>
+      claimDurableBackendPid(owner, runtime, 101, {
+        persist: () => {
+          throw new Error('ledger is read-only')
+        },
+        // The exit event fires while the kill is still on the stack.
+        terminate: () => {
+          intentional = exitIsIntentional(owner, runtime, 1, null)
+        }
+      })
+    ).toThrow()
+    expect(intentional).toBe(true)
+  })
+
+  it('reads an unmarked exit as unintentional and an unmarked exit 0 as a recycle', () => {
+    const killed = new BackendRuntimeOwner<object>()
+    const killedRuntime = killed.start({})
+    killed.recordOwnedPid(killedRuntime, 101)
+    expect(exitIsIntentional(killed, killedRuntime, 1, null)).toBe(false)
+
+    const recycled = new BackendRuntimeOwner<object>()
+    const recycledRuntime = recycled.start({})
+    recycled.recordOwnedPid(recycledRuntime, 101)
+    expect(exitIsIntentional(recycled, recycledRuntime, 0, null)).toBe(true)
+  })
+
+  it('settles once when the exit lands before the stop finishes reading it', () => {
+    const owner = new BackendRuntimeOwner<object>()
+    const runtime = owner.start({})
+    owner.recordOwnedPid(runtime, 101)
+    owner.beginShutdown(runtime)
+    // The close event settles first; the stop's own finalize call comes after.
+    expect(settleBackendRuntimeExit(owner, runtime, 101, () => false)).toMatchObject({
+      completed: true,
+      wasCurrent: true,
+      wasIntentional: true
+    })
+    expect(settleBackendRuntimeExit(owner, runtime, 101, () => false)).toMatchObject({
+      wasCurrent: false,
+      wasIntentional: true
+    })
   })
 })
 
@@ -116,6 +265,21 @@ describe('backend crash log persistence', () => {
     expect(records.map((entry) => entry.generation)).toEqual([2, 1])
     expect(readBackendCrashLog(path)).toEqual(records)
     expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ schemaVersion: 1 })
+  })
+
+  it('keeps a Windows crash name through the file and leaves older records without one', () => {
+    const path = backendCrashLogPath(tempUserData())
+    const named = record({
+      code: 3221225477,
+      signal: null,
+      windowsStatus: 'STATUS_ACCESS_VIOLATION'
+    })
+    const plain = record({ at: '2026-08-23T09:00:00.000Z' })
+    expect(plain).not.toHaveProperty('windowsStatus')
+    appendBackendCrashRecord(path, named, [plain])
+    const [readNamed, readPlain] = readBackendCrashLog(path)
+    expect(readNamed.windowsStatus).toBe('STATUS_ACCESS_VIOLATION')
+    expect(readPlain).not.toHaveProperty('windowsStatus')
   })
 
   it('keeps only the newest BACKEND_CRASH_LOG_LIMIT records', () => {
@@ -220,5 +384,12 @@ describe('describeBackendCrashRecord', () => {
         record({ code: 101, signal: null, attempt: null, intentional: true, uptimeMs: 500 })
       )
     ).toBe('generation 2 exited (code 101) after 500ms, intentional')
+    expect(
+      describeBackendCrashRecord(
+        record({ code: -1073740940, signal: null, windowsStatus: 'STATUS_HEAP_CORRUPTION' })
+      )
+    ).toBe(
+      'generation 2 exited (code 0xC0000374 STATUS_HEAP_CORRUPTION) after 12.3s, restart attempt 1'
+    )
   })
 })
