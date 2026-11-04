@@ -16114,10 +16114,154 @@ fn select_linux_h264_encoder(
     })
 }
 
+/// What one FFmpeg run of the VAAPI probe came back with. The process glue
+/// (`run_linux_vaapi_probe`) produces these on Linux; the decision over them
+/// (`probe_linux_vaapi_candidates`) is platform-independent so it is tested
+/// with fakes on every host and never touches a render node from a test.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LinuxVaapiProbeOutcome {
+    /// FFmpeg encoded the probe frames and exited 0.
+    Passed,
+    /// FFmpeg returned non-zero: the driver rejected this argument profile.
+    Rejected(String),
+    /// FFmpeg could not be spawned or waited on; nothing reached the GPU.
+    Failed(String),
+    /// FFmpeg was still running at the probe deadline: the node hung.
+    TimedOut,
+}
+
+/// 30 frames of 1080p30 take a healthy node well under a second; a node that
+/// has not answered in 20 s is the one the quarantine exists for (amdgpu's
+/// own ring timeout fires at 10 s).
+#[cfg(any(test, target_os = "linux"))]
+const LINUX_VAAPI_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Probes the planned nodes in order and stops at the first success. Every
 /// probe is wrapped in the quarantine sentinel: if the host hangs mid-probe,
 /// the next start quarantines that node instead of trying it again. A node
 /// whose sentinel cannot be armed is not probed at all.
+///
+/// A probe that times out is the same hang seen from inside the process
+/// (#1027): the node is quarantined on the spot, the `Compat` profile is
+/// never tried on it (a timeout is not an argument rejection), and no further
+/// node is probed this lifetime, because the timed-out FFmpeg may still hold
+/// its GPU and the driver may be mid-reset. The nodes left over are reported
+/// as skipped and probed at the next start, when the quarantine already
+/// names the one that hung.
+#[cfg(any(test, target_os = "linux"))]
+async fn probe_linux_vaapi_candidates<Run, Fut>(
+    ffmpeg_path: &str,
+    candidates: &[crate::linux_vaapi::RenderNodeCandidate],
+    quarantine: &crate::linux_vaapi::ProbeQuarantine,
+    mut run_probe: Run,
+) -> (
+    Option<(PathBuf, LinuxVaapiArgProfile)>,
+    Option<String>,
+    Vec<LinuxRenderNodeDiagnostic>,
+)
+where
+    Run: FnMut(crate::linux_vaapi::RenderNodeCandidate, LinuxVaapiArgProfile) -> Fut,
+    Fut: std::future::Future<Output = LinuxVaapiProbeOutcome>,
+{
+    use crate::protocol::LinuxRenderNodeState;
+    let mut rejections = Vec::new();
+    let mut reports = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let mut profile_rejections = Vec::new();
+        let mut timed_out = None;
+        // Standard first; Compat only after the standard set was rejected on
+        // this same node, so a compat selection is always evidence-backed.
+        for profile in [LinuxVaapiArgProfile::Standard, LinuxVaapiArgProfile::Compat] {
+            let armed = match quarantine.begin_probe(candidate, ffmpeg_path) {
+                Ok(armed) => armed,
+                Err(error) => {
+                    let detail = format!("probe sentinel could not be armed: {error}");
+                    profile_rejections.push(format!("{}: {detail}", profile));
+                    break;
+                }
+            };
+            let outcome = run_probe(candidate.clone(), profile).await;
+            // The probe returned (pass or reject): the sentinel no longer
+            // means a hang.
+            let returned = |armed: crate::linux_vaapi::ArmedProbe<'_>| {
+                if let Err(error) = armed.finish() {
+                    tracing::warn!(
+                        "Could not clear the VAAPI probe sentinel for {}: {error}",
+                        candidate.node_name()
+                    );
+                }
+            };
+            match outcome {
+                LinuxVaapiProbeOutcome::Passed => {
+                    returned(armed);
+                    reports.push(candidate.report(
+                        LinuxRenderNodeState::ProbedOk,
+                        Some(format!("{} argument profile", profile)),
+                    ));
+                    return (Some((candidate.path.clone(), profile)), None, reports);
+                }
+                LinuxVaapiProbeOutcome::Rejected(reason) => {
+                    returned(armed);
+                    profile_rejections.push(format!("{}: {reason}", profile));
+                }
+                LinuxVaapiProbeOutcome::Failed(error) => {
+                    returned(armed);
+                    // Nothing reached the driver, so there is no rejection
+                    // for Compat to answer.
+                    profile_rejections.push(format!("{}: {error}", profile));
+                    break;
+                }
+                LinuxVaapiProbeOutcome::TimedOut => {
+                    let detail = match armed.quarantine_timed_out(LINUX_VAAPI_PROBE_TIMEOUT) {
+                        Ok(entry) => {
+                            tracing::error!(
+                                "Quarantined Linux render node {} ({}): its VAAPI probe did not return within {} s. It will not be probed again unless {} names it.",
+                                entry.node,
+                                entry.driver.as_deref().unwrap_or("driver unknown"),
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs(),
+                                crate::linux_vaapi::DEVICE_PIN_ENV
+                            );
+                            entry.detail()
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                "The VAAPI probe of {} did not return within {} s and its quarantine entry could not be written: {error}",
+                                candidate.node_name(),
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+                            );
+                            format!(
+                                "a VAAPI probe of this node did not return within {} s; the quarantine entry could not be written ({error})",
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+                            )
+                        }
+                    };
+                    timed_out = Some(detail);
+                    break;
+                }
+            }
+        }
+        if let Some(detail) = timed_out {
+            rejections.push(format!("{}: {detail}", candidate.node_name()));
+            reports.push(candidate.report(LinuxRenderNodeState::Quarantined, Some(detail)));
+            let skipped = format!(
+                "not probed: {} did not return within {} s and may still hold its GPU; probed at the next start",
+                candidate.node_name(),
+                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+            );
+            for left in &candidates[index + 1..] {
+                reports.push(left.report(LinuxRenderNodeState::Skipped, Some(skipped.clone())));
+            }
+            break;
+        }
+        let detail = profile_rejections.join(" | ");
+        rejections.push(format!("{}: {detail}", candidate.node_name()));
+        reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
+    }
+    let reason = (!rejections.is_empty()).then(|| rejections.join("; "));
+    (None, reason, reports)
+}
+
 #[cfg(target_os = "linux")]
 async fn probe_linux_vaapi_encoder(
     ffmpeg_path: &str,
@@ -16128,64 +16272,94 @@ async fn probe_linux_vaapi_encoder(
     Option<String>,
     Vec<LinuxRenderNodeDiagnostic>,
 ) {
-    use crate::protocol::LinuxRenderNodeState;
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut rejections = Vec::new();
-    let mut reports = Vec::new();
-    for candidate in candidates {
-        let mut profile_rejections = Vec::new();
-        // Standard first; Compat only after the standard set was rejected on
-        // this same node, so a compat selection is always evidence-backed.
-        for profile in [LinuxVaapiArgProfile::Standard, LinuxVaapiArgProfile::Compat] {
-            if let Err(error) = quarantine.begin_probe(candidate, ffmpeg_path) {
-                let detail = format!("probe sentinel could not be armed: {error}");
-                profile_rejections.push(format!("{}: {detail}", profile));
-                break;
+    probe_linux_vaapi_candidates(
+        ffmpeg_path,
+        candidates,
+        quarantine,
+        |candidate, profile| async move {
+            run_linux_vaapi_probe(ffmpeg_path, &candidate, profile).await
+        },
+    )
+    .await
+}
+
+/// One FFmpeg run of the real-args probe, bounded by the probe deadline. The
+/// child is killed if this future is dropped and killed and reaped on a
+/// timeout, so a probe never leaves FFmpeg running on the GPU (#1027: two
+/// timed-out probes outlived the test binary on the Arch T2 box).
+#[cfg(target_os = "linux")]
+async fn run_linux_vaapi_probe(
+    ffmpeg_path: &str,
+    candidate: &crate::linux_vaapi::RenderNodeCandidate,
+    profile: LinuxVaapiArgProfile,
+) -> LinuxVaapiProbeOutcome {
+    const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+    let probe_args = linux_vaapi_probe_args(&candidate.path, profile);
+    // The exact command, so a tester can bisect it verbatim on the box.
+    tracing::info!(
+        "VAAPI probe on {} ({} profile): {} {}",
+        candidate.node_name(),
+        profile,
+        ffmpeg_path,
+        probe_args.join(" ")
+    );
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .args(&probe_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return LinuxVaapiProbeOutcome::Failed(format!("ffmpeg could not be spawned: {error}"));
+        }
+    };
+    // Drained beside the wait so a chatty driver never blocks FFmpeg on a
+    // full pipe and reads as a hang.
+    let stderr = child.stderr.take();
+    let stderr_drain = tokio::spawn(async move {
+        let mut collected = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let _ = stderr.read_to_end(&mut collected).await;
+        }
+        collected
+    });
+    match timeout(LINUX_VAAPI_PROBE_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => {
+            let stderr = stderr_drain.await.unwrap_or_default();
+            if status.success() {
+                LinuxVaapiProbeOutcome::Passed
+            } else {
+                LinuxVaapiProbeOutcome::Rejected(bounded_stream_output_topology_fallback_reason(
+                    &String::from_utf8_lossy(&stderr),
+                ))
             }
-            let probe_args = linux_vaapi_probe_args(&candidate.path, profile);
-            // The exact command, so a tester can bisect it verbatim on the box.
-            tracing::info!(
-                "VAAPI probe on {} ({} profile): {} {}",
-                candidate.node_name(),
-                profile,
-                ffmpeg_path,
-                probe_args.join(" ")
-            );
-            let mut command = Command::new(ffmpeg_path);
-            command
-                .args(&probe_args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-            let outcome = timeout(PROBE_TIMEOUT, command.output()).await;
-            if let Err(error) = quarantine.finish_probe() {
-                tracing::warn!(
-                    "Could not clear the VAAPI probe sentinel for {}: {error}",
-                    candidate.node_name()
+        }
+        Ok(Err(error)) => {
+            stderr_drain.abort();
+            LinuxVaapiProbeOutcome::Failed(format!("ffmpeg could not be waited on: {error}"))
+        }
+        Err(_) => {
+            // SIGKILL, then a short bounded reap. A child wedged in the driver
+            // (D state) ignores even SIGKILL until the kernel lets go; tokio
+            // keeps it as an orphan and reaps it on SIGCHLD when it finally
+            // exits, so this wait stays bounded and no zombie is left behind
+            // by this process.
+            let _ = child.start_kill();
+            if timeout(REAP_TIMEOUT, child.wait()).await.is_err() {
+                tracing::error!(
+                    "The VAAPI probe of {} ({} profile) did not exit within {} s of SIGKILL; it is stuck in the driver and is reaped when it exits",
+                    candidate.node_name(),
+                    profile,
+                    REAP_TIMEOUT.as_secs()
                 );
             }
-            let detail = match outcome {
-                Ok(Ok(output)) if output.status.success() => {
-                    reports.push(candidate.report(
-                        LinuxRenderNodeState::ProbedOk,
-                        Some(format!("{} argument profile", profile)),
-                    ));
-                    return (Some((candidate.path.clone(), profile)), None, reports);
-                }
-                Ok(Ok(output)) => bounded_stream_output_topology_fallback_reason(
-                    &String::from_utf8_lossy(&output.stderr),
-                ),
-                Ok(Err(error)) => error.to_string(),
-                Err(_) => "probe timed out".to_string(),
-            };
-            profile_rejections.push(format!("{}: {detail}", profile));
+            stderr_drain.abort();
+            LinuxVaapiProbeOutcome::TimedOut
         }
-        let detail = profile_rejections.join(" | ");
-        rejections.push(format!("{}: {detail}", candidate.node_name()));
-        reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
     }
-    let reason = (!rejections.is_empty()).then(|| rejections.join("; "));
-    (None, reason, reports)
 }
 
 /// One decision per backend lifetime per FFmpeg binary, preference and pin.
@@ -16358,6 +16532,21 @@ async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpeg
                 .as_deref(),
         )
         .map_err(anyhow::Error::msg)?;
+        // A unit test never probes a render node it did not name: the backend
+        // suite reached this resolver with a bare `ffmpeg`, probed every node
+        // on the Arch T2 box and hung its AMD GPU (#1027). A pin is the
+        // tester's explicit opt-in, the same one the quarantine honours.
+        #[cfg(test)]
+        if pin.is_none() {
+            return select_linux_h264_encoder(
+                preference,
+                None,
+                Some(format!(
+                    "unit tests never probe render nodes; set {} to the one node a test may use",
+                    crate::linux_vaapi::DEVICE_PIN_ENV
+                )),
+            );
+        }
         let key = format!(
             "{ffmpeg_path}|{preference:?}|{}",
             pin.as_deref()
@@ -29993,6 +30182,327 @@ mod tests {
         assert!(matches!(recovered, BlockingProbeOutcome::Finished("ok")));
     }
 
+    /// A scripted stand-in for `run_linux_vaapi_probe`: the outcome per
+    /// (node, profile), every call recorded, and a missing script entry is a
+    /// probe that must never have run (a timed-out node's Compat profile, a
+    /// node after a timeout).
+    struct ScriptedVaapiProbe {
+        outcomes: Vec<((&'static str, LinuxVaapiArgProfile), LinuxVaapiProbeOutcome)>,
+        calls: std::rc::Rc<std::cell::RefCell<Vec<(String, LinuxVaapiArgProfile)>>>,
+        quarantine_directory: PathBuf,
+    }
+
+    impl ScriptedVaapiProbe {
+        fn new(
+            label: &str,
+            outcomes: Vec<((&'static str, LinuxVaapiArgProfile), LinuxVaapiProbeOutcome)>,
+        ) -> Self {
+            Self {
+                outcomes,
+                calls: Default::default(),
+                quarantine_directory: std::env::temp_dir().join(format!(
+                    "videorc-vaapi-probe-decision-{label}-{}",
+                    uuid::Uuid::new_v4()
+                )),
+            }
+        }
+
+        fn quarantine(&self) -> crate::linux_vaapi::ProbeQuarantine {
+            crate::linux_vaapi::ProbeQuarantine::new(self.quarantine_directory.clone())
+        }
+
+        fn sentinel_armed(&self) -> bool {
+            self.quarantine_directory
+                .join("probe-in-progress.json")
+                .exists()
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn runner(
+            &self,
+        ) -> Box<
+            dyn FnMut(
+                crate::linux_vaapi::RenderNodeCandidate,
+                LinuxVaapiArgProfile,
+            ) -> std::future::Ready<LinuxVaapiProbeOutcome>,
+        > {
+            let outcomes = self.outcomes.clone();
+            let calls = self.calls.clone();
+            Box::new(move |candidate, profile| {
+                let node = candidate.node_name();
+                calls.borrow_mut().push((node.clone(), profile));
+                let outcome = outcomes
+                    .iter()
+                    .find(|((scripted, scripted_profile), _)| {
+                        *scripted == node && *scripted_profile == profile
+                    })
+                    .map(|(_, outcome)| outcome.clone())
+                    .unwrap_or_else(|| {
+                        panic!("{node} was probed with {profile}, which must never run")
+                    });
+                std::future::ready(outcome)
+            })
+        }
+
+        fn calls(&self) -> Vec<(String, LinuxVaapiArgProfile)> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Drop for ScriptedVaapiProbe {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.quarantine_directory).ok();
+        }
+    }
+
+    fn render_node(node: &str, driver: &str) -> crate::linux_vaapi::RenderNodeCandidate {
+        crate::linux_vaapi::RenderNodeCandidate {
+            path: PathBuf::from("/dev/dri").join(node),
+            driver: Some(driver.to_string()),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_timed_out_probe_quarantines_its_node_and_probes_nothing_else() {
+        use crate::protocol::LinuxRenderNodeState;
+        // The Arch T2 box: amdgpu first in probe order, i915 behind it. The
+        // AMD probe hangs; before #1027 Compat ran on the same hung GPU and
+        // the node was probed again at the next launch.
+        let amd = render_node("renderD128", "amdgpu");
+        let intel = render_node("renderD129", "i915");
+        let probe = ScriptedVaapiProbe::new(
+            "timeout",
+            vec![(
+                ("renderD128", LinuxVaapiArgProfile::Standard),
+                LinuxVaapiProbeOutcome::TimedOut,
+            )],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, reason, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[amd.clone(), intel.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, None);
+        assert_eq!(
+            probe.calls(),
+            vec![("renderD128".to_string(), LinuxVaapiArgProfile::Standard)],
+            "Compat on the hung node or any probe of the next node"
+        );
+        assert!(!probe.sentinel_armed(), "the sentinel outlived the probe");
+        let quarantined = quarantine.quarantined();
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(quarantined[0].node, "renderD128");
+        assert_eq!(quarantined[0].driver.as_deref(), Some("amdgpu"));
+        assert_eq!(quarantined[0].ffmpeg_path, "/opt/ffmpeg");
+        assert_eq!(
+            quarantined[0].timed_out_after_secs,
+            Some(LINUX_VAAPI_PROBE_TIMEOUT.as_secs())
+        );
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].node, "renderD128");
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Quarantined);
+        assert!(
+            reports[0]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("did not return within 20 s"))
+        );
+        assert_eq!(reports[1].node, "renderD129");
+        assert_eq!(reports[1].state, LinuxRenderNodeState::Skipped);
+        assert!(
+            reports[1]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("renderD128 did not return"))
+        );
+        let reason = reason.expect("the fallback names the hang");
+        assert!(reason.contains("renderD128"), "{reason}");
+        assert!(reason.contains("did not return within 20 s"), "{reason}");
+
+        // The next start plans around the hung node and reaches the healthy
+        // one; the quarantine is read from disk, not remembered in memory.
+        let (to_probe, planned) = crate::linux_vaapi::plan_probe_order(
+            &[amd, intel.clone()],
+            None,
+            &probe.quarantine().quarantined(),
+        )
+        .expect("plan");
+        assert_eq!(to_probe, vec![intel]);
+        assert_eq!(planned[0].state, LinuxRenderNodeState::Quarantined);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_rejected_standard_profile_tries_compat_on_the_same_node_only() {
+        use crate::protocol::LinuxRenderNodeState;
+        let intel = render_node("renderD128", "i915");
+        let amd = render_node("renderD129", "amdgpu");
+        let probe = ScriptedVaapiProbe::new(
+            "rejection",
+            vec![
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Rejected("no CQP support".to_string()),
+                ),
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Compat),
+                    LinuxVaapiProbeOutcome::Rejected("level 4 refused".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Rejected("hwupload failed".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Compat),
+                    LinuxVaapiProbeOutcome::Passed,
+                ),
+            ],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, reason, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[intel, amd.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, Some((amd.path, LinuxVaapiArgProfile::Compat)));
+        assert_eq!(reason, None);
+        assert_eq!(
+            probe.calls(),
+            vec![
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Compat),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Compat),
+            ]
+        );
+        assert!(!probe.sentinel_armed());
+        assert!(
+            quarantine.quarantined().is_empty(),
+            "a rejection is not a hang"
+        );
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Rejected);
+        assert_eq!(
+            reports[0].detail.as_deref(),
+            Some("standard: no CQP support | compat: level 4 refused")
+        );
+        assert_eq!(reports[1].state, LinuxRenderNodeState::ProbedOk);
+        assert_eq!(
+            reports[1].detail.as_deref(),
+            Some("compat argument profile")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_probe_that_never_spawned_has_no_rejection_for_compat_to_answer() {
+        use crate::protocol::LinuxRenderNodeState;
+        let intel = render_node("renderD128", "i915");
+        let amd = render_node("renderD129", "amdgpu");
+        let probe = ScriptedVaapiProbe::new(
+            "spawn-failure",
+            vec![
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Failed("ffmpeg could not be spawned".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Passed,
+                ),
+            ],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, _, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[intel, amd.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, Some((amd.path, LinuxVaapiArgProfile::Standard)));
+        assert_eq!(
+            probe.calls(),
+            vec![
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Standard),
+            ]
+        );
+        assert!(quarantine.quarantined().is_empty());
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Rejected);
+        assert_eq!(
+            reports[0].detail.as_deref(),
+            Some("standard: ffmpeg could not be spawned")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cancelled_probe_leaves_no_sentinel_for_the_next_resolve_to_adopt() {
+        // The resolve future is dropped mid-probe (a test runtime ending, a
+        // timeout around start_session, quit). This process is alive, so
+        // the node did not hang the host: nothing may be left for the next
+        // start to adopt. The Arch T2 box lost its healthy Intel node to
+        // exactly this (#1027, problem 2).
+        let intel = render_node("renderD128", "i915");
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-vaapi-probe-cancelled-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let quarantine = crate::linux_vaapi::ProbeQuarantine::new(directory.clone());
+        let (armed_tx, armed) = oneshot::channel::<()>();
+        let mut armed_tx = Some(armed_tx);
+        let sentinel_path = directory.join("probe-in-progress.json");
+        let sentinel_path_in_probe = sentinel_path.clone();
+        let never_returns = move |_: crate::linux_vaapi::RenderNodeCandidate,
+                                  _: LinuxVaapiArgProfile| {
+            // The sentinel is on disk while the probe runs.
+            assert!(
+                sentinel_path_in_probe.exists(),
+                "probe ran without a sentinel"
+            );
+            if let Some(armed_tx) = armed_tx.take() {
+                let _ = armed_tx.send(());
+            }
+            std::future::pending::<LinuxVaapiProbeOutcome>()
+        };
+
+        {
+            let resolve = probe_linux_vaapi_candidates(
+                "/opt/ffmpeg",
+                std::slice::from_ref(&intel),
+                &quarantine,
+                never_returns,
+            );
+            tokio::pin!(resolve);
+            tokio::select! {
+                _ = &mut resolve => panic!("a pending probe resolved"),
+                armed = armed => armed.expect("the probe armed its sentinel"),
+            }
+            // The resolve future is dropped here, mid-probe.
+        }
+
+        assert!(
+            !sentinel_path.exists(),
+            "the cancelled probe left its sentinel armed"
+        );
+        assert_eq!(
+            quarantine.adopt_stale_sentinel().expect("no sentinel"),
+            None,
+            "the next resolve quarantined a node that never hung"
+        );
+        assert!(quarantine.quarantined().is_empty());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "current_thread")]
     async fn a_decision_asked_for_during_a_probe_waits_and_never_quarantines_that_node() {
@@ -30017,14 +30527,14 @@ mod tests {
             async move {
                 resolutions.fetch_add(1, Ordering::SeqCst);
                 quarantine.adopt_stale_sentinel()?;
-                quarantine.begin_probe(intel, "/opt/ffmpeg")?;
+                let probing = quarantine.begin_probe(intel, "/opt/ffmpeg")?;
                 if let Some(armed) = armed {
                     let _ = armed.send(());
                 }
                 if let Some(probe_returns) = probe_returns {
                     let _ = probe_returns.await;
                 }
-                quarantine.finish_probe()?;
+                probing.finish()?;
                 select_linux_h264_encoder(
                     LinuxH264EncoderPreference::Auto,
                     Some((intel.path.clone(), LinuxVaapiArgProfile::Standard)),

@@ -62,9 +62,24 @@ GPU hang, so the policy keeps the app from touching a bad node at all:
   `<app data>/linux-vaapi/probe-in-progress.json` (`node`, `driver`,
   `startedAt`, `ffmpegSha`) and deletes it when the probe returns, pass or
   fail. A file still present at the next backend start means the previous
-  probe never returned: the node is appended to
-  `<app data>/linux-vaapi/quarantined.json`, logged at `warn`, listed in
-  diagnostics, and never probed again unless the pin names it explicitly.
+  backend died mid-probe (the host hung or was rebooted, the backend was
+  killed): the node is appended to `<app data>/linux-vaapi/quarantined.json`,
+  logged at `warn`, listed in diagnostics, and never probed again unless the
+  pin names it explicitly. A probe future dropped in-process (a cancelled
+  session start, quit mid-probe) clears its own sentinel: the process is
+  still alive, so the node did not hang the host.
+- A probe still running after 20 s is the same hang seen from inside the
+  process (#1027): FFmpeg is killed and reaped, the node is quarantined on
+  the spot with `timedOutAfterSecs`, the `compat` argument profile is never
+  tried on it (a timeout is not an argument rejection), and no further node
+  is probed in that backend lifetime, because the timed-out FFmpeg may still
+  hold its GPU and the driver may be mid-reset. The nodes left over are
+  listed as `skipped` and probed at the next start.
+- `cargo test -p videorc-backend` never probes a render node and never reads
+  or writes the real quarantine: a unit test gets a throwaway quarantine
+  directory under the temp dir unless `VIDEORC_DATABASE_PATH` isolates one,
+  and the resolver answers "unit tests never probe render nodes" unless
+  `VIDEORC_LINUX_VAAPI_DEVICE` names the one node a test may use.
 - The backend probes once per lifetime per FFmpeg path and caches the
   decision; sessions do not re-probe. A forced `openh264` session does not
   invalidate the cached VAAPI decision.
