@@ -46,6 +46,16 @@ float2 gmod2(float2 x, float y) { return x - y * floor(x / y); }
 float3 gmod3(float3 x, float y) { return x - y * floor(x / y); }
 float4 gmod4(float4 x, float y) { return x - y * floor(x / y); }
 float sq(float x) { return x * x; }
+// The GLSL's `pcg` and `unit` (Beams, Color Bends, Ghost Fibers): PCG over
+// whole numbers, then the top 24 bits as a value in [0, 1), the same bits on
+// every GPU and API (#987, #1077).
+uint livePcg(uint v)
+{
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+float liveUnit(uint h) { return float(h >> 8u) * (1.0 / 16777216.0); }
 float2 flipUv(float2 uv) { return float2(uv.x, 1.0 - uv.y); }
 
 // GLSL's smoothstep formula, which works with reversed edges.
@@ -62,17 +72,6 @@ float2 hermite2(float2 edge0, float2 edge1, float2 x)
 }
 
 static const float LIVE_PI = 3.141592653589793;
-
-// WARP's `sin` range-reduces large arguments poorly (plan 194 S4). `sin` is
-// 2π-periodic, so folding first keeps the hash on the hardware's accurate
-// domain. Arguments of a few hundred to a few tens of thousands of radians
-// (Beams' lane hash and grain) stay exact in float32; Ghost Fibers' hash11
-// arguments reach 1e5–1e7 and are left on the native `sin` so Windows keeps
-// the same formula as the GLSL.
-float sinPeriod(float x)
-{
-    return sin(gmod(x, 2.0 * LIVE_PI));
-}
 
 float hash2(float2 p)
 {
@@ -610,7 +609,26 @@ float4 PlasmaCompositePs(LiveVsOutput input) : SV_Target
 
 // ---------------------------------------------------------------- Beams (plan 194)
 
-float4 beamsPermute(float4 x) { return gmod4(((x * 34.0) + 1.0) * x, 289.0); }
+float4 beamsPermute(float4 x)
+{
+    uint4 i = uint4(x);
+    return float4((i * 34u + 1u) * i % 289u);
+}
+
+// The GLSL's `gradient`: the sevenths of a permutation split as whole
+// numbers, the fold decided on them.
+void beamsGradient(float4 p, out float4 gx, out float4 gy, out float4 gz)
+{
+    float4 q = floor((p + 0.5) / 7.0);
+    float4 rx = p - 7.0 * q;
+    float4 ry = q - 7.0 * floor((q + 0.5) / 7.0);
+    gx = rx / 7.0;
+    gy = ry / 7.0 - 0.5;
+    gz = 0.5 - abs(gx) - abs(gy);
+    float4 fold = step(7.0 - 2.0 * rx - abs(2.0 * ry - 7.0), float4(0.0, 0.0, 0.0, 0.0));
+    gx -= fold * (step(float4(0.0, 0.0, 0.0, 0.0), gx) - 0.5);
+    gy -= fold * (step(float4(0.0, 0.0, 0.0, 0.0), gy) - 0.5);
+}
 float4 beamsTaylorInvSqrt(float4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
 float3 beamsFade(float3 t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
 
@@ -629,20 +647,10 @@ float beamsNoise(float3 P)
     float4 ixy = beamsPermute(beamsPermute(ix) + iy);
     float4 ixy0 = beamsPermute(ixy + iz0);
     float4 ixy1 = beamsPermute(ixy + iz1);
-    float4 gx0 = ixy0 / 7.0;
-    float4 gy0 = frac(floor(gx0) / 7.0) - 0.5;
-    gx0 = frac(gx0);
-    float4 gz0 = 0.5 - abs(gx0) - abs(gy0);
-    float4 sz0 = step(gz0, float4(0.0, 0.0, 0.0, 0.0));
-    gx0 -= sz0 * (step(float4(0.0, 0.0, 0.0, 0.0), gx0) - 0.5);
-    gy0 -= sz0 * (step(float4(0.0, 0.0, 0.0, 0.0), gy0) - 0.5);
-    float4 gx1 = ixy1 / 7.0;
-    float4 gy1 = frac(floor(gx1) / 7.0) - 0.5;
-    gx1 = frac(gx1);
-    float4 gz1 = 0.5 - abs(gx1) - abs(gy1);
-    float4 sz1 = step(gz1, float4(0.0, 0.0, 0.0, 0.0));
-    gx1 -= sz1 * (step(float4(0.0, 0.0, 0.0, 0.0), gx1) - 0.5);
-    gy1 -= sz1 * (step(float4(0.0, 0.0, 0.0, 0.0), gy1) - 0.5);
+    float4 gx0, gy0, gz0;
+    beamsGradient(ixy0, gx0, gy0, gz0);
+    float4 gx1, gy1, gz1;
+    beamsGradient(ixy1, gx1, gy1, gz1);
     float3 g000 = float3(gx0.x, gy0.x, gz0.x);
     float3 g100 = float3(gx0.y, gy0.y, gz0.y);
     float3 g010 = float3(gx0.z, gy0.z, gz0.z);
@@ -676,9 +684,9 @@ float beamsNoise(float3 P)
     return 2.2 * n_xyz;
 }
 
-float beamsLaneHash(float lane)
+float beamsLaneHash(float lane, uint salt)
 {
-    return frac(sinPeriod(lane * 91.3458 + u[4].x * 17.17) * 47453.5453);
+    return liveUnit(livePcg(livePcg(livePcg(uint(int(lane) + 65536)) + asuint(u[4].x)) + salt));
 }
 
 float beamsLobe(float nh, float nl, float nv, float vh, float roughness)
@@ -696,11 +704,11 @@ float beamsLobe(float nh, float nl, float nv, float vh, float roughness)
 
 float2 beamsGlint(float lane, float2 local, float uTime, float camera)
 {
-    float along = local.y / u[2].y - beamsLaneHash(lane) * 60.0;
+    float along = local.y / u[2].y - beamsLaneHash(lane, 0u) * 60.0;
     float h = 0.01;
     float slope = (beamsNoise(float3(0.0, along + h, uTime)) - beamsNoise(float3(0.0, along - h, uTime))) / (2.0 * h);
     slope *= 0.2 * u[2].z;
-    float spin = beamsLaneHash(lane + 0.37);
+    float spin = beamsLaneHash(lane, 1u);
     float tilt = ((spin - 0.5) * 0.5 + sin(uTime * 2.1 + spin * 6.2831) * 0.06) * u[3].z;
     float3 normal = normalize(float3(tilt, -slope, 1.0));
     float3 view = normalize(float3(-local, camera));
@@ -747,19 +755,19 @@ float4 BeamsFieldPs(LiveVsOutput input) : SV_Target
     return float4(value.x, value.y, min(hot, 6.0), 1.0);
 }
 
-float beamsRandom(float2 st)
+float beamsRandom(float2 st, uint salt)
 {
-    return frac(sinPeriod(dot(st, float2(12.9898, 78.233))) * 43758.5453123);
+    return liveUnit(livePcg(livePcg(livePcg(uint(st.x)) + uint(st.y)) + salt));
 }
 
 float beamsGrain(float2 st)
 {
     float2 i = floor(st);
     float2 f = frac(st);
-    float a = beamsRandom(i);
-    float b = beamsRandom(i + float2(1.0, 0.0));
-    float c = beamsRandom(i + float2(0.0, 1.0));
-    float d = beamsRandom(i + float2(1.0, 1.0));
+    float a = beamsRandom(i, 0u);
+    float b = beamsRandom(i + float2(1.0, 0.0), 0u);
+    float c = beamsRandom(i + float2(0.0, 1.0), 0u);
+    float d = beamsRandom(i + float2(1.0, 1.0), 0u);
     float2 w = f * f * (3.0 - 2.0 * f);
     return lerp(a, b, w.x) + (c - a) * w.y * (1.0 - w.x) + (d - b) * w.x * w.y;
 }
@@ -802,7 +810,7 @@ float4 BeamsCompositePs(LiveVsOutput input) : SV_Target
     color -= beamsGrain(fragCoord) / 15.0 * u[4].w;
     color = max(color, 0.0);
     // No edge fade and full opacity: React Bits' mask is 1.
-    float dither = (beamsRandom(fragCoord.yx + 31.7) - 0.5) / 255.0;
+    float dither = (beamsRandom(fragCoord, 1u) - 0.5) / 255.0;
     color = saturate(color + dither);
     float alpha = max(color.r, max(color.g, color.b));
     return float4((color + u[6].rgb * (1.0 - alpha)) * (1.0 - u[1].z), 1.0);
@@ -901,7 +909,7 @@ float4 ColorBendsPs(LiveVsOutput input) : SV_Target
     if (noiseAmount > 0.0001)
     {
         // Fixed in place: React Bits adds the time to the hash every frame.
-        float n = frac(sin(dot(fragCoord, float2(12.9898, 78.233))) * 43758.5453123);
+        float n = liveUnit(livePcg(livePcg(uint(fragCoord.x)) + uint(fragCoord.y)));
         col += (n - 0.5) * noiseAmount;
         col = saturate(col);
     }
@@ -1492,9 +1500,9 @@ static const float4 GHOST_PLACEMENTS[3] = { float4(0.0, 0.0, 0.0, 0.0), float4(1
 static const float GHOST_RIBBON_GAIN[3] = { 1.0, 0.5, 0.55 };
 static const float GHOST_RIBBON_TINT[3] = { 0.0, 0.75, 0.35 };
 
-float ghostHash11(float n)
+float ghostHash11(uint a, uint b, uint c, uint salt)
 {
-    return frac(sin(n * 91.3458) * 47453.5453);
+    return liveUnit(livePcg(livePcg(livePcg(livePcg(a) + b) + c) + salt));
 }
 
 // React Bits' `fit`: the canvas aspect over 1.5, clamped to 0.6–1.
@@ -1527,8 +1535,7 @@ GhostVsOutput GhostFibersDustVs(uint vertexId : SV_VertexID, uint instanceId : S
     float2 viewport = u[0].xy;
     float dpr = u[0].w;
     float uTime = u[0].z;
-    float id = float(instanceId);
-    float3 seed = float3(ghostHash11(id * 1.37 + 0.3), ghostHash11(id * 2.91 + 1.7), ghostHash11(id * 4.17 + 2.9));
+    float3 seed = float3(ghostHash11(instanceId, 0u, 0u, 1u), ghostHash11(instanceId, 0u, 0u, 2u), ghostHash11(instanceId, 0u, 0u, 3u));
     float3 box = float3(9.0, 5.4, 6.0);
     float3 p = (seed - 0.5) * box;
     p.z -= 0.6;
@@ -1537,7 +1544,7 @@ GhostVsOutput GhostFibersDustVs(uint vertexId : SV_VertexID, uint instanceId : S
     float depth;
     float3 projected = ghostProject(p, viewport, depth);
     float2 px = projected.xy;
-    float size = u[8].x * lerp(0.5, 1.4, ghostHash11(id * 7.7));
+    float size = u[8].x * lerp(0.5, 1.4, ghostHash11(instanceId, 0u, 0u, 4u));
     float baseRadius = max(0.5 * size * dpr * GHOST_CAMERA / max(depth, 0.1), 0.45);
     float coc = min(u[4].w * abs(1.0 - u[4].z / max(depth, 0.1)) * viewport.y * 0.035, 22.0 * dpr * 1.6);
     float radius = baseRadius + coc;
@@ -1612,21 +1619,23 @@ GhostVsOutput GhostFibersDotsVs(uint vertexId : SV_VertexID, uint instanceId : S
     int withinRibbon = int(instanceId) - ribbon * perRibbon;
     int fiber = withinRibbon / perFiber;
     int bead = withinRibbon - fiber * perFiber;
-    float uRibbon = float(ribbon);
     float4 place = GHOST_PLACEMENTS[ribbon];
     float uGain = GHOST_RIBBON_GAIN[ribbon] * u[5].w;
     float uTint = GHOST_RIBBON_TINT[ribbon];
     float fi = float(fiber);
     float fk = float(bead);
+    uint fiberId = uint(fiber);
+    uint beadId = uint(bead);
+    uint ribbonId = uint(ribbon);
 
-    float seed = ghostHash11(fi * 1.731 + uRibbon * 17.0);
+    float seed = ghostHash11(fiberId, ribbonId, 0u, 1u);
     float s = frac((fk + uFlow + seed * uDots) / uDots) - 0.5;
     float sNext = s + 1.0 / uDots;
     float layer = gmod(fi, 3.0) - 1.0;
     float slot = floor(fi / 3.0);
     float perLayer = max(floor(uFibers / 3.0), 1.0);
-    float v = ((slot + 0.5) / perLayer) * 2.0 - 1.0 + (ghostHash11(fi * 3.113 + 4.0) - 0.5) * (1.6 / perLayer) + layer * 0.12 / perLayer;
-    float depthOffset = (ghostHash11(fi * 7.919 + 2.0) - 0.5) * GHOST_DEPTH_SPREAD * (0.35 + 6.0 * s * s);
+    float v = ((slot + 0.5) / perLayer) * 2.0 - 1.0 + (ghostHash11(fiberId, 0u, 0u, 2u) - 0.5) * (1.6 / perLayer) + layer * 0.12 / perLayer;
+    float depthOffset = (ghostHash11(fiberId, 0u, 0u, 3u) - 0.5) * GHOST_DEPTH_SPREAD * (0.35 + 6.0 * s * s);
 
     float3 normal;
     float3 world = ghostRibbonPoint(s, v, depthOffset, layer, place, scale, normal);
@@ -1661,14 +1670,14 @@ GhostVsOutput GhostFibersDotsVs(uint vertexId : SV_VertexID, uint instanceId : S
     float fold = pow(1.0 - facing, 6.0) * u[6].z;
     float endFade = hermite(0.5, 0.4, abs(s)) * smoothstep(1.6, 4.2, depth);
     float uTips = u[6].x;
-    float tipEnd = lerp(0.6, 0.06 + 0.26 * ghostHash11(fi * 9.137 + place.w * 3.0), uTips);
+    float tipEnd = lerp(0.6, 0.06 + 0.26 * ghostHash11(fiberId, ribbonId, 0u, 4u), uTips);
     float tip = exp(-sq((s - tipEnd) / 0.0065)) * uTips;
     endFade *= hermite(tipEnd + 0.003, tipEnd - 0.001, s);
     // The intro is finished (React Bits' appear = 1) and no click pulses.
     float uDotLength = u[5].y;
-    float twinklePhase = ghostHash11(fi * 13.7 + fk * 0.917 + uRibbon * 3.0);
+    float twinklePhase = ghostHash11(fiberId, beadId, ribbonId, 5u);
     float twinkle = pow(max(sin(uTime * (1.2 + 2.6 * twinklePhase) * 3.0 + twinklePhase * 61.0), 0.0), 36.0) * u[5].z * (1.0 - 0.85 * uDotLength);
-    float strength = lerp(0.45, 1.0, ghostHash11(fi * 5.37 + 1.0)) * lerp(1.0, 0.72, abs(layer) * u[3].y);
+    float strength = lerp(0.45, 1.0, ghostHash11(fiberId, 0u, 0u, 6u)) * lerp(1.0, 0.72, abs(layer) * u[3].y);
     float intensity = energy * crowd * strength * endFade * 0.8 * uGain * (1.0 + fold * 7.0 + twinkle * 5.0 + tip * 7.0);
     float highlight = saturate(fold * 0.55 + twinkle + tip);
 
