@@ -654,6 +654,19 @@ impl ScreenCaptureFrameStatus {
     fn is_valid_current_image(self) -> bool {
         self == Self::Complete
     }
+
+    /// A dropped screen frame is a callback that should have carried a picture
+    /// and did not (#981). ScreenCaptureKit's idle, blank, suspended, started
+    /// and stopped statuses say the screen has nothing new to show (unchanged
+    /// content, an off-screen window, a sleeping display, a stream edge); the
+    /// last complete frame stays current and nothing was lost, so they count
+    /// only in the per-status tallies. An unknown status is a callback whose
+    /// content cannot be trusted, so it is the one non-complete status that
+    /// counts as a drop.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    fn counts_as_dropped_frame(self) -> bool {
+        self == Self::Unknown
+    }
 }
 
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -731,12 +744,10 @@ fn record_screen_capture_callback_status(
     guard.capture_timings.record_callback_at(callback_at);
     guard.capture_callback_count = guard.capture_callback_count.saturating_add(1);
     guard.frame_statuses.record(status);
-    if status.is_valid_current_image() {
-        true
-    } else {
+    if status.counts_as_dropped_frame() {
         guard.dropped_frames = guard.dropped_frames.saturating_add(1);
-        false
     }
+    status.is_valid_current_image()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8538,22 +8549,24 @@ mod tests {
 
     #[test]
     fn capture_drop_reason_screen_frame_status_classifies_complete_and_noncomplete_fixtures() {
+        // (raw status, classification, publishes a picture, counts as a drop)
         let fixtures = [
-            (Some(0), ScreenCaptureFrameStatus::Complete, true),
-            (Some(1), ScreenCaptureFrameStatus::Idle, false),
-            (Some(2), ScreenCaptureFrameStatus::Blank, false),
-            (Some(3), ScreenCaptureFrameStatus::Suspended, false),
-            (Some(4), ScreenCaptureFrameStatus::Started, false),
-            (Some(5), ScreenCaptureFrameStatus::Stopped, false),
-            (Some(99), ScreenCaptureFrameStatus::Unknown, false),
-            (None, ScreenCaptureFrameStatus::Unknown, false),
+            (Some(0), ScreenCaptureFrameStatus::Complete, true, false),
+            (Some(1), ScreenCaptureFrameStatus::Idle, false, false),
+            (Some(2), ScreenCaptureFrameStatus::Blank, false, false),
+            (Some(3), ScreenCaptureFrameStatus::Suspended, false, false),
+            (Some(4), ScreenCaptureFrameStatus::Started, false, false),
+            (Some(5), ScreenCaptureFrameStatus::Stopped, false, false),
+            (Some(99), ScreenCaptureFrameStatus::Unknown, false, true),
+            (None, ScreenCaptureFrameStatus::Unknown, false, true),
         ];
         let mut counts = ScreenCaptureFrameStatusCounts::default();
 
-        for (raw, expected, valid_current_image) in fixtures {
+        for (raw, expected, valid_current_image, dropped) in fixtures {
             let status = classify_screen_capture_frame_status(raw);
             assert_eq!(status, expected);
             assert_eq!(status.is_valid_current_image(), valid_current_image);
+            assert_eq!(status.counts_as_dropped_frame(), dropped, "{status:?}");
             counts.record(status);
         }
 
@@ -8605,7 +8618,8 @@ mod tests {
         assert_eq!(latest.sequence, expected_sequence);
         assert_eq!(guard.frames_captured, 1);
         assert_eq!(guard.capture_callback_count, 6);
-        assert_eq!(guard.dropped_frames, 6);
+        // Only the unknown status is a drop (#981); the rest say "nothing new".
+        assert_eq!(guard.dropped_frames, 1);
         assert_eq!(guard.frame_statuses.idle, 1);
         assert_eq!(guard.frame_statuses.blank, 1);
         assert_eq!(guard.frame_statuses.suspended, 1);
@@ -8613,6 +8627,33 @@ mod tests {
         assert_eq!(guard.frame_statuses.stopped, 1);
         assert_eq!(guard.frame_statuses.unknown, 1);
         assert_eq!(guard.frame_statuses.complete, 0);
+    }
+
+    /// #981: a static screen is a stream of idle callbacks after one complete
+    /// frame. They are not dropped frames; they stay visible in the per-status
+    /// counts so Health can still say the screen is idle.
+    #[test]
+    fn capture_drop_reason_idle_screen_callbacks_are_not_dropped_frames() {
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+        assert!(record_screen_capture_callback_status(
+            &shared,
+            Instant::now(),
+            ScreenCaptureFrameStatus::Complete
+        ));
+        for _ in 0..300 {
+            assert!(!record_screen_capture_callback_status(
+                &shared,
+                Instant::now(),
+                ScreenCaptureFrameStatus::Idle
+            ));
+        }
+
+        let guard = shared.lock().unwrap();
+        assert_eq!(guard.capture_callback_count, 301);
+        assert_eq!(guard.dropped_frames, 0);
+        assert_eq!(guard.frame_statuses.complete, 1);
+        assert_eq!(guard.frame_statuses.idle, 300);
+        assert_eq!(guard.frame_statuses.diagnostic_stats().idle, 300);
     }
 
     #[test]

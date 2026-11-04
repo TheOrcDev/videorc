@@ -22,6 +22,7 @@ import {
   previewSourceCheck,
   slowdownAdvice,
   slowdownCheck,
+  sourcesCheck,
   type HealthCheck
 } from './health-checks'
 
@@ -212,5 +213,47 @@ describe('permissionWarnings', () => {
     expect(
       permissionWarnings(events, (pane) => pane !== 'screen-recording', new Set(['c']))
     ).toEqual([{ pane: 'camera', eventIds: ['a', 'b'], createdAt: '2026-10-11T10:05:00Z' }])
+  })
+})
+
+// #981: "Dropping frames" is present tense. It reads the drop window, never
+// the run totals, so a static screen's idle frames and one old drop never
+// keep Sources amber.
+describe('sourcesCheck', () => {
+  const healthy = {
+    deviceDisconnected: false,
+    duplicateCaptureSources: [],
+    previewCameraDroppedFrames: 0,
+    previewScreenDroppedFrames: 5_065,
+    captureFps: 30,
+    targetFps: 30
+  } as unknown as DiagnosticStats
+
+  it('is healthy on run totals alone', () => {
+    expect(sourcesCheck(healthy, { capture: false })).toEqual({ value: 'Healthy', tone: 'good' })
+  })
+
+  it('says Dropping frames while the window says so', () => {
+    expect(sourcesCheck(healthy, { capture: true })).toEqual({
+      value: 'Dropping frames',
+      tone: 'warn'
+    })
+  })
+
+  it('keeps the device and duplicate-capture words ahead of drops', () => {
+    expect(sourcesCheck({ ...healthy, deviceDisconnected: true }, { capture: true })).toEqual({
+      value: 'Device disconnected',
+      tone: 'error'
+    })
+    expect(
+      sourcesCheck({ ...healthy, duplicateCaptureSources: ['Screen'] }, { capture: true })
+    ).toEqual({ value: 'Captured twice', tone: 'warn' })
+  })
+
+  it('still says Capture slow from the frame rate', () => {
+    expect(sourcesCheck({ ...healthy, captureFps: 20 }, { capture: false })).toEqual({
+      value: 'Capture slow',
+      tone: 'warn'
+    })
   })
 })

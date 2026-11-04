@@ -92,8 +92,15 @@ export function DiagnosticsTab(): ReactElement {
   } = useStudioCore()
   const { recording } = useStudioRecording()
   const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
-  const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, recordLatency, streamHealth } =
-    useStudioDiagnostics()
+  const {
+    diagnosticStats,
+    healthEvents,
+    logs,
+    previewSurfaceStatus,
+    recentStreamDrops,
+    recordLatency,
+    streamHealth
+  } = useStudioDiagnostics()
   // Plan 214 E3: Videorc Camera's group, never where the camera is hidden.
   const camera = useVirtualCamera()
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
@@ -139,6 +146,7 @@ export function DiagnosticsTab(): ReactElement {
         previewLiveStatus,
         previewScreenStatus,
         previewSurfaceStatus,
+        recentStreamDrops,
         streamHealth,
         streamTargets
       }),
@@ -153,6 +161,7 @@ export function DiagnosticsTab(): ReactElement {
       previewLiveStatus,
       previewScreenStatus,
       previewSurfaceStatus,
+      recentStreamDrops,
       streamHealth,
       streamTargets
     ]
