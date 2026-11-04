@@ -608,6 +608,12 @@ function showSessionAudioNews(event: HealthEvent): void {
       description: event.message,
       duration: 8_000
     })
+  } else if (event.code === 'microphone-signal-recovered') {
+    // Issue 1064: sound came back after a run of digital silence.
+    notifyOnce(event.code, 'success', 'Your microphone has sound again', {
+      description: event.message,
+      duration: 8_000
+    })
   }
 }
 

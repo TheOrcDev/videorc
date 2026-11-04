@@ -72,6 +72,7 @@ import {
 } from '@/lib/capture'
 import {
   meterHasNoReading,
+  MIC_SESSION_LEVEL_UNAVAILABLE_COPY,
   micLevelUnavailableCopy,
   soundsMeterInput,
   systemAudioMeterInput,
@@ -260,12 +261,14 @@ export function SourcesAudioMixer(): ReactElement {
                     />
                   }
                   sessionActive={isSessionActive}
+                  sessionLevelUnavailable={microphone.sessionLevelUnavailable}
                   status={microphoneStatus({
                     selected: Boolean(microphoneId),
                     switching: sourceDeviceSwitchPending === 'microphone',
                     device: selectedDeviceStatus(deviceList.devices, microphoneId),
                     muted: audio.microphoneMuted,
-                    sessionActive: isSessionActive
+                    sessionActive: isSessionActive,
+                    silent: microphone.monitorState === 'silent'
                   })}
                   syncOffsetMs={audio.microphoneSyncOffsetMs}
                   syncUserSet={audio.microphoneSyncOffsetUserSet === true}
@@ -346,6 +349,7 @@ export function MicrophoneChannel({
   syncOffsetMs,
   syncUserSet,
   sessionActive,
+  sessionLevelUnavailable = false,
   calibration,
   keepReady,
   defaultMoreOpen,
@@ -368,6 +372,8 @@ export function MicrophoneChannel({
   syncOffsetMs: number
   syncUserSet: boolean
   sessionActive: boolean
+  /** Issue 1064: the running bus sends no level, so the meter shows none. */
+  sessionLevelUnavailable?: boolean
   /** Calibrate, in development builds only (plan 173, D3); null otherwise. */
   calibration: ReactNode
   /** Keep the microphone open while Studio is on screen (plan 174 S3.6, D5). */
@@ -464,6 +470,10 @@ export function MicrophoneChannel({
             data-videorc-mic-level-reason={unavailableReason}
           >
             {micLevelUnavailableCopy(unavailableReason)}
+          </p>
+        ) : sessionLevelUnavailable ? (
+          <p className="text-xs text-muted-foreground" data-videorc-mic-level-reason="session">
+            {MIC_SESSION_LEVEL_UNAVAILABLE_COPY}
           </p>
         ) : null}
       </SourceItem>

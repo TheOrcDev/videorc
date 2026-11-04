@@ -10557,6 +10557,7 @@ fn audio_levels_event(
         sounds: levels.sounds,
         master: levels.master,
         master_clipped_samples: levels.master_clipped_samples,
+        microphone_silent: levels.microphone_silent,
     })
 }
 
@@ -10592,6 +10593,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             system_audio_sample(active),
                             observation.recoveries,
                             observation.output_stalls,
+                            observation.silence_events,
                         )
                     })
                 }
@@ -10612,6 +10614,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             system_audio,
             recoveries,
             output_stalls,
+            silence_events,
         )) = counters
         else {
             return;
@@ -10635,6 +10638,13 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         if generation != microphone_generation {
             microphone_generation = generation;
             silent_mic_reported = false;
+        }
+        // Issue 1064: the watchdog's report is the news; the once-per-session
+        // check below would only repeat it for this microphone.
+        for change in &silence_events {
+            silent_mic_reported |= change.generation == generation
+                && change.change == crate::session_audio::MicrophoneSilenceChange::Silent;
+            emit_microphone_silence_health_event(&state, &session_id, change);
         }
         for source_loss_after_ms in source_loss_event_after_ms {
             silent_mic_reported |= source_loss_after_ms.generation == generation;
@@ -10839,6 +10849,58 @@ fn emit_microphone_recovered_health_event(
 }
 
 const MICROPHONE_TIMELINE_RECOVERED_CODE: &str = "microphone-timeline-recovered";
+
+/// Issue 1064: the captured microphone held nothing but digital silence for
+/// the watchdog's hold, and sound came back after such a run. The renderer
+/// shows the first through the microphone-loss notice and clears it on the
+/// second (its code ends in `-recovered`, like the loss flow's).
+pub(crate) const MICROPHONE_SILENT_CODE: &str = "microphone-silent";
+pub(crate) const MICROPHONE_SIGNAL_RECOVERED_CODE: &str = "microphone-signal-recovered";
+
+fn emit_microphone_silence_health_event(
+    state: &AppState,
+    session_id: &str,
+    change: &crate::session_audio::MicrophoneSilenceEvent,
+) {
+    use crate::session_audio::MicrophoneSilenceChange;
+    let (level, code, message) = match change.change {
+        MicrophoneSilenceChange::Silent => (
+            HealthLevel::Warn,
+            MICROPHONE_SILENT_CODE,
+            microphone_silent_message(&change.device_name, change.after_ms, change.silent_ms),
+        ),
+        MicrophoneSilenceChange::Recovered => (
+            HealthLevel::Info,
+            MICROPHONE_SIGNAL_RECOVERED_CODE,
+            microphone_signal_recovered_message(&change.device_name, change.silent_ms),
+        ),
+    };
+    state.emit_log(
+        if matches!(level, HealthLevel::Warn) {
+            "warn"
+        } else {
+            "info"
+        },
+        &message,
+    );
+    let _ = emit_health_event(state, Some(session_id), level, code, &message);
+}
+
+/// Activity-neutral, like the loss message: the renderer's title says
+/// whether a recording, a livestream or Clips is affected.
+fn microphone_silent_message(device_name: &str, after_ms: u64, silent_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" has sent only silence since {:.1} seconds into this session. Try choosing it again.",
+        after_ms.saturating_sub(silent_ms) as f64 / 1_000.0
+    )
+}
+
+fn microphone_signal_recovered_message(device_name: &str, silent_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" has sound again after {:.1} seconds of silence.",
+        silent_ms as f64 / 1_000.0
+    )
+}
 
 /// Plan 076: system audio places again after a timeline loss.
 fn emit_system_audio_recovered_health_event(
@@ -27602,6 +27664,7 @@ mod tests {
                 sounds: None,
                 master: Some(reading),
                 master_clipped_samples: 3,
+                microphone_silent: true,
             },
         )
         .expect("an event");
@@ -27609,6 +27672,7 @@ mod tests {
         assert_eq!(event.microphone, Some(reading));
         assert_eq!(event.system_audio, None);
         assert_eq!(event.master_clipped_samples, 3);
+        assert!(event.microphone_silent);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27835,6 +27899,26 @@ mod tests {
             microphone_input_lost_message("Desk Mic", 92_345),
             "Microphone \"Desk Mic\" stopped after 92.3 seconds. Videorc replaced the missing input with silence."
         );
+    }
+
+    #[test]
+    fn microphone_silence_messages_name_the_device_and_the_run() {
+        // Issue 1064: the report arrives at the end of the hold, so the
+        // silence began a hold earlier.
+        assert_eq!(
+            microphone_silent_message("HD Pro Webcam C920", 15_300, 3_000),
+            "Microphone \"HD Pro Webcam C920\" has sent only silence since 12.3 seconds into this session. Try choosing it again."
+        );
+        assert_eq!(
+            microphone_silent_message("Desk Mic", 1_000, 3_000),
+            "Microphone \"Desk Mic\" has sent only silence since 0.0 seconds into this session. Try choosing it again."
+        );
+        assert_eq!(
+            microphone_signal_recovered_message("Desk Mic", 7_450),
+            "Microphone \"Desk Mic\" has sound again after 7.5 seconds of silence."
+        );
+        assert_eq!(MICROPHONE_SILENT_CODE, "microphone-silent");
+        assert!(MICROPHONE_SIGNAL_RECOVERED_CODE.ends_with("-recovered"));
     }
 
     #[test]

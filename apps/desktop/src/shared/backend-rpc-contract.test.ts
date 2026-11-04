@@ -117,6 +117,9 @@ describe('backend RPC contract', () => {
     // The standby microphone between sessions carries no session.
     const standby = { microphone: { peakDb: -30, rmsDb: -36 }, masterClippedSamples: 0 }
     expect(validateBackendEventPayload('audio.levels', standby)).toEqual(standby)
+    // Issue 1064: the silence watchdog's report rides the levels while true.
+    const silent = { ...levels, microphone: { peakDb: -120, rmsDb: -120 }, microphoneSilent: true }
+    expect(validateBackendEventPayload('audio.levels', silent)).toEqual(silent)
     for (const malformed of [
       { ...levels, sessionId: null },
       { ...levels, microphone: { peakDb: -12, rmsDb: -20, extra: 1 } },
@@ -124,6 +127,7 @@ describe('backend RPC contract', () => {
       { ...levels, microphone: { peakDb: 60, rmsDb: -20 } },
       { ...levels, microphone: null },
       { ...levels, masterClippedSamples: -1 },
+      { ...levels, microphoneSilent: 'yes' },
       { ...levels, unknown: true }
     ]) {
       expect(() => validateBackendEventPayload('audio.levels', malformed)).toThrow()
