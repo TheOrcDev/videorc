@@ -206,10 +206,9 @@ describe('maintained Comments probe HTTP contract', () => {
             history = true
           return command === 'comments-window-layout-metrics'
             ? {
-                numberFormatLocale: 'en-GB',
                 stats: [
                   { id: 'supporters', text: '1' },
-                  { id: 'tips', text: 'US$20' },
+                  { id: 'tips', text: '$20' },
                   { id: 'chat', text: history ? '6,003' : '0' }
                 ]
               }

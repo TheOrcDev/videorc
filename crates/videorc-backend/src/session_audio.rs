@@ -7986,48 +7986,15 @@ mod tests {
     #[test]
     fn absent_input_keeps_one_pipe_open_with_truthful_silence_through_stop() {
         use std::io::Read;
-        use std::os::unix::fs::OpenOptionsExt;
         let path =
             std::env::temp_dir().join(format!("videorc-silent-bus-{}.fifo", uuid::Uuid::new_v4()));
         crate::fifo::create(&path).unwrap();
-        // macOS can leave a blocking FIFO read parked after every writer
-        // closes. Open nonblocking before attach, and explicitly signal when
-        // SessionAudio Drop has finished instead of relying on EOF wakeup.
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path)
-            .unwrap();
-        let writer_stopped = Arc::new(AtomicBool::new(false));
-        let reader_stop = writer_stopped.clone();
-        let (reader_finished, finished) = mpsc::sync_channel(1);
+        let reader_path = path.clone();
         let reader = thread::spawn(move || {
-            let result = (|| -> io::Result<Vec<u8>> {
-                let mut bytes = vec![];
-                let mut buffer = [0_u8; 16_384];
-                loop {
-                    match file.read(&mut buffer) {
-                        Ok(0) => {
-                            if reader_stop.load(Ordering::Acquire) {
-                                return Ok(bytes);
-                            }
-                        }
-                        Ok(count) => {
-                            bytes.extend_from_slice(&buffer[..count]);
-                            continue;
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if reader_stop.load(Ordering::Acquire) {
-                                return Ok(bytes);
-                            }
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(error) => return Err(error),
-                    }
-                    thread::sleep(Duration::from_millis(1));
-                }
-            })();
-            let _ = reader_finished.send(result);
+            let mut file = std::fs::File::open(reader_path).unwrap();
+            let mut bytes = vec![];
+            file.read_to_end(&mut bytes).unwrap();
+            bytes
         });
         let session = attach(
             None,
@@ -8041,27 +8008,17 @@ mod tests {
             thread::yield_now();
         }
         let status = session.status();
-        let input_before_stop = session.input_state();
-        session.request_stop();
-        let input_after_stop = session.input_state();
-        let selected_after_stop = session.has_selected_input();
-        let loss_after_stop = session.claim_source_loss_event();
-        drop(session);
-        writer_stopped.store(true, Ordering::Release);
-        let bytes = finished
-            .recv_timeout(Duration::from_secs(2))
-            .expect("owned FIFO reader finishes after writer stop")
-            .expect("FIFO read succeeds");
-        reader.join().unwrap();
-        // Assert only after both owners have closed, including failure paths.
         assert!(status.sample_cursor >= 960);
-        assert_eq!(input_before_stop, NativeAudioInputState::Silent);
+        assert_eq!(session.input_state(), NativeAudioInputState::Silent);
         assert!(!status.selected_input);
         assert_eq!(status.counters.captured_frames, 0);
         assert_eq!(status.counters.generated_frames, status.sample_cursor);
-        assert_eq!(input_after_stop, NativeAudioInputState::Stopped);
-        assert!(!selected_after_stop);
-        assert_eq!(loss_after_stop, None);
+        session.request_stop();
+        assert_eq!(session.input_state(), NativeAudioInputState::Stopped);
+        assert!(!session.has_selected_input());
+        assert_eq!(session.claim_source_loss_event(), None);
+        drop(session);
+        let bytes = reader.join().unwrap();
         assert!(bytes.len() >= 960 * 8);
         assert!(bytes.iter().all(|byte| *byte == 0));
     }

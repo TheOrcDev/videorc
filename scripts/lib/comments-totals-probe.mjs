@@ -59,28 +59,6 @@ export function assertFakeActivityTotals(eventTotals) {
   }
 }
 
-/** Match exact accounting strings using the detached renderer's Intl locale. */
-export function commentsTotalsMatch(metrics, history) {
-  if (typeof metrics?.numberFormatLocale !== 'string' || !metrics.numberFormatLocale) return false
-  try {
-    const locale = metrics.numberFormatLocale
-    const value = (id) => metrics.stats?.find((stat) => stat.id === id)?.text
-    const usd20 = new Intl.NumberFormat(locale, {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0
-    }).format(20)
-    return (
-      value('supporters') === (1).toLocaleString(locale) &&
-      value('tips') === usd20 &&
-      (!history || value('chat') === (6003).toLocaleString(locale))
-    )
-  } catch {
-    return false
-  }
-}
-
 /** Confirmed reduced accounting, with every paid row outside the 2,000-row
  * fixture window. SQLite correctness is exercised independently by the fake
  * provider smoke; this phase verifies the real detached renderer consumes it. */
@@ -141,7 +119,14 @@ export async function probeCommentsTotals({ command, waitFor, assert, layoutAt, 
   const observe = async (history, label) => {
     const result = await waitFor(
       () => layoutAt(1280),
-      (metrics) => commentsTotalsMatch(metrics, history),
+      (metrics) => {
+        const value = (id) => metrics.stats?.find((stat) => stat.id === id)?.text
+        return (
+          value('supporters') === '1' &&
+          value('tips') === '$20' &&
+          (!history || value('chat') === '6,003')
+        )
+      },
       8000
     )
     assert(

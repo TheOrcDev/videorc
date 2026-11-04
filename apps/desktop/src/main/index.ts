@@ -13281,7 +13281,6 @@ async function runSmokePreviewMotionCommand(
           statsMenuItems,
           menuOpenAfter: Boolean(document.querySelector('[role="menu"]')),
           windowWidth: window.innerWidth,
-          numberFormatLocale: new Intl.NumberFormat().resolvedOptions().locale,
           documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 0.5,
           header: box(header),
           headerItems: visibleDescendants(header),
