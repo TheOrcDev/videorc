@@ -16,6 +16,7 @@ use crate::buddy_pet_build::tests::{CELL_H, Figure, TEST_CELL_SIZE, draw_figure,
 use crate::cohost::get_cohost_settings;
 use crate::protocol::ServerEvent;
 use crate::storage::Database;
+use crate::test_temp_dir::TestTempDir;
 
 fn test_state() -> AppState {
     let (events, _) = broadcast::channel(512);
@@ -27,10 +28,8 @@ fn test_state() -> AppState {
     )
 }
 
-fn temp_root() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("videorc-buddy-create-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn temp_root() -> TestTempDir {
+    TestTempDir::new("buddy-create")
 }
 
 fn png_bytes(image: &image::RgbaImage) -> Vec<u8> {

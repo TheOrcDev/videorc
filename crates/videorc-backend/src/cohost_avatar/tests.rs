@@ -15,6 +15,7 @@ use super::*;
 use crate::cohost::{CohostErrorDetail, get_cohost_settings};
 use crate::protocol::ServerEvent;
 use crate::storage::Database;
+use crate::test_temp_dir::TestTempDir;
 
 fn test_state() -> AppState {
     let (events, _) = broadcast::channel(512);
@@ -26,10 +27,8 @@ fn test_state() -> AppState {
     )
 }
 
-fn temp_root() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("videorc-buddy-look-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn temp_root() -> TestTempDir {
+    TestTempDir::new("buddy-look")
 }
 
 /// A small transparent PNG with one opaque pixel in `shade`, so each

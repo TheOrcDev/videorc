@@ -160,6 +160,8 @@ mod system_audio_capture;
 #[cfg(any(windows, all(test, target_os = "macos")))]
 mod system_audio_capture_windows;
 mod system_audio_session;
+#[cfg(test)]
+mod test_temp_dir;
 mod transcript;
 mod twitch;
 mod twitch_chat;
@@ -18597,13 +18599,14 @@ mod tests {
         assert_eq!(state.screen_import_capacity.available_permits(), 1);
     }
 
+    /// The guard comes first so it drops after the state's database
+    /// (Windows cannot remove a folder holding an open SQLite file).
     fn banner_test_state() -> (
+        crate::test_temp_dir::TestTempDir,
         AppState,
         broadcast::Receiver<ServerEvent>,
-        std::path::PathBuf,
     ) {
-        let dir = std::env::temp_dir().join(format!("videorc-banner-rpc-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp_dir::TestTempDir::new("banner-rpc");
         let (events, receiver) = broadcast::channel(256);
         let state = AppState::new(
             "test-token".to_string(),
@@ -18611,7 +18614,7 @@ mod tests {
             events,
             Database::open_file_for_tests(&dir.join("videorc.sqlite3")),
         );
-        (state, receiver, dir)
+        (dir, state, receiver)
     }
 
     fn write_banner_png(dir: &std::path::Path, name: &str) -> String {
@@ -18647,7 +18650,7 @@ mod tests {
     /// database. The business rules live in the backend, not only in the UI.
     #[tokio::test]
     async fn banners_rpcs_enforce_the_showing_cap_and_the_session_delete_refusal() {
-        let (state, mut events, dir) = banner_test_state();
+        let (dir, state, mut events) = banner_test_state();
         let mut ids = Vec::new();
         for index in 0..5 {
             let path = write_banner_png(&dir, &format!("sponsor-{index}.png"));
@@ -18778,7 +18781,7 @@ mod tests {
                 .is_empty()
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Plan 205 D3 (owner): an import while nothing runs answers a shown
@@ -18787,7 +18790,7 @@ mod tests {
     /// fails for the show), and each import republishes the list once.
     #[tokio::test]
     async fn banners_import_shows_the_new_banner_unless_the_show_gates_refuse() {
-        let (state, mut events, dir) = banner_test_state();
+        let (dir, state, mut events) = banner_test_state();
         let import = |name: String| {
             let path = write_banner_png(&dir, &name);
             let state = &state;
@@ -18860,12 +18863,12 @@ mod tests {
             }
         }
         assert_eq!(changed, 8);
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn banners_import_refusals_are_the_verbatim_sentences() {
-        let (state, _events, dir) = banner_test_state();
+        let (dir, state, _events) = banner_test_state();
         let text = dir.join("notes.png");
         std::fs::write(&text, b"just some text").unwrap();
         let refused = banner_rpc(
@@ -18891,7 +18894,7 @@ mod tests {
                     .is_none(),
             "a refused import publishes nothing"
         );
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

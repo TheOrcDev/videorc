@@ -26,7 +26,8 @@ const OTHER_PACK: &str = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
 /// The three files of a synced pack: a synthetic manifest naming
 /// `mascot.webp`, its sheet, and a sidecar.
 fn pack_files(seed: u8) -> Vec<(String, Vec<u8>)> {
-    let dir = temp_root().join("pack");
+    let root = temp_root();
+    let dir = root.join("pack");
     write_pack(&dir, &synthetic_manifest("mascot.webp"), "mascot.webp");
     let sidecar = serde_json::json!({
         "version": 1,
@@ -379,7 +380,11 @@ fn buddy_default_switches_to_its_bundled_pack_once() {
     let bundled = temp_root();
     let database = Database::open_in_memory_for_tests();
     // No pack shipped: Still, and nothing remembered (a later launch with it switches).
-    let fresh = default_buddy_alive(&database, CohostSettings::default(), Some(&bundled));
+    let fresh = default_buddy_alive(
+        &database,
+        CohostSettings::default(),
+        Some(bundled.as_path()),
+    );
     assert_eq!(fresh.persona.avatar, BuddyAvatar::Still);
     assert_eq!(
         database
@@ -395,7 +400,11 @@ fn buddy_default_switches_to_its_bundled_pack_once() {
         &synthetic_manifest("mascot.webp"),
         "mascot.webp",
     );
-    let upgraded = default_buddy_alive(&database, CohostSettings::default(), Some(&bundled));
+    let upgraded = default_buddy_alive(
+        &database,
+        CohostSettings::default(),
+        Some(bundled.as_path()),
+    );
     assert_eq!(upgraded.persona.avatar, alive("bundled:buddy"));
     assert_eq!(crate::cohost::load_cohost_settings(&database), upgraded);
     assert_eq!(
@@ -408,7 +417,7 @@ fn buddy_default_switches_to_its_bundled_pack_once() {
     let mut still = upgraded;
     still.persona.avatar = BuddyAvatar::Still;
     assert_eq!(
-        default_buddy_alive(&database, still.clone(), Some(&bundled)),
+        default_buddy_alive(&database, still.clone(), Some(bundled.as_path())),
         still
     );
     // A Buddy of the streamer's own is never touched, and the switch is spent.
@@ -417,7 +426,7 @@ fn buddy_default_switches_to_its_bundled_pack_once() {
     own.persona.source = CohostPersonaSource::Uploaded;
     own.persona.images.idle = Some("default/idle.png".to_string());
     assert_eq!(
-        default_buddy_alive(&database, own.clone(), Some(&bundled)),
+        default_buddy_alive(&database, own.clone(), Some(bundled.as_path())),
         own
     );
     assert_eq!(
