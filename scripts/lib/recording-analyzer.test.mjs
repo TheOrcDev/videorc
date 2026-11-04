@@ -555,6 +555,33 @@ describe('evaluateGates', () => {
     assert.equal(evaluateGates({ ...silent, silentTrackCoverage: 0.95 }).pass, false)
   })
 
+  // Hosted CI runners have no input device: the take is the paced-silence bus.
+  it('skips the silent-track gate with a warning when the run has no microphone device', () => {
+    const silent = { ...clean, silentTrackMs: 5_526, silentTrackCoverage: 1 }
+    const noDevice = evaluateGates({ ...silent, microphoneAvailable: false })
+    assert.equal(noDevice.pass, true, noDevice.failures.join('; '))
+    assert.ok(
+      noDevice.warnings.some((w) =>
+        /digital silence .*100\.0% .*silent-microphone check skipped/.test(w)
+      ),
+      noDevice.warnings.join('; ')
+    )
+    // A real (or unspecified) microphone that recorded silence still fails.
+    for (const microphoneAvailable of [true, undefined]) {
+      const v = evaluateGates({ ...silent, microphoneAvailable })
+      assert.equal(v.pass, false)
+      assert.match(v.failures.join(' '), /the microphone recorded nothing/)
+    }
+    // No device never excuses a missing audio stream.
+    const missing = evaluateGates({
+      ...clean,
+      hasAudio: false,
+      microphoneAvailable: false
+    })
+    assert.equal(missing.pass, false)
+    assert.match(missing.failures.join(' '), /audio expected but no audio stream/)
+  })
+
   it('keeps a quiet-but-real take and a no-microphone run unaffected by the silent-track gate', () => {
     // A room floor sits above -80 dBFS: no digital-silence run at all.
     assert.equal(evaluateGates({ ...clean, silentTrackMs: 0, silentTrackCoverage: 0 }).pass, true)
@@ -1131,6 +1158,26 @@ describe(
       // A bare analysis infers a microphone from the track: the same verdict.
       const inferred = await analyzeRecording(silenttrack, { ffmpegPath, ffprobePath, intendedFps: 30 })
       assert.equal(inferred.verdict.pass, false)
+    })
+
+    it('warns instead of failing a digitally silent track when no microphone device exists', async () => {
+      const report = await analyzeRecording(silenttrack, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        expectAudio: true,
+        microphoneAvailable: false
+      })
+      assert.equal(report.metrics.microphoneAvailable, false)
+      assert.equal(
+        report.verdict.pass,
+        true,
+        `unexpected failures: ${report.verdict.failures.join('; ')}`
+      )
+      assert.ok(
+        report.verdict.warnings.some((w) => /silent-microphone check skipped/.test(w)),
+        report.verdict.warnings.join('; ')
+      )
     })
 
     it('PASSES a digitally silent audio track when no microphone was declared', async () => {

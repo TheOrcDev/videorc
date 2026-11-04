@@ -680,12 +680,23 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
       metrics.silentTrackCoverage != null &&
       metrics.silentTrackCoverage >= gates.silentTrackMinCoverage
     ) {
-      failures.push(
+      const silentTrack =
         `audio track is digital silence (under ${gates.silentTrackNoiseDb} dBFS) for ` +
-          `${(metrics.silentTrackCoverage * 100).toFixed(1)}% of the take ` +
-          `(${(metrics.silentTrackMs ?? 0).toFixed(0)}ms) although a microphone was selected — ` +
-          `the microphone recorded nothing`
-      )
+        `${(metrics.silentTrackCoverage * 100).toFixed(1)}% of the take ` +
+        `(${(metrics.silentTrackMs ?? 0).toFixed(0)}ms)`
+      // A run that declares no microphone input device (a hosted CI runner,
+      // a test-pattern smoke) records the paced-silence bus: silence is the
+      // expected content, not a microphone that recorded nothing.
+      if (metrics.microphoneAvailable === false) {
+        warnings.push(
+          `${silentTrack} — silent-microphone check skipped: the run declared no ` +
+            `microphone input device, so the track is the paced-silence bus`
+        )
+      } else {
+        failures.push(
+          `${silentTrack} although a microphone was selected — the microphone recorded nothing`
+        )
+      }
     }
   } else if (metrics.expectAudio) {
     failures.push('audio expected but no audio stream present')
@@ -1018,6 +1029,8 @@ export async function runAudioPackets(filePath, { ffprobePath = 'ffprobe' } = {}
  * @param {string} [options.ffprobePath]
  * @param {number} [options.intendedFps] - the session's selected fps (for the frame-count gate)
  * @param {boolean} [options.expectAudio] - whether a mic was selected (default: infer from stream)
+ * @param {boolean} [options.microphoneAvailable] - false when the run has no microphone input
+ *   device, so an all-silent track is the paced-silence bus and only warns (default: true)
  * @param {object} [options.gates] - overrides for DEFAULT_GATES
  * @returns {Promise<object>} the full report (verdict + metrics + raw findings)
  */
@@ -1034,6 +1047,7 @@ export async function analyzeRecording(filePath, options = {}) {
   const hasVideo = probe.video != null
   const hasAudio = probe.audio.length > 0
   const expectAudio = options.expectAudio ?? hasAudio
+  const microphoneAvailable = options.microphoneAvailable ?? true
 
   // Run the video passes (freeze, exact-dup frames, pacing) and the audio passes
   // (packet gaps, silence) concurrently. A frozen/black source can still produce a
@@ -1141,6 +1155,7 @@ export async function analyzeRecording(filePath, options = {}) {
     hasVideo,
     hasAudio,
     expectAudio,
+    microphoneAvailable,
     intendedFps,
     durationSeconds: durationForCount,
     codec: probe.video?.codec ?? null,
