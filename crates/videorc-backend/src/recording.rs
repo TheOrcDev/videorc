@@ -446,6 +446,23 @@ fn drop_noise_reduction_without_session_audio(
     true
 }
 
+/// Parses the RNNoise model off the async runtime before the bus can read a
+/// setting that asks for it (PR #1036, decision 3): the first construction
+/// took 2.7 to 16 ms on the bus thread mid-session. Once warm a construction
+/// is about a microsecond, so a session that turns it on later pays nothing
+/// here either. A session that stays Off never calls this.
+async fn prewarm_noise_reduction() -> Result<()> {
+    let started = Instant::now();
+    tokio::task::spawn_blocking(crate::microphone_denoise::prewarm)
+        .await
+        .context("Noise reduction model warm-up was interrupted")?;
+    tracing::debug!(
+        "Noise reduction model ready in {} ms.",
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
+
 /// What a session does when the capture worker cannot open its microphone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerMicrophoneFallback {
@@ -3397,6 +3414,23 @@ pub async fn update_active_audio_processing(
         confirmed_microphone_muted: None,
     };
 
+    // The bus never constructs the model itself: warm it here, off the
+    // runtime and before the recording lock, so the setting the bus reads
+    // flips to On only once the model is ready.
+    if params.microphone_noise_suppression
+        == Some(crate::protocol::MicrophoneNoiseSuppression::Rnnoise)
+        && let Err(error) = prewarm_noise_reduction().await
+    {
+        state.emit_log(
+            "warn",
+            format!("Noise reduction stays Off for this session: {error:#}"),
+        );
+        result.reason_code = Some(MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE.to_string());
+        result.confirmed_microphone_noise_suppression =
+            Some(crate::protocol::MicrophoneNoiseSuppression::Off);
+        return result;
+    }
+
     let mut system_audio_bypass_requested = false;
     let (ffmpeg_live_audio_session, ffmpeg_pid) = {
         let recording = state.recording.lock().await;
@@ -4670,6 +4704,13 @@ async fn start_session_with_timeline(
     // that bypasses that bus (direct FFmpeg capture) runs without it, and
     // the session starts either way.
     drop_noise_reduction_without_session_audio(&state, &session_id, &mut params, has_session_audio);
+    // The bus reads the request through its settings from its first chunk:
+    // the model must be parsed before the bus is attached below.
+    if params.audio.microphone_noise_suppression
+        == crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+    {
+        prewarm_noise_reduction().await?;
+    }
     let audio_tracks = capture_audio_tracks(&capture);
     let active_screen = state.database.active_stream_screen()?;
     // Plan 186 S4: the banners showing when the session starts decide whether

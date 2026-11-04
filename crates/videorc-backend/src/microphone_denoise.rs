@@ -13,11 +13,22 @@ const PCM_SCALE: f32 = 32768.0;
 // state or overflows spectral energy products. This is not a full-scale clip.
 const MAX_INPUT_MAGNITUDE: f32 = 64.0;
 
+/// Parses the embedded model into the crate's process-wide `OnceLock`, so the
+/// first [`RnnoiseProcessor::new`] on the bus thread finds it ready. The
+/// first call takes milliseconds (2.7 to 16 ms in a release build); every
+/// later construction reads the shared model in about a microsecond.
+/// Idempotent: every path that can turn noise reduction on calls it first,
+/// off the bus thread and off the async runtime.
+pub(crate) fn prewarm() {
+    drop(rnnoise::DenoiseState::new());
+}
+
 pub(crate) struct RnnoiseProcessor {
     state: rnnoise::DenoiseState,
 }
 
 impl RnnoiseProcessor {
+    /// Cheap once [`prewarm`] has run; the session bus relies on that.
     pub(crate) fn new() -> Self {
         Self {
             state: rnnoise::DenoiseState::new(),
@@ -157,6 +168,21 @@ mod tests {
             let frame = tone_frame(index, 16.0);
             assert_eq!(
                 processor.process_frame(&frame),
+                reference.process_frame(&frame)
+            );
+        }
+    }
+
+    #[test]
+    fn prewarm_is_idempotent_and_a_processor_built_after_it_is_the_same_model() {
+        prewarm();
+        prewarm();
+        let mut warmed = RnnoiseProcessor::new();
+        let mut reference = RnnoiseProcessor::new();
+        for index in 0..6 {
+            let frame = tone_frame(index, 0.3);
+            assert_eq!(
+                warmed.process_frame(&frame),
                 reference.process_frame(&frame)
             );
         }
