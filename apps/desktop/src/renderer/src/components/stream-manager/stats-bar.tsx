@@ -153,10 +153,13 @@ function StatCell({
       onDrop={drag?.onDrop}
     >
       <StatLead item={item} />
+      {/* A main value's line is 20 px, never leading-none: a shrinking one
+          truncates, so it clips at its line box, and Segoe UI's comma falls
+          below a 15 px one (1.33 em from ascent to descent; #1083). */}
       <span
         className={cn(
           'tabular-nums',
-          main ? 'text-[15px] leading-none font-semibold' : 'text-[13px] font-medium',
+          main ? 'text-[15px] leading-5 font-semibold' : 'text-[13px] font-medium',
           item.tone === 'subtle' ? 'text-subtle' : 'text-foreground',
           shrinks && 'min-w-0 truncate'
         )}
