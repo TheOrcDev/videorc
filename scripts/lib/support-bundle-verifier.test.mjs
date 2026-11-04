@@ -491,11 +491,12 @@ describe('validateSupportBundle', () => {
       {
         at: '2026-08-23T10:00:05.000Z',
         generation: 2,
-        code: 101,
+        code: 3221225477,
         signal: null,
         attempt: 2,
         uptimeMs: 1200,
         intentional: false,
+        windowsStatus: 'STATUS_ACCESS_VIOLATION',
         stderrTail: ['{"panic":"boom","location":"main.rs:1","thread":"main"}']
       },
       {
@@ -527,6 +528,7 @@ describe('validateSupportBundle', () => {
         attempt: 0,
         uptimeMs: -1,
         intentional: false,
+        windowsStatus: '',
         stderrTail: 'not-a-list'
       },
       {
@@ -549,6 +551,7 @@ describe('validateSupportBundle', () => {
     assert.match(failures, /backendCrashes\.0\.attempt must be a positive integer or null/)
     assert.match(failures, /backendCrashes\.0\.uptimeMs must be a non-negative integer/)
     assert.match(failures, /backendCrashes\.0\.stderrTail must be an array of strings/)
+    assert.match(failures, /backendCrashes\.0\.windowsStatus must be an NTSTATUS name/)
     assert.match(failures, /must be ordered most recent first \(record 1\)/)
 
     bundle.rendererDiagnostics.runtimeInfo.backendCrashes = { at: 'x' }

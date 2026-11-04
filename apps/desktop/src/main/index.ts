@@ -336,6 +336,7 @@ import {
   appendBackendCrashRecord,
   backendCrashLogPath,
   buildBackendCrashRecord,
+  classifyBackendExit,
   describeBackendCrashRecord,
   readBackendCrashLog,
   shouldRecordBackendExit
@@ -10519,10 +10520,13 @@ function recordBackendExit(
   runtime: BackendRuntime,
   code: number | null,
   signal: NodeJS.Signals | null,
-  intentional: boolean,
+  markedByMain: boolean,
   attempt: number | null
 ): void {
-  if (!shouldRecordBackendExit({ intentional, code, signal })) {
+  // Read the mark at the exit itself: main sets it before any signal it sends,
+  // so the exit event can never land ahead of it.
+  const exit = classifyBackendExit({ markedByMain, code, signal, platform: process.platform })
+  if (!shouldRecordBackendExit({ cause: exit.cause, code })) {
     return
   }
   const evidence = backendGenerationEvidence.get(runtime)
@@ -10533,7 +10537,8 @@ function recordBackendExit(
     signal,
     attempt,
     uptimeMs: evidence ? Date.now() - evidence.startedAtMs : 0,
-    intentional,
+    intentional: exit.intentional,
+    windowsStatus: exit.windowsStatus,
     stderrTail: evidence?.stderrTail.snapshot() ?? []
   })
   try {

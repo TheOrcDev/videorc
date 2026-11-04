@@ -73,19 +73,98 @@ export function truncateStderrLine(
   return `${line.slice(0, Math.max(0, maxChars - 1))}…`
 }
 
-/** Every non-intentional exit is a crash. An intentional stop that still
- * reports a non-zero code is worth keeping too (the backend failed while we
- * asked it to shut down); a clean or signal-only intentional stop is not —
- * SIGTERM/SIGKILL is how the supervisor stops the process on purpose. */
+/** Why a backend process ended, as main can tell it at the exit event.
+ *
+ * - `stopped`: main ended it itself (quit, restart, a failed ownership
+ *   claim). Every such path moves the runtime out of `active` synchronously
+ *   before it signals, so the mark is in place whenever the exit arrives.
+ * - `recycled`: nobody in main asked, but the process exited 0 without a
+ *   signal. The backend only returns 0 from its own ordered shutdown, which
+ *   it latches to be replaced (a live-control watchdog, device loss), so this
+ *   is Videorc's own termination, not a crash.
+ * - `crashed`: Windows reported an NTSTATUS crash code. Main's own kills
+ *   (TerminateProcess, `taskkill`) report code 1, never one of these, so the
+ *   name wins over a mark: the process crashed while it was being stopped.
+ * - `unexpected`: anything else main did not ask for. Windows reports an
+ *   outside kill as code 1, the same as an exit-1 failure, so it stays here.
+ */
+export type BackendExitCause = 'stopped' | 'recycled' | 'crashed' | 'unexpected'
+
+export interface BackendExitClassification {
+  cause: BackendExitCause
+  intentional: boolean
+  /** NTSTATUS name of a Windows crash code, or null. */
+  windowsStatus: string | null
+}
+
+// Crash codes a Windows process reports as its exit code. Node can surface
+// them unsigned (3221225477) or signed (-1073741819); both read as one key.
+const WINDOWS_CRASH_STATUS_NAMES: ReadonlyMap<number, string> = new Map([
+  [0xc0000005, 'STATUS_ACCESS_VIOLATION'],
+  [0xc0000374, 'STATUS_HEAP_CORRUPTION'],
+  [0xc0000409, 'STATUS_STACK_BUFFER_OVERRUN'],
+  [0xc00000fd, 'STATUS_STACK_OVERFLOW'],
+  [0xc000001d, 'STATUS_ILLEGAL_INSTRUCTION'],
+  [0xc0000094, 'STATUS_INTEGER_DIVIDE_BY_ZERO'],
+  [0x80000003, 'STATUS_BREAKPOINT']
+])
+
+/** NTSTATUS name for a Windows crash exit code, or null. */
+export function windowsCrashStatusName(
+  code: number | null,
+  platform: NodeJS.Platform
+): string | null {
+  if (platform !== 'win32' || code === null || !Number.isInteger(code)) {
+    return null
+  }
+  return WINDOWS_CRASH_STATUS_NAMES.get(code >>> 0) ?? null
+}
+
+/** `0xC0000005` for a Windows status code (signed or unsigned). */
+export function formatWindowsStatusCode(code: number): string {
+  return `0x${(code >>> 0).toString(16).toUpperCase().padStart(8, '0')}`
+}
+
+export function classifyBackendExit({
+  markedByMain,
+  code,
+  signal,
+  platform
+}: {
+  /** The runtime had left `active` (main began stopping it) when it exited. */
+  markedByMain: boolean
+  code: number | null
+  signal: string | null
+  platform: NodeJS.Platform
+}): BackendExitClassification {
+  const windowsStatus = windowsCrashStatusName(code, platform)
+  const cause: BackendExitCause = windowsStatus
+    ? 'crashed'
+    : markedByMain
+      ? 'stopped'
+      : code === 0 && signal === null
+        ? 'recycled'
+        : 'unexpected'
+  return {
+    cause,
+    intentional: cause === 'stopped' || cause === 'recycled',
+    windowsStatus
+  }
+}
+
+/** Every exit main did not ask for is kept, a backend recycle included (it
+ * says a command wedged). A stop main asked for that still reports a non-zero
+ * code is worth keeping too (the backend failed while we asked it to shut
+ * down); a clean or signal-only stop is not — SIGTERM/SIGKILL is how the
+ * supervisor stops the process on purpose. */
 export function shouldRecordBackendExit({
-  intentional,
+  cause,
   code
 }: {
-  intentional: boolean
+  cause: BackendExitCause
   code: number | null
-  signal?: string | null
 }): boolean {
-  if (!intentional) {
+  if (cause !== 'stopped') {
     return true
   }
   return typeof code === 'number' && code !== 0
@@ -151,6 +230,7 @@ export function buildBackendCrashRecord({
   attempt,
   uptimeMs,
   intentional,
+  windowsStatus = null,
   stderrTail
 }: {
   at: string
@@ -160,6 +240,7 @@ export function buildBackendCrashRecord({
   attempt: number | null
   uptimeMs: number
   intentional: boolean
+  windowsStatus?: string | null
   stderrTail: readonly string[]
 }): BackendCrashRecord {
   return {
@@ -170,6 +251,8 @@ export function buildBackendCrashRecord({
     attempt,
     uptimeMs: Math.max(0, Math.round(uptimeMs)),
     intentional,
+    // Only on a named Windows crash, so older readers see the same shape.
+    ...(windowsStatus ? { windowsStatus } : {}),
     stderrTail: stderrTail
       .slice(-BACKEND_CRASH_STDERR_TAIL_LINES)
       .map((line) => truncateStderrLine(line))
@@ -182,7 +265,9 @@ export function describeBackendCrashRecord(record: BackendCrashRecord): string {
     record.signal !== null
       ? `signal ${record.signal}`
       : record.code !== null
-        ? `code ${record.code}`
+        ? record.windowsStatus
+          ? `code ${formatWindowsStatusCode(record.code)} ${record.windowsStatus}`
+          : `code ${record.code}`
         : 'unknown exit'
   const attempt = record.attempt !== null ? `, restart attempt ${record.attempt}` : ''
   return `generation ${record.generation} exited (${exit}) after ${formatUptime(record.uptimeMs)}${attempt}${record.intentional ? ', intentional' : ''}`
@@ -213,6 +298,9 @@ function normalizeBackendCrashRecord(value: unknown): BackendCrashRecord | null 
     attempt: finiteInteger(value.attempt),
     uptimeMs: Math.max(0, finiteInteger(value.uptimeMs) ?? 0),
     intentional: value.intentional === true,
+    ...(typeof value.windowsStatus === 'string' && value.windowsStatus
+      ? { windowsStatus: value.windowsStatus }
+      : {}),
     stderrTail: Array.isArray(value.stderrTail)
       ? value.stderrTail
           .filter((line): line is string => typeof line === 'string')
