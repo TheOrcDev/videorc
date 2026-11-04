@@ -4269,6 +4269,7 @@ mod tests {
         assert_eq!(empty, CohostCommandResponse::default());
     }
 
+    #[allow(clippy::type_complexity)]
     async fn spawn_command_server(
         status: axum::http::StatusCode,
         headers: Vec<(&'static str, &'static str)>,

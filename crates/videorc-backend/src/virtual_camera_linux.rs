@@ -958,6 +958,10 @@ mod tests {
     const OMARCHY: &str = "NAME=\"Omarchy\"\nID=omarchy\nID_LIKE=arch\n";
 
     #[test]
+    #[allow(
+        clippy::assertions_on_constants,
+        reason = "a tripwire: flipping PROVEN must fail this test, not the build"
+    )]
     fn the_camera_is_hidden_until_the_linux_box_proves_it() {
         assert!(
             !PROVEN,

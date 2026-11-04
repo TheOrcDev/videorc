@@ -7595,8 +7595,11 @@ mod tests {
             by_platform(&paused, StreamPlatform::Twitch),
             Some(CommentsModerateState::Ready)
         );
-        let running =
-            chat_capabilities_with_quota(&[youtube.clone()], false, &SessionState::SignedIn);
+        let running = chat_capabilities_with_quota(
+            std::slice::from_ref(&youtube),
+            false,
+            &SessionState::SignedIn,
+        );
         assert_eq!(
             by_platform(&running, StreamPlatform::Youtube),
             Some(CommentsModerateState::Ready)

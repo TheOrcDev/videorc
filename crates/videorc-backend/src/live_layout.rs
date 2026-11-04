@@ -6020,7 +6020,7 @@ mod tests {
                 .compositor_status
                 .scene_layout
                 .as_ref()
-                .map(|layout| layout.arrangement_mode.clone()),
+                .map(|layout| layout.arrangement_mode),
             Some(crate::protocol::ArrangementMode::Freeform)
         );
         let camera = preview_camera_status(&state).await;

@@ -8793,7 +8793,11 @@ mod tests {
         let mut bytes = vec![0_u8; (PRIVACY_W * PRIVACY_H * 4) as usize];
         for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
             let x = index % PRIVACY_W as usize;
-            let value = if (x / 2 + phase) % 2 == 0 { 255 } else { 0 };
+            let value = if (x / 2 + phase).is_multiple_of(2) {
+                255
+            } else {
+                0
+            };
             px[..3].fill(value);
             px[3] = 255;
         }
@@ -9174,8 +9178,10 @@ mod tests {
     fn swap_attribution_stamps_frames_by_their_screen_rectangle() {
         let alpha = (40.0, 40.0, 1280.0, 720.0);
         let beta = (200.0, 230.0, 1280.0, 720.0);
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 1;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 1,
+            ..Default::default()
+        };
         arm_capture_generation(
             &mut shared,
             SwapAttribution {
@@ -9212,8 +9218,10 @@ mod tests {
 
         // The other order: the completion first, then a straggler of the
         // previous target, discarded; the next target's frames carry 3.
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 2;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 2,
+            ..Default::default()
+        };
         arm_capture_generation(&mut shared, attribution(3, alpha, beta));
         begin_capture_generation(&mut shared, 3);
         assert_eq!(shared.capture_generation, 3);
@@ -9228,8 +9236,10 @@ mod tests {
         assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(3));
 
         // Two targets at the same place: the completion alone decides.
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 3;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 3,
+            ..Default::default()
+        };
         arm_capture_generation(&mut shared, attribution(4, alpha, alpha));
         assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(3));
         begin_capture_generation(&mut shared, 4);

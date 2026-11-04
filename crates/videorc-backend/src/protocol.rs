@@ -3599,6 +3599,7 @@ pub struct RecordingTimelineSnapshot {
     pub marks: Vec<RecordingTimelineMark>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderBridgeSyntheticParams {
@@ -3611,6 +3612,7 @@ pub struct EncoderBridgeSyntheticParams {
     pub bitrate_kbps: Option<u32>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderBridgeSyntheticResult {
