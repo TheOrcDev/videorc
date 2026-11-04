@@ -6,7 +6,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   statSync,
   writeFileSync
 } from 'node:fs'
@@ -39,6 +38,7 @@ import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { analyzeRecording, normalizeProbe, runFramemd5 } from './lib/recording-analyzer.mjs'
 import { assertFinalizedRecordingStop } from './lib/recording-smoke-guards.mjs'
 import { connectBackend, loadSessionListItem } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 // Clean cut end-to-end smoke (plan 119 S16): "Stop recording, and the edited
 // version is already there", without a real provider.
@@ -699,7 +699,7 @@ try {
     }
     await fake.close()
     if (passed && !keepArtifacts) {
-      rmSync(stateRoot, { force: true, recursive: true })
+      await removeProfileDir(stateRoot, { label: 'clean-cut smoke' })
     } else {
       console.log(`Clean cut smoke evidence: ${stateRoot}`)
     }

@@ -23,7 +23,7 @@
 // by smokeAppEnv from VIDEORC_SMOKE_STATE_DIR. No resource capability is needed.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { cpus, hostname, release, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -63,6 +63,7 @@ import {
 } from './lib/startup-resolution-analyzer.mjs'
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const { values: args } = parseArgs({
   options: {
@@ -587,7 +588,7 @@ try {
     renderer,
     remote,
     stopApp,
-    removeProfile: () => rmSync(userDataDir, { recursive: true, force: true })
+    removeProfile: () => removeProfileDir(userDataDir, { label: 'record-latency' })
   })
   for (const failure of cleanup.failures) {
     console.error(`record-latency: cleanup failed for ${failure.owner}.`)

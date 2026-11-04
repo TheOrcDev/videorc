@@ -14,7 +14,7 @@
 //
 // No recording is started: the intents exercised here are disk-free.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
@@ -33,6 +33,7 @@ import {
 } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-remote-control-user-data-'))
@@ -425,6 +426,6 @@ try {
   try {
     await stopApp()
   } finally {
-    rmSync(userDataDir, { recursive: true, force: true })
+    await removeProfileDir(userDataDir, { label: 'remote-control smoke' })
   }
 }

@@ -1,5 +1,4 @@
 import { mkdtempSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -33,6 +32,7 @@ import {
   performanceSamplingEvidenceFailures,
   performanceSamplingInvariants
 } from './lib/performance-sampling-schedule.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const mode = performanceMode()
 const timeoutMs = numberFromEnv('VIDEORC_SMOKE_TIMEOUT_MS', 120000)
@@ -223,7 +223,7 @@ console.log(`Process memory report: ${reportPath}`)
 
 const failed = hardFailures.length > 0 || enforcedBudgetFailures.length > 0
 if (!failed && process.env.VIDEORC_PERF_RETAIN_ARTIFACTS !== '1') {
-  await rm(stateRoot, { recursive: true, force: true })
+  await removeProfileDir(stateRoot, { label: 'process-memory smoke' })
 } else {
   console.log(`Process memory scratch retained: ${stateRoot}`)
 }

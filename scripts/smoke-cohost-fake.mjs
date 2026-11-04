@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -22,6 +22,7 @@ import {
   startFakeCohostService
 } from './lib/fake-cohost-service.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 // Live Co-host offline smoke. Launches the real debug backend against an
 // isolated profile and a local fake videorc-web (`POST /api/ai/cohost/tick`),
@@ -709,7 +710,7 @@ try {
     await router.close()
     await captionFake.close()
     await fake.close()
-    rmSync(stateRoot, { force: true, recursive: true })
+    await removeProfileDir(stateRoot, { label: 'cohost-fake smoke' })
   }
 }
 
