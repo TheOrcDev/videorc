@@ -1,5 +1,6 @@
 import type { StatusTone } from '@/components/status-badge'
 import type { Device, DeviceStatus, PreviewCameraState, PreviewScreenState } from '@/lib/backend'
+import { cameraLowFrameRateLine, type CameraLowFrameRate } from '@/lib/camera-frame-rate'
 import type { SourceStandIn } from '@/lib/capture'
 import { SOURCE_RECEIVING_LABEL, systemAudioIssueLabel } from '@/lib/state-labels'
 import type { SystemAudioSwitchView } from '@/lib/system-audio'
@@ -115,6 +116,8 @@ export function videoSourceStatus(input: {
   name?: string
   /** Plan 213 E1: another source stands in for the pick this session. */
   standIn?: SourceStandIn
+  /** Issue #1066: the camera's rate has stayed low (`camera-frame-rate.ts`). */
+  lowFrameRate?: CameraLowFrameRate | null
 }): SourceStatus | null {
   const status = pipelineSourceStatus(input)
   if (!input.standIn || input.switching || !input.selected) return status
@@ -151,6 +154,13 @@ function pipelineSourceStatus(
         label: `Stale ${Math.round(frameAgeMs / 1000)}s`,
         tone: 'warn',
         hint: 'No fresh frames. Choose it again to restart it.'
+      }
+    }
+    if (input.kind === 'camera' && input.lowFrameRate) {
+      return {
+        label: 'Low frame rate',
+        tone: 'warn',
+        hint: cameraLowFrameRateLine(input.name, input.lowFrameRate)
       }
     }
     // Producing frames reads "Receiving" (plan 174 D4): "On air" is the livestream's alone.
