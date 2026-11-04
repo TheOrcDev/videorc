@@ -1566,6 +1566,7 @@ mod tests {
             ffmpeg_path: SENTINEL_PROBE.to_string(),
             probe_started_at_unix_secs: 0,
             quarantined_at_unix_secs: 0,
+            timed_out_after_secs: None,
         }
     }
 
