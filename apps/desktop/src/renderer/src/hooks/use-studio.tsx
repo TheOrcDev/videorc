@@ -132,6 +132,13 @@ import {
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import {
+  advanceStreamDropActivity,
+  emptyStreamDropActivity,
+  recentStreamDrops,
+  type RecentStreamDrops,
+  type StreamDropActivity
+} from '@/lib/stream-health-attribution'
+import {
   connectionBlockedReason,
   sceneSourceOffBlockedReason,
   START_BLOCKED_COPY
@@ -1855,6 +1862,12 @@ interface StudioDiagnosticsContextValue {
   captureRecoveryStatus: CaptureRecoveryStatus
   captureRecoveryRetryPending: boolean
   diagnosticStats: DiagnosticStats
+  /**
+   * Which stages dropped frames within the last few seconds (#981), read
+   * from the growth of the diagnostics' session totals. One window for every
+   * surface, so the Studio, Go Live and Health cannot disagree.
+   */
+  recentStreamDrops: RecentStreamDrops
   /** Latest renderer-measured Record/Stop click latency samples. */
   recordLatency: RecordLatencyState
   healthEvents: HealthEvent[]
@@ -2720,6 +2733,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null)
   const [streamTargets, setStreamTargets] = useState<StreamTargetRuntime[]>([])
   const [diagnosticStats, setDiagnosticStats] = useState<DiagnosticStats>(idleDiagnosticStats)
+  // The drop window advances once per committed diagnostics sample. Folding
+  // the same sample twice is a no-op (no counter grows), so a repeated memo
+  // under StrictMode cannot flag a stage.
+  const streamDropActivityRef = useRef<StreamDropActivity>(emptyStreamDropActivity())
+  const recentDrops = useMemo(() => {
+    const nowMs = Date.now()
+    streamDropActivityRef.current = advanceStreamDropActivity(
+      streamDropActivityRef.current,
+      diagnosticStats,
+      streamHealth,
+      nowMs
+    )
+    return recentStreamDrops(streamDropActivityRef.current, nowMs)
+  }, [diagnosticStats, streamHealth])
   const [captureRecoveryStatus, setCaptureRecoveryStatus] =
     useState<CaptureRecoveryStatus>(idleCaptureRecoveryStatus)
   const [captureRecoveryRetryPending, setCaptureRecoveryRetryPending] = useState(false)
@@ -18550,6 +18577,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       healthEvents,
       logs,
       previewSurfaceStatus,
+      recentStreamDrops: recentDrops,
       recordLatency,
       retryCaptureRecovery,
       streamHealth
@@ -18561,6 +18589,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       healthEvents,
       logs,
       previewSurfaceStatus,
+      recentDrops,
       recordLatency,
       retryCaptureRecovery,
       streamHealth
