@@ -9,6 +9,7 @@ import { launchDevApp } from './lib/app-launcher.mjs'
 import {
   COMMENT_HIGHLIGHT_AVATAR_RGB,
   COMMENT_HIGHLIGHT_EMOTE_RGB,
+  analyzeChatBoxArtifact,
   analyzeCommentHighlightArtifact,
   captionStimulusPngBase64,
   classifyCommentHighlightResult,
@@ -37,6 +38,11 @@ const surface =
 const STUDIO_CHAT = '[data-testid="studio-chat"]'
 /** The preview card's rect while the section is away, to compare once it shows. */
 let studioPreviewBefore = null
+// Chat on stream (plan 215 G, D5): the default run also switches the chat box
+// on for the stream and proves the fake message (its emote and the box's
+// glass) lands in the box's rect on every stream leg. The legacy FFmpeg graph
+// carries no chat box, as it carries no highlight card.
+const checkChatBox = surface === 'stream-manager'
 
 const PREVIEW_CARD_RECT = `(() => {
   const card = document.querySelector('[data-videorc-preview-card]')
@@ -170,7 +176,7 @@ if (surface === 'studio') {
   })
 
   console.log(
-    `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar and emote on the card; both legs of a dual-orientation stream and its recording carry the card; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
+    `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar and emote on the card; both legs of a dual-orientation stream and its recording carry the card; the chat box (plan 215 G) showed the message whole (icon, padding and emote) in its rect on the stream-only and both dual-orientation stream legs; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
   )
 }
 
@@ -271,6 +277,16 @@ async function runScenario(ws, smoke, scenario, index) {
     : null
   // Stream-burned captions are refused beside a vertical leg.
   const requireCaption = !verticalTarget
+  // Not beside a top-corner card: the card's gate weighs its corner against
+  // the mirrored one, the chat box's top-left, and the box's glass would
+  // tip it. Stream-only and dual-orientation (bottom-left) cover both legs.
+  // The dual-orientation horizontal stream is the primary leg at the
+  // session's 1280x720, not the 1920 stream profile: a box painted for the
+  // profile's width was cropped there (its icon and first letters gone), and
+  // the gate reads the box's left edge so that cannot pass again.
+  const chatBox =
+    checkChatBox && !scenario.allowHighlightUnavailable && !scenario.anchor.startsWith('top-')
+  let layoutBefore = null
   const listener = spawnRtmpListener(target)
   const verticalListener = verticalTarget ? spawnRtmpListener(verticalTarget) : null
   let sessionActive = false
@@ -287,6 +303,19 @@ async function runScenario(ws, smoke, scenario, index) {
       }
     }
 
+    if (chatBox) {
+      // Off by default (D5): switch it on for the stream, as the Scene page does.
+      layoutBefore = await request(ws, timeoutMs, 'overlays.layout.get', {})
+      const layout = await request(ws, timeoutMs, 'overlays.layout.set', {
+        ...layoutBefore,
+        chat: { ...layoutBefore.chat, showOnStream: true, showInRecording: false }
+      })
+      if (layout?.chat?.showOnStream !== true) {
+        throw new Error(
+          `[${scenario.label}] chat on stream did not switch on: ${JSON.stringify(layout)}`
+        )
+      }
+    }
     const outputAuthorization = await smokeCommand(smoke, 'authorize-smoke-resource', {
       kind: 'output-directory',
       path: scenarioDirectory
@@ -438,6 +467,13 @@ async function runScenario(ws, smoke, scenario, index) {
       )
     }
 
+    if (chatBox) {
+      await assertChatBox(scenario, scenarioDirectory, target.receivedPath, {
+        rect: layoutBefore.chat.horizontal,
+        name: 'chat-box-artifact.json'
+      })
+    }
+
     if (verticalTarget) {
       assertArtifactFile(
         scenario.label,
@@ -481,6 +517,15 @@ async function runScenario(ws, smoke, scenario, index) {
         throw new Error(
           `[${scenario.label}] vertical comment-highlight artifact gate failed: ${verticalArtifact.failures.join('; ')} (report: ${verticalArtifactPath})`
         )
+      }
+      if (chatBox) {
+        // The portrait leg gets its own box, in the vertical rect.
+        await assertChatBox(scenario, scenarioDirectory, verticalTarget.receivedPath, {
+          rect: layoutBefore.chat.vertical,
+          name: 'chat-box-artifact-vertical.json',
+          sampleWidth: scenario.verticalLeg.width,
+          sampleHeight: scenario.verticalLeg.height
+        })
       }
     }
 
@@ -542,9 +587,36 @@ async function runScenario(ws, smoke, scenario, index) {
     }
     await requestSafe(ws, 'comments.highlight.clear', { sessionId })
     await requestSafe(ws, 'captions.overlay.clear', {})
+    await requestSafe(ws, 'chat.overlay.clear', {})
+    if (layoutBefore) await requestSafe(ws, 'overlays.layout.set', layoutBefore)
     await requestSafe(ws, 'liveChat.stop', {})
     await stopRtmpListener(listener)
     await stopRtmpListener(verticalListener)
+  }
+}
+
+/** The chat box (plan 215 G) on one received stream, whole: the fake
+ * message's emote, the leading YouTube icon and the box's glass padding
+ * before it, inside the chat rect, in enough sampled frames. A box the
+ * backend cropped at its left edge (painted for a wider canvas than the leg)
+ * has no icon, or one on the rect's edge, and fails. */
+async function assertChatBox(scenario, scenarioDirectory, filePath, options) {
+  const report = await analyzeChatBoxArtifact(filePath, {
+    ffmpegPath,
+    rect: options.rect,
+    ...(options.sampleWidth
+      ? { sampleWidth: options.sampleWidth, sampleHeight: options.sampleHeight }
+      : {})
+  })
+  const reportPath = join(scenarioDirectory, options.name)
+  writeFileSync(reportPath, JSON.stringify({ scenario, report }, null, 2))
+  console.log(
+    `[${scenario.label}] chat box: ${report.observations.boxFrames} frame(s) with the whole box (emote in ${report.observations.emoteFrames}, icon in ${report.observations.iconFrames}, padding before the icon in ${report.observations.paddingFrames} at most ${(report.observations.maxChatLeadingPaddingRatio * 100).toFixed(1)}% of the rect, glass in it ${report.observations.maxChatLeadingGlassRatio.toFixed(2)}; rect glass ${report.observations.maxChatDarkPixelRatio.toFixed(3)})`
+  )
+  if (!report.pass) {
+    throw new Error(
+      `[${scenario.label}] chat box artifact gate failed: ${report.failures.join('; ')} (report: ${reportPath})`
+    )
   }
 }
 

@@ -10,7 +10,9 @@
 // "Save a local recording", and pass the same entitlement gate; separate
 // source recordings work on a Mac only; the captions language waits while a
 // session runs. The recordings folder is chosen in a folder picker, so an
-// agent can only put it back to the default.
+// agent can only put it back to the default. Videorc Camera (plan 214 E2)
+// refuses in the Output row's own words where it can't run, and is refused
+// outright where the camera is hidden (the hide rule).
 
 import {
   layoutPresetOrientation,
@@ -22,6 +24,7 @@ import { CAPTION_LANGUAGES } from '@/lib/caption-languages'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
 import { SESSION_LOCK_REASON } from '@/lib/lock-reason'
 import { pickRecordingResolution } from '@/lib/output-quality'
+import { virtualCameraHidden, virtualCameraSettingRefusal } from '@/lib/virtual-camera-view'
 import type { VideoSettings } from '../../../../shared/backend'
 import type { AgentToolExecutor } from './agent'
 import type { StudioSettingsAccess } from './context'
@@ -37,7 +40,8 @@ export const CURATED_SETTINGS = [
   'clips',
   'captionsLanguage',
   'chatInStudio',
-  'theme'
+  'theme',
+  'videorcCamera'
 ] as const
 export type CuratedSetting = (typeof CURATED_SETTINGS)[number]
 
@@ -75,7 +79,10 @@ export function curatedSettings(access: StudioSettingsAccess): Record<CuratedSet
     clips: access.captureConfig.replayBuffer.enabled,
     captionsLanguage: access.captureConfig.captions.language,
     chatInStudio: access.settings.studioChat === true,
-    theme
+    theme,
+    videorcCamera: Boolean(
+      access.virtualCamera?.status?.on && !virtualCameraHidden(access.virtualCamera.status)
+    )
   }
 }
 
@@ -89,7 +96,9 @@ export const getSettings: AgentToolExecutor = async (context) => {
   }
 }
 
-type Plan = { refusal: string } | { apply: () => void; said: string[] }
+/** `apply` answers null, or why the one asynchronous change (Videorc Camera)
+ * failed; it runs first, so a failure changes nothing else. */
+type Plan = { refusal: string } | { apply: () => Promise<string | null>; said: string[] }
 
 /** Check every asked change against its control's locks and gates, then
  * hand back one apply step, so a refusal changes nothing. Pure. */
@@ -106,6 +115,7 @@ export function planSettingsUpdate(
     }
   }
   const steps: (() => void)[] = []
+  let camera: (() => Promise<string | null>) | null = null
   const said: string[] = []
   const { captureConfig } = access
   const orientation = layoutPresetOrientation(captureConfig.layout.layoutPreset)
@@ -224,7 +234,38 @@ export function planSettingsUpdate(
     said.push(`Theme: ${theme}.`)
   }
 
-  return { apply: () => steps.forEach((step) => step()), said }
+  // Output → Videorc Camera: the switch, with the row's own words where it
+  // can't change, and nothing at all where the camera is hidden.
+  if ('videorcCamera' in args) {
+    const on = args.videorcCamera
+    if (typeof on !== 'boolean') return { refusal: 'videorcCamera must be true or false.' }
+    const cameraAccess = access.virtualCamera
+    const refusal = virtualCameraSettingRefusal(
+      {
+        status: cameraAccess?.status ?? null,
+        connected: cameraAccess?.connected ?? false,
+        platform: cameraAccess?.platform ?? access.platform,
+        osRelease: cameraAccess?.osRelease
+      },
+      on
+    )
+    if (refusal || !cameraAccess) return { refusal: refusal ?? SETTINGS_TOOL_COPY.unavailable }
+    camera = async () => {
+      const result = await cameraAccess.setOn(on)
+      return result.ok ? null : (result.message ?? SETTINGS_TOOL_COPY.unavailable)
+    }
+    said.push(on ? 'Videorc Camera on.' : 'Videorc Camera off.')
+  }
+
+  return {
+    apply: async () => {
+      const failure = camera ? await camera() : null
+      if (failure) return failure
+      steps.forEach((step) => step())
+      return null
+    },
+    said
+  }
 }
 
 export const updateSettings: AgentToolExecutor = async (context, args) => {
@@ -232,7 +273,8 @@ export const updateSettings: AgentToolExecutor = async (context, args) => {
   if (!access) return { ok: false, message: SETTINGS_TOOL_COPY.unavailable }
   const plan = planSettingsUpdate(access, context.sessionActive, args)
   if ('refusal' in plan) return { ok: false, message: plan.refusal }
-  plan.apply()
+  const failure = await plan.apply()
+  if (failure) return { ok: false, message: failure }
   // Every value was checked above, so the asked values are the new ones.
   return { ok: true, message: plan.said.join(' '), result: { changed: { ...args } } }
 }

@@ -1,6 +1,6 @@
-// Plan 178 U8. The one way lab code talks to the YouTube Data API: charge the
-// quota ledger first (a refused charge never sends), then call with the
-// role's access token. `apiBase` points at Google in a run and at
+// Plan 178 U8. The one way lab code talks to the YouTube Data API: get the
+// role's access token, charge the quota ledger (a refused charge never
+// sends), then call. A role with no token is never charged: nothing went out. `apiBase` points at Google in a run and at
 // scripts/lib/fake-youtube-api.mjs in tests. Errors carry Google's reason but
 // never the token or the request URL's query.
 
@@ -32,7 +32,7 @@ export function createYoutubeClient({ getToken, ledger, fetch: fetchImpl = fetch
   if (!ledger?.charge) throw new Error('createYoutubeClient needs a quota ledger.')
   const base = String(apiBase ?? YOUTUBE_API_BASE).replace(/\/+$/, '')
 
-  async function send({ role, method, httpMethod, resource, query, body }) {
+  async function send({ role, method, httpMethod, resource, query, body, token: firstToken }) {
     const url = new URL(`${base}${resourcePath(resource)}`)
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value !== undefined && value !== null && value !== '') {
@@ -41,7 +41,7 @@ export function createYoutubeClient({ getToken, ledger, fetch: fetchImpl = fetch
     }
     let attempt = 0
     for (;;) {
-      const token = await getToken(role, { force: attempt > 0 })
+      const token = attempt === 0 ? firstToken : await getToken(role, { force: true })
       const response = await fetchImpl(url, {
         method: httpMethod,
         headers: {
@@ -78,8 +78,9 @@ export function createYoutubeClient({ getToken, ledger, fetch: fetchImpl = fetch
      *   query?: object, body?: object}} request
      */
     async call({ role, method, httpMethod = 'GET', resource, query, body }) {
+      const token = await getToken(role, { force: false })
       ledger.charge(method)
-      return send({ role, method, httpMethod, resource, query, body })
+      return send({ role, method, httpMethod, resource, query, body, token })
     }
   }
 }

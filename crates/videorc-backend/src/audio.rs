@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
+#[cfg(any(test, debug_assertions))]
 use std::thread;
 use std::time::{Duration, Instant};
 

@@ -14,6 +14,10 @@ import { extname, join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { analyzeMediaAudioAmplitude } from './lib/audio-amplitude.mjs'
 import {
+  captionsPlatformUnavailableReason,
+  captionsSkipLine
+} from './lib/captions-platform-skip.mjs'
+import {
   analyzeCaptionsAbsentArtifact,
   analyzeCaptionsLiveArtifact,
   formatCaptionsLiveArtifactSummary
@@ -81,6 +85,11 @@ let backend
 let listener
 let sessionActive = false
 let observed = { statuses: [], updates: [], recordingStatuses: [], healthEvents: [] }
+// Set when the product says this platform can't caption at all (Linux
+// today): every check below is a caption check, so the whole smoke SKIPs
+// with the product's own reason instead of timing out on `desiredEnabled`.
+let captionsUnavailableReason = null
+class CaptionsPlatformSkip extends Error {}
 
 try {
   launched = await launchDevApp({
@@ -101,6 +110,10 @@ try {
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
   const smoke = launched.connections['preview-motion-ready']
   observed = collectCaptionEvents(backend)
+  captionsUnavailableReason = await captionsPlatformUnavailableReason(
+    async (code) => (await smokeCommand(smoke, 'eval-js', { code }))?.result
+  )
+  if (captionsUnavailableReason) throw new CaptionsPlatformSkip(captionsUnavailableReason)
 
   fake.state.realtimeAvailable = false
   fake.state.realtimeFailureCode = 'captions-realtime-disabled'
@@ -545,34 +558,36 @@ try {
       `Evidence: ${outputDirectory}`
   )
 } catch (error) {
-  const [diagnostics, recordingStatus, captionsStatus] = backend
-    ? await Promise.all([
-        requestSafe(backend, 'diagnostics.stats', {}),
-        requestSafe(backend, 'recording.status', {}),
-        requestSafe(backend, 'captions.status.get', {})
-      ])
-    : [null, null, null]
-  const failure = {
-    pass: false,
-    error: {
-      message: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : null
-    },
-    diagnostics,
-    recordingStatus,
-    captionsStatus,
-    observed,
-    fake: {
-      ...safeFakeCounters(fake.state),
-      chunkAudio: fake.state.chunkAudio
-    },
-    artifacts: artifactInventory(outputDirectory)
+  if (!(error instanceof CaptionsPlatformSkip)) {
+    const [diagnostics, recordingStatus, captionsStatus] = backend
+      ? await Promise.all([
+          requestSafe(backend, 'diagnostics.stats', {}),
+          requestSafe(backend, 'recording.status', {}),
+          requestSafe(backend, 'captions.status.get', {})
+        ])
+      : [null, null, null]
+    const failure = {
+      pass: false,
+      error: {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : null
+      },
+      diagnostics,
+      recordingStatus,
+      captionsStatus,
+      observed,
+      fake: {
+        ...safeFakeCounters(fake.state),
+        chunkAudio: fake.state.chunkAudio
+      },
+      artifacts: artifactInventory(outputDirectory)
+    }
+    writeFileSync(reportPath, JSON.stringify(failure, null, 2))
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)} Full failure evidence: ${reportPath}`,
+      { cause: error }
+    )
   }
-  writeFileSync(reportPath, JSON.stringify(failure, null, 2))
-  throw new Error(
-    `${error instanceof Error ? error.message : String(error)} Full failure evidence: ${reportPath}`,
-    { cause: error }
-  )
 } finally {
   try {
     if (backend) {
@@ -585,6 +600,9 @@ try {
     await launched?.stop().catch(() => {})
     await fake.close()
   }
+}
+if (captionsUnavailableReason) {
+  console.log(captionsSkipLine('Captions live smoke', 'every check', captionsUnavailableReason))
 }
 
 /** Plan 164 D14: the captions item's two switches are the one home of the

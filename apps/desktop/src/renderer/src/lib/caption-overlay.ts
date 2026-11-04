@@ -4,7 +4,9 @@
 // the canvas painter is a thin shell over it.
 
 import {
+  commentHighlightIdentity,
   commentHighlightPlatformBadge,
+  type CommentHighlightPlatformBadge,
   HIGHLIGHT_NAME_WEIGHT,
   HIGHLIGHT_TEXT_WEIGHT,
   type HighlightTextMeasurer
@@ -16,6 +18,11 @@ import {
   layoutCommentHighlightTokens,
   type HighlightEmoteSizer
 } from '@/lib/comment-highlight-layout'
+import {
+  layoutChatOverlay,
+  type ChatOverlayCanvas,
+  type ChatOverlayRowInput
+} from '@/lib/chat-overlay'
 import { activityItems } from '@/lib/stream-activity'
 import { YOUTUBE_ARTBOARD, YOUTUBE_MARK } from '@/lib/youtube-mark'
 import {
@@ -25,7 +32,13 @@ import {
 } from '@/lib/brand-mark-data'
 import { plural } from '@/lib/format'
 import { canvasToBase64Png } from '@/lib/canvas-png'
-import type { CaptionStyleId, LiveChatMessageFragment, OverlayRect } from '@/lib/backend'
+import type {
+  CaptionStyleId,
+  LiveChatMessage,
+  LiveChatMessageFragment,
+  OverlayRect,
+  StreamPlatform
+} from '@/lib/backend'
 import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../../../shared/comments-command-timing'
 
 export type CaptionTextSize = 's' | 'm' | 'l'
@@ -751,6 +764,58 @@ export async function renderCommentHighlightCards(
   return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
 }
 
+/** The round brand badge for a platform the card never shows a file mark
+ * for (Twitch, Kick, a custom destination): the highlight card's avatar
+ * badge and the chat box's row icon (plan 215 G). */
+function paintPlatformBadge(
+  context: OffscreenCanvasRenderingContext2D,
+  platformBadge: Extract<CommentHighlightPlatformBadge, { color: string }>,
+  badgeX: number,
+  badgeY: number,
+  badgeSize: number
+): void {
+  context.save()
+  context.beginPath()
+  context.arc(badgeX + badgeSize / 2, badgeY + badgeSize / 2, badgeSize / 2, 0, Math.PI * 2)
+  context.fillStyle = platformBadge.color
+  context.fill()
+  context.strokeStyle = 'rgba(255, 255, 255, 0.28)'
+  context.lineWidth = Math.max(1, Math.round(badgeSize * 0.06))
+  context.stroke()
+  context.strokeStyle = platformBadge.ink ?? '#FFFFFF'
+  context.fillStyle = platformBadge.ink ?? '#FFFFFF'
+  context.lineWidth = Math.max(1.5, badgeSize * 0.1)
+  context.lineCap = 'round'
+  context.lineJoin = 'round'
+  const centerX = badgeX + badgeSize / 2
+  const centerY = badgeY + badgeSize / 2
+  if (platformBadge.glyph === 'kick') {
+    context.beginPath()
+    context.moveTo(centerX - badgeSize * 0.14, centerY - badgeSize * 0.22)
+    context.lineTo(centerX - badgeSize * 0.14, centerY + badgeSize * 0.22)
+    context.moveTo(centerX + badgeSize * 0.16, centerY - badgeSize * 0.22)
+    context.lineTo(centerX - badgeSize * 0.1, centerY)
+    context.lineTo(centerX + badgeSize * 0.16, centerY + badgeSize * 0.22)
+    context.stroke()
+  } else if (platformBadge.glyph === 'twitch') {
+    context.strokeRect(
+      centerX - badgeSize * 0.2,
+      centerY - badgeSize * 0.2,
+      badgeSize * 0.4,
+      badgeSize * 0.34
+    )
+    context.beginPath()
+    context.moveTo(centerX - badgeSize * 0.06, centerY + badgeSize * 0.14)
+    context.lineTo(centerX - badgeSize * 0.14, centerY + badgeSize * 0.24)
+    context.stroke()
+  } else {
+    context.beginPath()
+    context.arc(centerX, centerY, badgeSize * 0.12, 0, Math.PI * 2)
+    context.fill()
+  }
+  context.restore()
+}
+
 export async function renderCommentHighlightPng(params: {
   authorName: string
   text: string
@@ -871,48 +936,13 @@ export async function renderCommentHighlightPng(params: {
   const platformBadge = commentHighlightPlatformBadge(params.platform)
   if (platformBadge && 'color' in platformBadge) {
     const badgeSize = Math.max(12, Math.round(metrics.avatarPx * 0.42))
-    const badgeX = avatarX + metrics.avatarPx - badgeSize * 0.84
-    const badgeY = avatarY + metrics.avatarPx - badgeSize * 0.84
-    context.save()
-    context.beginPath()
-    context.arc(badgeX + badgeSize / 2, badgeY + badgeSize / 2, badgeSize / 2, 0, Math.PI * 2)
-    context.fillStyle = platformBadge.color
-    context.fill()
-    context.strokeStyle = 'rgba(255, 255, 255, 0.28)'
-    context.lineWidth = Math.max(1, Math.round(badgeSize * 0.06))
-    context.stroke()
-    context.strokeStyle = platformBadge.ink ?? '#FFFFFF'
-    context.fillStyle = platformBadge.ink ?? '#FFFFFF'
-    context.lineWidth = Math.max(1.5, badgeSize * 0.1)
-    context.lineCap = 'round'
-    context.lineJoin = 'round'
-    const centerX = badgeX + badgeSize / 2
-    const centerY = badgeY + badgeSize / 2
-    if (platformBadge.glyph === 'kick') {
-      context.beginPath()
-      context.moveTo(centerX - badgeSize * 0.14, centerY - badgeSize * 0.22)
-      context.lineTo(centerX - badgeSize * 0.14, centerY + badgeSize * 0.22)
-      context.moveTo(centerX + badgeSize * 0.16, centerY - badgeSize * 0.22)
-      context.lineTo(centerX - badgeSize * 0.1, centerY)
-      context.lineTo(centerX + badgeSize * 0.16, centerY + badgeSize * 0.22)
-      context.stroke()
-    } else if (platformBadge.glyph === 'twitch') {
-      context.strokeRect(
-        centerX - badgeSize * 0.2,
-        centerY - badgeSize * 0.2,
-        badgeSize * 0.4,
-        badgeSize * 0.34
-      )
-      context.beginPath()
-      context.moveTo(centerX - badgeSize * 0.06, centerY + badgeSize * 0.14)
-      context.lineTo(centerX - badgeSize * 0.14, centerY + badgeSize * 0.24)
-      context.stroke()
-    } else {
-      context.beginPath()
-      context.arc(centerX, centerY, badgeSize * 0.12, 0, Math.PI * 2)
-      context.fill()
-    }
-    context.restore()
+    paintPlatformBadge(
+      context,
+      platformBadge,
+      avatarX + metrics.avatarPx - badgeSize * 0.84,
+      avatarY + metrics.avatarPx - badgeSize * 0.84,
+      badgeSize
+    )
   }
 
   // YouTube's official icon (plan 165) or X's kit mark (plan 167):
@@ -1021,6 +1051,224 @@ export async function renderCommentHighlightPng(params: {
     flushRun()
   })
   context.restore()
+
+  return canvasToBase64Png(canvas)
+}
+
+// --- Chat on stream (plan 215 G, D5) -------------------------------------------
+
+/** The file marks a chat box draws, decoded once per box. */
+type ChatOverlayMarks = Partial<Record<StreamPlatform, HighlightBitmap | null>>
+
+/**
+ * The chat box (`lib/chat-overlay.ts` lays it out) for the stream canvas
+ * and, when the session has a vertical simulcast leg, its portrait canvas.
+ * Emotes and the platforms' marks are decoded once and shared by both, like
+ * the highlight card's; no avatars in this version (D5). A failed emote shows
+ * its name and a failed mark the platform's name, both logged once. Null
+ * when the stream's box cannot be painted.
+ */
+export async function renderChatOverlayCards(
+  messages: readonly LiveChatMessage[],
+  stream: ChatOverlayCanvas,
+  vertical?: ChatOverlayCanvas,
+  imageDeps: HighlightCardImageDeps = {}
+): Promise<{ pngBase64: string; verticalPngBase64?: string } | null> {
+  const deps = {
+    readImage: imageDeps.readImage ?? defaultHighlightImageReader,
+    cacheImage: imageDeps.cacheImage ?? defaultHighlightImageCacher,
+    decode: imageDeps.decode ?? defaultHighlightImageDecoder,
+    deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
+  }
+  const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
+  const loadBrandMark = imageDeps.loadBrandMark ?? loadBrandMarkImage
+  const platforms = new Set(messages.map((message) => message.platform))
+  const [youtube, x] = await Promise.all([
+    platforms.has('youtube')
+      ? (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
+      : null,
+    platforms.has('x') ? loadBrandMark(X_LOGO_WHITE_DATA_URL).catch(() => null) : null
+  ])
+  const marks: ChatOverlayMarks = { youtube, x }
+  const rows: ChatOverlayRowInput[] = messages.map((message) => {
+    const badge = commentHighlightPlatformBadge(message.platform)
+    const icon = marks[message.platform] ? 'mark' : badge && 'color' in badge ? 'badge' : 'none'
+    return {
+      id: message.id,
+      // Without an icon the name says the platform: "YouTube · name".
+      authorName:
+        icon === 'none'
+          ? commentHighlightIdentity(message.authorName, message.platform)
+          : message.authorName,
+      platform: message.platform,
+      text: message.messageText,
+      fragments: message.fragments,
+      icon
+    }
+  })
+  const tokens = rows.flatMap((row) => highlightTokens(row.text, row.fragments))
+  const emoteNames = new Map<string, string>()
+  for (const token of tokens) {
+    if (token.kind === 'emote') emoteNames.set(token.url, token.name)
+  }
+  const emotes = new Map<string, HighlightBitmap>()
+  const emoteFailures: string[] = []
+  await Promise.all(
+    highlightEmoteUrls(tokens).map(async (url) => {
+      try {
+        emotes.set(url, await decodeHighlightEmote(url, deps))
+      } catch (error) {
+        emoteFailures.push(`${emoteNames.get(url) ?? 'overlay'}: ${describeImageFailure(error)}`)
+      }
+    })
+  )
+  if (emoteFailures.length > 0) {
+    warn(
+      `Chat on stream: ${plural(emoteFailures.length, 'emote')} show as text (${emoteFailures.join('; ')}).`
+    )
+  }
+  const [pngBase64, verticalPngBase64] = await Promise.all([
+    renderChatOverlayPng(rows, stream, emotes, marks),
+    vertical ? renderChatOverlayPng(rows, vertical, emotes, marks) : null
+  ])
+  if (!pngBase64) return null
+  return verticalPngBase64 ? { pngBase64, verticalPngBase64 } : { pngBase64 }
+}
+
+async function renderChatOverlayPng(
+  rows: readonly ChatOverlayRowInput[],
+  target: ChatOverlayCanvas,
+  emotes: ReadonlyMap<string, HighlightBitmap>,
+  marks: ChatOverlayMarks
+): Promise<string | null> {
+  const measure = highlightCanvasMeasurer()
+  if (!measure) return null
+  const layout = layoutChatOverlay({
+    rows,
+    canvasWidth: target.width,
+    canvasHeight: target.height,
+    rectWidthPx: Math.floor(target.rect.w * target.width),
+    rectHeightPx: Math.floor(target.rect.h * target.height),
+    measure,
+    emoteSize: (url) => {
+      const bitmap = emotes.get(url)
+      return bitmap ? { width: bitmap.width, height: bitmap.height } : null
+    }
+  })
+  if (!layout || layout.boxWidthPx <= 0 || layout.boxHeightPx <= 0) return null
+  const { metrics } = layout
+  // The box is the rect's width, so it carries no drop-shadow margin: the
+  // backend crops a bitmap wider than its rect.
+  const canvas = new OffscreenCanvas(layout.boxWidthPx, layout.boxHeightPx)
+  const context = canvas.getContext('2d')
+  if (!context) return null
+
+  // The highlight card's glass: the fill, the sheen and the hairline.
+  context.beginPath()
+  context.roundRect(0, 0, layout.boxWidthPx, layout.boxHeightPx, metrics.radiusPx)
+  context.fillStyle = 'rgba(16, 16, 18, 0.78)'
+  context.fill()
+  const sheen = context.createLinearGradient(0, 0, 0, layout.boxHeightPx)
+  sheen.addColorStop(0, 'rgba(255, 255, 255, 0.07)')
+  sheen.addColorStop(0.35, 'rgba(255, 255, 255, 0.015)')
+  sheen.addColorStop(1, 'rgba(255, 255, 255, 0)')
+  context.fillStyle = sheen
+  context.fill()
+  context.beginPath()
+  context.roundRect(0.5, 0.5, layout.boxWidthPx - 1, layout.boxHeightPx - 1, metrics.radiusPx)
+  context.strokeStyle = 'rgba(255, 255, 255, 0.1)'
+  context.lineWidth = 1
+  context.stroke()
+
+  const contentX = metrics.paddingPx
+  const emoteAxisPx = metrics.textFontPx * 0.58
+  for (const row of layout.rows) {
+    const identityMidY = row.topPx + row.identityHeightPx / 2
+    // The platform icon leads the row: YouTube's and X's own files, unmodified
+    // and at least 20 px tall; Twitch, Kick and custom the highlight's badge.
+    const mark = marks[row.platform]
+    if (row.icon === 'mark' && mark) {
+      const markY = Math.round(identityMidY - metrics.iconPx / 2)
+      if (row.platform === 'youtube') {
+        const scaleX = mark.width / YOUTUBE_ARTBOARD.width
+        const scaleY = mark.height / YOUTUBE_ARTBOARD.height
+        context.drawImage(
+          mark,
+          YOUTUBE_MARK.x * scaleX,
+          YOUTUBE_MARK.y * scaleY,
+          YOUTUBE_MARK.width * scaleX,
+          YOUTUBE_MARK.height * scaleY,
+          contentX,
+          markY,
+          row.iconWidthPx,
+          metrics.iconPx
+        )
+      } else {
+        context.drawImage(mark, contentX, markY, row.iconWidthPx, metrics.iconPx)
+      }
+    } else if (row.icon === 'badge') {
+      const badge = commentHighlightPlatformBadge(row.platform)
+      if (badge && 'color' in badge) {
+        paintPlatformBadge(
+          context,
+          badge,
+          contentX,
+          Math.round(identityMidY - metrics.iconPx / 2),
+          metrics.iconPx
+        )
+      }
+    }
+
+    context.save()
+    context.shadowColor = 'rgba(0, 0, 0, 0.45)'
+    context.shadowBlur = metrics.textFontPx * 0.08
+    context.shadowOffsetY = Math.max(1, Math.round(metrics.textFontPx * 0.03))
+    context.textAlign = 'left'
+    context.textBaseline = 'middle'
+    context.font = canvasFont(metrics.nameFontPx, HIGHLIGHT_NAME_WEIGHT)
+    context.fillStyle = '#F5F5F7'
+    context.fillText(
+      row.name,
+      contentX + row.nameXPx,
+      identityMidY + 1,
+      Math.max(1, metrics.maxTextWidthPx - row.nameXPx)
+    )
+    context.textBaseline = 'top'
+    context.font = canvasFont(metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
+    context.fillStyle = 'rgba(244, 244, 245, 0.92)'
+    const textTop = row.topPx + row.identityHeightPx + metrics.rowGapPx
+    row.lines.forEach((line, index) => {
+      const lineTop = textTop + metrics.lineHeightPx * index
+      let run: { xPx: number; words: string[] } | null = null
+      const flushRun = (): void => {
+        if (!run) return
+        context.fillText(
+          run.words.join(' '),
+          contentX + run.xPx,
+          lineTop,
+          metrics.maxTextWidthPx - run.xPx
+        )
+        run = null
+      }
+      for (const item of line.items) {
+        if (item.kind === 'word') {
+          if (run) run.words.push(item.text)
+          else run = { xPx: item.xPx, words: [item.text] }
+          continue
+        }
+        flushRun()
+        const boxY = Math.round(lineTop + emoteAxisPx - item.heightPx / 2)
+        for (const url of [item.url, ...item.overlays]) {
+          const bitmap = emotes.get(url)
+          if (bitmap) {
+            context.drawImage(bitmap, contentX + item.xPx, boxY, item.widthPx, item.heightPx)
+          }
+        }
+      }
+      flushRun()
+    })
+    context.restore()
+  }
 
   return canvasToBase64Png(canvas)
 }

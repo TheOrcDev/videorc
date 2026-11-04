@@ -14,7 +14,11 @@
 //   6. Pass-through: with the surface docked over the Scene canvas, a click on
 //      a stage source reaches the SVG hit layer under the surface and never
 //      focuses the preview window — at the DOM level (CDP) and, when the host
-//      lets this process post HID events, at the OS level (CGEvent).
+//      lets this process post HID events, at the OS level (CGEvent). The same
+//      at the OS level on the FALLBACK path (plan 216 C): with the native
+//      presenter retired the way the watchdog does it, the Electron proof
+//      surface is hosted inside the main window, a real click reaches the
+//      stage, and a real drag moves a Freeform source.
 //   7. Window managers (plan 213 D1): a docked preview is one window with the
 //      app — drawn inside the main window's own view, or hidden with a stated
 //      reason — when the Preview window is moved on its own (wm-displaces-child)
@@ -37,6 +41,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   windowsPreviewLifecycleDiagnosticFailures,
   windowsPreviewLifecycleOpenFailures,
@@ -307,7 +312,9 @@ async function main() {
   // Drawable-resolution regression gate: the surface's Metal drawable must be
   // the slot rect in PHYSICAL pixels (points × the display's scale factor) —
   // a lost scale factor halves the effective preview resolution on Retina.
-  {
+  if (process.platform !== 'darwin') {
+    assertProbe(true, 'dock-drawable: skipped — the Metal drawable is macOS only', '')
+  } else {
     const nativeSizingState = await waitFor(
       async () => smokeCommand('preview-window-state'),
       (candidate) =>
@@ -597,7 +604,16 @@ async function main() {
   await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-dock-slot]' })
   await waitForDockedSurfaceAtSlot('dock-tab-return: surface returns when Studio remounts')
 
-  await runSceneSlotScenarios()
+  // The Scene canvas docks the live preview on macOS only (layout-tab.tsx).
+  if (process.platform === 'darwin') {
+    await runSceneSlotScenarios()
+  } else {
+    assertProbe(
+      true,
+      'scene-dock: skipped — the Scene canvas is a live dock slot on macOS only',
+      ''
+    )
+  }
 
   // Undock: floating chrome and the remembered floating frame come back.
   const floated = await smokeCommand('preview-window-set-mode', { mode: 'floating' })
@@ -616,7 +632,7 @@ async function main() {
   console.log('\n=== Preview window probe summary ===')
   if (failures.length === 0) {
     console.log(
-      'PASS — open, move, resize, toggle-close, toggle-reopen, dock-follow, window-manager docked cases, dock-occlusion, scene-slot dock, pass-through, undock, and the window-manager floating resize keep the surface aligned.'
+      'PASS — open, move, resize, toggle-close, toggle-reopen, dock-follow, window-manager docked cases, dock-occlusion, scene-slot dock, pass-through, pass-through on the proof fallback, undock, and the window-manager floating resize keep the surface aligned.'
     )
     return 0
   }
@@ -797,6 +813,7 @@ async function runSceneSlotScenarios() {
   })
 
   await runPassThroughScenario()
+  await runProofFallbackPassThroughScenario()
 
   // --- Tab switch: Scene → Studio re-docks in the Studio slot and back ---------
   await smokeCommand('open-tab', { tab: 'studio', waitFor: STUDIO_SLOT })
@@ -1002,40 +1019,480 @@ async function runPassThroughScenario() {
   })
 }
 
+/**
+ * Plan 216 C: the pass-through on the FALLBACK path. When the presenting
+ * watchdog retires the in-process CAMetalLayer (reset-native-path), the
+ * Electron proof surface takes the dock; a streamer on 0.18.0 then had a
+ * canvas the arrow keys moved and the mouse could not. This forces that
+ * fallback the way the watchdog does, holds it past the retry cooldown, and
+ * posts a REAL click and a REAL drag on a Freeform stage source: the surface
+ * must be one window with the app (hosted inside the main window, as on
+ * Linux), the press must reach the stage, and the drag must move the source's
+ * committed rect. Runs while the surface is docked in the Scene canvas and
+ * puts the native presenter back afterwards.
+ */
+async function runProofFallbackPassThroughScenario() {
+  const label = 'pass-through(os, proof-fallback)'
+  if (process.platform !== 'darwin' || !expectInProcessNative) {
+    assertProbe(
+      true,
+      `${label}: skipped — macOS with the in-process presenter only`,
+      JSON.stringify({ platform: process.platform, expectInProcessNative })
+    )
+    return
+  }
+  const forced = await smokeCommand('exercise-native-preview-proof-fallback', {
+    holdMs: 120000
+  })
+  const fallback = await waitFor(
+    async () => smokeCommand('preview-window-state'),
+    (s) =>
+      s.surfaceStatus?.transport === 'electron-proof-surface' &&
+      s.surfaceStatus?.nativePreviewHostKind === 'proof-surface' &&
+      s.surface?.exists === true &&
+      s.surface?.visible === true,
+    10000
+  )
+  assertProbe(
+    fallback.ok,
+    `${label}: the Electron proof surface took over the dock`,
+    JSON.stringify({ forced: forced.status?.message, last: fallback.last?.surfaceStatus })
+  )
+  try {
+    if (!fallback.ok) return
+    const state = fallback.last
+    const slot = await dockSlotRect(SCENE_SLOT)
+    const main = await smokeCommand('main-window-state')
+    const expected = {
+      x: main.contentBounds.x + slot.x,
+      y: main.contentBounds.y + slot.y,
+      width: slot.width,
+      height: slot.height
+    }
+    const near = (a, b) => typeof a === 'number' && typeof b === 'number' && Math.abs(a - b) <= 6
+    const bounds = state.surface.bounds
+    assertProbe(
+      Boolean(bounds) &&
+        near(bounds.x, expected.x) &&
+        near(bounds.y, expected.y) &&
+        near(bounds.width, expected.width) &&
+        near(bounds.height, expected.height),
+      `${label}: the fallback surface covers the Scene canvas rect`,
+      JSON.stringify({ bounds, expected })
+    )
+    // One window, as on Linux (plan 216 D4): the surface is a view inside the
+    // main window, the lifecycle Preview window stays hidden, and CGWindowList
+    // sees no second window of the app over the canvas. Two borderless
+    // windows over the canvas, each asked to ignore the mouse, were the path
+    // the streamer's mouse never crossed.
+    const others = appWindowsOnScreen(main.bounds).filter(
+      (w) => !(near(w.x, main.bounds.x) && near(w.y, main.bounds.y))
+    )
+    assertProbe(
+      state.surface.hostedInWindow === 'main' &&
+        state.previewWindowShown === false &&
+        others.length === 0,
+      `${label}: the fallback surface is hosted inside the main window (no window over the canvas)`,
+      JSON.stringify({
+        hostedInWindow: state.surface.hostedInWindow,
+        previewWindowShown: state.previewWindowShown,
+        otherAppWindows: others
+      })
+    )
+
+    const target = await prepareFreeformDragTarget(label)
+    if (!target) return
+    const stageState = () =>
+      smokeCommand('eval-js', {
+        code: `
+          const source = document.querySelector('[data-videorc-stage-source=' + CSS.escape(${JSON.stringify(target.sourceId)}) + ']')
+          const rect = source?.querySelector('[data-videorc-stage-bounds]')?.getBoundingClientRect() ?? null
+          return {
+            downs: window.__videorcProofFallback.downs,
+            ups: window.__videorcProofFallback.ups,
+            phase: document.querySelector('[data-videorc-stage-phase]')?.dataset.videorcStagePhase ?? null,
+            bounds: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
+          }
+        `
+      })
+    const toScreen = (point) => ({
+      x: main.contentBounds.x + point.x,
+      y: main.contentBounds.y + point.y
+    })
+    // Surface-local points for input delivered to the fallback surface
+    // itself; the surface rect is re-read, since Freeform re-laid the page out.
+    const toSurface = async (points) => {
+      const current = (await smokeCommand('preview-window-state')).surface.bounds
+      return points.map((point) => ({
+        x: Math.round(toScreen(point).x - current.x),
+        y: Math.round(toScreen(point).y - current.y)
+      }))
+    }
+    const surfaceInput = (events) => smokeCommand('send-input-to-proof-surface', { events })
+    const press = (point) => ({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 })
+    const release = (point) => ({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 })
+    // Two ways in. 'surface': the input enters the fallback surface's own
+    // web contents, as real mouse input enters a view, and must come out on
+    // the stage (the forwarding is what is under test; once the surface is a
+    // view in the window no AppKit hit-testing sits in the path). 'os': a
+    // real HID event through every layer, when the host lets this process
+    // post one (an Accessibility grant); otherwise recorded as skipped.
+    const ways = [
+      {
+        kind: 'surface',
+        click: async (point) => {
+          const [local] = await toSurface([point])
+          await surfaceInput([{ type: 'mouseMove', ...local }, press(local), release(local)])
+          return true
+        },
+        drag: async (points) => {
+          const local = await toSurface(points)
+          await surfaceInput([
+            { type: 'mouseMove', ...local[0] },
+            press(local[0]),
+            ...local
+              .slice(1)
+              .map((point) => ({ type: 'mouseMove', ...point, modifiers: ['leftbuttondown'] })),
+            release(local[local.length - 1])
+          ])
+          return true
+        }
+      },
+      {
+        kind: 'os',
+        click: async (point) => osMouseDelivered(osMouse([toScreen(point)]), toScreen(point)),
+        drag: async (points) =>
+          osMouseDelivered(osMouse(points.map(toScreen)), toScreen(points[points.length - 1]))
+      }
+    ]
+    for (const way of ways) {
+      const done = await driveFallbackInput(
+        `${label} [${way.kind}]`,
+        way,
+        target.sourceId,
+        stageState
+      )
+      if (!done) return
+    }
+    const focus = await smokeCommand('focused-window')
+    assertProbe(
+      focus.previewFocused === false && focus.role !== 'preview',
+      `${label}: preview window not focused after the input`,
+      JSON.stringify(focus)
+    )
+  } finally {
+    await restoreNativePresenterAfterProofFallback(label)
+  }
+}
+
+/**
+ * One way into the fallback (see runProofFallbackPassThroughScenario): a
+ * click on the source, then a drag that moves it and the same drag back, so
+ * the box ends where it started. Returns false when the scenario should
+ * stop (a failed step); a way the host cannot post is recorded as skipped.
+ */
+async function driveFallbackInput(label, way, sourceId, stageState) {
+  const centerOf = (rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
+  const idleStage = async (step) => {
+    const idle = await waitFor(
+      stageState,
+      (s) => s.result?.phase === 'idle' && s.result?.bounds,
+      5000
+    )
+    assertProbe(
+      idle.ok,
+      `${label}: the stage is idle before the ${step}`,
+      JSON.stringify(idle.last?.result)
+    )
+    return idle.ok ? idle.last.result : null
+  }
+  const before = await idleStage('click')
+  if (!before) return false
+  const downsBefore = before.downs.length
+  const start = centerOf(before.bounds)
+  if (!(await way.click(start))) {
+    assertProbe(
+      true,
+      `${label}: skipped — this process may not post HID events (cursor did not move)`,
+      JSON.stringify({ start })
+    )
+    return true
+  }
+  const onSource = (down) => down.sourceId === sourceId && down.onBounds
+  const pressed = await waitFor(
+    stageState,
+    (s) => (s.result?.downs ?? []).slice(downsBefore).some(onSource),
+    5000
+  )
+  const down = (pressed.last?.result?.downs ?? []).slice(downsBefore).find(onSource)
+  assertProbe(
+    pressed.ok,
+    `${label}: the click reached the stage source through the fallback surface (trusted: ${down?.isTrusted ?? 'n/a'})`,
+    JSON.stringify({ sourceId, state: pressed.last?.result })
+  )
+  if (!pressed.ok) return false
+  for (const [index, delta] of [
+    { x: 64, y: 36 },
+    { x: -64, y: -36 }
+  ].entries()) {
+    const state = await idleStage(`drag ${index}`)
+    if (!state) return false
+    const from = centerOf(state.bounds)
+    const points = [0, 1 / 4, 1 / 2, 3 / 4, 1].map((t) => ({
+      x: from.x + delta.x * t,
+      y: from.y + delta.y * t
+    }))
+    const posted = await way.drag(points)
+    assertProbe(posted, `${label}: drag ${index} was posted`, JSON.stringify({ points }))
+    if (!posted) return false
+    const moved = await waitFor(
+      stageState,
+      (s) =>
+        s.result?.phase === 'idle' &&
+        Boolean(s.result?.bounds) &&
+        Math.abs(s.result.bounds.x - state.bounds.x - delta.x) <= 8 &&
+        Math.abs(s.result.bounds.y - state.bounds.y - delta.y) <= 8,
+      8000
+    )
+    assertProbe(
+      moved.ok,
+      `${label}: the drag ${index === 0 ? 'moved the source' : 'moved it back'} (the stage shows the committed rect)`,
+      JSON.stringify({
+        before: state.bounds,
+        delta,
+        after: moved.last?.result?.bounds,
+        phase: moved.last?.result?.phase,
+        downs: moved.last?.result?.downs?.length,
+        ups: moved.last?.result?.ups?.length
+      })
+    )
+    if (!moved.ok) return false
+  }
+  return true
+}
+
+/**
+ * Freeform (the streamer's mode: a preset's screen is not editable on the
+ * stage), the first source selected through its toolbar chip and shrunk to a
+ * 40 % box at (30 %, 30 %) through the inspector, so a move has somewhere to
+ * go. The inspector is driven over CDP (it is not what is under test); every
+ * pointerdown and pointerup that reaches a stage source is recorded with its
+ * trust. Returns the source and its on-screen rect, or null (asserted).
+ */
+async function prepareFreeformDragTarget(label) {
+  await smokeCommand('eval-js', {
+    code: `
+      window.__videorcProofFallback = { downs: [], ups: [] }
+      for (const type of ['pointerdown', 'pointerup']) {
+        document.addEventListener(type, (event) => {
+          const source = event.target?.closest?.('[data-videorc-stage-source]')
+          window.__videorcProofFallback[type === 'pointerdown' ? 'downs' : 'ups'].push({
+            sourceId: source?.getAttribute('data-videorc-stage-source') ?? null,
+            onBounds: Boolean(event.target?.hasAttribute?.('data-videorc-stage-bounds')),
+            isTrusted: event.isTrusted
+          })
+        }, { capture: true })
+      }
+      return true
+    `
+  })
+  const entered = await smokeCommand('eval-js', {
+    code: `
+      const toggle = document.querySelector('[data-videorc-layout-preset="freeform"]')
+      if (!toggle) return { entered: false, reason: 'no Freeform toggle' }
+      const pressed = () =>
+        toggle.getAttribute('aria-pressed') === 'true' || toggle.hasAttribute('data-pressed')
+      if (!pressed()) toggle.click()
+      for (let i = 0; i < 100; i++) {
+        await sleep(100)
+        const idle = document.querySelector('[data-videorc-stage-phase]')?.dataset.videorcStagePhase === 'idle'
+        if (pressed() && idle && toggle.textContent.trim() === 'Freeform') return { entered: true }
+      }
+      return { entered: false, reason: toggle.textContent.trim() }
+    `
+  })
+  assertProbe(
+    entered.result?.entered === true,
+    `${label}: the scene is in Freeform`,
+    JSON.stringify(entered.result)
+  )
+  if (entered.result?.entered !== true) return null
+  const picked = await smokeCommand('eval-js', {
+    code: `
+      const source = document.querySelector('[data-videorc-stage-source]')
+      if (!source) return null
+      const chip = document.querySelector('[data-videorc-stage-toolbar] button[aria-label^="Select "]')
+      chip?.click()
+      await sleep(150)
+      document.querySelector('button[aria-label="Unlock aspect ratio"]')?.click()
+      await sleep(100)
+      return {
+        sourceId: source.getAttribute('data-videorc-stage-source'),
+        sourceName: chip?.textContent?.trim() ?? null
+      }
+    `
+  })
+  assertProbe(
+    Boolean(picked.result?.sourceId),
+    `${label}: a stage source exists to drag`,
+    JSON.stringify(picked)
+  )
+  if (!picked.result?.sourceId || !cdp) return null
+  const sourceId = picked.result.sourceId
+  for (const [field, value] of [
+    ['width', 40],
+    ['height', 40],
+    ['x', 30],
+    ['y', 30]
+  ]) {
+    const focused = await smokeCommand('eval-js', {
+      code: `
+        for (let i = 0; i < 50; i++) {
+          if (document.querySelector('[data-videorc-stage-phase]')?.dataset.videorcStagePhase === 'idle') break
+          await sleep(100)
+        }
+        const input = document.querySelector('[data-videorc-transform-field="${field}"]')
+        if (!input || input.disabled) return { focused: false }
+        input.focus()
+        input.select()
+        return { focused: true }
+      `
+    })
+    if (focused.result?.focused !== true) {
+      assertProbe(
+        false,
+        `${label}: the inspector's ${field} field is editable`,
+        JSON.stringify(focused)
+      )
+      return null
+    }
+    await cdp.send('Input.insertText', { text: String(value) })
+    for (const type of ['rawKeyDown', 'keyUp']) {
+      await cdp.send('Input.dispatchKeyEvent', {
+        type,
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13
+      })
+    }
+  }
+  const ready = await waitFor(
+    async () =>
+      smokeCommand('eval-js', {
+        code: `
+          const canvas = document.querySelector('[data-videorc-stage-canvas]')?.getBoundingClientRect()
+          const source = document.querySelector('[data-videorc-stage-source=' + CSS.escape(${JSON.stringify(sourceId)}) + ']')
+          const rect = source?.querySelector('[data-videorc-stage-bounds]')?.getBoundingClientRect() ?? null
+          return {
+            phase: document.querySelector('[data-videorc-stage-phase]')?.dataset.videorcStagePhase ?? null,
+            canvas: canvas ? { x: canvas.x, y: canvas.y, width: canvas.width, height: canvas.height } : null,
+            bounds: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
+          }
+        `
+      }),
+    (s) =>
+      s.result?.phase === 'idle' &&
+      Boolean(s.result?.bounds && s.result?.canvas) &&
+      s.result.bounds.width <= s.result.canvas.width * 0.6 &&
+      s.result.bounds.x + s.result.bounds.width + 70 <= s.result.canvas.x + s.result.canvas.width &&
+      s.result.bounds.y + s.result.bounds.height + 40 <= s.result.canvas.y + s.result.canvas.height,
+    10000
+  )
+  assertProbe(
+    ready.ok,
+    `${label}: the source is a box the mouse can move inside the canvas`,
+    JSON.stringify(ready.last?.result)
+  )
+  return ready.ok ? { sourceId, bounds: ready.last.result.bounds } : null
+}
+
+/** Back on the native path for the scenarios that follow: the preset the
+ * probe started from, the presenter resolved again, the surface docked. */
+async function restoreNativePresenterAfterProofFallback(label) {
+  try {
+    await smokeCommand('select-layout-preset', { preset: 'screen-only', settleMs: 100 })
+  } catch (error) {
+    console.log(`${label}: layout preset not restored: ${error?.message ?? error}`)
+  }
+  await smokeCommand('restore-native-preview-driver')
+  const restored = await waitFor(
+    async () => smokeCommand('preview-window-state'),
+    (s) =>
+      s.surfaceStatus?.nativePreviewHostKind === 'in-process' &&
+      s.surfaceStatus?.transport === 'native-surface',
+    15000
+  )
+  assertProbe(
+    restored.ok,
+    `${label}: the native presenter is back after the probe`,
+    JSON.stringify(restored.last?.surfaceStatus)
+  )
+  await waitForDockedSurfaceAtSlot(`${label}: surface docked over the canvas again`, {
+    selector: SCENE_SLOT
+  })
+}
+
 /** Post a real left click at a global display point (Quartz top-left origin,
  * the same space as Electron's screen coordinates). Returns the cursor
  * position read back afterwards, or null when the event could not be posted. */
 function osClick(point) {
+  return osMouse([point])
+}
+
+/** Post real left-button input at global display points: one point is a
+ * click; more are a press at the first, a drag through the rest and a release
+ * at the last. Returns the cursor position read back after the release (before
+ * the cursor is put back where it was: this is the owner's real pointer, so
+ * the run is short and leaves no trace), or null when the events could not be
+ * posted. */
+function osMouse(points) {
   const swift = `
 import CoreGraphics
 import Foundation
-let x = Double(CommandLine.arguments[1])!, y = Double(CommandLine.arguments[2])!
-let point = CGPoint(x: x, y: y)
+let values = CommandLine.arguments.dropFirst().compactMap(Double.init)
+var points: [CGPoint] = []
+for index in stride(from: 0, to: values.count - 1, by: 2) {
+  points.append(CGPoint(x: values[index], y: values[index + 1]))
+}
+let before = CGEvent(source: nil)?.location ?? CGPoint(x: -1, y: -1)
 let source = CGEventSource(stateID: .hidSystemState)
-func post(_ type: CGEventType) {
+func post(_ type: CGEventType, _ point: CGPoint, settleUs: UInt32 = 70_000) {
   if let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) {
     event.post(tap: .cghidEventTap)
   }
-  usleep(70_000)
+  usleep(settleUs)
 }
-post(.mouseMoved)
-post(.leftMouseDown)
-post(.leftMouseUp)
+post(.mouseMoved, points[0])
+post(.leftMouseDown, points[0])
+for point in points.dropFirst() {
+  post(.leftMouseDragged, point, settleUs: 40_000)
+}
+post(.leftMouseUp, points[points.count - 1])
 let location = CGEvent(source: nil)?.location ?? CGPoint(x: -1, y: -1)
 print("\\(location.x)\\t\\(location.y)")
+if before.x >= 0 && before.y >= 0 {
+  post(.mouseMoved, before, settleUs: 0)
+}
 `
-  const file = join(outputDirectory, 'os-click.swift')
+  const file = join(outputDirectory, 'os-mouse.swift')
   writeFileSync(file, swift)
-  const result = spawnSync('swift', [file, String(point.x), String(point.y)], {
-    encoding: 'utf8',
-    timeout: 60000
-  })
+  const result = spawnSync(
+    'swift',
+    [file, ...points.flatMap((point) => [String(point.x), String(point.y)])],
+    { encoding: 'utf8', timeout: 60000 }
+  )
   if (result.status !== 0) {
-    console.log(`os-click: swift failed: ${result.stderr?.slice(0, 300)}`)
+    console.log(`os-mouse: swift failed: ${result.stderr?.slice(0, 300)}`)
     return null
   }
   const [x, y] = result.stdout.trim().split('\t').map(Number)
   return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null
+}
+
+/** The posted events reached the display: the cursor was read back at the
+ * last point (within rounding). Anything else is recorded as skipped. */
+function osMouseDelivered(posted, point) {
+  return Boolean(posted) && Math.abs(posted.x - point.x) <= 2 && Math.abs(posted.y - point.y) <= 2
 }
 
 async function runWindowsD3d11WindowProbe() {
@@ -1353,6 +1810,16 @@ async function runWindowManagerDockedScenarios() {
  * draw the video aspect-fit inside it. Runs while floating.
  */
 async function runWindowManagerFloatingScenario() {
+  // previewWindowExternalResizePolicy (plan 213 D4): only macOS keeps the
+  // tile's size; elsewhere the backstop conforms the window to the output.
+  if (process.platform !== 'darwin') {
+    assertProbe(
+      true,
+      'wm-resizes-floating: skipped — off macOS an external resize conforms the window by design',
+      ''
+    )
+    return
+  }
   await smokeCommand('preview-window-set-bounds', {
     x: 240,
     y: 160,
@@ -1714,20 +2181,14 @@ async function waitFor(fetchState, predicate, timeoutMsLocal) {
   return { ok: false, last }
 }
 
-async function smokeCommand(command, params = {}) {
-  const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${smoke.capability}`
-    },
-    body: JSON.stringify({ command, params })
-  })
-  const payload = await response.json()
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload?.error ?? `${command} smoke command failed`)
-  }
-  return payload.result
+// One dedicated connection per command (smoke-command-client.mjs): the
+// pooled keep-alive socket a bare fetch reuses is closed by the app after 5 s
+// idle, and this probe spends seconds at a time inside synchronous `swift`
+// spawns (CGWindowList, CGEvent), so on a loaded host the next command rode a
+// socket the app had already closed and failed with "fetch failed" (plan 216
+// C gate runs, 2026-11-03).
+function smokeCommand(command, params = {}) {
+  return requestSmokeCommand(smoke, command, params, { timeoutMs })
 }
 
 // The app answers smoke commands before the renderer has drawn its shell
@@ -1749,6 +2210,12 @@ async function smokeCommandWhenShellReady(command, params = {}) {
 }
 
 function windowList() {
+  // CGWindowList is macOS-only. Elsewhere no native_preview_host_helper window
+  // can exist, so the helper-gone and surface-hidden oracles hold trivially;
+  // the [proof-window] oracles cover Linux.
+  if (process.platform !== 'darwin') {
+    return []
+  }
   const swift = `
 import CoreGraphics
 import Foundation

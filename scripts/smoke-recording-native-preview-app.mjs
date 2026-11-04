@@ -120,8 +120,12 @@ const usePackagedWindowsScreen =
 // configured by a running session, so the gate drives the renderer's own
 // sources to the real screen + ScreenOnly through the packaged bridge.
 const usePackagedWindowsD3d11Sources = usePackagedWindowsScreen && windowsPreviewOptions.d3d11
-const recordingProofPollingIntervalMs = 125
-const recordingProofPollingMaxWidth = 960
+// A recording keeps the idle proof-polling profile (the proof surface is the
+// production Preview): 40 ms, and a width cap that follows the surface,
+// floored at 640 and ceilinged at 1920 (native-preview-proof-polling.ts).
+const recordingProofPollingIntervalMs = 40
+const recordingProofPollingMinMaxWidth = 640
+const recordingProofPollingCeilingWidth = 1920
 const previewLatencyBudgets = resolveNativePreviewLatencyBudgets({
   configuredP95Ms: maxPreviewInputToPresentLatencyP95Ms,
   configuredP99Ms: maxPreviewInputToPresentLatencyP99Ms,
@@ -1144,10 +1148,11 @@ function assertNativeMeasurement(scenario, measurement, { armedInPlace = false }
     }
     if (
       measurement.framePollingIntervalMs !== recordingProofPollingIntervalMs ||
-      measurement.framePollingMaxWidth !== recordingProofPollingMaxWidth
+      !(measurement.framePollingMaxWidth >= recordingProofPollingMinMaxWidth) ||
+      !(measurement.framePollingMaxWidth <= recordingProofPollingCeilingWidth)
     ) {
       throw new Error(
-        `Windows recording preview did not apply the contained ${recordingProofPollingIntervalMs}ms/${recordingProofPollingMaxWidth}px polling profile: ${JSON.stringify({ intervalMs: measurement.framePollingIntervalMs, maxWidth: measurement.framePollingMaxWidth })}`
+        `Windows recording preview did not keep the full-quality ${recordingProofPollingIntervalMs}ms polling profile (width ${recordingProofPollingMinMaxWidth}-${recordingProofPollingCeilingWidth}px): ${JSON.stringify({ intervalMs: measurement.framePollingIntervalMs, maxWidth: measurement.framePollingMaxWidth })}`
       )
     }
     if (

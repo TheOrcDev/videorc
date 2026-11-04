@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::account::SessionState;
 use crate::live_chat::{CommentsReadState, CommentsWriteState};
 use crate::streaming::{
     PlatformAccount, PlatformAccountStatus, StreamAuthMode, StreamMetadataDraft, StreamPlatform,
@@ -71,10 +72,13 @@ pub enum GoLivePreflightIssueSeverity {
     Error,
 }
 
+/// `session` is the Videorc account the relay platforms need (plan 215 A2):
+/// signed out, X and Kick chat warn and name it, and the stream still goes.
 pub fn validate_go_live_preflight(
     params: GoLivePreflightParams,
     metadata: &StreamMetadataDraft,
     accounts: &[PlatformAccount],
+    session: &SessionState,
 ) -> GoLivePreflight {
     let mut issues = Vec::new();
     if metadata.title.trim().is_empty()
@@ -115,6 +119,7 @@ pub fn validate_go_live_preflight(
                         .get(&target.id)
                         .unwrap_or(metadata),
                     accounts,
+                    session,
                     &mut issues,
                 )
             })
@@ -151,6 +156,7 @@ fn destination_preflight(
     target: &StreamTargetSettings,
     metadata: &StreamMetadataDraft,
     accounts: &[PlatformAccount],
+    session: &SessionState,
     issues: &mut Vec<GoLivePreflightIssue>,
 ) -> GoLiveDestinationPreflight {
     let (title, description) = effective_metadata(target.platform, metadata);
@@ -262,7 +268,8 @@ fn destination_preflight(
         }
     }
 
-    let (chat_read, chat_write, chat_message) = destination_chat_preflight(target, accounts);
+    let (chat_read, chat_write, chat_message) =
+        destination_chat_preflight(target, accounts, session);
     if ready
         && target.platform != StreamPlatform::Custom
         && (chat_read != CommentsReadState::Ready || chat_write != CommentsWriteState::Ready)
@@ -314,9 +321,13 @@ fn scheduled_smoke_x_fixture(_target: &StreamTargetSettings) -> Option<String> {
 fn destination_chat_preflight(
     target: &StreamTargetSettings,
     accounts: &[PlatformAccount],
+    session: &SessionState,
 ) -> (CommentsReadState, CommentsWriteState, String) {
-    let capability =
-        crate::live_chat::chat_capability(target.platform, account_for_target(target, accounts));
+    let capability = crate::live_chat::chat_capability(
+        target.platform,
+        account_for_target(target, accounts),
+        session,
+    );
     if target.platform == StreamPlatform::X {
         let account = account_for_target(target, accounts);
         let (native_available, capability_message) = match x_live::x_native_live_capability(account)
@@ -332,6 +343,7 @@ fn destination_chat_preflight(
             account.map(|account| account.status),
             native_available,
             capability_message,
+            session,
         );
     }
 
@@ -392,6 +404,7 @@ fn x_destination_chat_preflight(
     account_status: Option<PlatformAccountStatus>,
     native_available: bool,
     capability_message: String,
+    session: &SessionState,
 ) -> (CommentsReadState, CommentsWriteState, String) {
     if auth_mode != StreamAuthMode::Oauth {
         return (
@@ -424,11 +437,27 @@ fn x_destination_chat_preflight(
             capability_message,
         );
     }
-    (
-        CommentsReadState::Ready,
-        CommentsWriteState::Ready,
-        "X chat is ready to read and send.".to_string(),
-    )
+    // Plan 215 A2: X itself is fine, but the relay that reads its chat needs
+    // the Videorc sign-in. Named here, before Go Live, with Sign in as the
+    // fix; the stream still goes live (a warning, never a block). A store
+    // that cannot be read is its own failure, never "signed out".
+    match session {
+        SessionState::SignedIn => (
+            CommentsReadState::Ready,
+            CommentsWriteState::Ready,
+            "X chat is ready to read and send.".to_string(),
+        ),
+        SessionState::SignedOut => (
+            CommentsReadState::NeedsVideorcSignIn,
+            CommentsWriteState::Ready,
+            crate::live_chat::X_CHAT_NEEDS_YOUR_VIDEORC_SIGN_IN.to_string(),
+        ),
+        SessionState::Unreadable(error) => (
+            CommentsReadState::Failed,
+            CommentsWriteState::Ready,
+            format!("Couldn't read your Videorc sign-in: {error}"),
+        ),
+    }
 }
 
 fn effective_metadata(
@@ -550,12 +579,13 @@ mod tests {
         for (scopes, read, write, message) in cases {
             let accounts = [account(&scopes)];
             let (actual_read, actual_write, actual_message) =
-                destination_chat_preflight(&target, &accounts);
+                destination_chat_preflight(&target, &accounts, &SessionState::SignedIn);
             assert_eq!(actual_read, read, "{scopes:?}");
             assert_eq!(actual_write, write, "{scopes:?}");
             assert!(actual_message.contains(message), "{actual_message}");
         }
-        let (read, write, message) = destination_chat_preflight(&target, &[]);
+        let (read, write, message) =
+            destination_chat_preflight(&target, &[], &SessionState::SignedIn);
         assert_eq!(read, CommentsReadState::Unavailable);
         assert_eq!(write, CommentsWriteState::Unavailable);
         assert!(message.contains("Connect Kick"));
@@ -596,6 +626,7 @@ mod tests {
                 },
                 &empty,
                 &[],
+                &SessionState::SignedIn,
             );
             assert_eq!(
                 result
@@ -656,6 +687,7 @@ mod tests {
             },
             &metadata,
             &accounts,
+            &SessionState::SignedIn,
         );
 
         assert!(!preflight.valid);
@@ -714,6 +746,7 @@ mod tests {
             connected,
             true,
             "X Livestream API credentials are configured.".to_string(),
+            &SessionState::SignedIn,
         );
         assert_eq!(ready.0, CommentsReadState::Ready);
         assert_eq!(ready.1, CommentsWriteState::Ready);
@@ -735,8 +768,13 @@ mod tests {
             ),
             "Connected X account does not match the account that authorized X Live."
         );
-        let not_authorized =
-            x_destination_chat_preflight(StreamAuthMode::Oauth, connected, false, authorize);
+        let not_authorized = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            connected,
+            false,
+            authorize,
+            &SessionState::SignedIn,
+        );
         assert_eq!(not_authorized.0, CommentsReadState::Unavailable);
         assert_eq!(not_authorized.1, CommentsWriteState::Unavailable);
         assert_eq!(not_authorized.2, "Authorize X Live to read and send chat.");
@@ -746,6 +784,7 @@ mod tests {
             Some(PlatformAccountStatus::NeedsReconnect),
             true,
             "X Livestream API credentials are configured.".to_string(),
+            &SessionState::SignedIn,
         );
         assert_eq!(disconnected.0, CommentsReadState::Unavailable);
         assert_eq!(disconnected.1, CommentsWriteState::Unavailable);
@@ -757,6 +796,7 @@ mod tests {
             None,
             false,
             crate::live_chat::X_AUTHORIZE_LIVE_FOR_CHAT.to_string(),
+            &SessionState::SignedIn,
         );
         assert_eq!(signed_out.0, CommentsReadState::Unavailable);
         assert_eq!(signed_out.2, "Sign in to X to read and send chat.");
@@ -769,6 +809,7 @@ mod tests {
             connected,
             true,
             "ignored".to_string(),
+            &SessionState::SignedIn,
         );
         assert_eq!(stream_key.0, CommentsReadState::NeedsSignIn);
         assert_eq!(stream_key.1, CommentsWriteState::Unavailable);
@@ -782,6 +823,83 @@ mod tests {
             assert!(!message.contains("receive-only"), "{message}");
             assert!(!message.contains("Manual RTMP"), "{message}");
         }
+    }
+
+    /// Plan 215 A2: X and Kick chat ride the Videorc relay. Signed out of
+    /// Videorc, the Go Live check names that sign-in in its own words and
+    /// leaves sending (the platform's own credentials) ready; a store that
+    /// cannot be read is a failure with its error, never "signed out".
+    #[test]
+    fn relay_chat_preflight_names_the_missing_videorc_sign_in() {
+        let connected = Some(PlatformAccountStatus::Connected);
+        let signed_out = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            connected,
+            true,
+            "X Livestream API credentials are configured.".to_string(),
+            &SessionState::SignedOut,
+        );
+        assert_eq!(signed_out.0, CommentsReadState::NeedsVideorcSignIn);
+        assert_eq!(signed_out.1, CommentsWriteState::Ready);
+        assert_eq!(signed_out.2, "X chat needs your Videorc sign-in.");
+        assert!(!signed_out.2.contains("Sign in to X"));
+
+        let unreadable = x_destination_chat_preflight(
+            StreamAuthMode::Oauth,
+            connected,
+            true,
+            "ignored".to_string(),
+            &SessionState::Unreadable("permission denied".to_string()),
+        );
+        assert_eq!(unreadable.0, CommentsReadState::Failed);
+        assert!(
+            unreadable.2.contains("permission denied"),
+            "{}",
+            unreadable.2
+        );
+
+        // The X side still comes first: a stream key or a signed-out X
+        // account says so before the Videorc account is looked at.
+        let stream_key = x_destination_chat_preflight(
+            StreamAuthMode::ManualRtmp,
+            connected,
+            true,
+            "ignored".to_string(),
+            &SessionState::SignedOut,
+        );
+        assert_eq!(stream_key.0, CommentsReadState::NeedsSignIn);
+
+        let kick_target = default_stream_targets()
+            .into_iter()
+            .find(|target| target.platform == StreamPlatform::Kick)
+            .expect("default Kick target");
+        let kick = PlatformAccount {
+            id: "kick-acct".to_string(),
+            platform: StreamPlatform::Kick,
+            account_id: "4242".to_string(),
+            account_label: "orcdev".to_string(),
+            account_handle: None,
+            avatar_url: None,
+            scopes: vec!["events:subscribe".to_string(), "chat:write".to_string()],
+            access_token_present: true,
+            refresh_token_present: true,
+            stream_key_present: false,
+            expires_at: None,
+            connected_at: "2026-09-25T00:00:00Z".to_string(),
+            updated_at: "2026-09-25T00:00:00Z".to_string(),
+            status: PlatformAccountStatus::Connected,
+        };
+        let (read, write, message) = destination_chat_preflight(
+            &kick_target,
+            std::slice::from_ref(&kick),
+            &SessionState::SignedOut,
+        );
+        assert_eq!(read, CommentsReadState::NeedsVideorcSignIn);
+        assert_eq!(write, CommentsWriteState::Ready);
+        assert_eq!(message, "Kick chat needs your Videorc sign-in.");
+        let (read, _, _) =
+            destination_chat_preflight(&kick_target, &[kick], &SessionState::SignedIn);
+        assert_eq!(read, CommentsReadState::Ready);
     }
 
     #[test]
@@ -859,6 +977,7 @@ mod tests {
             },
             &metadata,
             &[],
+            &SessionState::SignedIn,
         );
 
         assert!(!preflight.valid);
@@ -903,6 +1022,7 @@ mod tests {
             },
             &metadata,
             &[],
+            &SessionState::SignedIn,
         );
 
         assert!(preflight.valid, "{preflight:?}");
@@ -944,6 +1064,7 @@ mod tests {
             },
             &metadata,
             &[],
+            &SessionState::SignedIn,
         );
 
         assert!(preflight.valid, "{preflight:?}");
@@ -1012,6 +1133,7 @@ mod tests {
             },
             &metadata,
             &[twitch_account],
+            &SessionState::SignedIn,
         )
     }
 

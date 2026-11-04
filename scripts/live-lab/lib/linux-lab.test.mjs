@@ -41,7 +41,9 @@ import {
   LAB_SPEECH_SINK,
   PORTAL_PICK_FILE,
   clientForPid,
+  hyprctlDispatch,
   labSessionEnv,
+  luaDispatch,
   parseEnvironmentBlock,
   parsePulseDevices,
   pickLabOutput,
@@ -542,6 +544,12 @@ test('config examples: the mic and sink names match the code', posixOnly, async 
   const hypr = await readFile(join(LINUX_CONFIG, 'hyprland.videorc-lab.conf'), 'utf8')
   assert.match(hypr, /^monitor = videorc-lab, 1920x1080@30, 20000x0, 1$/m)
   assert.match(hypr, /^exec-once = hyprctl output create headless videorc-lab$/m)
+  const hyprLua = await readFile(join(LINUX_CONFIG, 'hyprland.videorc-lab.lua'), 'utf8')
+  assert.match(
+    hyprLua,
+    /^hl\.monitor\(\{ output = "videorc-lab", mode = "1920x1080@30", position = "20000x0", scale = 1 \}\)$/m
+  )
+  assert.match(hyprLua, /hl\.exec_cmd\("hyprctl output create headless videorc-lab"\)/)
   const xdph = await readFile(join(LINUX_CONFIG, 'xdph.conf.example'), 'utf8')
   assert.equal(parseXdphPicker(xdph), '/home/videorc-lab/.local/bin/videorc-lab-share-picker')
 })
@@ -573,6 +581,100 @@ test('card window: a window that is not fullscreen is focused and made fullscree
   const focus = calls.indexOf('dispatch focuswindow pid:78')
   assert.ok(focus !== -1 && calls[focus + 1] === 'dispatch fullscreen 0')
   assert.ok(!calls.some((line) => line.startsWith('dispatch movetoworkspacesilent')))
+})
+
+// What Hyprland 0.56 with a hyprland.lua answers a legacy dispatch (ogre).
+const luaRefusal = (legacy) => ({
+  code: 7,
+  stdout: `error: [string "return hl.dispatch(${legacy})"]:1: ')' expected near 'x'\n\n → Note: dispatch in lua is a shorthand for hl.dispatch(...), your syntax might need to be updated.\n`,
+  stderr: ''
+})
+
+test('luaDispatch: the Lua form of every dispatch the harness sends', () => {
+  assert.equal(luaDispatch(['focusmonitor', 'eDP-1']), 'hl.dsp.focus({ monitor = "eDP-1" })')
+  assert.equal(luaDispatch(['focuswindow', 'pid:77']), 'hl.dsp.focus({ window = "pid:77" })')
+  assert.equal(
+    luaDispatch(['fullscreen', '0']),
+    'hl.dsp.window.fullscreen({ mode = "fullscreen" })'
+  )
+  assert.equal(
+    luaDispatch(['movetoworkspacesilent', '9,pid:77']),
+    'hl.dsp.window.move({ workspace = "9", window = "pid:77", follow = false })'
+  )
+  assert.equal(luaDispatch(['focusmonitor', 'a"b\\c']), 'hl.dsp.focus({ monitor = "a\\"b\\\\c" })')
+  assert.equal(luaDispatch(['focusmonitor', 'a\nb']), null)
+  assert.equal(luaDispatch(['fullscreen', '2']), null)
+  assert.equal(luaDispatch(['exec', 'rm -rf ~']), null)
+})
+
+test('hyprctlDispatch: a Lua-config Hyprland gets the Lua form, a classic one never does', async () => {
+  const calls = []
+  const lua = async (command, args) => {
+    calls.push(args.slice(1).join(' '))
+    return args[1].startsWith('hl.') ? { code: 0, stdout: 'ok', stderr: '' } : luaRefusal(args[1])
+  }
+  await hyprctlDispatch(['focusmonitor', 'eDP-1'], { sessionEnv: {}, exec: lua })
+  assert.deepEqual(calls, ['focusmonitor eDP-1', 'hl.dsp.focus({ monitor = "eDP-1" })'])
+
+  // A classic config's own error is final: nothing is retried in Lua.
+  calls.length = 0
+  const classic = async (command, args) => {
+    calls.push(args.slice(1).join(' '))
+    return { code: 0, stdout: 'No such window found', stderr: '' }
+  }
+  await assert.rejects(
+    hyprctlDispatch(['focuswindow', 'pid:9'], { sessionEnv: {}, exec: classic }),
+    /hyprctl dispatch focuswindow pid:9: No such window found/
+  )
+  assert.deepEqual(calls, ['focuswindow pid:9'])
+
+  // The Lua form failing too is an error naming the Lua form.
+  const both = async (command, args) =>
+    args[1].startsWith('hl.')
+      ? { code: 0, stdout: 'window not found', stderr: '' }
+      : luaRefusal(args[1])
+  await assert.rejects(
+    hyprctlDispatch(['focuswindow', 'pid:9'], { sessionEnv: {}, exec: both }),
+    /hl\.dsp\.focus\(\{ window = "pid:9" \}\)': window not found/
+  )
+})
+
+test('card window: placed on a Lua-config Hyprland', posixOnly, async () => {
+  const calls = []
+  let full = 0
+  let monitor = 0
+  const exec = async (command, args) => {
+    if (args[0] === '-j' && args[1] === 'clients') {
+      return {
+        code: 0,
+        stdout: JSON.stringify([{ pid: 79, monitor, fullscreen: full, size: [1920, 1080] }]),
+        stderr: ''
+      }
+    }
+    calls.push(args[1])
+    if (!args[1].startsWith('hl.')) return luaRefusal(args.slice(1).join(' '))
+    if (args[1].startsWith('hl.dsp.window.move(')) monitor = 1
+    if (args[1].startsWith('hl.dsp.window.fullscreen(')) full = 2
+    return { code: 0, stdout: 'ok', stderr: '' }
+  }
+  const placed = await placeCardWindow({
+    pid: 79,
+    bounds: { id: 1, name: 'videorc-lab', activeWorkspaceId: 99 },
+    previousOutput: 'eDP-1',
+    sessionEnv: {},
+    exec,
+    wait: async () => {}
+  })
+  assert.deepEqual(placed, { onLabOutput: true, fullscreen: true, size: [1920, 1080] })
+  assert.deepEqual(
+    calls.filter((call) => call.startsWith('hl.')),
+    [
+      'hl.dsp.window.move({ workspace = "99", window = "pid:79", follow = false })',
+      'hl.dsp.focus({ window = "pid:79" })',
+      'hl.dsp.window.fullscreen({ mode = "fullscreen" })',
+      'hl.dsp.focus({ monitor = "eDP-1" })'
+    ]
+  )
 })
 
 test('inhibitorHeld: false when systemd-inhibit exits at once, true while it runs', async () => {

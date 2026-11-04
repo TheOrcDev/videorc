@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { performanceAppSpawnSpec, launchDevApp } from './lib/app-launcher.mjs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
@@ -303,10 +304,18 @@ try {
   }
   const stopRequestedAt = Date.now()
   const stopped = await request(ws, timeoutMs, 'session.stop')
-  const outputPath = stopped?.outputPath ?? started?.outputPath
+  // Analyze the published MP4, never the MKV Stop returns: the backend
+  // quarantines that MKV once the export lands, and an ffprobe holding it on
+  // Windows fails the rename with os error 32 (#1081).
+  const outputPath = await resolveFinalRecordingPath({
+    started,
+    stopped,
+    stopRequestedAt,
+    timeoutMs
+  })
   if (!outputPath || !existsSync(outputPath) || statSync(outputPath).size <= 0) {
     throw new Error(
-      `Native ScreenOnly recording output is missing or empty: ${outputPath ?? 'none'}`
+      `Native ScreenOnly recording MP4 is missing or empty: ${outputPath ?? stopped?.outputPath ?? started?.outputPath ?? 'none'}`
     )
   }
 

@@ -238,18 +238,14 @@
   --chrome-chromatic-recess: oklch(0 0 0 / 28%);
   --chrome-chromatic-rim: oklch(0 0 0 / 18%);
   --chrome-chromatic-lift: oklch(0 0 0 / 3%);
-  /* Chrome rows (plan 0011): the Stream Manager's on-stream row is a plate
-     with a black-chrome edge down its left side; a member's row is a quieter
-     plate whose edge keeps the member hue, the one place colour says who
-     wrote it. */
-  --chrome-row-edge-stops: oklch(0.45 0 0), oklch(0.22 0 0) 55%, oklch(0.1 0 0);
+  /* Chrome rows (plan 0011): the Stream Manager's on-stream row is a plate;
+     a member's row is a quieter plate. Neither has an edge down its left. */
   --chrome-row-live-top: oklch(0 0 0 / 10%);
   --chrome-row-live-bottom: oklch(0 0 0 / 3%);
   --chrome-row-live-hi: oklch(1 0 0 / 90%);
   --chrome-row-member-top: oklch(0 0 0 / 5%);
   --chrome-row-member-bottom: oklch(0 0 0 / 1%);
   --chrome-row-member-hi: oklch(1 0 0 / 70%);
-  --chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);
   --chrome-row-rim: oklch(0 0 0 / 8%);
   --chrome-row-lift: oklch(0 0 0 / 3%);
 
@@ -418,17 +414,14 @@
   --chrome-chromatic-recess: oklch(0 0 0 / 90%);
   --chrome-chromatic-rim: oklch(0 0 0 / 70%);
   --chrome-chromatic-lift: oklch(1 0 0 / 6%);
-  /* Chrome rows (plan 0011): a silver plate on the black solid with a
-     polished bead edge for the on-stream row, half its strength for a
-     member's row. */
-  --chrome-row-edge-stops: oklch(1 0 0), oklch(0.85 0 0) 55%, oklch(0.6 0 0);
+  /* Chrome rows (plan 0011): a silver plate on the black solid for the
+     on-stream row, half its strength for a member's row. */
   --chrome-row-live-top: oklch(1 0 0 / 14%);
   --chrome-row-live-bottom: oklch(1 0 0 / 4%);
   --chrome-row-live-hi: oklch(1 0 0 / 20%);
   --chrome-row-member-top: oklch(1 0 0 / 7%);
   --chrome-row-member-bottom: oklch(1 0 0 / 2%);
   --chrome-row-member-hi: oklch(1 0 0 / 10%);
-  --chrome-row-member-edge: color-mix(in oklch, var(--member) 80%, transparent);
   --chrome-row-rim: oklch(1 0 0 / 8%);
   --chrome-row-lift: oklch(1 0 0 / 4%);
 
@@ -989,21 +982,14 @@
  * box, cached with its tile, so a virtualized chat of any number of members
  * costs what the old flat tint did, also on a CPU-only compositor. No
  * transition, no motion, no backdrop-filter.
- *   chrome-row-live    the row that is on stream: a plate, a top line, a rim
- *                      and a 2px polished edge down the left.
- *   chrome-row-member  a member's row: a plate at half strength with a 2px
- *                      edge in the member hue, so a tip still reads louder.
+ *   chrome-row-live    the row that is on stream: a plate, a top line and a rim.
+ *   chrome-row-member  a member's row: a plate at half strength, so a tip still
+ *                      reads louder. No row has a stripe down its left.
  */
 @utility chrome-row-live {
   background-image:
-    linear-gradient(to bottom, var(--chrome-row-edge-stops)),
     linear-gradient(to bottom, var(--chrome-row-live-top), var(--chrome-row-live-bottom)),
     linear-gradient(var(--glass-solid), var(--glass-solid));
-  background-size:
-    2px 100%,
-    100% 100%,
-    100% 100%;
-  background-repeat: no-repeat;
   background-origin: border-box;
   --tw-shadow: inset 0 1px 0 var(--chrome-row-live-hi), inset 0 0 0 1px var(--chrome-row-rim);
   box-shadow:
@@ -1011,15 +997,9 @@
     var(--tw-ring-shadow), var(--tw-shadow);
   &:hover:not(:disabled) {
     background-image:
-      linear-gradient(to bottom, var(--chrome-row-edge-stops)),
       linear-gradient(var(--chrome-row-lift), var(--chrome-row-lift)),
       linear-gradient(to bottom, var(--chrome-row-live-top), var(--chrome-row-live-bottom)),
       linear-gradient(var(--glass-solid), var(--glass-solid));
-    background-size:
-      2px 100%,
-      100% 100%,
-      100% 100%,
-      100% 100%;
   }
 }
 
@@ -1028,8 +1008,7 @@
     linear-gradient(to bottom, var(--chrome-row-member-top), var(--chrome-row-member-bottom)),
     linear-gradient(var(--glass-solid), var(--glass-solid));
   background-origin: border-box;
-  --tw-shadow:
-    inset 2px 0 0 var(--chrome-row-member-edge), inset 0 1px 0 var(--chrome-row-member-hi);
+  --tw-shadow: inset 0 1px 0 var(--chrome-row-member-hi);
   box-shadow:
     var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
     var(--tw-ring-shadow), var(--tw-shadow);

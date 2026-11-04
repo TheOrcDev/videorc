@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Plan 214 B2: the entitlements of every binary that is NOT the app
+       itself: Electron's helpers, frameworks, dylibs, crashpad and ShipIt,
+       and the bare binaries in Contents/Resources (videorc-backend,
+       native_preview_host_helper, videorc-mcp, the .node addon, ffmpeg,
+       ffprobe). Exactly the five keys the app had before the Videorc Camera,
+       and never com.apple.developer.system-extension.install, the app group,
+       com.apple.application-identifier or com.apple.developer.team-identifier:
+       a binary without an embedded profile that carries any of them dies at
+       exec with SIGKILL, silently (spike P0a). The app's own plist is
+       entitlements.mac.plist (plus the camera keys when the app profile is
+       configured; see scripts/lib/camera-extension-packaging.mjs). The
+       extension has its own two-key plist and no profile. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- Hardened-runtime AV device access. Without these, camera/microphone are
+       denied in packaged builds NO MATTER what the user grants in System
+       Settings (TCC cannot override a missing entitlement): the exact
+       works-in-dev/dead-in-release split shipped in 0.9.1. Screen recording
+       needs no entitlement (TCC-only). -->
+  <key>com.apple.security.device.camera</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>

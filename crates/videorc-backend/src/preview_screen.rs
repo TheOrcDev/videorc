@@ -105,9 +105,18 @@ const SCREEN_PREVIEW_REUSED_MESSAGE: &str = if cfg!(target_os = "linux") {
     "Native screen preview source reused."
 };
 const SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE: &str = if cfg!(target_os = "linux") {
-    "Screen capture source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+    "Screen capture source reused; the capture exclusion set updates at the next capture start."
 } else {
-    "Native screen preview source reused; the capture exclusion set updates at the next capture start (content protection already hides those windows)."
+    "Native screen preview source reused; the capture exclusion set updates at the next capture start."
+};
+/// Plan 215 C2: the running ScreenCaptureKit stream took the new exclusion
+/// set through `updateContentFilter`, with no restart. Only macOS applies a
+/// set in place; elsewhere the Linux copy test still reads the words.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const SCREEN_PREVIEW_REUSED_EXCLUSION_APPLIED_MESSAGE: &str = if cfg!(target_os = "linux") {
+    "Screen capture source reused; the capture exclusion set was applied to the running capture."
+} else {
+    "Native screen preview source reused; the capture exclusion set was applied to the running capture."
 };
 const SCREEN_PREVIEW_STARTUP_TIMEOUT_SUBJECT: &str = if cfg!(target_os = "linux") {
     "starting screen capture"
@@ -315,7 +324,12 @@ enum PreviewScreenStartRegistration {
     JoinExisting {
         admitted_starting_identity: Option<PreviewScreenStartingIdentity>,
     },
-    Reused(PreviewScreenStatus),
+    Reused {
+        status: PreviewScreenStatus,
+        /// Plan 215 C2: the exclusion set the running capture still has to
+        /// take in place (`apply_reused_screen_exclusion`), when it changed.
+        exclusion_update: Option<Vec<u32>>,
+    },
     RejectedSuperseded(PreviewScreenStatus),
     RejectedShutdown(PreviewScreenStatus),
     Started {
@@ -328,7 +342,9 @@ impl PartialEq for PreviewScreenStartRegistration {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::JoinExisting { .. }, Self::JoinExisting { .. }) => true,
-            (Self::Reused(left), Self::Reused(right)) => left == right,
+            (Self::Reused { status: left, .. }, Self::Reused { status: right, .. }) => {
+                left == right
+            }
             (Self::RejectedSuperseded(left), Self::RejectedSuperseded(right)) => left == right,
             (Self::RejectedShutdown(left), Self::RejectedShutdown(right)) => left == right,
             (Self::Started { lease: left, .. }, Self::Started { lease: right, .. }) => {
@@ -487,6 +503,26 @@ enum NativeScreenCommand {
     /// Plan 213 F2 (macOS): the running display's new pixel size, in place.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Resize(ScreenResizeRequest),
+    /// Plan 215 C2 (macOS): a new capture exclusion set for the running
+    /// stream, through `updateContentFilter` alone: the Stream Manager's
+    /// Hide from stream switch, applied live.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    UpdateFilter(ScreenFilterUpdateRequest),
+}
+
+/// Plan 215 C2: the running stream's target again, with the new exclusion
+/// set, answered on `reply` with the update's duration in ms once the stream
+/// took the filter (or refused it).
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct ScreenFilterUpdateRequest {
+    source: SelectedScreenSource,
+    ffmpeg_path: String,
+    video: VideoSettings,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
+    protected_overlay_window_ids: Vec<u32>,
+    reply: std_mpsc::Sender<Result<u64, String>>,
 }
 
 /// Plan 213 F2: the capture a display's new resolution or scale calls for,
@@ -544,6 +580,14 @@ const SCREEN_SWAP_FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(250);
 /// updates, with slack, before the supervisor stops waiting for the thread.
 #[cfg(target_os = "macos")]
 const SCREEN_SWAP_REPLY_TIMEOUT: Duration = Duration::from_millis(1_000);
+/// Plan 215 C2: an exclusion-set change loads the shareable content fresh
+/// (the window to leave out may have opened a moment ago, after the
+/// listing's cache), then swaps the filter. Nothing waits on it but the
+/// command thread; frames keep arriving on the stream's own queue.
+#[cfg(target_os = "macos")]
+const SCREEN_EXCLUSION_UPDATE_TIMEOUT: Duration = Duration::from_millis(2_000);
+#[cfg(target_os = "macos")]
+const SCREEN_EXCLUSION_REPLY_TIMEOUT: Duration = Duration::from_millis(3_000);
 
 #[derive(Debug, Default)]
 struct PreviewScreenNativeSupervisor {
@@ -609,6 +653,19 @@ impl ScreenCaptureFrameStatus {
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn is_valid_current_image(self) -> bool {
         self == Self::Complete
+    }
+
+    /// A dropped screen frame is a callback that should have carried a picture
+    /// and did not (#981). ScreenCaptureKit's idle, blank, suspended, started
+    /// and stopped statuses say the screen has nothing new to show (unchanged
+    /// content, an off-screen window, a sleeping display, a stream edge); the
+    /// last complete frame stays current and nothing was lost, so they count
+    /// only in the per-status tallies. An unknown status is a callback whose
+    /// content cannot be trusted, so it is the one non-complete status that
+    /// counts as a drop.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    fn counts_as_dropped_frame(self) -> bool {
+        self == Self::Unknown
     }
 }
 
@@ -687,12 +744,10 @@ fn record_screen_capture_callback_status(
     guard.capture_timings.record_callback_at(callback_at);
     guard.capture_callback_count = guard.capture_callback_count.saturating_add(1);
     guard.frame_statuses.record(status);
-    if status.is_valid_current_image() {
-        true
-    } else {
+    if status.counts_as_dropped_frame() {
         guard.dropped_frames = guard.dropped_frames.saturating_add(1);
-        false
     }
+    status.is_valid_current_image()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1802,7 +1857,7 @@ async fn start_preview_screen_with_restart_signal(
         let status = status_for_missing_source(
             Some(source.source_id),
             Some(source.source_kind),
-            "The Videorc Notes window cannot be selected as a capture source.",
+            "This Videorc window is hidden from capture and cannot be selected as a capture source.",
         );
         if layout_intent_id.is_none() {
             let _ = stop_preview_screen(&state).await;
@@ -1867,10 +1922,20 @@ async fn start_preview_screen_with_restart_signal(
                     admitted_starting_identity,
                 };
             }
-            PreviewScreenStartRegistration::Reused(status) => {
+            PreviewScreenStartRegistration::Reused {
+                status,
+                exclusion_update,
+            } => {
                 signal_screen_layout_admission(&mut admission_ready, None);
                 signal_screen_restart_ready(&mut restart_ready);
                 drop(transition);
+                let status = match exclusion_update {
+                    Some(protected_overlay_window_ids) => {
+                        apply_reused_screen_exclusion(&state, protected_overlay_window_ids, status)
+                            .await
+                    }
+                    None => status,
+                };
                 return PreviewScreenLayoutStart::without_admission(status);
             }
             PreviewScreenStartRegistration::RejectedSuperseded(status)
@@ -5277,6 +5342,9 @@ async fn begin_screen_start(
         return PreviewScreenStartRegistration::RejectedSuperseded(slot.status.clone());
     }
     slot.protected_overlay_window_ids = start_key.protected_overlay_window_ids.clone();
+    let exclusion_changed = slot.active.as_ref().is_some_and(|active| {
+        active.protected_overlay_window_ids != start_key.protected_overlay_window_ids
+    });
     if let Some(reused) = reuse_current_screen_source_locked(&mut slot, &start_key) {
         registry.acquire(start_key.source_key.clone(), SourceConsumerReason::Preview);
         registry.set_status(start_key.source_key.clone(), SourceLifecycleStatus::Live);
@@ -5287,7 +5355,11 @@ async fn begin_screen_start(
         drop(registry);
         drop(slot);
         state.emit_event("preview.screen.status", reused.clone());
-        return PreviewScreenStartRegistration::Reused(reused);
+        return PreviewScreenStartRegistration::Reused {
+            status: reused,
+            exclusion_update: exclusion_changed
+                .then(|| start_key.protected_overlay_window_ids.clone()),
+        };
     }
 
     if let Some(previous_source_key) = previous_source_key.as_ref()
@@ -5431,10 +5503,13 @@ fn reuse_current_screen_source_locked(
     // Notes window flips the id set, and the resulting SCK teardown mid-
     // recording froze the screen and corrupted colors (owner report,
     // 2026-08-19 — the same disease as the mid-recording camera restart).
-    // Privacy is not at stake: Electron content protection excludes those
-    // windows from EVERY capture at the OS level independently of this
-    // filter, which is best-effort hygiene. The stored set updates so status
-    // stays truthful, and the SCK filter picks it up at the next real start.
+    // For Notes privacy is not at stake: Electron content protection excludes
+    // it from EVERY capture at the OS level independently of this filter. The
+    // stored set updates so status stays truthful; on macOS the caller then
+    // hands the new set to the running stream in place (plan 215 C2,
+    // `apply_reused_screen_exclusion`: the Stream Manager's Hide from stream
+    // has no content protection there, so the filter is its whole promise),
+    // and elsewhere the SCK filter picks it up at the next real start.
     let ids_changed = slot.active.as_ref().is_some_and(|active| {
         active.protected_overlay_window_ids != start_key.protected_overlay_window_ids
     });
@@ -5487,6 +5562,131 @@ async fn reuse_current_screen_source(
     };
     let mut slot = state.preview_screen.lock().await;
     reuse_current_screen_source_locked(&mut slot, &start_key)
+}
+
+/// Plan 215 C2: the exclusion set changed under a running capture that was
+/// reused as is. On macOS the running ScreenCaptureKit stream takes the new
+/// content filter in place (plan 210's `updateContentFilter` path), under the
+/// same generation and frame store: no stop, no restart, no hitch. The
+/// status says whether it was applied or waits for the next start.
+#[cfg(target_os = "macos")]
+async fn apply_reused_screen_exclusion(
+    state: &AppState,
+    protected_overlay_window_ids: Vec<u32>,
+    mut status: PreviewScreenStatus,
+) -> PreviewScreenStatus {
+    let requested_at = Instant::now();
+    match update_screen_exclusion_in_place(state, &protected_overlay_window_ids).await {
+        Ok(update_ms) => {
+            tracing::info!(
+                "[videorc-capture-exclusion] applied in place ids={:?} update_ms={} total_ms={}",
+                protected_overlay_window_ids,
+                update_ms,
+                requested_at.elapsed().as_millis()
+            );
+            let mut slot = state.preview_screen.lock().await;
+            // Only the capture this set was stored for: a newer start or stop
+            // owns the status now.
+            let still_current = slot.active.as_ref().is_some_and(|active| {
+                active.protected_overlay_window_ids == protected_overlay_window_ids
+            });
+            if still_current && slot.status.state == PreviewScreenState::Live {
+                slot.status.message =
+                    Some(SCREEN_PREVIEW_REUSED_EXCLUSION_APPLIED_MESSAGE.to_string());
+                slot.status.updated_at = Utc::now().to_rfc3339();
+                status = slot.status.clone();
+                drop(slot);
+                state.emit_event("preview.screen.status", status.clone());
+            }
+            status
+        }
+        Err(reason) => {
+            tracing::warn!(
+                "[videorc-capture-exclusion] not applied in place ids={:?}: {}; the set applies at the next capture start",
+                protected_overlay_window_ids,
+                reason
+            );
+            status
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn apply_reused_screen_exclusion(
+    _state: &AppState,
+    _protected_overlay_window_ids: Vec<u32>,
+    status: PreviewScreenStatus,
+) -> PreviewScreenStatus {
+    // Windows hides the Stream Manager through content protection and its
+    // monitor capture has no exclusion list; Linux cannot hide it (plan 215
+    // D6). The stored set still applies at the next ScreenCaptureKit-free
+    // start, which is to say never on these platforms.
+    status
+}
+
+/// Asks the running native capture thread to take the exclusion set, and
+/// waits for its answer (the update's duration in ms). The supervisor lock
+/// is held only to hand the command over: the stream answers on its own
+/// channel, and a Stop queued behind the update still ends the loop.
+#[cfg(target_os = "macos")]
+async fn update_screen_exclusion_in_place(
+    state: &AppState,
+    protected_overlay_window_ids: &[u32],
+) -> Result<u64, String> {
+    let native_supervisor = Arc::clone(&state.preview_screen.lock().await.native_supervisor);
+    let reply_rx = {
+        let supervisor = native_supervisor.lock().await;
+        let Some(owner) = supervisor.active.as_ref() else {
+            return Err("no running native capture to change".to_string());
+        };
+        let request = {
+            let slot = state.preview_screen.lock().await;
+            let Some(active) = slot.active.as_ref() else {
+                return Err("no running capture to change".to_string());
+            };
+            if slot.status.state != PreviewScreenState::Live {
+                return Err("the capture is not live".to_string());
+            }
+            if active.protected_overlay_window_ids != protected_overlay_window_ids {
+                return Err("a newer exclusion set superseded this one".to_string());
+            }
+            if active.source.display_id.is_none() && active.source.window_id.is_none() {
+                return Err("the running capture is not a ScreenCaptureKit stream".to_string());
+            }
+            let (reply_tx, reply_rx) = std_mpsc::channel();
+            (
+                ScreenFilterUpdateRequest {
+                    source: active.source.clone(),
+                    ffmpeg_path: active.ffmpeg_path.clone(),
+                    video: active.video.clone(),
+                    include_cursor: active.include_cursor,
+                    exclude_current_process_windows: active.exclude_current_process_windows,
+                    protected_overlay_window_ids: protected_overlay_window_ids.to_vec(),
+                    reply: reply_tx,
+                },
+                reply_rx,
+            )
+        };
+        let (request, reply_rx) = request;
+        if owner
+            .stop_tx
+            .send(NativeScreenCommand::UpdateFilter(request))
+            .is_err()
+        {
+            return Err("the native capture thread has exited".to_string());
+        }
+        reply_rx
+    };
+    match tokio::task::spawn_blocking(move || reply_rx.recv_timeout(SCREEN_EXCLUSION_REPLY_TIMEOUT))
+        .await
+    {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => Err(format!(
+            "the native capture thread did not answer the exclusion change within {} ms",
+            SCREEN_EXCLUSION_REPLY_TIMEOUT.as_millis()
+        )),
+        Err(_) => Err("the exclusion change wait task failed".to_string()),
+    }
 }
 
 fn screen_shared_snapshot(shared: &Arc<StdMutex<PreviewScreenShared>>) -> ScreenSharedSnapshot {
@@ -7062,6 +7262,11 @@ mod macos {
                                 autoreleasepool(|_| resize_stream(&mut session, &request));
                             let _ = request.reply.send(outcome);
                         }
+                        Ok(NativeScreenCommand::UpdateFilter(request)) => {
+                            let outcome =
+                                autoreleasepool(|_| update_filter(&mut session, &request));
+                            let _ = request.reply.send(outcome);
+                        }
                         Ok(NativeScreenCommand::Stop) | Err(_) => break,
                     }
                 }
@@ -7667,6 +7872,58 @@ mod macos {
             update_ms,
             stamped_at,
         })
+    }
+
+    /// Plan 215 C2: a new exclusion set for the running stream, through
+    /// `updateContentFilter` alone. The target, configuration, size,
+    /// generation and frame store all stay, so frames of the same target
+    /// keep flowing into the same store, now without the excluded windows.
+    /// The shareable content is loaded fresh: the window to leave out (the
+    /// Stream Manager, hidden a moment ago) may postdate the listing cache.
+    fn update_filter(
+        session: &mut ScreenSession,
+        request: &ScreenFilterUpdateRequest,
+    ) -> Result<u64, String> {
+        let started_at = Instant::now();
+        let config = NativeScreenPreviewConfig {
+            source_id: request.source.source_id.clone(),
+            source_kind: request.source.source_kind.clone(),
+            display_id: request.source.display_id,
+            window_id: request.source.window_id,
+            ffmpeg_path: request.ffmpeg_path.clone(),
+            video: request.video.clone(),
+            include_cursor: request.include_cursor,
+            exclude_current_process_windows: request.exclude_current_process_windows,
+            protected_overlay_window_ids: request.protected_overlay_window_ids.clone(),
+            consent_cancel: Arc::new(AtomicBool::new(false)),
+        };
+        let content = load_shareable_content_once_within(
+            ShareableContentQuery::FullOnScreenContent,
+            SCREEN_EXCLUSION_UPDATE_TIMEOUT,
+        )
+        .map_err(startup_failure_reason)?;
+        let selected = select_content(&content, &config).map_err(startup_failure_reason)?;
+        let (filter_tx, filter_rx) = std_mpsc::channel::<Result<(), String>>();
+        let filter_handler = RcBlock::new(move |error: *mut NSError| {
+            let _ = filter_tx.send(if error.is_null() {
+                Ok(())
+            } else {
+                Err(error_description(error))
+            });
+        });
+        let update_started_at = Instant::now();
+        unsafe {
+            session
+                .stream
+                .updateContentFilter_completionHandler(&selected.filter, Some(&filter_handler));
+        }
+        await_stream_update(
+            &filter_rx,
+            update_started_at + SCREEN_SWAP_UPDATE_TIMEOUT,
+            "content filter",
+        )?;
+        session._filter = selected.filter;
+        Ok(started_at.elapsed().as_millis() as u64)
     }
 
     /// Plan 213 F2: the display's resolution or scale changed under the
@@ -8292,22 +8549,24 @@ mod tests {
 
     #[test]
     fn capture_drop_reason_screen_frame_status_classifies_complete_and_noncomplete_fixtures() {
+        // (raw status, classification, publishes a picture, counts as a drop)
         let fixtures = [
-            (Some(0), ScreenCaptureFrameStatus::Complete, true),
-            (Some(1), ScreenCaptureFrameStatus::Idle, false),
-            (Some(2), ScreenCaptureFrameStatus::Blank, false),
-            (Some(3), ScreenCaptureFrameStatus::Suspended, false),
-            (Some(4), ScreenCaptureFrameStatus::Started, false),
-            (Some(5), ScreenCaptureFrameStatus::Stopped, false),
-            (Some(99), ScreenCaptureFrameStatus::Unknown, false),
-            (None, ScreenCaptureFrameStatus::Unknown, false),
+            (Some(0), ScreenCaptureFrameStatus::Complete, true, false),
+            (Some(1), ScreenCaptureFrameStatus::Idle, false, false),
+            (Some(2), ScreenCaptureFrameStatus::Blank, false, false),
+            (Some(3), ScreenCaptureFrameStatus::Suspended, false, false),
+            (Some(4), ScreenCaptureFrameStatus::Started, false, false),
+            (Some(5), ScreenCaptureFrameStatus::Stopped, false, false),
+            (Some(99), ScreenCaptureFrameStatus::Unknown, false, true),
+            (None, ScreenCaptureFrameStatus::Unknown, false, true),
         ];
         let mut counts = ScreenCaptureFrameStatusCounts::default();
 
-        for (raw, expected, valid_current_image) in fixtures {
+        for (raw, expected, valid_current_image, dropped) in fixtures {
             let status = classify_screen_capture_frame_status(raw);
             assert_eq!(status, expected);
             assert_eq!(status.is_valid_current_image(), valid_current_image);
+            assert_eq!(status.counts_as_dropped_frame(), dropped, "{status:?}");
             counts.record(status);
         }
 
@@ -8359,7 +8618,8 @@ mod tests {
         assert_eq!(latest.sequence, expected_sequence);
         assert_eq!(guard.frames_captured, 1);
         assert_eq!(guard.capture_callback_count, 6);
-        assert_eq!(guard.dropped_frames, 6);
+        // Only the unknown status is a drop (#981); the rest say "nothing new".
+        assert_eq!(guard.dropped_frames, 1);
         assert_eq!(guard.frame_statuses.idle, 1);
         assert_eq!(guard.frame_statuses.blank, 1);
         assert_eq!(guard.frame_statuses.suspended, 1);
@@ -8367,6 +8627,33 @@ mod tests {
         assert_eq!(guard.frame_statuses.stopped, 1);
         assert_eq!(guard.frame_statuses.unknown, 1);
         assert_eq!(guard.frame_statuses.complete, 0);
+    }
+
+    /// #981: a static screen is a stream of idle callbacks after one complete
+    /// frame. They are not dropped frames; they stay visible in the per-status
+    /// counts so Health can still say the screen is idle.
+    #[test]
+    fn capture_drop_reason_idle_screen_callbacks_are_not_dropped_frames() {
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+        assert!(record_screen_capture_callback_status(
+            &shared,
+            Instant::now(),
+            ScreenCaptureFrameStatus::Complete
+        ));
+        for _ in 0..300 {
+            assert!(!record_screen_capture_callback_status(
+                &shared,
+                Instant::now(),
+                ScreenCaptureFrameStatus::Idle
+            ));
+        }
+
+        let guard = shared.lock().unwrap();
+        assert_eq!(guard.capture_callback_count, 301);
+        assert_eq!(guard.dropped_frames, 0);
+        assert_eq!(guard.frame_statuses.complete, 1);
+        assert_eq!(guard.frame_statuses.idle, 300);
+        assert_eq!(guard.frame_statuses.diagnostic_stats().idle, 300);
     }
 
     #[test]
@@ -8506,7 +8793,11 @@ mod tests {
         let mut bytes = vec![0_u8; (PRIVACY_W * PRIVACY_H * 4) as usize];
         for (index, px) in bytes.chunks_exact_mut(4).enumerate() {
             let x = index % PRIVACY_W as usize;
-            let value = if (x / 2 + phase) % 2 == 0 { 255 } else { 0 };
+            let value = if (x / 2 + phase).is_multiple_of(2) {
+                255
+            } else {
+                0
+            };
             px[..3].fill(value);
             px[3] = 255;
         }
@@ -8887,8 +9178,10 @@ mod tests {
     fn swap_attribution_stamps_frames_by_their_screen_rectangle() {
         let alpha = (40.0, 40.0, 1280.0, 720.0);
         let beta = (200.0, 230.0, 1280.0, 720.0);
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 1;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 1,
+            ..Default::default()
+        };
         arm_capture_generation(
             &mut shared,
             SwapAttribution {
@@ -8925,8 +9218,10 @@ mod tests {
 
         // The other order: the completion first, then a straggler of the
         // previous target, discarded; the next target's frames carry 3.
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 2;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 2,
+            ..Default::default()
+        };
         arm_capture_generation(&mut shared, attribution(3, alpha, beta));
         begin_capture_generation(&mut shared, 3);
         assert_eq!(shared.capture_generation, 3);
@@ -8941,8 +9236,10 @@ mod tests {
         assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(3));
 
         // Two targets at the same place: the completion alone decides.
-        let mut shared = PreviewScreenShared::default();
-        shared.capture_generation = 3;
+        let mut shared = PreviewScreenShared {
+            capture_generation: 3,
+            ..Default::default()
+        };
         arm_capture_generation(&mut shared, attribution(4, alpha, alpha));
         assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(3));
         begin_capture_generation(&mut shared, 4);
@@ -9289,7 +9586,7 @@ mod tests {
         let admission = begin_screen_start(&state, key, status, None).await;
         assert!(matches!(
             admission,
-            PreviewScreenStartRegistration::Reused(_)
+            PreviewScreenStartRegistration::Reused { .. }
         ));
         stop_preview_screen(&state).await;
         assert_eq!(
@@ -10376,7 +10673,7 @@ mod tests {
                 transition
             }
             PreviewScreenStartRegistration::JoinExisting { .. } => panic!("first start must own"),
-            PreviewScreenStartRegistration::Reused(_) => panic!("first start cannot reuse"),
+            PreviewScreenStartRegistration::Reused { .. } => panic!("first start cannot reuse"),
             PreviewScreenStartRegistration::RejectedSuperseded(_)
             | PreviewScreenStartRegistration::RejectedShutdown(_) => {
                 panic!("start cannot be rejected before shutdown")
@@ -10617,7 +10914,7 @@ mod tests {
         {
             PreviewScreenStartRegistration::Started { transition, .. } => transition,
             PreviewScreenStartRegistration::JoinExisting { .. } => panic!("first start must own"),
-            PreviewScreenStartRegistration::Reused(_) => panic!("first start cannot reuse"),
+            PreviewScreenStartRegistration::Reused { .. } => panic!("first start cannot reuse"),
             PreviewScreenStartRegistration::RejectedSuperseded(_)
             | PreviewScreenStartRegistration::RejectedShutdown(_) => {
                 panic!("start cannot be rejected before shutdown")
@@ -10696,7 +10993,7 @@ mod tests {
                 PreviewScreenStartRegistration::JoinExisting { .. } => {
                     panic!("first start must own")
                 }
-                PreviewScreenStartRegistration::Reused(_) => panic!("first start cannot reuse"),
+                PreviewScreenStartRegistration::Reused { .. } => panic!("first start cannot reuse"),
                 PreviewScreenStartRegistration::RejectedSuperseded(_)
                 | PreviewScreenStartRegistration::RejectedShutdown(_) => {
                     panic!("start cannot be rejected before shutdown")
@@ -11338,7 +11635,9 @@ mod tests {
         assert_eq!(status.source_kind, Some(PreviewScreenSourceKind::Window));
         assert_eq!(
             status.message.as_deref(),
-            Some("The Videorc Notes window cannot be selected as a capture source.")
+            Some(
+                "This Videorc window is hidden from capture and cannot be selected as a capture source."
+            )
         );
     }
 
@@ -11684,6 +11983,7 @@ mod tests {
                 SCREEN_PREVIEW_STOPPED_MESSAGE,
                 SCREEN_PREVIEW_REUSED_MESSAGE,
                 SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE,
+                SCREEN_PREVIEW_REUSED_EXCLUSION_APPLIED_MESSAGE,
             ] {
                 assert!(!copy.contains("ative"), "{copy}");
             }
@@ -11957,7 +12257,7 @@ mod tests {
             PreviewScreenStartRegistration::JoinExisting { .. } => {
                 panic!("first start must own a lease")
             }
-            PreviewScreenStartRegistration::Reused(_) => panic!("first start cannot reuse"),
+            PreviewScreenStartRegistration::Reused { .. } => panic!("first start cannot reuse"),
             PreviewScreenStartRegistration::RejectedSuperseded(_)
             | PreviewScreenStartRegistration::RejectedShutdown(_) => {
                 panic!("start cannot be rejected before shutdown")
@@ -12227,6 +12527,154 @@ mod tests {
                 .map(|active| active.protected_overlay_window_ids.clone()),
             Some(vec![7]),
             "the stored exclusion set must reflect the new truth"
+        );
+    }
+
+    /// Plan 215 C2: Hide from stream flips the Stream Manager's window id
+    /// in and out of the exclusion set while a capture runs. The running
+    /// stream takes the new filter in place: the same run, the same
+    /// generation, no Stop, and the status says the set was applied.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn exclusion_change_applies_to_the_running_capture_in_place() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let (stop_tx, stop_rx) = std_mpsc::channel::<NativeScreenCommand>();
+        let observed = Arc::new(StdMutex::new(Vec::<Vec<u32>>::new()));
+        let stop_seen = Arc::new(AtomicBool::new(false));
+        let refuse_next = Arc::new(AtomicBool::new(false));
+        let thread_observed = Arc::clone(&observed);
+        let thread_stop_seen = Arc::clone(&stop_seen);
+        let thread_refuse_next = Arc::clone(&refuse_next);
+        let join_handle = thread::Builder::new()
+            .name("videorc-test-fake-screen-filter".to_string())
+            .spawn(move || {
+                loop {
+                    match stop_rx.recv() {
+                        Ok(NativeScreenCommand::UpdateFilter(request)) => {
+                            thread_observed
+                                .lock()
+                                .unwrap()
+                                .push(request.protected_overlay_window_ids.clone());
+                            let outcome = if thread_refuse_next.swap(false, Ordering::SeqCst) {
+                                Err("the stream refused the filter".to_string())
+                            } else {
+                                Ok(3)
+                            };
+                            let _ = request.reply.send(outcome);
+                        }
+                        Ok(NativeScreenCommand::Swap(request)) => {
+                            let _ = request.reply.send(Err("unexpected swap".to_string()));
+                        }
+                        Ok(NativeScreenCommand::Resize(request)) => {
+                            let _ = request.reply.send(Err("unexpected resize".to_string()));
+                        }
+                        Ok(NativeScreenCommand::Stop) => {
+                            thread_stop_seen.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .expect("spawn fake screen native thread");
+        {
+            let mut slot = state.preview_screen.lock().await;
+            slot.source_key = Some(source_key.clone());
+            slot.run_id = Some("run-1".to_string());
+            let mut status = starting_screen_status(&source_key, &video);
+            status.state = PreviewScreenState::Live;
+            status.message = Some("Live".to_string());
+            slot.status = status;
+            slot.start_generation = 1;
+            slot.active_generation = Some(1);
+            slot.active = Some(NativeScreenPreviewThread {
+                shared: Arc::new(StdMutex::new(PreviewScreenShared::default())),
+                source: SelectedScreenSource {
+                    source_id: source_key.id.clone(),
+                    source_kind: PreviewScreenSourceKind::Screen,
+                    callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+                    display_id: Some(5),
+                    window_id: None,
+                },
+                ffmpeg_path: resolve_ffmpeg_path(None),
+                video: video.clone(),
+                include_cursor: true,
+                exclude_current_process_windows: false,
+                protected_overlay_window_ids: vec![42],
+            });
+            slot.native_supervisor.lock().await.active = Some(OwnedNativeScreenPreviewThread {
+                stop_tx,
+                join_handle: Some(join_handle),
+            });
+        }
+
+        // The Stream Manager (id 7) joins Notes (id 42) in the set.
+        let mut params = screen_params(Some("screen:screencapturekit:5"), None);
+        params.protected_overlay_window_ids = vec![42, 7];
+        let status = start_preview_screen(state.clone(), params).await;
+        assert_eq!(status.state, PreviewScreenState::Live);
+        assert_eq!(
+            status.message.as_deref(),
+            Some(SCREEN_PREVIEW_REUSED_EXCLUSION_APPLIED_MESSAGE)
+        );
+        assert_eq!(*observed.lock().unwrap(), vec![vec![7, 42]]);
+        assert!(
+            !stop_seen.load(Ordering::SeqCst),
+            "an exclusion change must never stop the capture"
+        );
+        {
+            let slot = state.preview_screen.lock().await;
+            assert_eq!(slot.run_id.as_deref(), Some("run-1"), "the same run");
+            assert_eq!(slot.active_generation, Some(1), "the same generation");
+            assert_eq!(
+                slot.active
+                    .as_ref()
+                    .map(|active| active.protected_overlay_window_ids.clone()),
+                Some(vec![7, 42])
+            );
+        }
+
+        // Off again: the window leaves the set the same way.
+        let mut params = screen_params(Some("screen:screencapturekit:5"), None);
+        params.protected_overlay_window_ids = vec![42];
+        let status = start_preview_screen(state.clone(), params).await;
+        assert_eq!(
+            status.message.as_deref(),
+            Some(SCREEN_PREVIEW_REUSED_EXCLUSION_APPLIED_MESSAGE)
+        );
+        assert_eq!(*observed.lock().unwrap(), vec![vec![7, 42], vec![42]]);
+
+        // The same set again is a plain reuse: nothing is sent.
+        let mut params = screen_params(Some("screen:screencapturekit:5"), None);
+        params.protected_overlay_window_ids = vec![42];
+        let status = start_preview_screen(state.clone(), params).await;
+        assert_eq!(
+            status.message.as_deref(),
+            Some(SCREEN_PREVIEW_REUSED_MESSAGE)
+        );
+        assert_eq!(observed.lock().unwrap().len(), 2);
+
+        // A refused update keeps the capture running and says the set waits
+        // for the next start; the stored set is still the new truth.
+        refuse_next.store(true, Ordering::SeqCst);
+        let mut params = screen_params(Some("screen:screencapturekit:5"), None);
+        params.protected_overlay_window_ids = vec![42, 7];
+        let status = start_preview_screen(state.clone(), params).await;
+        assert_eq!(status.state, PreviewScreenState::Live);
+        assert_eq!(
+            status.message.as_deref(),
+            Some(SCREEN_PREVIEW_REUSED_EXCLUSION_MESSAGE)
+        );
+        assert!(!stop_seen.load(Ordering::SeqCst));
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            slot.active
+                .as_ref()
+                .map(|active| active.protected_overlay_window_ids.clone()),
+            Some(vec![7, 42])
         );
     }
 }

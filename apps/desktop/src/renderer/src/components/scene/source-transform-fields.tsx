@@ -34,10 +34,12 @@ import {
  */
 export function SourceTransformFields({
   source,
+  box,
   disabled = false,
   disabledReason,
   sizeEditable = true,
   aspectForced = false,
+  aspectForcedReason = 'The camera shape sets the aspect.',
   aspectLocked: aspectLockedChoice = true,
   onAspectLockedChange,
   outputWidth,
@@ -45,19 +47,27 @@ export function SourceTransformFields({
   onCommit
 }: {
   source: SceneSource
+  /** The box the fields describe and edit (plan 216 B5): the source's PICTURE
+   * as the stage shows it, in canvas fractions. Defaults to the transform.
+   * The patch committed is in the same coordinates; the owner maps it to
+   * the frame (`pictureEditToFrame`). */
+  box?: StageRect
   disabled?: boolean
   disabledReason?: string
   /** Size fields stay read-only where the layout owns the box (fixed presets). */
   sizeEditable?: boolean
-  /** The source's aspect is law (circle / forced camera aspect): the lock cannot open. */
+  /** The source's aspect is law (circle / forced camera aspect, or a Freeform
+   * screen's picture): the lock cannot open. */
   aspectForced?: boolean
+  /** Why, on the lock and under the fields. */
+  aspectForcedReason?: string
   aspectLocked?: boolean
   onAspectLockedChange?: (locked: boolean) => void
   outputWidth: number
   outputHeight: number
   onCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
 }): ReactElement {
-  const committed: StageRect = {
+  const committed: StageRect = box ?? {
     x: source.transform.x,
     y: source.transform.y,
     width: source.transform.width,
@@ -89,7 +99,7 @@ export function SourceTransformFields({
   const aspectLockDisabledReason = disabled
     ? (disabledReason ?? null)
     : aspectForced
-      ? 'The camera shape sets the aspect.'
+      ? aspectForcedReason
       : !sizeEditable
         ? 'This layout sets the size.'
         : null
@@ -171,9 +181,7 @@ export function SourceTransformFields({
         })}
       </FieldGroup>
 
-      {aspectForced ? (
-        <p className="text-xs text-muted-foreground">Aspect locked by the camera shape.</p>
-      ) : null}
+      {aspectForced ? <p className="text-xs text-muted-foreground">{aspectForcedReason}</p> : null}
       <p className="text-xs text-muted-foreground">
         {pixelReadout(committed, outputWidth, outputHeight)}
       </p>

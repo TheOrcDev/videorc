@@ -1,7 +1,8 @@
 import type { StatusTone } from '@/components/status-badge'
 import type { Device, DeviceStatus, PreviewCameraState, PreviewScreenState } from '@/lib/backend'
+import { cameraLowFrameRateLine, type CameraLowFrameRate } from '@/lib/camera-frame-rate'
 import type { SourceStandIn } from '@/lib/capture'
-import { SOURCE_RECEIVING_LABEL, systemAudioIssueLabel } from '@/lib/state-labels'
+import { MIC_SILENT_LABEL, SOURCE_RECEIVING_LABEL, systemAudioIssueLabel } from '@/lib/state-labels'
 import type { SystemAudioSwitchView } from '@/lib/system-audio'
 
 // Plan 173: one status vocabulary for the four Sources rows. Each row's header
@@ -22,6 +23,22 @@ export interface SourceStatus {
 
 /** A camera whose newest frame is older than this is reported stale. */
 export const CAMERA_STALE_WARN_MS = 3000
+
+/**
+ * Plan 216 D2: the camera is on (macOS acked it Live) but has sent no
+ * frame past the backend's first-frame grace. Only the backend's `noVideo`
+ * says so, by the rule capture recovery uses.
+ */
+export function cameraSendsNoVideo(
+  status: { state?: PreviewCameraState | PreviewScreenState; noVideo?: boolean } | undefined
+): boolean {
+  return status?.state === 'live' && status.noVideo === true
+}
+
+/** "MacBook Pro Camera isn't sending video.", by name where Videorc knows it. */
+export function cameraNoVideoLine(name: string | undefined): string {
+  return `${name?.trim() || 'Your camera'} isn't sending video.`
+}
 
 /**
  * How the selected device appears in the device list: its status, or
@@ -93,9 +110,14 @@ export function videoSourceStatus(input: {
     state?: PreviewScreenState | PreviewCameraState
     frameAgeMs?: number
     message?: string
+    noVideo?: boolean
   }
+  /** The source's name as the picker shows it, for a line that names it. */
+  name?: string
   /** Plan 213 E1: another source stands in for the pick this session. */
   standIn?: SourceStandIn
+  /** Issue #1066: the camera's rate has stayed low (`camera-frame-rate.ts`). */
+  lowFrameRate?: CameraLowFrameRate | null
 }): SourceStatus | null {
   const status = pipelineSourceStatus(input)
   if (!input.standIn || input.switching || !input.selected) return status
@@ -116,6 +138,13 @@ function pipelineSourceStatus(
     return { label: 'Disconnected', tone: 'warn', hint: input.preview?.message }
   }
   if (state === 'live') {
+    if (input.kind === 'camera' && cameraSendsNoVideo(input.preview)) {
+      return {
+        label: 'No video',
+        tone: 'warn',
+        hint: `${cameraNoVideoLine(input.name)} Close other apps that use it, or choose another camera.`
+      }
+    }
     if (
       input.kind === 'camera' &&
       typeof frameAgeMs === 'number' &&
@@ -125,6 +154,13 @@ function pipelineSourceStatus(
         label: `Stale ${Math.round(frameAgeMs / 1000)}s`,
         tone: 'warn',
         hint: 'No fresh frames. Choose it again to restart it.'
+      }
+    }
+    if (input.kind === 'camera' && input.lowFrameRate) {
+      return {
+        label: 'Low frame rate',
+        tone: 'warn',
+        hint: cameraLowFrameRateLine(input.name, input.lowFrameRate)
       }
     }
     // Producing frames reads "Receiving" (plan 174 D4): "On air" is the livestream's alone.
@@ -163,7 +199,9 @@ function pipelineSourceStatus(
 /**
  * The microphone: muted and missing are news; a working microphone says
  * nothing until a session runs, because its meter already moves. A dead meter
- * explains itself on the line under the meter, not in a second chip.
+ * explains itself on the line under the meter, not in a second chip. Issue
+ * 1064: a session microphone the bus reads as digital silence is "Silent",
+ * never "Receiving".
  */
 export function microphoneStatus(input: {
   selected: boolean
@@ -171,6 +209,8 @@ export function microphoneStatus(input: {
   device?: SelectedDeviceStatus
   muted: boolean
   sessionActive: boolean
+  /** The backend's silence watchdog reports the captured microphone silent. */
+  silent?: boolean
 }): SourceStatus | null {
   if (input.switching) return SWITCHING
   if (!input.selected) return null
@@ -181,6 +221,7 @@ export function microphoneStatus(input: {
     return notFound('microphone')
   }
   if (input.muted) return { label: 'Muted', tone: 'neutral' }
+  if (input.silent) return { label: MIC_SILENT_LABEL, tone: 'warn' }
   if (input.sessionActive) return { label: SOURCE_RECEIVING_LABEL, tone: 'good' }
   return null
 }

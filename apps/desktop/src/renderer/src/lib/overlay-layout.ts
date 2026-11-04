@@ -31,14 +31,16 @@ const PORTRAIT_BOTTOM_MARGIN = 0.22
 export const OVERLAY_ITEM_LABELS: Record<OverlayItem, string> = {
   highlight: 'Highlight',
   captions: 'Captions',
-  buddy: 'Buddy'
+  buddy: 'Buddy',
+  chat: 'Chat'
 }
 
 /** How a Go Live sentence names the item mid-sentence (mirrors Rust). */
 const OVERLAY_ITEM_SENTENCE_LABELS: Record<OverlayItem, string> = {
   highlight: 'highlights',
   captions: 'captions',
-  buddy: 'the Buddy'
+  buddy: 'the Buddy',
+  chat: 'chat'
 }
 
 export const OVERLAY_SNAPS: readonly OverlaySnap[] = [
@@ -74,6 +76,9 @@ export function overlayDefaultSize(
       return portrait ? [0.76, 0.14] : [0.92, 0.16]
     case 'buddy':
       return portrait ? [0.32, (0.32 * 9) / 16] : [0.18, (0.18 * 16) / 9]
+    // Plan 215 G: a column five rows tall; the painter wraps each row to it.
+    case 'chat':
+      return portrait ? [0.8, 0.3] : [0.3, 0.44]
   }
 }
 
@@ -169,18 +174,22 @@ function snappedItem(
   }
 }
 
-/** Mirrors `OverlayLayout::default()`; pinned by the shared fixture. */
+/** Mirrors `OverlayLayout::default()`; pinned by the shared fixture. The chat
+ * box (plan 215 D5) ships top-left and off for both outputs: it shows
+ * viewers' names, so the streamer turns it on. */
 export const DEFAULT_OVERLAY_LAYOUT: OverlayLayout = {
   highlight: snappedItem('highlight', 'bottom-left', true, true),
   captions: snappedItem('captions', 'bottom-center', false, false),
-  buddy: snappedItem('buddy', 'bottom-right', false, false)
+  buddy: snappedItem('buddy', 'bottom-right', false, false),
+  chat: snappedItem('chat', 'top-left', false, false)
 }
 
 export function cloneOverlayLayout(layout: OverlayLayout): OverlayLayout {
   return {
     highlight: { ...layout.highlight },
     captions: { ...layout.captions },
-    buddy: { ...layout.buddy }
+    buddy: { ...layout.buddy },
+    chat: { ...layout.chat }
   }
 }
 

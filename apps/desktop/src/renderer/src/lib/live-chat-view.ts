@@ -397,7 +397,13 @@ export const MAX_RENDERED_LIVE_CHAT_MESSAGES = 200
 function providerStatePriority(provider: LiveChatProviderState): number {
   if (provider.state === 'failed' || provider.read === 'failed') return 0
   if (provider.write === 'missing-scope') return 1
-  if (provider.read === 'unavailable' || provider.read === 'needs-sign-in') return 2
+  if (
+    provider.read === 'unavailable' ||
+    provider.read === 'needs-sign-in' ||
+    provider.read === 'needs-videorc-sign-in'
+  ) {
+    return 2
+  }
   if (provider.state === 'unsupported') return 3
   return 4
 }
@@ -425,6 +431,23 @@ export function chatSetupToastWarnings(providers: LiveChatProviderState[]): Chat
       id: provider.id,
       platform: provider.platform,
       message: provider.message || 'Live chat is unavailable for this destination.'
+    }))
+}
+
+/**
+ * Destinations whose chat waits on the Videorc sign-in (plan 215 A3). They
+ * are not failures (never "isn't connected"), but a live streamer must hear
+ * it once, with Sign in as the fix: the go-live toast names the account.
+ */
+export function chatVideorcSignInWarnings(
+  providers: readonly LiveChatProviderState[]
+): ChatSetupWarning[] {
+  return providers
+    .filter((provider) => provider.read === 'needs-videorc-sign-in')
+    .map((provider) => ({
+      id: provider.id,
+      platform: provider.platform,
+      message: provider.message
     }))
 }
 

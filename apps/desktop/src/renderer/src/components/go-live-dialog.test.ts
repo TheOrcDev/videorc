@@ -57,6 +57,38 @@ describe('Go Live comments status', () => {
     expect(markup).not.toContain('Authorize X Live')
   })
 
+  // Plan 215 A2: signed out of Videorc, X itself fine. The check names the
+  // Videorc sign-in before Go Live, with Sign in as the fix; a warning, not
+  // a block, because the stream still goes live.
+  it('names the missing Videorc sign-in and offers it, never Failed', () => {
+    const markup = renderToStaticMarkup(
+      createElement(GoLiveCommentsStatus, {
+        read: 'needs-videorc-sign-in',
+        write: 'ready',
+        message: 'X chat needs your Videorc sign-in.',
+        onSignInToVideorc: () => {}
+      })
+    )
+
+    expect(markup).toMatch(/>Read<\/span><span[^>]*>Needs Videorc sign-in</)
+    expect(markup).toMatch(/>Send<\/span><span[^>]*>Ready</)
+    expect(markup).toContain('data-tone="warn"')
+    expect(markup).toContain('X chat needs your Videorc sign-in.')
+    expect(markup).toContain('Sign in to Videorc')
+    expect(markup).not.toContain('Failed')
+    expect(markup).not.toContain('Sign in to X')
+
+    // Without a door to the sign-in, the words alone.
+    const wordsOnly = renderToStaticMarkup(
+      createElement(GoLiveCommentsStatus, {
+        read: 'needs-videorc-sign-in',
+        write: 'ready',
+        message: 'X chat needs your Videorc sign-in.'
+      })
+    )
+    expect(wordsOnly).not.toContain('Sign in to Videorc')
+  })
+
   it('shows Twitch read and write scope state independently', () => {
     const markup = renderToStaticMarkup(
       createElement(GoLiveCommentsStatus, {

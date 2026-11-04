@@ -68,6 +68,12 @@ function skipped(ctx, id, reason) {
   return { skipped: true, reason }
 }
 
+/** The YouTube observer, or why this run has none. */
+function observerOff(ctx) {
+  if (!ctx.observer) throw new Error('the YouTube observer is not running')
+  return ctx.observer.unavailable ?? null
+}
+
 function latestJournal(ctx) {
   return ctx.observe?.latestJournal?.() ?? null
 }
@@ -180,7 +186,17 @@ export function outputProfileStep({ id = 'output-profile', profileParam = 'profi
       await ctx.ui.evaluate(
         `(() => { localStorage.setItem(${JSON.stringify(CAPTURE_CONFIG_KEY)}, ${JSON.stringify(JSON.stringify(next))}); return true })()`
       )
+      // The backend relays a remote intent once, to the renderer connected at
+      // that moment; one sent before the reloaded renderer is back is lost
+      // and never acked. The renderer republishes its remote surface on every
+      // connect, so its next remote.state means it is there to take one.
+      const rendererBack = ctx.waitFor((type) => type === 'remote.state', {
+        deadlineMs: 60_000,
+        label: 'renderer back on the backend after the reload'
+      })
+      rendererBack.catch(() => undefined)
       await ctx.ui.reload()
+      await rendererBack
       const check = JSON.parse(
         (await ctx.ui.evaluate(`localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`)) ??
           'null'
@@ -570,7 +586,8 @@ export function chatSteps({ idPrefix = 'chat', slowModeSeconds = 30 } = {}) {
       title: 'Live chat id',
       deadlineMs: 6 * MIN,
       async run(ctx) {
-        if (!ctx.observer) throw new Error('the YouTube observer is not running')
+        const off = observerOff(ctx)
+        if (off) throw new Error(`the YouTube observer is off: ${off}`)
         const liveChatId = await ctx.waitFor(() => ctx.observer.liveChatId(), {
           label: 'the broadcast liveChatId from the observer'
         })
@@ -779,7 +796,8 @@ export function youtubeHealthStep({ id = 'youtube-health', profileParam = 'profi
     title: 'YouTube health',
     deadlineMs: 7 * MIN,
     async run(ctx) {
-      if (!ctx.observer) throw new Error('the YouTube observer is not running')
+      const off = observerOff(ctx)
+      if (off) return skipped(ctx, id, off)
       const since = ctx.clock?.now?.() ?? Date.now()
       const expected = ctx.params?.[profileParam] ? OUTPUT_PROFILES[ctx.params[profileParam]] : null
       let last = null
@@ -843,7 +861,8 @@ export function vodStep({ id = 'vod' } = {}) {
     title: 'VOD',
     deadlineMs: 5 * MIN,
     async run(ctx) {
-      if (!ctx.observer) throw new Error('the YouTube observer is not running')
+      const off = observerOff(ctx)
+      if (off) return skipped(ctx, id, off)
       let snapshot = null
       for (let attempt = 0; attempt < 3; attempt += 1) {
         snapshot = await ctx.observer.poll()

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,6 +16,7 @@ import {
 } from './lib/fake-cohost-service.mjs'
 import { startFakeTranscriptService } from './lib/fake-transcript-service.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 // Buddy voice commands, end to end (plan 140 S9). Launches the real debug
 // backend against isolated profiles and local fakes (Buddy's tick and
@@ -125,7 +126,7 @@ try {
   await capabilities.close()
   await captionFake.close()
   await fakeCohost.close()
-  rmSync(stateRoot, { force: true, recursive: true })
+  await removeProfileDir(stateRoot, { label: 'buddy-commands smoke' })
 }
 
 // --- A. Premium ------------------------------------------------------------------

@@ -93,6 +93,144 @@ export async function analyzeNotesOverlayArtifact(
   }
 }
 
+/**
+ * Per-frame marker coverage, in sample order (plan 215 C5). The same red
+ * rule as the whole-file measure, kept per frame so a gate can judge spans
+ * of the recording apart: before, during and after a switch flipped.
+ */
+export function measureOverlayMarkerFramesFromRgb(
+  rgb,
+  {
+    width = NOTES_OVERLAY_ARTIFACT_DEFAULTS.sampleWidth,
+    height = NOTES_OVERLAY_ARTIFACT_DEFAULTS.sampleHeight
+  } = {}
+) {
+  const frameBytes = width * height * 3
+  const framePixels = width * height
+  const sampledFrames = Math.floor(rgb.length / frameBytes)
+  const ratios = []
+  for (let frame = 0; frame < sampledFrames; frame += 1) {
+    const start = frame * frameBytes
+    let markerPixels = 0
+    for (let offset = start; offset < start + frameBytes; offset += 3) {
+      if (isNotesOverlayMarkerPixel(rgb[offset], rgb[offset + 1], rgb[offset + 2])) {
+        markerPixels += 1
+      }
+    }
+    ratios.push(framePixels > 0 ? markerPixels / framePixels : 0)
+  }
+  return ratios
+}
+
+/**
+ * Judges spans of a recording by their marker coverage (plan 215 C5: the
+ * Stream Manager invisibility smoke). Each phase names a span in
+ * milliseconds of the file and what it expects: `absent` holds every frame
+ * at or under `maxMarkerPixelRatio`; `present` needs at least one frame at
+ * or over `minPresentMarkerPixelRatio`, which proves the gate can see the
+ * window at all. A phase with no sampled frame fails: it proves nothing.
+ */
+export function evaluateOverlayArtifactPhases(
+  frameRatios,
+  {
+    sampleFps = NOTES_OVERLAY_ARTIFACT_DEFAULTS.sampleFps,
+    phases = [],
+    maxMarkerPixelRatio = NOTES_OVERLAY_ARTIFACT_DEFAULTS.maxMarkerPixelRatio,
+    minPresentMarkerPixelRatio = 0.02,
+    window = 'stream-manager'
+  } = {}
+) {
+  const failures = []
+  const frameMs = 1000 / sampleFps
+  const results = phases.map((phase) => {
+    const frames = frameRatios
+      .map((ratio, index) => ({ ratio, atMs: index * frameMs }))
+      .filter((frame) => frame.atMs >= phase.fromMs && frame.atMs < phase.toMs)
+    const maxMarkerPixelRatio_ = frames.length ? Math.max(...frames.map((f) => f.ratio)) : null
+    const minMarkerPixelRatio = frames.length ? Math.min(...frames.map((f) => f.ratio)) : null
+    const result = {
+      name: phase.name,
+      expect: phase.expect,
+      fromMs: phase.fromMs,
+      toMs: phase.toMs,
+      sampledFrames: frames.length,
+      maxMarkerPixelRatio: maxMarkerPixelRatio_,
+      minMarkerPixelRatio
+    }
+    if (frames.length === 0) {
+      failures.push(
+        `${window}: phase "${phase.name}" (${phase.fromMs}-${phase.toMs} ms) sampled no decoded frames`
+      )
+      return result
+    }
+    if (phase.expect === 'absent' && maxMarkerPixelRatio_ > maxMarkerPixelRatio) {
+      failures.push(
+        `${window}: phase "${phase.name}" leaked the red smoke marker into the final artifact ` +
+          `(max ${(maxMarkerPixelRatio_ * 100).toFixed(3)}%, threshold ${(maxMarkerPixelRatio * 100).toFixed(3)}%)`
+      )
+    }
+    if (phase.expect === 'present' && maxMarkerPixelRatio_ < minPresentMarkerPixelRatio) {
+      failures.push(
+        `${window}: phase "${phase.name}" never showed the red smoke marker, so the gate cannot see the window ` +
+          `(max ${(maxMarkerPixelRatio_ * 100).toFixed(3)}%, needs ${(minPresentMarkerPixelRatio * 100).toFixed(3)}%)`
+      )
+    }
+    return result
+  })
+  if (frameRatios.length === 0) {
+    failures.push(`${window}: no decoded video frames were sampled`)
+  }
+  return {
+    pass: failures.length === 0,
+    failures,
+    warnings: [],
+    thresholds: { maxMarkerPixelRatio, minPresentMarkerPixelRatio },
+    metrics: {
+      sampledFrames: frameRatios.length,
+      sampleFps,
+      maxMarkerPixelRatio: frameRatios.length ? Math.max(...frameRatios) : 0,
+      phases: results
+    }
+  }
+}
+
+export async function analyzeOverlayArtifactPhases(
+  filePath,
+  {
+    ffmpegPath = 'ffmpeg',
+    sampleWidth = NOTES_OVERLAY_ARTIFACT_DEFAULTS.sampleWidth,
+    sampleHeight = NOTES_OVERLAY_ARTIFACT_DEFAULTS.sampleHeight,
+    sampleFps = NOTES_OVERLAY_ARTIFACT_DEFAULTS.sampleFps,
+    ...options
+  } = {}
+) {
+  const rgb = await decodeRgbSamples(filePath, { ffmpegPath, sampleWidth, sampleHeight, sampleFps })
+  const frameRatios = measureOverlayMarkerFramesFromRgb(rgb, {
+    width: sampleWidth,
+    height: sampleHeight
+  })
+  return {
+    file: filePath,
+    ...evaluateOverlayArtifactPhases(frameRatios, { sampleFps, ...options })
+  }
+}
+
+export function formatOverlayArtifactPhasesSummary(verdict, label = 'Stream Manager') {
+  if (!verdict) {
+    return `${label} artifact gate: not requested`
+  }
+  const phases = (verdict.metrics?.phases ?? [])
+    .map(
+      (phase) =>
+        `${phase.name}=${formatRatio(phase.maxMarkerPixelRatio)} (${phase.expect}, ${phase.sampledFrames} frames)`
+    )
+    .join(' ')
+  return (
+    `${label} artifact gate: ${verdict.pass ? 'PASS' : 'FAIL'} ` +
+    `frames=${verdict.metrics?.sampledFrames ?? 0} ${phases}`
+  )
+}
+
 export function appendNotesOverlayFailures(verdict, notesOverlay) {
   if (!notesOverlay) {
     return verdict

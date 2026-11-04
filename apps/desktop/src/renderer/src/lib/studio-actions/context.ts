@@ -31,7 +31,8 @@ import type {
   StreamMetadataDraft,
   StreamTargetSettings,
   StreamingSettings,
-  VideoSettings
+  VideoSettings,
+  VirtualCameraStatus
 } from '../../../../shared/backend'
 import type { CaptureConfig, SettingsState } from '@/lib/capture'
 
@@ -269,6 +270,18 @@ export interface StudioSettingsAccess {
   /** Output → Clips' one switch. */
   setClipsEnabled: (enabled: boolean) => void
   setTheme: (theme: 'light' | 'dark' | 'system') => void
+  /** Output → Videorc Camera (plan 214 E): its status and its switch. Absent
+   * in a Studio without one, and the tool refuses it. */
+  virtualCamera?: StudioVirtualCameraAccess
+}
+
+/** Videorc Camera as the agents' settings tool sees it (plan 214 E2). */
+export interface StudioVirtualCameraAccess {
+  status: VirtualCameraStatus | null
+  connected: boolean
+  platform: string | undefined
+  osRelease: string | undefined
+  setOn: (on: boolean) => Promise<{ ok: boolean; message?: string }>
 }
 
 /** The Library's rows and its own file actions. */

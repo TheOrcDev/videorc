@@ -785,14 +785,24 @@ fn sanitize_transform(transform: SceneTransform) -> SceneTransform {
 
 // Clamp + clean without the edge/center snap — for precision operations
 // (numeric/gesture edits, saved overrides and arrow nudges) where the snap
-// magnet must not undo the movement.
+// magnet must not undo the movement. The bounds are the protocol's (plan 215
+// E3, D2): a box up to 400% of the canvas, placed from three canvases left
+// or above to four right or below; what hangs off the canvas is cut by every
+// render path. The editor keeps at least 5% of the canvas covered
+// (`stage-transform.ts`, `transform-fields-math.ts`); the backend only
+// bounds the numbers.
 fn sanitize_transform_unsnapped(transform: SceneTransform) -> SceneTransform {
+    use crate::scene_geometry::{
+        MAX_SOURCE_POSITION_FRACTION, MAX_SOURCE_SIZE_FRACTION, MIN_SOURCE_POSITION_FRACTION,
+    };
     let transform = sanitize_crop(transform);
     SceneTransform {
-        x: clean_number(transform.x).clamp(-1.0, 2.0),
-        y: clean_number(transform.y).clamp(-1.0, 2.0),
-        width: clean_number(transform.width).clamp(0.0, 2.0),
-        height: clean_number(transform.height).clamp(0.0, 2.0),
+        x: clean_number(transform.x)
+            .clamp(MIN_SOURCE_POSITION_FRACTION, MAX_SOURCE_POSITION_FRACTION),
+        y: clean_number(transform.y)
+            .clamp(MIN_SOURCE_POSITION_FRACTION, MAX_SOURCE_POSITION_FRACTION),
+        width: clean_number(transform.width).clamp(0.0, MAX_SOURCE_SIZE_FRACTION),
+        height: clean_number(transform.height).clamp(0.0, MAX_SOURCE_SIZE_FRACTION),
         ..transform
     }
 }
@@ -1471,9 +1481,10 @@ mod tests {
 
         let scene = scene_from_capture_config(params);
         let camera = &scene.sources[1];
-        // Sanitized like a live transform update: NaN -> 0, position clamped.
+        // Sanitized like a live transform update: NaN -> 0, position clamped
+        // to the protocol's bounds (plan 215 E3).
         assert_eq!(camera.transform.x, 0.0);
-        assert!(camera.transform.y <= 2.0);
+        assert_eq!(camera.transform.y, 4.0);
         // The zoom crop rides along.
         assert!(camera.transform.crop_left > 0.0 || camera.transform.crop_right > 0.0);
     }
@@ -2146,6 +2157,59 @@ mod tests {
         }
     }
 
+    /// Plan 215 E3 (D2): a box bigger than the canvas, placed so part of it
+    /// hangs off, commits as typed and round-trips through a saved override.
+    #[test]
+    fn a_box_bigger_than_the_canvas_round_trips_unsquashed() {
+        let mut scene = scene_from_capture_config(base_params());
+        let committed = update_source_transform(
+            &mut scene,
+            SceneTransformUpdateParams {
+                source_id: BASE_SOURCE_ID.to_string(),
+                snap: SceneTransformSnap::None,
+                transform: SceneTransformPatch {
+                    x: Some(-0.25),
+                    y: Some(-0.25),
+                    width: Some(1.5),
+                    height: Some(1.5),
+                    crop_left: None,
+                    crop_right: None,
+                    crop_top: None,
+                    crop_bottom: None,
+                },
+            },
+        )
+        .unwrap();
+        let transform = &committed.sources[0].transform;
+        assert_eq!(
+            (transform.x, transform.y, transform.width, transform.height),
+            (-0.25, -0.25, 1.5, 1.5)
+        );
+        // The 400% ceiling, centred: a quarter past every edge is fine.
+        let mut params = base_params();
+        params.layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        params.layout.source_transform_overrides.insert(
+            BASE_SOURCE_ID.to_string(),
+            crate::protocol::SourceTransformOverride::from_box(CameraTransform {
+                x: -1.5,
+                y: -1.5,
+                width: 4.0,
+                height: 4.0,
+            }),
+        );
+        let scene = scene_from_capture_config(params);
+        let screen = &scene.sources[0].transform;
+        assert_eq!(
+            (screen.x, screen.y, screen.width, screen.height),
+            (-1.5, -1.5, 4.0, 4.0)
+        );
+        let rect = scene_source_rect_pixels(screen, 1920, 1080).unwrap();
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (-2880, -1620, 7680, 4320)
+        );
+    }
+
     #[test]
     fn precision_transform_update_still_sanitizes_every_numeric_field() {
         let mut scene = scene_from_capture_config(base_params());
@@ -2158,7 +2222,7 @@ mod tests {
                     x: Some(f64::NAN),
                     y: Some(9.0),
                     width: Some(-1.0),
-                    height: Some(3.0),
+                    height: Some(9.0),
                     crop_left: Some(0.8),
                     crop_right: Some(0.8),
                     crop_top: Some(f64::INFINITY),
@@ -2168,10 +2232,12 @@ mod tests {
         )
         .unwrap();
         let transform = &scene.sources[1].transform;
+        // The protocol's bounds (plan 215 E3, D2): positions in [-3, 4],
+        // sizes up to 400%.
         assert_eq!(transform.x, 0.0);
-        assert_eq!(transform.y, 2.0);
+        assert_eq!(transform.y, 4.0);
         assert_eq!(transform.width, 0.0);
-        assert_eq!(transform.height, 2.0);
+        assert_eq!(transform.height, 4.0);
         assert!((transform.crop_left - 0.475).abs() < 1e-12);
         assert!((transform.crop_right - 0.475).abs() < 1e-12);
         assert_eq!(transform.crop_top, 0.0);

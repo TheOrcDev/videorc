@@ -1,7 +1,8 @@
 import type { BackendCrashRecord } from './backend'
 
 export interface BackendCrashView {
-  /** "code 101" / "signal SIGKILL" / "unknown exit". */
+  /** "code 101" / "signal SIGKILL" / "code 0xC0000005 STATUS_ACCESS_VIOLATION"
+   * / "unknown exit". */
   exit: string
   /** Restart ladder position, or null when no restart was scheduled. */
   attempt: number | null
@@ -16,8 +17,15 @@ export interface BackendCrashView {
 
 const PANIC_LINE_PREFIX = '{"panic":'
 
-export function backendCrashExitLabel(record: Pick<BackendCrashRecord, 'code' | 'signal'>): string {
+export function backendCrashExitLabel(
+  record: Pick<BackendCrashRecord, 'code' | 'signal' | 'windowsStatus'>
+): string {
   if (record.signal) return `signal ${record.signal}`
+  if (record.code !== null && record.windowsStatus) {
+    // Windows crash codes read as hex (Node may report them signed or unsigned).
+    const hex = (record.code >>> 0).toString(16).toUpperCase().padStart(8, '0')
+    return `code 0x${hex} ${record.windowsStatus}`
+  }
   if (record.code !== null) return `code ${record.code}`
   return 'unknown exit'
 }

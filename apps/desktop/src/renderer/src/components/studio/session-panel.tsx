@@ -563,10 +563,10 @@ export function LiveDestinationRows({
  */
 export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook }): ReactElement {
   const { streamTargets } = useStudioCore()
-  const { diagnosticStats, streamHealth } = useStudioDiagnostics()
+  const { diagnosticStats, recentStreamDrops, streamHealth } = useStudioDiagnostics()
   const { setActive } = useWorkspaceNav()
   const fact = streamHealthFact(
-    classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets)
+    classifyStreamHealthAttribution(diagnosticStats, streamHealth, streamTargets, recentStreamDrops)
   )
   return (
     <FactRow

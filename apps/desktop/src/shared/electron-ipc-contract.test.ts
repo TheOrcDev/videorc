@@ -77,8 +77,14 @@ describe('Electron IPC contract', () => {
     // 156: plan 210 S5 adds app icons for New scene… (S4 fills main's side).
     // 157: plan 213 J1 adds comments-window:open-destination ("Use Sign in"
     // opens the destination in the main window).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(157)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(157)
+    // 158: plan 215 C1 adds comments-window:set-hidden-from-stream (the
+    // Stream Manager's Hide from stream switch).
+    // 159: plan 214 E adds virtual-camera:action (Videorc Camera's System
+    // Settings, removal and setup).
+    // 160: plan 215 A3 adds comments-window:sign-in-videorc ("Sign in to
+    // Videorc" on a chat row; the main window starts the sign-in).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(160)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(160)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -138,6 +144,32 @@ describe('Electron IPC contract', () => {
     ).toEqual({ added: true, message: 'Added.' })
     expect(() =>
       validateElectronInvokeResult('agents:add-to-app', { added: true, message: 'x', path: '/' })
+    ).toThrow()
+  })
+
+  it('takes one named Videorc Camera action and answers ok with an optional sentence (plan 214 E)', () => {
+    for (const action of ['open-approval-settings', 'remove', 'set-up', 'load-module']) {
+      expect(validateElectronInvokeArgs('virtual-camera:action', [action])).toEqual([action])
+    }
+    expect(() => validateElectronInvokeArgs('virtual-camera:action', ['install'])).toThrow()
+    expect(() => validateElectronInvokeArgs('virtual-camera:action', [])).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('virtual-camera:action', ['remove', '/Applications'])
+    ).toThrow()
+    expect(validateElectronInvokeResult('virtual-camera:action', { ok: true })).toEqual({
+      ok: true
+    })
+    expect(
+      validateElectronInvokeResult('virtual-camera:action', {
+        ok: false,
+        message: 'Not available on this computer.'
+      })
+    ).toEqual({ ok: false, message: 'Not available on this computer.' })
+    expect(() =>
+      validateElectronInvokeResult('virtual-camera:action', { ok: true, message: '' })
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('virtual-camera:action', { ok: true, path: '/tmp' })
     ).toThrow()
   })
 
@@ -457,6 +489,34 @@ describe('Electron IPC contract', () => {
     })
     expect(() =>
       validateElectronEventPayload('livestream:open-destination', { targetId: 'x', view: 'setup' })
+    ).toThrow()
+  })
+
+  it('lets the Stream Manager ask for the Videorc sign-in with nothing but its request id (plan 215 A3)', () => {
+    const command = { requestId: 'sign-in-1' }
+    expect(validateElectronInvokeArgs('comments-window:sign-in-videorc', [command])).toEqual([
+      command
+    ])
+    for (const forged of [
+      { requestId: '' },
+      { requestId: 'r', authorizeUrl: 'https://evil.example/authorize' },
+      { requestId: 'r', targetId: 'x' },
+      {},
+      'sign-in',
+      null
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:sign-in-videorc', [forged])
+      ).toThrow()
+    }
+    expect(validateElectronInvokeResult('comments-window:sign-in-videorc', true)).toBe(true)
+    expect(() =>
+      validateElectronInvokeResult('comments-window:sign-in-videorc', 'started')
+    ).toThrow()
+    // The ask to the main window carries nothing: the shell owns the sign-in.
+    expect(validateElectronEventPayload('account:sign-in-request', undefined)).toBeUndefined()
+    expect(() =>
+      validateElectronEventPayload('account:sign-in-request', { authorizeUrl: 'https://x.y' })
     ).toThrow()
   })
 

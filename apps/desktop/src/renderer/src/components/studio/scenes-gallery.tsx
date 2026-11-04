@@ -16,7 +16,7 @@ import { SceneCard, SceneGalleryReason } from '@/components/studio/scene-card'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
-import { useWorkspaceNav } from '@/components/workspace-nav'
+import { useEditScene } from '@/hooks/use-edit-scene'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
 import {
@@ -24,8 +24,10 @@ import {
   studioModeTogglePreset,
   type LayoutOrientation
 } from '@/lib/capture'
+import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { presetSwitching } from '@/lib/layout-switch-pending'
 
 // Built-in layouts and named visual snapshots share the Scenes surface.
 // The gallery is MODE-SCOPED: horizontal and vertical are two disjoint scene
@@ -84,7 +86,7 @@ export function ScenesGallery(): ReactElement {
     settings,
     runtimeInfo
   } = useStudioCore()
-  const { openStudioPanel } = useWorkspaceNav()
+  const editScene = useEditScene()
   const activePreset = captureConfig.layout.layoutPreset
   const mode = layoutPresetOrientation(activePreset)
   const scenes = mode === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
@@ -163,8 +165,9 @@ export function ScenesGallery(): ReactElement {
               onValueChange={switchMode}
             />
           </DisabledReason>
-          <Button variant="ghost" onClick={() => openStudioPanel('layouts')}>
-            Edit scene
+          {/* Plan 215 D4: the same Edit scene as the Scene page's and ⌘K's. */}
+          <Button variant="ghost" onClick={editScene}>
+            {EDIT_SCENE_LABEL}
           </Button>
         </div>
       }
@@ -184,7 +187,7 @@ export function ScenesGallery(): ReactElement {
               key={preset.id}
               data-scene-preset={preset.id}
               disabled={gaps.length > 0}
-              label={layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+              label={presetSwitching(layoutSwitchPending, preset.id) ? 'Switching…' : preset.label}
               meta={
                 shortcut ? (
                   <ShortcutKeys accelerator={shortcut} platform={runtimeInfo?.platform} />
