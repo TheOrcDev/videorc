@@ -15,8 +15,13 @@ import {
 } from './host-lock.mjs'
 import { prepareSmokeLaunch } from './app-launcher.mjs'
 
-const portTest = (name, fn) =>
-  test(name, { skip: process.platform === 'win32', timeout: 10000 }, fn)
+// Host admission is off on Windows by design (#937): acquirePortLock, the host lock and the
+// build slots admit everything there, so the TCP mutual-exclusion cases have nothing to test.
+// The Windows contract is pinned below; docs/windows-dev-loop.md names what stays unverified.
+const WINDOWS_ADMISSION_OFF =
+  process.platform === 'win32' &&
+  'host admission is off on Windows by design: acquirePortLock, acquireHostSmokeLock and withBuildSlot admit every caller'
+const portTest = (name, fn) => test(name, { skip: WINDOWS_ADMISSION_OFF, timeout: 10000 }, fn)
 async function freePort() {
   const server = net.createServer()
   server.listen(0, '127.0.0.1')
@@ -172,6 +177,46 @@ portTest('release never waits on a peer that probed the lock port', async (t) =>
   assert.equal(await Promise.race([lock.release().then(() => true), delay(2000, false)]), true)
   await hungUp
 })
+test(
+  'Windows admits every smoke and build without taking a port',
+  { skip: process.platform !== 'win32' && 'pins the Windows-only no-op admission', timeout: 10000 },
+  async (t) => {
+    // A listener already owns this port, so a real lock could only wait or time out.
+    const port = await freePort()
+    const owner = net.createServer((socket) => socket.destroy())
+    owner.listen({ host: '127.0.0.1', port, exclusive: true })
+    await once(owner, 'listening')
+    t.after(() => new Promise((done) => owner.close(done)))
+    await (await acquirePortLock({ port, waitMs: 0 })).release()
+    await (await acquirePortLock({ port: 0, waitMs: 0 })).release()
+    const env = { VIDEORC_SMOKE_LOCK_PORT: String(port) }
+    const first = await acquireHostSmokeLock({ env })
+    const second = await acquireHostSmokeLock({ env })
+    await first.release()
+    await second.release()
+    assert.notEqual(process.env.VIDEORC_SMOKE_HOST_LOCK_HOLDER, String(process.pid))
+    const slotEnv = { VIDEORC_SMOKE_LOCK_PORT: String(port - 1), VIDEORC_SMOKE_BUILD_SLOTS: '1' }
+    let active = 0
+    let peak = 0
+    let releaseAll
+    const gate = new Promise((done) => (releaseAll = done))
+    const builds = Array.from({ length: 3 }, () =>
+      withBuildSlot(
+        async () => {
+          peak = Math.max(peak, ++active)
+          await gate
+          active--
+          return process.env.VIDEORC_SMOKE_BUILD_SLOT_HOLDER
+        },
+        { env: slotEnv }
+      )
+    )
+    // withBuildSlot calls fn synchronously on Windows, so every build is already inside.
+    assert.equal(peak, 3)
+    releaseAll()
+    for (const holder of await Promise.all(builds)) assert.notEqual(holder, String(process.pid))
+  }
+)
 test('memory parsers and thresholds (swap alone does not block)', () => {
   assert.equal(parseDarwinMemory('1\n', '51', 'total = 8G used = 6.8G free = 1.2G').busy, false)
   assert.equal(parseDarwinMemory('2', '20', '').pressure, 'warning')

@@ -298,6 +298,31 @@ Learned on-box 2026-07-08; encoded in `scripts/lib/app-launcher.mjs`:
   before they spawn anything. Prefer ordinary CLI flags when the script already
   exposes them, or set env in the parent Node `spawn({ env })`.
 
+## Shared host admission is off on Windows
+
+The shared-host rules in `AGENTS.md` (one app-smoke host lock per machine, two
+build slots for backend prebuilds and `pnpm cargo:slot`) are macOS and Linux
+only. `scripts/lib/host-lock.mjs` turns admission off on win32 by design
+(#937): `acquirePortLock`, `acquireHostSmokeLock` and `withBuildSlot` admit
+every caller at once, without taking a port. On a Windows box, nothing
+serializes parallel app smokes or cargo builds; run them one at a time
+yourself.
+
+`pnpm test:scripts` on Windows therefore skips the TCP lock cases in
+`scripts/lib/host-lock.test.mjs` with that reason, and runs one Windows-only
+case that pins the no-op instead. Unverified on Windows, because the code
+does not do it there:
+
+- mutual exclusion on the `VIDEORC_SMOKE_LOCK_PORT` lock and the holder named
+  in a timeout;
+- a crashed holder (killed by `TerminateProcess`) freeing its port;
+- in-process reentrancy and `VIDEORC_SMOKE_*_HOLDER` inheritance by children;
+- the build-slot cap (`VIDEORC_SMOKE_BUILD_SLOTS`) and nested builds;
+- refusing port 0 and the release that never waits on a probing peer.
+
+The memory check (`VIDEORC_SMOKE_MEMORY_*`) does run on Windows; it reads
+`os.freemem()`.
+
 ## electron-builder winCodeSign / symlink privilege
 
 Packaging used to pull the legacy `winCodeSign` tool bundle (for rcedit /
