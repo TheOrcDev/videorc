@@ -5,6 +5,12 @@ import {
   returningSourceChoices,
   sourceReturnAction
 } from '@/lib/source-return'
+import {
+  IDLE_CAMERA_FRAME_RATE_WATCH,
+  nextCameraFrameRateWatch,
+  sameCameraLowFrameRate,
+  type CameraLowFrameRate
+} from '@/lib/camera-frame-rate'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
@@ -1443,6 +1449,8 @@ export type StudioContextValue = {
   previewLoading: boolean
   previewLiveStatus: PreviewLiveStatus
   previewCameraStatus: PreviewCameraStatus
+  /** Issue #1066: the camera's rate has stayed under its own; null otherwise. */
+  previewCameraLowFrameRate: CameraLowFrameRate | null
   previewScreenStatus: PreviewScreenStatus
   previewSurfaceStatus: PreviewSurfaceStatus
   nativePreviewSurfaceEnabled: boolean
@@ -1811,6 +1819,7 @@ export type StudioCoreContextValue = Omit<
   | 'liveChatSnapshot'
   | 'logs'
   | 'previewCameraStatus'
+  | 'previewCameraLowFrameRate'
   | 'previewLiveStatus'
   | 'previewScreenStatus'
   | 'streamHealth'
@@ -1834,7 +1843,7 @@ export type StudioRecordingContextValue = Pick<StudioContextValue, 'recording'>
 
 export type StudioPreviewContextValue = Pick<
   StudioContextValue,
-  'previewLiveStatus' | 'previewCameraStatus' | 'previewScreenStatus'
+  'previewLiveStatus' | 'previewCameraStatus' | 'previewCameraLowFrameRate' | 'previewScreenStatus'
 >
 
 type RecordLatencyState = {
@@ -4077,6 +4086,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     useState<PreviewSurfaceStatus>(idlePreviewSurfaceStatus)
   const [previewCameraStatus, setPreviewCameraStatus] =
     useState<PreviewCameraStatus>(idlePreviewCameraStatus)
+  const [previewCameraLowFrameRate, setPreviewCameraLowFrameRate] =
+    useState<CameraLowFrameRate | null>(null)
   const [previewScreenStatus, setPreviewScreenStatus] =
     useState<PreviewScreenStatus>(idlePreviewScreenStatus)
   // Linux: the portal source whose share this run granted (Clips waits for it).
@@ -4639,6 +4650,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     computedAtMs: number
   } | null>(null)
   const previewCameraStatusRef = useRef<PreviewCameraStatus>(idlePreviewCameraStatus())
+  // Issue #1066: watched here, so Sources knows the moment it opens.
+  const cameraFrameRateWatchRef = useRef(IDLE_CAMERA_FRAME_RATE_WATCH)
   const previewScreenStatusRef = useRef<PreviewScreenStatus>(idlePreviewScreenStatus())
   const sourceStatusUnknownRef = useRef(true)
   const [sourceStatusKnown, setSourceStatusKnown] = useState(false)
@@ -6551,6 +6564,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const applyPreviewCameraStatus = useCallback((status: PreviewCameraStatus) => {
     previewCameraStatusRef.current = status
     setPreviewCameraStatus(status)
+    const watch = nextCameraFrameRateWatch(cameraFrameRateWatchRef.current, status, Date.now())
+    if (!sameCameraLowFrameRate(watch.low, cameraFrameRateWatchRef.current.low)) {
+      setPreviewCameraLowFrameRate(watch.low)
+    }
+    cameraFrameRateWatchRef.current = watch
     setSourcePictureSizes((current) => sourcePictureSizesFromCapture(current, 'camera', status))
   }, [])
 
@@ -18618,8 +18636,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const recordingValue = useMemo<StudioRecordingContextValue>(() => ({ recording }), [recording])
   const previewValue = useMemo<StudioPreviewContextValue>(
-    () => ({ previewLiveStatus, previewCameraStatus, previewScreenStatus }),
-    [previewCameraStatus, previewLiveStatus, previewScreenStatus]
+    () => ({
+      previewLiveStatus,
+      previewCameraStatus,
+      previewCameraLowFrameRate,
+      previewScreenStatus
+    }),
+    [previewCameraLowFrameRate, previewCameraStatus, previewLiveStatus, previewScreenStatus]
   )
 
   // Development smoke harness: delegates to the same public actions as the UI.

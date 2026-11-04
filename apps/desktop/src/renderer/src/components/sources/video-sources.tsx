@@ -227,7 +227,7 @@ export function VideoSources(): ReactElement {
     systemAccessContext,
     wsStatus
   } = useStudioCore()
-  const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
+  const { previewCameraStatus, previewCameraLowFrameRate, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats } = useStudioDiagnostics()
   const sources = captureConfig.sources
   const captureDevices = capturePickerDevices(deviceList.devices)
@@ -274,7 +274,8 @@ export function VideoSources(): ReactElement {
           preview: previewCameraStatus,
           // The camera in use: a stand-in is the one that may send nothing.
           name: sources.cameraName,
-          standIn: cameraStandIn
+          standIn: cameraStandIn,
+          lowFrameRate: previewCameraLowFrameRate
         }),
         // Facts describe the selected source only (the synthetic screen and a
         // camera turned Off leave the picker saying None or Off).
