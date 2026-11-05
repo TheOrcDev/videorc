@@ -56,7 +56,7 @@ pub(crate) const SYSTEM_AUDIO_MIC_FALLBACK_BYPASS_MESSAGE: &str =
     "System audio is off for this session because the microphone is on a fallback input.";
 
 /// The one system-audio device (`devices.rs`).
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 const SYSTEM_AUDIO_DEVICE_NAME: &str = "System audio";
 
 /// How long a start waits for this session's previous capture (just turned
@@ -70,11 +70,13 @@ const CLEANUP_POLL: Duration = Duration::from_millis(50);
 /// a capture starts, and a missing grant is a `system-audio-unavailable`
 /// event. On Windows it is WASAPI process loopback (build 20348 and later,
 /// every Windows 11), the same probe that makes the device row Available;
-/// loopback needs no grant. Every session on a capable platform runs the bus
-/// with the system-audio playout delay and the decision 8 offset split,
-/// whether or not the switch is on, so a live toggle never changes FFmpeg. A
-/// session whose microphone bypasses the bus cannot mix it
-/// ([`SYSTEM_AUDIO_MIC_FALLBACK_BYPASS_CODE`]). Linux is out of scope.
+/// loopback needs no grant. On Linux it is a reachable PipeWire socket
+/// (plan 212), the same probe that makes the device row Available; linking
+/// playback streams needs no grant either. Every session on a capable
+/// platform runs the bus with the system-audio playout delay and the decision
+/// 8 offset split, whether or not the switch is on, so a live toggle never
+/// changes FFmpeg. A session whose microphone bypasses the bus cannot mix it
+/// ([`SYSTEM_AUDIO_MIC_FALLBACK_BYPASS_CODE`]).
 pub(crate) fn system_audio_capable() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -84,7 +86,11 @@ pub(crate) fn system_audio_capable() -> bool {
     {
         crate::devices::windows_system_audio_supported()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::devices::linux_system_audio_supported()
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         false
     }
@@ -135,25 +141,26 @@ pub(crate) type SystemAudioOpen = Arc<dyn Fn() -> anyhow::Result<ProducerSource>
 /// The platform's system-audio capture, or `None` where sessions cannot mix
 /// system audio.
 pub(crate) fn platform_opener() -> Option<SystemAudioOpen> {
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     {
         system_audio_capable().then(|| Arc::new(open_platform_capture) as SystemAudioOpen)
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         None
     }
 }
 
 /// The platform capture as a bus producer: S3's audio-only SCStream on macOS,
-/// S8a's WASAPI process-loopback client on Windows (the same
-/// `SystemAudioCapture` API). Its failure slot is mirrored into the bus's
-/// `ProducerFailure`, so a stream that stops with an error (on Windows,
-/// `AUDCLNT_E_DEVICE_INVALIDATED` included) is retired as lost; a deliberate
-/// stop (detach, session end) closes the channel with no failure. Dropping the
-/// producer's owner stops the stream within the bounded stop budget, and logs
-/// (then leaves to finish) a stream that does not answer in time.
-#[cfg(any(target_os = "macos", windows))]
+/// S8a's WASAPI process-loopback client on Windows, a PipeWire capture stream
+/// on Linux (the same `SystemAudioCapture` API). Its failure slot is mirrored
+/// into the bus's `ProducerFailure`, so a stream that stops with an error (on
+/// Windows, `AUDCLNT_E_DEVICE_INVALIDATED` included) is retired as lost; a
+/// deliberate stop (detach, session end) closes the channel with no failure.
+/// Dropping the producer's owner stops the stream within the bounded stop
+/// budget, and logs (then leaves to finish) a stream that does not answer in
+/// time.
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 fn open_platform_capture() -> anyhow::Result<ProducerSource> {
     use crate::protocol::DeviceStatus;
     use crate::system_audio_capture::{SystemAudioCapture, SystemAudioCaptureOptions};
@@ -190,10 +197,10 @@ fn open_platform_capture() -> anyhow::Result<ProducerSource> {
 /// thread when the slot detaches, is lost, or the session ends: it stops the
 /// stream within the bounded budget and says how it ended. A stream that does
 /// not answer in time is left to finish on its own thread (never a hang).
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 struct PlatformCaptureOwner(Option<crate::system_audio_capture::SystemAudioCapture>);
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 impl Drop for PlatformCaptureOwner {
     fn drop(&mut self) {
         let Some(capture) = self.0.take() else {
@@ -682,7 +689,7 @@ mod tests {
         // Plan 076; the renderer's lib/system-audio-session.ts mirrors both.
         assert_eq!(SYSTEM_AUDIO_ECHO_PAUSED_CODE, "system-audio-echo-paused");
         assert_eq!(SYSTEM_AUDIO_RECOVERED_CODE, "system-audio-recovered");
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             assert_eq!(
                 SYSTEM_AUDIO_UNAVAILABLE_CODE,
@@ -699,7 +706,7 @@ mod tests {
     fn capability_is_the_platform_and_the_mix_always_names_the_microphone_slot() {
         // macOS always; Windows where process loopback exists (the device
         // row's own probe, so the row shows exactly where sessions mix it);
-        // Linux is out of scope.
+        // Linux where PipeWire is reachable (likewise the row's probe).
         #[cfg(target_os = "macos")]
         assert!(system_audio_capable());
         #[cfg(windows)]
@@ -707,7 +714,12 @@ mod tests {
             system_audio_capable(),
             crate::devices::windows_system_audio_supported()
         );
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            system_audio_capable(),
+            crate::devices::linux_system_audio_supported()
+        );
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         assert!(!system_audio_capable());
         assert_eq!(platform_opener().is_some(), system_audio_capable());
         assert_eq!(bus_mix_sources(false), vec![AudioTrackSource::Microphone]);

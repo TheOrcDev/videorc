@@ -155,8 +155,10 @@ mod storage;
 mod streaming;
 mod support_bundle;
 mod synthetic_diagnostic;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 mod system_audio_capture;
+#[cfg(target_os = "linux")]
+mod system_audio_capture_linux;
 // Windows-only at runtime; its pure helpers are also unit-tested on macOS.
 #[cfg(any(windows, all(test, target_os = "macos")))]
 mod system_audio_capture_windows;

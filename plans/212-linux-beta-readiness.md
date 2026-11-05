@@ -77,7 +77,7 @@ file size or successful build is not a pass.
 
 | Feature                            | Current finding                                                                                   | Required completion                                                                                         |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| System audio                       | Linux unsupported                                                                                 | Implement and prove before broad streaming Beta, or obtain an explicit narrower scope decision.             |
+| System audio                       | PipeWire capture built; unit and owned null-sink live tests pass, no app-level proof yet          | Prove in the real app (included and excluded playback, toggles, stream) before broad streaming Beta.        |
 | Live camera/mic/screen replacement | Shared-bus microphone replacement passes development artifact checks; camera/screen still refused | Finish camera/screen replacement and exact-candidate physical recovery evidence.                            |
 | Captions                           | Shared PCM bus enabled; fake contract and rendered local-stream/recording artifacts pass          | Exact-candidate physical microphone, supported-profile and packaged acceptance still required.              |
 | Separate source recordings         | macOS-only                                                                                        | First Beta may explicitly exclude; keep unsupported controls guarded and publish limitation.                |
@@ -138,6 +138,8 @@ both included external audio and excluded Videorc playback in actual capture.
 Native PipeWire clients still need server-authenticated ownership checks;
 Pulse-server indirection and unknown/transient ownership must be handled
 explicitly. No production system-audio capture or desktop routing changed.
+Production capture has since been built on these findings; see "Linux system
+audio over PipeWire, 2026-11-05" below.
 
 The microphone artifact analyzer now accepts one exact backend-reported FFmpeg
 tee output shared by recording and stream only when their applied offsets agree.
@@ -3609,3 +3611,79 @@ Validation on Ogre at `f13a3046` plus the change:
 
 A first unloaded loop named the tests `session_audio::tests::`, matched no
 test and proved nothing; the 40 of 40 above is its rerun under `mix_tests`.
+
+### Linux system audio over PipeWire, 2026-11-05
+
+The owner asked for Linux system audio to be built. The backend now captures
+it through PipeWire (`system_audio_capture_linux.rs`), the Linux twin of the
+ScreenCaptureKit and WASAPI producers with the same `SystemAudioCapture` API,
+so the session bus, the mix, the toggles and the health events are shared.
+
+- One capture stream (48 kHz stereo F32LE, no autoconnect) on its own thread.
+  The thread watches the registry and links each application playback stream
+  (`Stream/Output/Audio`) to the capture's input ports by channel. Links are
+  made with `link-factory`, `object.linger` off, and removed by dropping their
+  proxy. `core.destroy_object` was not used: with pipewire-rs 0.10 it sends a
+  second destroy when the proxy drops.
+- Frames carry the graph cycle's CLOCK_MONOTONIC time on a sample-counted
+  timeline, so the bus's `SourceClock` reads them as it reads macOS frames.
+  Jitter, slow drift and gaps have unit tests.
+- Own-app exclusion is decided before a stream is linked, so excluded audio
+  never reaches the capture. A process the backend can verify (its executable
+  or `comm` matches the binary the stream reports) decides first: left out
+  when it descends from `VIDEORC_ELECTRON_MAIN_PID`, captured otherwise. Then a
+  socket pid that descends from that root. Then the `videorc.app-instance`
+  marker the Electron main process now sets through `PULSE_PROP`
+  (`linux-audio-instance.ts`), which decides only for a stream with no
+  verifiable process, so a marker leaked into a foreign app never hides it.
+  Chromium's audio service runs from `/proc/self/exe` with `comm` `exe`, so
+  the executable's name is checked before `comm`.
+- The device row and session capability are Ready only when a PipeWire socket
+  exists (the libpipewire lookup: `PIPEWIRE_REMOTE`, `PIPEWIRE_RUNTIME_DIR`,
+  `XDG_RUNTIME_DIR`, `/run/pipewire`). Without one the row says "System audio
+  on Linux needs PipeWire." and the renderer copy names that case.
+
+Capability has a side effect on every Linux session: on a capable platform
+the bus always runs with the system-audio playout delay and the decision 8
+offset split, whether or not the switch is on. Linux recording timing
+therefore changes for every session on a PipeWire desktop, which is why the
+direct matrix must pass on this change.
+
+Validation on Ogre (PipeWire 1.6.8):
+
+- Backend tests: 4,430 passed, 0 failed, 22 ignored (the 20 known ignores and
+  the two live tests below). The 21 new module tests, the two new device
+  tests and the updated capability tests are in that run.
+- Live tests, 8 of 8 runs passing both. Each plays a faded 1.5 s, 1 kHz tone
+  with `pacat` into an owned null sink, unloaded afterwards, never the
+  speakers. The foreign tone is captured at -12.0 dBFS, its played level. A
+  tone from a process inside the exclusion tree measures -109.5 dBFS (once
+  -108.4), and the debug log shows its node was never linked. The capture
+  started in about 10 to 17 ms with no dropped or rejected buffers.
+- cargo fmt and clippy with the Linux CI flags (`--all-targets` included)
+  pass.
+- Desktop: typecheck, lint and format:check pass; desktop unit tests 7,211
+  passed, 1 skipped.
+- Direct 1080p30 matrix on renderD128, both backends PASS with the owned
+  440 Hz microphone. OpenH264: 186 of 186 frames, level 4.0, BT.709 TV range,
+  13 ms tail, no audio gaps or digital-zero runs, tone -18 dBFS with the
+  unselected 997 Hz tone at -97. VAAPI: 187 of 187 frames, level 4.0, BT.709
+  TV range, 3 ms tail, no gaps, tone -18 with -94.1. The first run of both
+  stopped before any gate: the main merge brought #1131's incident-tone
+  check, which ran on Linux too, where the pass uses an owned microphone and
+  never asks for the tone. The matrix now checks the tone only for a pass
+  without a microphone.
+- The first live exclusion run failed at -49.8 dBFS. The audio was not
+  leaking: the per-buffer rectangular measurement leaked energy from the tone
+  next to it. Hann windows and tone fades fixed the measurement, not the
+  capture.
+
+Not yet proven: the real app with Electron's own playback excluded and
+another app's playback included, the toggles and the stream leg
+(`smoke:system-audio` is macOS-only), WirePlumber over long runs, and stream
+volume restore. Known limits, in the module header: playback into null or
+virtual sinks is captured too; link-group streams (filter chains, loopbacks)
+are skipped; 5.1 sides and rears are summed at full gain; a link the user
+removes is not recreated while its stream lives. Also, any process launched
+under the Electron main process and not reparented is left out as Videorc's
+own.

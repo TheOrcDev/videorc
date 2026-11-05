@@ -372,6 +372,7 @@ import {
   DISABLE_FEATURES_SWITCH,
   mergeDisabledFeatures
 } from './chromium-disabled-features'
+import { linuxPulseProp } from './linux-audio-instance'
 import { linuxPasswordStoreSwitch, PASSWORD_STORE_SWITCH } from './linux-password-store'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
 import {
@@ -1385,6 +1386,13 @@ const disabledChromiumFeatures = mergeDisabledFeatures(
 )
 if (disabledChromiumFeatures) {
   app.commandLine.appendSwitch(DISABLE_FEATURES_SWITCH, disabledChromiumFeatures)
+}
+// Plan 212 (Linux system audio): mark every stream Chromium's audio service
+// plays as Videorc's, so the backend leaves its own playback out of System
+// audio. Set before any renderer plays; see linux-audio-instance.ts.
+const linuxPulsePropValue = linuxPulseProp(process.platform, process.env.PULSE_PROP, process.pid)
+if (linuxPulsePropValue) {
+  process.env.PULSE_PROP = linuxPulsePropValue
 }
 // Linux: Chromium gives safeStorage a real password store only on desktops it
 // recognizes (KDE, GNOME, XFCE, …). On Hyprland, Sway, i3 and other window
@@ -10724,8 +10732,9 @@ function startBackendWithRegistryLock(): void {
       // The backend crate stays at 0.9.0 across desktop releases. Hashing
       // only that left Linux performance-check poison sticky.
       VIDEORC_APP_VERSION: app.getVersion(),
-      // Root of the process tree Windows system audio excludes (plan 069):
-      // this process, its Chromium audio service and renderers are Videorc.
+      // Root of the process tree Windows and Linux system audio exclude
+      // (plans 069, 212): this process, its Chromium audio service and
+      // renderers are Videorc. Linux also matches it against PULSE_PROP.
       VIDEORC_ELECTRON_MAIN_PID: String(process.pid),
       // Cargo is only the development wrapper. The backend publishes this
       // generation-bound token with its real PID before any fallible startup

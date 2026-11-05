@@ -36,9 +36,14 @@
 //! [`SystemAudioCapture`] API over WASAPI process loopback and is re-exported
 //! from here, so consumers import one path on both platforms. The
 //! ScreenCaptureKit half is `cfg(target_os = "macos")`.
+//!
+//! Linux (plan 212): the same shared half compiles on Linux, where
+//! `system_audio_capture_linux.rs` implements [`SystemAudioCapture`] over a
+//! PipeWire capture stream linked to every playback stream, and is
+//! re-exported from here the same way.
 
 // The ScreenCaptureKit conversion helpers stay compiled (and unit-tested) on
-// Windows, where only the shared half is used.
+// Windows and Linux, where only the shared half is used.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::sync::{Arc, Mutex};
@@ -684,6 +689,9 @@ pub(crate) use capture::{SystemAudioCapture, SystemAudioCaptureOptions};
 pub(crate) use crate::system_audio_capture_windows::{
     SystemAudioCapture, SystemAudioCaptureOptions,
 };
+
+#[cfg(target_os = "linux")]
+pub(crate) use crate::system_audio_capture_linux::{SystemAudioCapture, SystemAudioCaptureOptions};
 
 #[cfg(target_os = "macos")]
 mod capture {

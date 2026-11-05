@@ -7,10 +7,10 @@ describe('globalShortcutRows (Linux plan 0019)', () => {
     expect(globalShortcutRows({ systemAudioAvailable: true, systemAudioBound: false })).toContain(
       'system-audio-toggle'
     )
-    const linux = globalShortcutRows({ systemAudioAvailable: false, systemAudioBound: false })
-    expect(linux).not.toContain('system-audio-toggle')
-    expect(linux).toContain('record-toggle')
-    expect(linux).toContain('mic-toggle')
+    const unavailable = globalShortcutRows({ systemAudioAvailable: false, systemAudioBound: false })
+    expect(unavailable).not.toContain('system-audio-toggle')
+    expect(unavailable).toContain('record-toggle')
+    expect(unavailable).toContain('mic-toggle')
   })
 
   it('offers both clip lengths, the minute right after the 30 seconds (plan 199)', () => {
