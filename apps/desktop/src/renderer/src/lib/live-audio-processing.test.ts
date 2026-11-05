@@ -43,6 +43,7 @@ describe('activeAudioProcessingUpdateParams', () => {
         )
       ).toEqual({
         sessionId: 'session-1',
+        microphoneNoiseSuppression: 'off',
         microphoneGainDb: 6,
         microphoneMuted: true
       })
@@ -217,7 +218,7 @@ describe('activeAudioProcessingUpdateParams', () => {
         lastApplied: { microphoneGainDb: -2, microphoneMuted: true }
       })
     ).toEqual({
-      rollback: { microphoneGainDb: 3, microphoneMuted: false },
+      rollback: { microphoneGainDb: 3, microphoneMuted: false, microphoneNoiseSuppression: 'off' },
       disableForSession: true,
       message:
         'Live microphone controls are unavailable for this capture. The previous gain and mute settings were restored.'
@@ -300,7 +301,11 @@ describe('liveAudioProcessingSessionSyncDecision', () => {
         }
       )
     ).toEqual({
-      lastApplied: { microphoneGainDb: 0, microphoneMuted: false },
+      lastApplied: {
+        microphoneGainDb: 0,
+        microphoneMuted: false,
+        microphoneNoiseSuppression: 'off'
+      },
       enqueueDesired: true
     })
   })
@@ -320,7 +325,11 @@ describe('liveAudioProcessingSessionSyncDecision', () => {
         }
       )
     ).toEqual({
-      lastApplied: { microphoneGainDb: 4, microphoneMuted: false },
+      lastApplied: {
+        microphoneGainDb: 4,
+        microphoneMuted: false,
+        microphoneNoiseSuppression: 'off'
+      },
       enqueueDesired: true
     })
   })
@@ -612,5 +621,190 @@ describe('systemAudioProcessingDelta (plan 069)', () => {
     expect(systemAudioProcessingDelta(off, { ...off, systemAudioEchoGuard: false })).toStrictEqual({
       systemAudioEchoGuard: true
     })
+  })
+})
+
+describe('live RNNoise controls', () => {
+  const base = { sessionId: 'session-1', microphoneGainDb: 0, microphoneMuted: false }
+  it('sends the suppression mode and notices an edit made while start was in flight', () => {
+    const desired = activeAudioProcessingUpdateParams(
+      { state: 'recording', sessionId: base.sessionId },
+      { ...base, microphoneNoiseSuppression: 'rnnoise' }
+    )!
+    expect(desired.microphoneNoiseSuppression).toBe('rnnoise')
+    expect(
+      liveAudioProcessingSessionSyncDecision(desired, {
+        ...base,
+        microphoneNoiseSuppression: 'off'
+      })
+    ).toMatchObject({ lastApplied: { microphoneNoiseSuppression: 'off' }, enqueueDesired: true })
+  })
+  it('confirms noise reduction once after a start that asked for it', () => {
+    // A microphone that bypasses the session audio bus starts without noise
+    // reduction; the confirmation is what brings back the rejection whose
+    // rollback shows Off. An untouched Off start still sends nothing.
+    const desired = activeAudioProcessingUpdateParams(
+      { state: 'recording', sessionId: base.sessionId },
+      { ...base, microphoneNoiseSuppression: 'rnnoise' }
+    )!
+    expect(
+      liveAudioProcessingSessionSyncDecision(desired, {
+        ...base,
+        microphoneNoiseSuppression: 'rnnoise'
+      })
+    ).toEqual({
+      lastApplied: {
+        microphoneGainDb: 0,
+        microphoneMuted: false,
+        microphoneNoiseSuppression: 'rnnoise'
+      },
+      enqueueDesired: true
+    })
+    expect(
+      liveAudioProcessingSessionSyncDecision(
+        activeAudioProcessingUpdateParams(
+          { state: 'recording', sessionId: base.sessionId },
+          { ...base, microphoneNoiseSuppression: 'off' }
+        )!,
+        { ...base, microphoneNoiseSuppression: 'off' }
+      ).enqueueDesired
+    ).toBe(false)
+  })
+  it('keeps suppression and system edits across a newer legacy gain or mute request', () => {
+    expect(
+      mergeAudioProcessingParams(
+        { ...base, microphoneNoiseSuppression: 'rnnoise', systemAudioEnabled: true },
+        { ...base, microphoneGainDb: 6, microphoneMuted: true }
+      )
+    ).toEqual({
+      ...base,
+      microphoneGainDb: 6,
+      microphoneMuted: true,
+      microphoneNoiseSuppression: 'rnnoise',
+      systemAudioEnabled: true
+    })
+  })
+  it('coalesces rapid suppression toggles with gain, mute and system changes', async () => {
+    const first = deferred<import('@/lib/backend').AudioProcessingUpdateResult>()
+    const sent: import('@/lib/backend').AudioProcessingUpdateParams[] = []
+    const queue = new LatestWinsLiveAudioProcessingQueue(
+      base.sessionId,
+      async (params) => {
+        sent.push(params)
+        return sent.length === 1 ? first.promise : { ...params, applied: true }
+      },
+      () => true
+    )
+    queue.enqueue({ ...base, microphoneNoiseSuppression: 'rnnoise' })
+    queue.enqueue({ ...base, microphoneNoiseSuppression: 'off', systemAudioEnabled: true })
+    queue.enqueue({
+      ...base,
+      microphoneNoiseSuppression: 'rnnoise',
+      microphoneGainDb: 6,
+      microphoneMuted: true
+    })
+    first.resolve({ ...base, microphoneNoiseSuppression: 'rnnoise', applied: true })
+    await queue.waitForIdle()
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toEqual({
+      ...base,
+      microphoneNoiseSuppression: 'rnnoise',
+      microphoneGainDb: 6,
+      microphoneMuted: true,
+      systemAudioEnabled: true
+    })
+  })
+  it('rolls back an unavailable suppression change without disabling gain and mute', () => {
+    const requested = { ...base, microphoneNoiseSuppression: 'rnnoise' as const }
+    const result = {
+      ...requested,
+      applied: false,
+      reasonCode: 'microphone-noise-suppression-unavailable' as const,
+      confirmedMicrophoneGainDb: 0,
+      confirmedMicrophoneMuted: false,
+      confirmedMicrophoneNoiseSuppression: 'off' as const
+    }
+    expect(
+      rejectedLiveAudioProcessingUpdate({
+        recording: { state: 'recording', sessionId: base.sessionId },
+        current: requested,
+        requested,
+        result,
+        lastApplied: { ...base, microphoneNoiseSuppression: 'off' }
+      })
+    ).toMatchObject({ rollback: { microphoneNoiseSuppression: 'off' }, disableForSession: false })
+    expect(
+      rejectedLiveAudioProcessingUpdate({
+        recording: { state: 'recording', sessionId: base.sessionId },
+        current: { ...base, microphoneNoiseSuppression: 'off' },
+        requested,
+        result,
+        lastApplied: base
+      })
+    ).toBeNull()
+  })
+})
+
+it('restores confirmed Off on reconnect even when gain and mute were not confirmed', () => {
+  const requested = {
+    sessionId: 'session-1',
+    microphoneGainDb: 6,
+    microphoneMuted: true,
+    microphoneNoiseSuppression: 'rnnoise' as const
+  }
+  const { lastApplied } = liveAudioProcessingSessionSyncDecision(requested, null)
+  expect(lastApplied.microphoneNoiseSuppression).toBe('rnnoise')
+  const rejected = rejectedLiveAudioProcessingUpdate({
+    recording: { sessionId: requested.sessionId, state: 'recording' },
+    current: requested,
+    requested,
+    lastApplied,
+    result: {
+      ...requested,
+      applied: false,
+      reasonCode: 'microphone-noise-suppression-unavailable',
+      confirmedMicrophoneNoiseSuppression: 'off'
+    }
+  })
+  expect(rejected?.rollback).toEqual({
+    microphoneGainDb: 6,
+    microphoneMuted: true,
+    microphoneNoiseSuppression: 'off'
+  })
+  expect(rejected?.disableForSession).toBe(false)
+})
+
+it('locks live mic edits to confirmed settings when its bus dies while video remains active', () => {
+  const requested = {
+    sessionId: 'session-1',
+    microphoneGainDb: 6,
+    microphoneMuted: false,
+    microphoneNoiseSuppression: 'rnnoise' as const
+  }
+  const rejection = rejectedLiveAudioProcessingUpdate({
+    recording: { state: 'recording', sessionId: requested.sessionId },
+    // An already queued, newer edit must also roll back once the entire
+    // controller is unavailable, rather than continuing to look applied.
+    current: { microphoneGainDb: 9, microphoneMuted: true, microphoneNoiseSuppression: 'off' },
+    requested,
+    result: {
+      ...requested,
+      applied: false,
+      reasonCode: 'live-audio-control-unavailable',
+      confirmedMicrophoneGainDb: 3,
+      confirmedMicrophoneMuted: false,
+      confirmedMicrophoneNoiseSuppression: 'rnnoise'
+    },
+    lastApplied: { microphoneGainDb: 0, microphoneMuted: false, microphoneNoiseSuppression: 'off' }
+  })
+  expect(rejection).toEqual({
+    rollback: {
+      microphoneGainDb: 3,
+      microphoneMuted: false,
+      microphoneNoiseSuppression: 'rnnoise'
+    },
+    disableForSession: true,
+    message:
+      'Live microphone controls are unavailable for this capture. The previous gain and mute settings were restored.'
   })
 })

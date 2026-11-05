@@ -2215,6 +2215,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "rnnoise-rs"
+version = "0.1.0"
+source = "git+https://github.com/TheOrcDev/rnnoise-rs?rev=c915940e94e2ec1ca07a1af22c769a33c3fb1ce6#c915940e94e2ec1ca07a1af22c769a33c3fb1ce6"
+
+[[package]]
 name = "rusqlite"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3108,6 +3113,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "rmcp",
+ "rnnoise-rs",
  "rusqlite",
  "serde",
  "serde_json",

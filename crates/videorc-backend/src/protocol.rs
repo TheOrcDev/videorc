@@ -1669,9 +1669,19 @@ impl CaptionsSessionParams {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MicrophoneNoiseSuppression {
+    #[default]
+    Off,
+    Rnnoise,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
+    #[serde(default)]
+    pub microphone_noise_suppression: MicrophoneNoiseSuppression,
     #[serde(default)]
     pub microphone_gain_db: f32,
     #[serde(default)]
@@ -1694,6 +1704,7 @@ pub struct AudioSettings {
 impl Default for AudioSettings {
     fn default() -> Self {
         Self {
+            microphone_noise_suppression: Default::default(),
             microphone_gain_db: 0.0,
             microphone_muted: false,
             microphone_sync_offset_ms: default_microphone_sync_offset_ms(),
@@ -1732,6 +1743,8 @@ pub fn clamp_system_audio_gain_db(gain_db: f32) -> f32 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProcessingUpdateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_noise_suppression: Option<MicrophoneNoiseSuppression>,
     pub session_id: String,
     pub microphone_gain_db: f32,
     pub microphone_muted: bool,
@@ -1746,9 +1759,12 @@ pub struct AudioProcessingUpdateParams {
     pub system_audio_echo_guard: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProcessingUpdateResult {
+    pub microphone_noise_suppression: MicrophoneNoiseSuppression,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_noise_suppression: Option<MicrophoneNoiseSuppression>,
     pub applied: bool,
     pub session_id: String,
     pub microphone_gain_db: f32,
@@ -7822,6 +7838,55 @@ mod tests {
             .pointer(pointer)
             .unwrap_or_else(|| panic!("shared protocol fixture is missing {pointer}"))
             .clone()
+    }
+
+    #[test]
+    fn shared_microphone_noise_suppression_contract_and_defaults() {
+        let fixture = shared_high_risk_contract_fixture_value("/microphoneNoiseSuppression");
+        let settings: AudioSettings =
+            serde_json::from_value(fixture["audioSettings"].clone()).unwrap();
+        assert_eq!(
+            settings.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Rnnoise
+        );
+        let legacy: AudioSettings =
+            serde_json::from_value(fixture["legacyAudioSettings"].clone()).unwrap();
+        assert_eq!(
+            legacy.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Off
+        );
+        let update: AudioProcessingUpdateParams =
+            serde_json::from_value(fixture["update"].clone()).unwrap();
+        assert_eq!(
+            update.microphone_noise_suppression,
+            Some(MicrophoneNoiseSuppression::Rnnoise)
+        );
+        let legacy: AudioProcessingUpdateParams =
+            serde_json::from_value(fixture["legacyUpdate"].clone()).unwrap();
+        assert_eq!(legacy.microphone_noise_suppression, None);
+        assert!(
+            serde_json::from_value::<AudioSettings>(
+                serde_json::json!({"microphoneNoiseSuppression":"unknown"})
+            )
+            .is_err()
+        );
+        for key in ["applied", "unavailable"] {
+            let result: AudioProcessingUpdateResult =
+                serde_json::from_value(fixture[key].clone()).unwrap();
+            let wire = serde_json::to_value(&result).unwrap();
+            assert_eq!(
+                wire["microphoneNoiseSuppression"],
+                fixture[key]["microphoneNoiseSuppression"]
+            );
+            assert_eq!(
+                wire["confirmedMicrophoneNoiseSuppression"],
+                fixture[key]["confirmedMicrophoneNoiseSuppression"]
+            );
+            assert_eq!(
+                serde_json::from_value::<AudioProcessingUpdateResult>(wire).unwrap(),
+                result
+            );
+        }
     }
 
     #[test]
