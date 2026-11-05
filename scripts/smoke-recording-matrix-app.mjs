@@ -244,14 +244,17 @@ async function recordComboWithArtifactGates({
     throw new Error(`session.start state ${started.state}: ${started.message ?? ''}`)
   }
   // The tone is decided at session start; any other way of losing it is
-  // named here once instead of as every combo's digital-zero failure.
-  const toneMissing = incidentToneMissingFailure(
-    await request(ws, timeoutMs, 'sessions.healthEvents.list', {
-      sessionId: started.sessionId,
-      limit: 120
-    })
-  )
-  if (toneMissing) throw new IncidentToneMissingError(`${combo.label}: ${toneMissing}`)
+  // named here once instead of as every combo's digital-zero failure. A pass
+  // with an owned microphone (Linux) never asks for the tone.
+  if (!microphoneId) {
+    const toneMissing = incidentToneMissingFailure(
+      await request(ws, timeoutMs, 'sessions.healthEvents.list', {
+        sessionId: started.sessionId,
+        limit: 120
+      })
+    )
+    if (toneMissing) throw new IncidentToneMissingError(`${combo.label}: ${toneMissing}`)
+  }
   let livenessFailure = null
   if (assertPreviewLiveness) {
     // The 0.9.44 regression starved the compositor mid-recording (encoder
