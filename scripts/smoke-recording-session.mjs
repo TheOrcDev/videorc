@@ -673,7 +673,13 @@ function assertAssetBackgroundFrame({ outputPath, outputDirectory, ffmpegPath })
   }
 }
 
-function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath, sourcePath }) {
+export function assertBundledBackgroundFrame({
+  outputPath,
+  outputDirectory,
+  ffmpegPath,
+  sourcePath,
+  seekSeconds = 0.5
+}) {
   const width = 640
   const height = 360
   const recordedRawPath = join(outputDirectory, `bundled-background-recording-${Date.now()}.rgb`)
@@ -684,7 +690,7 @@ function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath,
     ffmpegPath,
     width,
     height,
-    seekSeconds: 0.5,
+    seekSeconds,
     label: 'extract bundled background recording frame'
   })
   extractRgbFrame({
@@ -717,9 +723,10 @@ function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath,
   }
   if (meanDifference > 48) {
     throw new Error(
-      `Packaged bundled background pixels do not match the decoded source asset: mean RGB difference ${meanDifference.toFixed(1)} exceeded 48.`
+      `Packaged bundled background pixels do not match the decoded source asset at ${seekSeconds}s: mean RGB difference ${meanDifference.toFixed(1)} exceeded 48.`
     )
   }
+  return { seekSeconds, meanDifference }
 }
 
 function extractRgbFrame({ inputPath, outputPath, ffmpegPath, width, height, seekSeconds, label }) {
