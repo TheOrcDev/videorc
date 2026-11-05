@@ -583,11 +583,19 @@ function showLiveOutputNews(event: HealthEvent): void {
 
 /**
  * Plan 076: what the audio bus reports mid-session. An echo pause stays up
- * until it is resumed (a live loop repeats every word); a stall and a
- * recovered microphone are news the interface shows nowhere else.
+ * until it is resumed (a live loop repeats every word); a stall, a silenced
+ * microphone and a recovered microphone are news the interface shows
+ * nowhere else.
  */
 function showSessionAudioNews(event: HealthEvent): void {
-  if (event.code === 'system-audio-echo-paused') {
+  if (event.code === 'microphone-noise-reduction-silenced') {
+    // Noise reduction refused a stretch of microphone input and the bus
+    // wrote silence for it; the session went on. One episode, one toast.
+    notifyOnce(event.code, 'warning', 'Microphone silenced for a moment', {
+      description: event.message,
+      duration: 12_000
+    })
+  } else if (event.code === 'system-audio-echo-paused') {
     toast.warning('System audio paused: your stream was echoing', {
       id: SYSTEM_AUDIO_ECHO_TOAST_ID,
       description: event.message,

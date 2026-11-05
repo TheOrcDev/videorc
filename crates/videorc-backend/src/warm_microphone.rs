@@ -299,6 +299,7 @@ pub async fn arm_warm_microphone(
         return refused("disabled-for-smoke", None);
     }
     let settings = AudioProcessingSettings {
+        noise_suppression: Default::default(),
         gain_db: params.microphone_gain_db,
         muted: params.microphone_muted,
     };
@@ -420,6 +421,7 @@ mod tests {
 
     fn settings(gain_db: f32) -> AudioProcessingSettings {
         AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db,
             muted: false,
         }
