@@ -45,12 +45,20 @@ test('native Windows screen arguments select D3D11 or natural fallback strictly'
   assert.deepEqual(parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11']), {
     d3d11: true,
     requireD3d11: true,
-    expectFallback: null
+    expectFallback: null,
+    background: false
   })
   assert.deepEqual(parseWindowsNativeScreenArgs(['--expect-fallback', 'natural']), {
     d3d11: false,
     requireD3d11: false,
-    expectFallback: 'natural'
+    expectFallback: 'natural',
+    background: false
+  })
+  assert.deepEqual(parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11', '--background']), {
+    d3d11: true,
+    requireD3d11: true,
+    expectFallback: null,
+    background: true
   })
   assert.throws(() => parseWindowsNativeScreenArgs(['--require-d3d11']), /requires --d3d11/)
   assert.throws(
