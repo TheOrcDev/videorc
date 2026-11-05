@@ -5,7 +5,10 @@ import type {
   RecordingStatus
 } from '@/lib/backend'
 
-export type LiveAudioProcessingValues = Pick<AudioSettings, 'microphoneGainDb' | 'microphoneMuted'>
+export type LiveAudioProcessingValues = Pick<
+  AudioSettings,
+  'microphoneGainDb' | 'microphoneMuted' | 'microphoneNoiseSuppression'
+>
 
 /** The system-audio switch and level (plan 069), sent only when they change. */
 export type LiveSystemAudioValues = Pick<
@@ -113,6 +116,7 @@ export class LatestWinsLiveAudioProcessingQueue {
 }
 
 const OPTIONAL_AUDIO_PROCESSING_FIELDS = [
+  'microphoneNoiseSuppression',
   'systemAudioEnabled',
   'systemAudioGainDb',
   'systemAudioEchoGuard'
@@ -131,6 +135,10 @@ export function mergeAudioProcessingParams(
     microphoneGainDb: newer.microphoneGainDb,
     microphoneMuted: newer.microphoneMuted
   }
+  const microphoneNoiseSuppression =
+    newer.microphoneNoiseSuppression ?? older.microphoneNoiseSuppression
+  if (microphoneNoiseSuppression !== undefined)
+    merged.microphoneNoiseSuppression = microphoneNoiseSuppression
   const systemAudioEnabled = newer.systemAudioEnabled ?? older.systemAudioEnabled
   if (systemAudioEnabled !== undefined) merged.systemAudioEnabled = systemAudioEnabled
   const systemAudioGainDb = newer.systemAudioGainDb ?? older.systemAudioGainDb
@@ -166,13 +174,14 @@ function sameAudioProcessingParams(
  */
 export function activeAudioProcessingUpdateParams(
   recording: Pick<RecordingStatus, 'state' | 'sessionId'>,
-  audio: Pick<AudioSettings, 'microphoneGainDb' | 'microphoneMuted'>
+  audio: Pick<AudioSettings, 'microphoneGainDb' | 'microphoneMuted' | 'microphoneNoiseSuppression'>
 ): AudioProcessingUpdateParams | null {
   if (!['recording', 'streaming'].includes(recording.state) || !recording.sessionId) {
     return null
   }
   return {
     sessionId: recording.sessionId,
+    microphoneNoiseSuppression: audio.microphoneNoiseSuppression ?? 'off',
     microphoneGainDb: audio.microphoneGainDb,
     microphoneMuted: audio.microphoneMuted
   }
@@ -208,6 +217,13 @@ export function systemAudioProcessingDelta(
  * request. Controls can still change while start is in flight; comparing the
  * active values with this seed preserves that edit without inventing a
  * redundant live mutation for an untouched start.
+ *
+ * A start that asked for noise reduction is confirmed once after start: a
+ * microphone that bypasses the session audio bus (a direct FFmpeg capture)
+ * starts without it, and the backend answers that confirmation with the
+ * `microphone-noise-suppression-unavailable` rejection, whose rollback shows
+ * Off and says so. A bus-backed session confirms the same mode and nothing
+ * changes.
  */
 export function liveAudioProcessingSessionSyncDecision(
   desired: AudioProcessingUpdateParams,
@@ -215,6 +231,10 @@ export function liveAudioProcessingSessionSyncDecision(
 ): LiveAudioProcessingSessionSyncDecision {
   const startSnapshotMatches = startSnapshot?.sessionId === desired.sessionId
   const lastApplied = {
+    microphoneNoiseSuppression:
+      (startSnapshotMatches
+        ? startSnapshot.microphoneNoiseSuppression
+        : desired.microphoneNoiseSuppression) ?? 'off',
     microphoneGainDb: startSnapshotMatches
       ? startSnapshot.microphoneGainDb
       : desired.microphoneGainDb,
@@ -224,8 +244,10 @@ export function liveAudioProcessingSessionSyncDecision(
     lastApplied,
     enqueueDesired:
       !startSnapshotMatches ||
+      lastApplied.microphoneNoiseSuppression === 'rnnoise' ||
       desired.microphoneGainDb !== lastApplied.microphoneGainDb ||
-      desired.microphoneMuted !== lastApplied.microphoneMuted
+      desired.microphoneMuted !== lastApplied.microphoneMuted ||
+      (desired.microphoneNoiseSuppression ?? 'off') !== lastApplied.microphoneNoiseSuppression
   }
 }
 
@@ -265,7 +287,9 @@ export function rejectedLiveAudioProcessingUpdate(input: {
     input.result?.reasonCode === 'live-audio-control-unavailable'
   const currentRequestStillVisible =
     input.current.microphoneGainDb === input.requested.microphoneGainDb &&
-    input.current.microphoneMuted === input.requested.microphoneMuted
+    input.current.microphoneMuted === input.requested.microphoneMuted &&
+    (input.current.microphoneNoiseSuppression ?? 'off') ===
+      (input.requested.microphoneNoiseSuppression ?? 'off')
   if (!liveAudioControlsUnavailable && !currentRequestStillVisible) {
     return null
   }
@@ -273,17 +297,29 @@ export function rejectedLiveAudioProcessingUpdate(input: {
     input.result?.confirmedMicrophoneGainDb !== undefined &&
     input.result.confirmedMicrophoneMuted !== undefined
       ? {
+          microphoneNoiseSuppression:
+            input.result.confirmedMicrophoneNoiseSuppression ??
+            input.lastApplied.microphoneNoiseSuppression ??
+            'off',
           microphoneGainDb: input.result.confirmedMicrophoneGainDb,
           microphoneMuted: input.result.confirmedMicrophoneMuted
         }
       : null
   return {
-    rollback: backendConfirmedRollback ?? input.lastApplied,
+    rollback: {
+      ...(backendConfirmedRollback ?? input.lastApplied),
+      ...(input.result?.confirmedMicrophoneNoiseSuppression !== undefined
+        ? { microphoneNoiseSuppression: input.result.confirmedMicrophoneNoiseSuppression }
+        : {})
+    },
     disableForSession: liveAudioControlsUnavailable,
-    message: liveAudioControlStateUnknown
-      ? "The live microphone change couldn't be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute."
-      : liveAudioControlsUnavailable
-        ? 'Live microphone controls are unavailable for this capture. The previous gain and mute settings were restored.'
-        : "The live microphone change wasn't applied. The previous gain and mute settings were restored."
+    message:
+      input.result?.reasonCode === 'microphone-noise-suppression-unavailable'
+        ? 'Noise reduction is unavailable for this capture. It is Off.'
+        : liveAudioControlStateUnknown
+          ? "The live microphone change couldn't be confirmed, and the captured audio state may differ from the controls shown. Stop and restart this capture before relying on microphone gain or mute."
+          : liveAudioControlsUnavailable
+            ? 'Live microphone controls are unavailable for this capture. The previous gain and mute settings were restored.'
+            : "The live microphone change wasn't applied. The previous gain and mute settings were restored."
   }
 }
