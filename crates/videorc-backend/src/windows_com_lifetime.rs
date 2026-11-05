@@ -133,6 +133,24 @@ fn pin_graphics_capture_module() -> Result<(), String> {
     Ok(())
 }
 
+/// The test binary never runs `main`, so nothing installed the anchors
+/// before the first test touched COM (#1069): in a full `cargo test` run the
+/// D3D11, Graphics Capture, Media Foundation and WASAPI tests that come
+/// before `windows_com_lifetime::tests` alphabetically left the MTA and MF
+/// with no process reference, so COM unloaded their servers under their own
+/// internal worker threads, which then faulted (`0xC0000005`) inside some
+/// later, unrelated test. An MSVC CRT initializer runs this before the test
+/// harness starts, which is what `main` guarantees the real backend.
+#[cfg(test)]
+#[used]
+#[unsafe(link_section = ".CRT$XCU")]
+static INSTALL_BEFORE_ANY_TEST: extern "C" fn() = {
+    extern "C" fn install_before_any_test() {
+        install();
+    }
+    install_before_any_test
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +160,18 @@ mod tests {
         COINIT_MULTITHREADED, CoGetApartmentType, CoInitializeEx, CoUninitialize,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    /// Every other test here calls `install` itself, which hid #1069: the
+    /// anchors must already be in place before the harness runs any test.
+    #[test]
+    fn com_lifetime_anchors_are_installed_before_any_test_runs() {
+        let status = STATUS
+            .get()
+            .expect("the CRT initializer installs the anchors before the harness starts");
+        assert_eq!(status.mta_held, Ok(()), "{status:?}");
+        assert_eq!(status.graphics_capture_pinned, Ok(()), "{status:?}");
+        assert_eq!(status.media_foundation_held, Ok(()), "{status:?}");
+    }
 
     #[test]
     fn com_lifetime_install_is_idempotent_and_succeeds() {
