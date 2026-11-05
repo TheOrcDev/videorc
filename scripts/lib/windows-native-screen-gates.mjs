@@ -55,20 +55,33 @@ export const SCENE_EDIT_SCREEN_TRANSFORM = Object.freeze({
   cropBottom: 0
 })
 
+/** The backend's stage inset for screen-like sources over a background. */
+export const SCENE_BACKGROUND_STAGE_INSET = 0.1
+
 /**
  * The sample rectangles (in pixels of a `width`×`height` frame) a
  * `--scene-edit` recording is judged on: `uncovered` lies wholly outside the
  * moved screen, so it shows the canvas fill (the background, or black);
- * `covered` lies inside the screen even when the screen is letterboxed or
- * pillarboxed within its box.
+ * `covered` is the screen's box, inset by the same margin. The whole box, not
+ * its middle: a desktop's middle is often one flat dark window, while its
+ * taskbar, text and edges always vary.
+ *
+ * `stageInset` mirrors the backend's `scene_source_render_transform`: with a
+ * background, a screen is placed in a stage inset by 10% on every side
+ * (x' = inset + x * (1 - 2 * inset)), so pass `SCENE_BACKGROUND_STAGE_INSET`.
  */
-export function sceneEditFrameRegions(width, height, transform = SCENE_EDIT_SCREEN_TRANSFORM) {
+export function sceneEditFrameRegions(
+  width,
+  height,
+  { transform = SCENE_EDIT_SCREEN_TRANSFORM, stageInset = 0 } = {}
+) {
   const margin = Math.round(Math.min(width, height) * 0.04)
+  const stage = 1 - 2 * stageInset
   const box = {
-    x0: transform.x * width,
-    y0: transform.y * height,
-    x1: (transform.x + transform.width) * width,
-    y1: (transform.y + transform.height) * height
+    x0: (stageInset + transform.x * stage) * width,
+    y0: (stageInset + transform.y * stage) * height,
+    x1: (stageInset + (transform.x + transform.width) * stage) * width,
+    y1: (stageInset + (transform.y + transform.height) * stage) * height
   }
   return {
     uncovered: {
@@ -78,10 +91,10 @@ export function sceneEditFrameRegions(width, height, transform = SCENE_EDIT_SCRE
       y1: height - 1 - margin
     },
     covered: {
-      x0: Math.ceil(box.x0 + (box.x1 - box.x0) * 0.25),
-      y0: Math.ceil(box.y0 + (box.y1 - box.y0) * 0.25),
-      x1: Math.floor(box.x0 + (box.x1 - box.x0) * 0.75),
-      y1: Math.floor(box.y0 + (box.y1 - box.y0) * 0.75)
+      x0: Math.ceil(box.x0) + margin,
+      y0: Math.ceil(box.y0) + margin,
+      x1: Math.min(width - 1, Math.floor(box.x1) - margin),
+      y1: Math.min(height - 1, Math.floor(box.y1) - margin)
     }
   }
 }

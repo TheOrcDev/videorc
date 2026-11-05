@@ -10,6 +10,7 @@ import {
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
   parseWindowsNativeScreenArgs,
+  SCENE_BACKGROUND_STAGE_INSET,
   SCENE_EDIT_SCREEN_TRANSFORM,
   sceneEditFrameRegions,
   requiredBmpPreviewAdvances,
@@ -97,11 +98,19 @@ test('a scene-edit recording is judged outside and inside the moved screen, neve
   assert.ok(uncovered.x0 >= 0 && uncovered.y0 >= 0)
   assert.ok(uncovered.x1 < box.x0 && uncovered.y1 < height)
   assert.ok(uncovered.x1 - uncovered.x0 > width / 3)
-  // The covered rectangle is the middle half of the box, so a screen that is
-  // letterboxed or pillarboxed in its box still fills it.
-  assert.ok(covered.x0 > box.x0 && covered.x1 < box.x1)
+  // The covered rectangle is the box, inset: inside the screen, inside the frame.
+  assert.ok(covered.x0 > box.x0 && covered.x1 < box.x1 && covered.x1 < width)
   assert.ok(covered.y0 > box.y0 && covered.y1 < box.y1)
   assert.ok(covered.x1 > covered.x0 && covered.y1 > covered.y0)
+  // Over a background the screen sits in the 10%-inset stage, as the backend
+  // places it (scene_source_render_transform): x' = 0.1 + 0.8 * x.
+  const staged = sceneEditFrameRegions(width, height, {
+    stageInset: SCENE_BACKGROUND_STAGE_INSET
+  })
+  const stagedBox = { x0: 0.5 * width, y0: 0.3 * height, x1: 0.9 * width, y1: 0.7 * height }
+  assert.ok(staged.covered.x0 > stagedBox.x0 && staged.covered.x1 < stagedBox.x1)
+  assert.ok(staged.covered.y0 > stagedBox.y0 && staged.covered.y1 < stagedBox.y1)
+  assert.ok(staged.uncovered.x1 < stagedBox.x0)
   // The transform is a real move: not the preset's full canvas.
   assert.notDeepEqual(
     { x: SCENE_EDIT_SCREEN_TRANSFORM.x, width: SCENE_EDIT_SCREEN_TRANSFORM.width },

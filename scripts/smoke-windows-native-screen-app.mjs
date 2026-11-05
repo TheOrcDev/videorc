@@ -34,6 +34,7 @@ import {
   parseWindowsNativeScreenArgs,
   requiredBmpPreviewAdvances,
   windowsNativeScreenPerformanceBudgetContext,
+  SCENE_BACKGROUND_STAGE_INSET,
   SCENE_EDIT_SCREEN_TRANSFORM,
   sceneEditFrameRegions,
   windowsNativeScreenRecordingArtifactGates,
@@ -928,30 +929,34 @@ function assertSceneEditPlacementFrame({ outputPath, backgroundSourcePath, seekS
       `Scene-edit frame at ${seekSeconds}s is truncated: recording=${recorded.length}, reference=${reference.length}, expected=${expectedBytes}.`
     )
   }
-  const regions = sceneEditFrameRegions(width, height)
+  const regions = sceneEditFrameRegions(width, height, {
+    stageInset: backgroundSourcePath ? SCENE_BACKGROUND_STAGE_INSET : 0
+  })
   const uncoveredPoints = sampleGrid({ ...regions.uncovered, columns: 12, rows: 12 })
-  const coveredPoints = sampleGrid({ ...regions.covered, columns: 8, rows: 6 })
+  const coveredPoints = sampleGrid({ ...regions.covered, columns: 24, rows: 14 })
   const fill = backgroundSourcePath ? 'the background' : 'black'
-  // Outside: the fill. A background gets the border gate's tolerance (a
-  // scaled, encoded image); black gets a tight one, so a dark desktop drawn
-  // at its preset place still fails.
-  const uncoveredLimit = backgroundSourcePath ? 48 : 16
+  // Outside: the fill, within encoding noise (the bundled background measures
+  // about 1 here, black 0), so a dark desktop drawn at its preset place fails.
+  const uncoveredLimit = 16
   const uncoveredScore = meanRgbDifference(recorded, reference, width, uncoveredPoints)
   if (uncoveredScore > uncoveredLimit) {
     throw new Error(
       `Scene-edit recording at ${seekSeconds}s does not show ${fill} where the moved screen used to be: mean RGB difference ${uncoveredScore.toFixed(1)} exceeded ${uncoveredLimit}. The session drew the screen at its preset place, not where the scene moved it.`
     )
   }
-  // Inside: the screen, so not the fill. Against a background only the
-  // difference counts (the background has its own range); against black, a
-  // dark desktop still has a range of pixel values.
+  // Inside: the screen, so not the fill. It must stand out from the fill by
+  // far more than the noise measured outside: a dark desktop over a dark
+  // background differs by about 24 on average, while a box holding only the
+  // fill scores like the outside. Against black, a dark desktop's range of
+  // pixel values counts too; a background has its own range, so not there.
   const coveredDifference = meanRgbDifference(recorded, reference, width, coveredPoints)
   const coveredScore = backgroundSourcePath
     ? coveredDifference
     : Math.max(coveredDifference, rgbRange(recorded, width, coveredPoints))
-  if (coveredScore < 24) {
+  const coveredMinimum = 12 + 3 * uncoveredScore
+  if (coveredScore < coveredMinimum) {
     throw new Error(
-      `Scene-edit recording at ${seekSeconds}s shows only ${fill} inside the moved screen's box (score ${coveredScore.toFixed(1)}, need 24): the screen was not drawn where the scene put it.`
+      `Scene-edit recording at ${seekSeconds}s shows only ${fill} inside the moved screen's box (score ${coveredScore.toFixed(1)}, need ${coveredMinimum.toFixed(1)}): the screen was not drawn where the scene put it.`
     )
   }
   return { seekSeconds, uncoveredScore, coveredScore }
