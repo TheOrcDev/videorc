@@ -1,5 +1,7 @@
 import type { ChatDelivery, ChatDeliveryMessage } from '../../../../shared/chat-delivery'
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -116,6 +118,9 @@ import {
 import { liveChatEmptyMessage } from '@/lib/live-chat-view'
 import { ChatSignInRows } from '@/components/stream-manager/chat-sign-in-rows'
 import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
+
+// Chat on stream (plan 215 G): its own chunk.
+const ChatOnStreamSwitch = lazy(() => import('@/components/stream-manager/chat-on-stream-switch'))
 import { cn } from '@/lib/utils'
 
 export interface ChatPrefill {
@@ -171,6 +176,8 @@ export function ChatPane({
   searchFocusSignal = 0,
   composerFocusSignal = 0,
   onUseSignIn,
+  chatOnStream,
+  onChatOnStreamChange,
   onSignInToVideorc
 }: {
   delivery?: ChatDelivery
@@ -200,6 +207,10 @@ export function ChatPane({
   removals?: ReadonlyMap<string, ModerationOperation>
   /** "Remove from chat" asked for, before any operation answered. */
   removalRequestIds?: ReadonlySet<string>
+  /** Chat on stream (plan 215 G, D5): `overlayLayout.chat.showOnStream` and
+   * its switch, through the Studio relay. Absent hides the switch. */
+  chatOnStream?: boolean
+  onChatOnStreamChange?: (showOnStream: boolean) => void
   /** ⋯ Remove from chat on a removable row; only while live. */
   onRemoveFromChat?: (message: LiveChatMessage) => void
   sendPending?: boolean
@@ -514,6 +525,11 @@ export function ChatPane({
             <ShortcutKeys accelerator="CmdOrCtrl+F" />
           </InputGroupAddon>
         </InputGroup>
+        {chatOnStream !== undefined && onChatOnStreamChange ? (
+          <Suspense fallback={null}>
+            <ChatOnStreamSwitch checked={chatOnStream} onCheckedChange={onChatOnStreamChange} />
+          </Suspense>
+        ) : null}
       </div>
 
       {/* Plan 213 J1: a stream-key X destination says chat needs Sign in,

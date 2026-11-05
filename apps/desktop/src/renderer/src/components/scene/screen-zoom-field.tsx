@@ -21,17 +21,22 @@ import type { StageRect } from './stage-transform'
  */
 export function ScreenZoomField({
   source,
+  box,
   disabled = false,
   disabledReason,
   onCommit
 }: {
   source: Pick<SceneSource, 'id' | 'transform'>
+  /** The box Zoom scales (plan 216 B5): the screen's picture as the stage
+   * shows it. Defaults to the transform; the patch is in the same
+   * coordinates, mapped to the frame by the owner. */
+  box?: StageRect
   disabled?: boolean
   /** Why it can't change now (a recording or a livestream), or undefined. */
   disabledReason?: string
   onCommit: (patch: StageRect) => void
 }): ReactElement {
-  const committed: StageRect = {
+  const committed: StageRect = box ?? {
     x: source.transform.x,
     y: source.transform.y,
     width: source.transform.width,

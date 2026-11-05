@@ -43,6 +43,7 @@ export interface ProofSurfaceHost {
   on(event: 'closed', listener: () => void): this
   on(event: 'resize', listener: () => void): this
   on(event: 'move', listener: () => void): this
+  off(event: 'closed', listener: () => void): this
 }
 
 // The screen rect the placement pipeline computes, expressed in the host

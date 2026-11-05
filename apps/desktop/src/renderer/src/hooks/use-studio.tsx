@@ -5,7 +5,14 @@ import {
   returningSourceChoices,
   sourceReturnAction
 } from '@/lib/source-return'
+import {
+  IDLE_CAMERA_FRAME_RATE_WATCH,
+  nextCameraFrameRateWatch,
+  sameCameraLowFrameRate,
+  type CameraLowFrameRate
+} from '@/lib/camera-frame-rate'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
+import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
 import {
@@ -26,6 +33,12 @@ import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, withoutSceneShortcut } from '../../../shared/global-shortcuts'
 import { screenHideAccelerator } from '@/lib/screen-privacy-view'
 import { nextEligibleScene } from '@/lib/scene-shortcut-walk'
+import {
+  NO_SOURCE_PICTURE_SIZES,
+  sourcePictureSizesFromCapture,
+  sourcePictureSizesFromCompositor,
+  type SourcePictureSizes
+} from '@/lib/scene-source-sizes'
 import { acceleratorLabel } from '@/lib/accelerator'
 import {
   DEFAULT_CLIP_SECONDS,
@@ -119,6 +132,13 @@ import {
 import { notifyOnce } from '@/lib/notify-once'
 import { streamTargetNotices } from '@/lib/stream-target-notices'
 import {
+  advanceStreamDropActivity,
+  emptyStreamDropActivity,
+  recentStreamDrops,
+  type RecentStreamDrops,
+  type StreamDropActivity
+} from '@/lib/stream-health-attribution'
+import {
   connectionBlockedReason,
   sceneSourceOffBlockedReason,
   START_BLOCKED_COPY
@@ -157,6 +177,8 @@ import type { AgentSurfaceInput } from '@/lib/agent-surface'
 import type { AgentStudioLink } from '@/lib/agent-studio-link'
 import type { RemoteSurfacePublisher, RemoteSurfaceValues } from '@/lib/remote-surface'
 import { useScreenPrivacy } from './use-screen-privacy'
+import { useMarkerContextPublisher } from './use-marker-context-publisher'
+import type { MarkerContext } from '../../../shared/session-markers'
 import { VirtualCameraContext, useVirtualCameraController } from './use-virtual-camera'
 import type { FollowFrontAppHost, FollowSceneApply } from './use-follow-front-app'
 import type { AgentIntent, AgentIntentOutcome, StudioActionSource } from '@/lib/studio-actions'
@@ -327,6 +349,12 @@ import {
   UserFacingError,
   type UserErrorContext
 } from '@/lib/user-error'
+import { recentUserErrors } from '@/lib/user-error-log'
+import {
+  layoutSwitchTarget,
+  pendingLayoutEvidence,
+  type LayoutSwitchTarget
+} from '@/lib/layout-switch-pending'
 import {
   INITIAL_ACCOUNT_READY_REFRESH_STATE,
   reduceAccountReadyRefresh,
@@ -723,6 +751,21 @@ function loadBannerRules() {
 
 function loadCaptionOverlay() {
   return import('@/lib/caption-overlay')
+}
+
+// Chat on stream (plan 215 G): the box's driver and painter, lazy, loaded the
+// first time a chat switch is on while live.
+async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlayDriver> {
+  const [{ createChatOverlayDriver }, { renderChatOverlayCards }] = await Promise.all([
+    import('@/lib/chat-overlay'),
+    loadCaptionOverlay()
+  ])
+  return createChatOverlayDriver({
+    set: (params) => client.requestTyped('chat.overlay.set', params),
+    clear: () => client.requestTyped('chat.overlay.clear'),
+    canvases: () => client.requestTyped('chat.overlay.canvases'),
+    paint: renderChatOverlayCards
+  })
 }
 
 // The Buddy's bubble rasterizer: lazy, never in the eager shell.
@@ -1413,6 +1456,8 @@ export type StudioContextValue = {
   previewLoading: boolean
   previewLiveStatus: PreviewLiveStatus
   previewCameraStatus: PreviewCameraStatus
+  /** Issue #1066: the camera's rate has stayed under its own; null otherwise. */
+  previewCameraLowFrameRate: CameraLowFrameRate | null
   previewScreenStatus: PreviewScreenStatus
   previewSurfaceStatus: PreviewSurfaceStatus
   nativePreviewSurfaceEnabled: boolean
@@ -1427,6 +1472,8 @@ export type StudioContextValue = {
   closeNotesWindow: () => Promise<void>
   setNotesWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<void>
   scene: Scene | null
+  /** Plan 216 B2: each scene source's picture size, for the stage's box. */
+  sourcePictureSizes: SourcePictureSizes
   sceneEditMode: boolean
   selectedSceneSourceId: string | null
   setSceneEditMode: Dispatch<SetStateAction<boolean>>
@@ -1519,9 +1566,9 @@ export type StudioContextValue = {
    * to the leg live — the horizontal program is never touched.
    */
   applySimulcastLeg: (patch: SimulcastLegPatch) => void
-  // The layout preset a live switch is currently starting sources for, if any
-  // (drives the "Switching…" pending state; plan slice D2).
-  layoutSwitchPending: LayoutPreset | null
+  // The layout a switch is applying, if any: its preset and whether it lands
+  // in Freeform (drives the one "Switching…" label; plan slice D2, plan 216 A4).
+  layoutSwitchPending: LayoutSwitchTarget | null
   sourceDeviceSwitchPending: LiveSourceDeviceSwitchPending | null
   sourceSelectionState: LiveSourceSelectionState
   sourceSwitchReason: (kind: LiveSourceDeviceSwitchPending) => string | null
@@ -1779,6 +1826,7 @@ export type StudioCoreContextValue = Omit<
   | 'liveChatSnapshot'
   | 'logs'
   | 'previewCameraStatus'
+  | 'previewCameraLowFrameRate'
   | 'previewLiveStatus'
   | 'previewScreenStatus'
   | 'streamHealth'
@@ -1802,7 +1850,7 @@ export type StudioRecordingContextValue = Pick<StudioContextValue, 'recording'>
 
 export type StudioPreviewContextValue = Pick<
   StudioContextValue,
-  'previewLiveStatus' | 'previewCameraStatus' | 'previewScreenStatus'
+  'previewLiveStatus' | 'previewCameraStatus' | 'previewCameraLowFrameRate' | 'previewScreenStatus'
 >
 
 type RecordLatencyState = {
@@ -1814,6 +1862,12 @@ interface StudioDiagnosticsContextValue {
   captureRecoveryStatus: CaptureRecoveryStatus
   captureRecoveryRetryPending: boolean
   diagnosticStats: DiagnosticStats
+  /**
+   * Which stages dropped frames within the last few seconds (#981), read
+   * from the growth of the diagnostics' session totals. One window for every
+   * surface, so the Studio, Go Live and Health cannot disagree.
+   */
+  recentStreamDrops: RecentStreamDrops
   /** Latest renderer-measured Record/Stop click latency samples. */
   recordLatency: RecordLatencyState
   healthEvents: HealthEvent[]
@@ -2679,6 +2733,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null)
   const [streamTargets, setStreamTargets] = useState<StreamTargetRuntime[]>([])
   const [diagnosticStats, setDiagnosticStats] = useState<DiagnosticStats>(idleDiagnosticStats)
+  // The drop window advances once per committed diagnostics sample. Folding
+  // the same sample twice is a no-op (no counter grows), so a repeated memo
+  // under StrictMode cannot flag a stage.
+  const streamDropActivityRef = useRef<StreamDropActivity>(emptyStreamDropActivity())
+  const recentDrops = useMemo(() => {
+    const nowMs = Date.now()
+    streamDropActivityRef.current = advanceStreamDropActivity(
+      streamDropActivityRef.current,
+      diagnosticStats,
+      streamHealth,
+      nowMs
+    )
+    return recentStreamDrops(streamDropActivityRef.current, nowMs)
+  }, [diagnosticStats, streamHealth])
   const [captureRecoveryStatus, setCaptureRecoveryStatus] =
     useState<CaptureRecoveryStatus>(idleCaptureRecoveryStatus)
   const [captureRecoveryRetryPending, setCaptureRecoveryRetryPending] = useState(false)
@@ -4045,11 +4113,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     useState<PreviewSurfaceStatus>(idlePreviewSurfaceStatus)
   const [previewCameraStatus, setPreviewCameraStatus] =
     useState<PreviewCameraStatus>(idlePreviewCameraStatus)
+  const [previewCameraLowFrameRate, setPreviewCameraLowFrameRate] =
+    useState<CameraLowFrameRate | null>(null)
   const [previewScreenStatus, setPreviewScreenStatus] =
     useState<PreviewScreenStatus>(idlePreviewScreenStatus)
   // Linux: the portal source whose share this run granted (Clips waits for it).
   const [portalShareGrantedSourceId, setPortalShareGrantedSourceId] = useState<string | null>(null)
   const [scene, setScene] = useState<Scene | null>(null)
+  // Plan 216 B2: changes only when a source's picture size does (a display
+  // swap, a camera format), never on a status tick.
+  const [sourcePictureSizes, setSourcePictureSizes] =
+    useState<SourcePictureSizes>(NO_SOURCE_PICTURE_SIZES)
   const transformSceneRef = useRef<Scene | null>(null)
   const [sceneEditMode, setSceneEditMode] = useState(false)
   const [selectedSceneSourceId, setSelectedSceneSourceId] = useState<string | null>(null)
@@ -4291,7 +4365,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLiveAudioProcessingApplied((current) =>
         current?.sessionId === next.sessionId &&
         current.microphoneGainDb === next.microphoneGainDb &&
-        current.microphoneMuted === next.microphoneMuted
+        current.microphoneMuted === next.microphoneMuted &&
+        current.microphoneNoiseSuppression === next.microphoneNoiseSuppression
           ? current
           : next
       )
@@ -4511,7 +4586,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const screenHidden = privacy.screenPrivacy.hidden
   const screenHideRefusal = privacy.screenPrivacy.unavailable
   const screenHideKey = screenHideAccelerator(settings.globalShortcuts?.screenHideToggle)
-  useEffect(() => {
+  const markerContextForWindow = useMemo<MarkerContext>(() => {
     // A buffer-only session (plan 181) has no Library row to hold a marker,
     // so the voice marker waits for a recording or a livestream.
     const available = Boolean(
@@ -4534,7 +4609,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           : replayState.state === 'starting'
             ? ('starting' as const)
             : ('idle' as const)
-    void window.videorc?.pushMarkerContext?.({
+    return {
       sessionId: recording.sessionId,
       available,
       reason: available ? undefined : 'Start a recording or livestream to make a marker.',
@@ -4562,9 +4637,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ...(screenHideRefusal ? { unavailable: screenHideRefusal } : {}),
         ...(screenHideKey ? { accelerator: screenHideKey } : {})
       }
-    })
-    return () => {
-      void window.videorc?.pushMarkerContext?.(null)
     }
   }, [
     captureConfig.replayBuffer.enabled,
@@ -4583,6 +4655,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     screenHideRefusal,
     screenHideKey
   ])
+  // One push per change, never a null between two contexts: the window's
+  // composer mounts on the context and keeps Buddy's answer in that mount.
+  useMarkerContextPublisher(markerContextForWindow, window.videorc?.pushMarkerContext)
   const previewRequestPending = useRef(false)
   const previewRefreshQueued = useRef(false)
   const previewSurfaceStatusRef = useRef<PreviewSurfaceStatus>(idlePreviewSurfaceStatus())
@@ -4603,6 +4678,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     computedAtMs: number
   } | null>(null)
   const previewCameraStatusRef = useRef<PreviewCameraStatus>(idlePreviewCameraStatus())
+  // Issue #1066: watched here, so Sources knows the moment it opens.
+  const cameraFrameRateWatchRef = useRef(IDLE_CAMERA_FRAME_RATE_WATCH)
   const previewScreenStatusRef = useRef<PreviewScreenStatus>(idlePreviewScreenStatus())
   const sourceStatusUnknownRef = useRef(true)
   const [sourceStatusKnown, setSourceStatusKnown] = useState(false)
@@ -4857,7 +4934,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [autosaveSavedScene]
   )
 
-  const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutPreset | null>(null)
+  const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutSwitchTarget | null>(null)
   const [sourceSelectionState, setSourceSelectionState] = useState<LiveSourceSelectionState>({
     snapshot: null,
     pending: null,
@@ -5595,6 +5672,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // the relay carries the off shape, never null.
   const buddyShowOnStream = overlayLayout.buddy.showOnStream
   const buddyShowInRecording = overlayLayout.buddy.showInRecording
+  const chatOnStream = overlayLayout.chat.showOnStream
   const cohostAutoChat = cohostSettings?.autoChat
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
@@ -5626,10 +5704,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           }
         : {}),
-      ...(cohostAutoChat ? { autoChat: cohostAutoChat } : {})
+      ...(cohostAutoChat ? { autoChat: cohostAutoChat } : {}),
+      // Plan 215 G: the chat pane's Chat on stream switch.
+      chatOnStream
     }),
     [
       aiConsent,
+      chatOnStream,
       cohostAutoChat,
       cohostEnabled,
       cohostGate,
@@ -5726,6 +5807,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             await setOverlayLayout({
               ...current,
               buddy: { ...current.buddy, showOnStream: command.showOnStream }
+            })
+          }
+          return cohostStateRef.current ?? offCohostState()
+        }
+        // Plan 215 G (D5): Chat on stream, the same overlay write.
+        if (command.kind === 'chat-show-on-stream') {
+          const current = overlayLayoutRef.current
+          if (current.chat.showOnStream !== command.showOnStream) {
+            await setOverlayLayout({
+              ...current,
+              chat: { ...current.chat, showOnStream: command.showOnStream }
             })
           }
           return cohostStateRef.current ?? offCohostState()
@@ -6500,11 +6592,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const applyPreviewCameraStatus = useCallback((status: PreviewCameraStatus) => {
     previewCameraStatusRef.current = status
     setPreviewCameraStatus(status)
+    const watch = nextCameraFrameRateWatch(cameraFrameRateWatchRef.current, status, Date.now())
+    if (!sameCameraLowFrameRate(watch.low, cameraFrameRateWatchRef.current.low)) {
+      setPreviewCameraLowFrameRate(watch.low)
+    }
+    cameraFrameRateWatchRef.current = watch
+    setSourcePictureSizes((current) => sourcePictureSizesFromCapture(current, 'camera', status))
   }, [])
 
   const applyPreviewScreenStatus = useCallback((status: PreviewScreenStatus) => {
     previewScreenStatusRef.current = status
     setPreviewScreenStatus(status)
+    setSourcePictureSizes((current) => sourcePictureSizesFromCapture(current, 'screen', status))
     setPortalShareGrantedSourceId((current) => nextPortalShareGrant(current, status))
   }, [])
 
@@ -7059,6 +7158,51 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Live records too, and the backend calls that `recording` (plan 095 S5).
   const xProducerReminderShownRef = useRef(false)
   const recordingLive = sessionIsLive(recording)
+
+  // Chat on stream (plan 215 G, D5): while a livestream is on air and one of
+  // the chat box's switches is on, the box follows chat (repainted at most
+  // twice a second); it clears when chat empties, both switches go off or the
+  // livestream ends. Nothing loads until the box is first switched on.
+  const chatOverlayLayout = overlayLayout.chat
+  const chatOverlayOn =
+    recordingLive && (chatOverlayLayout.showOnStream || chatOverlayLayout.showInRecording)
+  const chatOverlayDriverRef = useRef<{
+    client: BackendClient
+    driver: Promise<ChatOverlayDriver | null>
+  } | null>(null)
+  useEffect(() => {
+    const held = chatOverlayDriverRef.current
+    if (held && held.client !== client) {
+      void held.driver.then((driver) => driver?.dispose())
+      chatOverlayDriverRef.current = null
+    }
+    if (!client || (!chatOverlayDriverRef.current && !chatOverlayOn)) return
+    chatOverlayDriverRef.current ??= {
+      client,
+      driver: loadChatOverlayDriver(client).catch(() => null)
+    }
+    const streamVideo = streamOutputVideoSettings(
+      captureConfig.video,
+      captureConfig.streamEnabled ? captureConfig.streaming : undefined
+    )
+    const input = {
+      on: chatOverlayOn,
+      sessionId: liveChatSnapshot.sessionId,
+      messages: liveChatSnapshot.messages,
+      layout: chatOverlayLayout,
+      canvas: { width: streamVideo.width, height: streamVideo.height }
+    }
+    void chatOverlayDriverRef.current.driver.then((driver) => driver?.update(input))
+  }, [
+    captureConfig.streamEnabled,
+    captureConfig.streaming,
+    captureConfig.video,
+    chatOverlayLayout,
+    chatOverlayOn,
+    client,
+    liveChatSnapshot.messages,
+    liveChatSnapshot.sessionId
+  ])
   useEffect(() => {
     if (!recordingLive) {
       if (recording.state === 'idle' || recording.state === 'failed') {
@@ -8044,8 +8188,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           void refreshSessions(nextClient)
         }
         // isSessionAudioLossCode lives in the lazy recovery chunk; this stays
-        // byte-cheap for the eager renderer budget.
-        if (/^(microphone-(input|timeline)|system-audio)-lost$/.test(event.code)) {
+        // byte-cheap for the eager renderer budget. Issue 1064: a microphone
+        // the bus reads as digital silence takes the same notice.
+        if (
+          /^(?:(?:microphone-(?:input|timeline)|system-audio)-lost|microphone-silent)$/.test(
+            event.code
+          )
+        ) {
           void publishMicrophoneInputLost(event)
         } else {
           // Plan 076: a timeline loss that recovered clears its notice.
@@ -8180,6 +8329,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const status = payload as CompositorStatus
         setLiveBackgroundStatus((current) =>
           nextLiveBackgroundStatusView(current, status.liveBackground)
+        )
+        // Plan 216 B2: the sizes the compositor fits each scene source at.
+        setSourcePictureSizes((current) =>
+          sourcePictureSizesFromCompositor(current, status.sceneSources ?? [])
         )
         // Backend-authored commits (live source switches) arrive only as this
         // event; advance committed truth so a later resync never re-presents
@@ -10134,7 +10287,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Background-only commits keep the same preset; flashing the layout
       // controls into "Switching…" for them reads as an unrelated change.
       if (options?.pendingIndicator !== false) {
-        setLayoutSwitchPending(layout.layoutPreset)
+        setLayoutSwitchPending(layoutSwitchTarget(layout))
       }
 
       let commitReceiptSettled = false
@@ -12482,7 +12635,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
 
     try {
-      setLastError(null)
+      // Plan 216 A5: the last error stays; the bundle is meant to explain it.
       setSupportBundleExportPending(true)
       // Re-read runtime info at export time: backend crash records are
       // appended by main while the app runs, and the startup snapshot would
@@ -12505,7 +12658,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Plan 214 E3: the camera's state, never its words.
           virtualCamera: (await import('@/lib/virtual-camera-view')).virtualCameraBundleLine(
             virtualCamera.status
-          )
+          ),
+          // Plan 216 A5: the toasts this session showed, raw text included;
+          // the backend redacts them with the rest of the bundle.
+          recentUserErrors: recentUserErrors()
         }
       }
       const result = await client.request<SupportBundleExportResult>(
@@ -12949,6 +13105,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const params = activeAudioProcessingUpdateParams(
       { state: recording.state, sessionId: recording.sessionId },
       {
+        microphoneNoiseSuppression: captureConfig.audio.microphoneNoiseSuppression ?? 'off',
         microphoneGainDb: captureConfig.audio.microphoneGainDb,
         microphoneMuted: captureConfig.audio.microphoneMuted
       }
@@ -13027,6 +13184,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : undefined
           if (validResult?.applied) {
             latest.lastApplied = {
+              microphoneNoiseSuppression:
+                validResult.microphoneNoiseSuppression ??
+                latest.lastApplied.microphoneNoiseSuppression ??
+                'off',
               microphoneGainDb: validResult.microphoneGainDb,
               microphoneMuted: validResult.microphoneMuted
             }
@@ -13151,7 +13312,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (sync.disabled) {
       if (
         params.microphoneGainDb !== sync.lastApplied.microphoneGainDb ||
-        params.microphoneMuted !== sync.lastApplied.microphoneMuted
+        params.microphoneMuted !== sync.lastApplied.microphoneMuted ||
+        params.microphoneNoiseSuppression !== sync.lastApplied.microphoneNoiseSuppression
       ) {
         const rollback = sync.lastApplied
         setCaptureConfig((current) => ({
@@ -13172,7 +13334,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const systemAudioChanged = Object.keys(systemAudioDelta).length > 0
     const desiredMatchesLastApplied =
       params.microphoneGainDb === sync.lastApplied.microphoneGainDb &&
-      params.microphoneMuted === sync.lastApplied.microphoneMuted
+      params.microphoneMuted === sync.lastApplied.microphoneMuted &&
+      params.microphoneNoiseSuppression === sync.lastApplied.microphoneNoiseSuppression
     if (
       !enqueueDesiredForNewSync &&
       !sync.queue.hasOutstandingWork &&
@@ -13192,6 +13355,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     recording.state,
     captureConfig.audio.microphoneGainDb,
     captureConfig.audio.microphoneMuted,
+    captureConfig.audio.microphoneNoiseSuppression,
     captureConfig.audio.systemAudioEnabled,
     captureConfig.audio.systemAudioGainDb,
     captureConfig.audio.systemAudioEchoGuard,
@@ -14264,7 +14428,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!streamingProfileGate.allowed) {
         return streamingProfileGate.reason
       }
-      const compatibility = videoProfileCompatibility(config)
+      const compatibility = videoProfileCompatibility(config, runtimeInfo?.platform)
       if (compatibility.blockingReason) {
         return compatibility.blockingReason
       }
@@ -14315,6 +14479,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       health,
       transportSessionActive,
       livestreamingEntitlementReason,
+      runtimeInfo?.platform,
       savedSceneAppStates,
       sceneLibrary.scenes,
       streamOutputTopologyPreflight,
@@ -15352,6 +15517,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               }
           const startAudioSnapshot = nextSessionParams.audio
             ? {
+                microphoneNoiseSuppression:
+                  nextSessionParams.audio.microphoneNoiseSuppression ?? 'off',
                 microphoneGainDb: nextSessionParams.audio.microphoneGainDb,
                 microphoneMuted: nextSessionParams.audio.microphoneMuted,
                 systemAudio: {
@@ -18427,6 +18594,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       healthEvents,
       logs,
       previewSurfaceStatus,
+      recentStreamDrops: recentDrops,
       recordLatency,
       retryCaptureRecovery,
       streamHealth
@@ -18438,6 +18606,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       healthEvents,
       logs,
       previewSurfaceStatus,
+      recentDrops,
       recordLatency,
       retryCaptureRecovery,
       streamHealth
@@ -18513,8 +18682,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const recordingValue = useMemo<StudioRecordingContextValue>(() => ({ recording }), [recording])
   const previewValue = useMemo<StudioPreviewContextValue>(
-    () => ({ previewLiveStatus, previewCameraStatus, previewScreenStatus }),
-    [previewCameraStatus, previewLiveStatus, previewScreenStatus]
+    () => ({
+      previewLiveStatus,
+      previewCameraStatus,
+      previewCameraLowFrameRate,
+      previewScreenStatus
+    }),
+    [previewCameraLowFrameRate, previewCameraStatus, previewLiveStatus, previewScreenStatus]
   )
 
   // Development smoke harness: delegates to the same public actions as the UI.
@@ -18528,7 +18702,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         scenes: value.savedScenes,
         activeId: value.activeSavedSceneId,
         pendingId: value.savedScenePendingId,
-        pendingLayout: value.layoutSwitchPending,
+        pendingLayout: pendingLayoutEvidence(value.layoutSwitchPending),
         modified: value.savedSceneModified,
         visual: workingVisual,
         diagnostics: {
@@ -18700,6 +18874,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeNotesWindow,
       setNotesWindowAlwaysOnTop,
       scene,
+      sourcePictureSizes,
       sceneEditMode,
       selectedSceneSourceId,
       setSceneEditMode,
@@ -18949,6 +19124,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       closeNotesWindow,
       setNotesWindowAlwaysOnTop,
       scene,
+      sourcePictureSizes,
       sceneEditMode,
       selectedSceneSourceId,
       setSceneEditMode,

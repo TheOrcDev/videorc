@@ -99,7 +99,14 @@ jobs:
         run: cargo fmt --check --all
 
       - name: Clippy
-        run: cargo clippy -p videorc-backend -- -D warnings
+        # --all-targets lints the test code too (#1070).
+        run: cargo clippy -p videorc-backend --all-targets -- -D warnings
+
+      - name: Clippy (release)
+        # Release compiles out the debug_assertions-only smoke paths, so code
+        # only they reach goes dead or unused there; the dev clippy above
+        # cannot see it (#1070).
+        run: cargo clippy --release -p videorc-backend -- -D warnings
 
       - name: Compile tests
         # Split from the run so a slow compile and a hung test are told apart.
@@ -205,6 +212,9 @@ jobs:
 
       - name: Node logic tests
         run: pnpm test:scripts
+
+      - name: Source reconciliation smoke
+        run: pnpm smoke:sources
 
   js-skip:
     name: JS (format + lint + tests)

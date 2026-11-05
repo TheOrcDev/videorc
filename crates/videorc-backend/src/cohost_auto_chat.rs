@@ -2679,7 +2679,7 @@ mod tests {
             &bubble,
             None,
             true,
-            &[twitch_ana.clone()],
+            std::slice::from_ref(&twitch_ana),
             start,
             &now_iso(),
         );

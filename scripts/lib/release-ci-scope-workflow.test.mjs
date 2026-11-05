@@ -28,7 +28,7 @@ describe('release CI path-filter wiring', () => {
     assert.match(ci, /rust-skip:[\s\S]*runs-on: ubuntu-latest/)
     assert.match(rustJob, /name: Check out repository/)
     assert.match(rustJob, /name: Clippy/)
-    assert.match(rustJob, /cargo clippy -p videorc-backend -- -D warnings/)
+    assert.match(rustJob, /cargo clippy -p videorc-backend --all-targets -- -D warnings/)
     assert.match(rustJob, /name: Test/)
     assert.match(rustJob, /cargo test -p videorc-backend/)
     assert.match(rustJob, /name: Short no-device process\/memory sentinel/)

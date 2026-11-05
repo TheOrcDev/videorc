@@ -340,10 +340,6 @@ async function recordCommittedComposition() {
       .map((source) => ({ ...source, kind: 'test-pattern', deviceId: null })),
     outputs: committed.outputs.map((output) => ({ ...output, width, height, fps }))
   }
-  const resource = await command('authorize-smoke-resource', {
-    path: outputDirectory,
-    kind: 'output-directory'
-  })
   const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
   const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
   // Plan 215 D3: the camera moves and resizes mid-session, through the
@@ -352,6 +348,12 @@ async function recordCommittedComposition() {
   // is the aux compositor leg, so the file alone proves nothing about it).
   report.liveMove = { definition: LIVE_MOVE_DEFINITION, passes: [] }
   for (const streaming of [false, true]) {
+    // An output-directory capability is single-use: each session.start
+    // consumes one, so each pass gets its own.
+    const resource = await command('authorize-smoke-resource', {
+      path: outputDirectory,
+      kind: 'output-directory'
+    })
     report.liveMove.passes.push(
       await recordWithLiveMove({
         scene,
@@ -405,6 +407,17 @@ async function recordWithLiveMove({
   const sourceIds = Object.keys(transforms)
   const fields = ['x', 'y', 'width', 'height']
   const timestamp = '2026-01-01T00:00:00.000Z'
+  // The pass starts from the saved transforms. A session.start installs its
+  // own scene without a scene.changed, so the editor would keep the last
+  // pass's live move and treat the same value as a no-op; put the transforms
+  // back through an announced commit first, so the editor reads them.
+  for (const [sourceId, rect] of Object.entries(transforms)) {
+    await request(backend, timeoutMs, 'scene.source.transform.update', {
+      sourceId,
+      transform: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      snap: 'none'
+    })
+  }
   const started = await request(backend, timeoutMs, 'session.start', {
     sources: { testPattern: true },
     scene,
@@ -447,7 +460,17 @@ async function recordWithLiveMove({
         }
       : {})
   })
-  assert.equal(started.state, streaming ? 'streaming' : 'recording', JSON.stringify(started))
+  // A record+stream session reports `recording` with a record+stream message
+  // (as smoke:smart-scenes reads it); only a stream-only one says `streaming`.
+  if (streaming) {
+    assert.ok(
+      started.state === 'streaming' ||
+        (started.state === 'recording' && /record\+stream/i.test(started.message ?? '')),
+      JSON.stringify(started)
+    )
+  } else {
+    assert.equal(started.state, 'recording', JSON.stringify(started))
+  }
   const during = await request(backend, timeoutMs, 'scene.get')
   assertSceneTransforms(during, transforms)
   await draftRefusedWhileRecording()
@@ -465,6 +488,13 @@ async function recordWithLiveMove({
   await waitUntil(`document.body.textContent.includes(${JSON.stringify(LIVE_PLACEMENT_HINT)})`)
   await waitUntil(`document.querySelector('[data-videorc-transform-field="x"]')?.disabled===false`)
   await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  const percent = (value) => {
+    const rounded = Math.round(value * 1000) / 10
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+  }
+  await waitUntil(
+    `document.querySelector('[data-videorc-transform-field="x"]')?.value === ${JSON.stringify(percent(transforms['source:camera'].x))}`
+  )
   const runBefore = (await request(backend, timeoutMs, 'compositor.status')).runId ?? null
   await sleep(LIVE_MOVE_SETTLE_MS)
 

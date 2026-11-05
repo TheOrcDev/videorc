@@ -50,7 +50,13 @@ import type { ScreenPrivacyContext } from '../../../../shared/session-markers'
 import { shortcutLabel } from '@/lib/platform'
 import { screenPrivacyActionLabel, screenPrivacyDisabledReason } from '@/lib/screen-privacy-view'
 import { shortcutAccelerator } from '@/lib/shortcuts'
-import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY, WIDE_LABEL } from '@/lib/stream-manager-layout'
+import {
+  ABOVE_NARROW,
+  COMPACT_ICON,
+  COMPACT_LABEL,
+  NARROW_ONLY,
+  WIDE_LABEL
+} from '@/lib/stream-manager-layout'
 import { chatStateLabel } from '@/lib/state-labels'
 import { DEFAULT_STAT_ORDER } from '@/lib/stream-manager-stats'
 import {
@@ -345,7 +351,7 @@ export function StreamManagerStatusBar({
   onSound?: (action: SoundRelayAction) => unknown
   onOpenPreview?: () => void
   /** The window's keyboard hints (plan 174 S3.16a, H-7): ⌘F, ⌘L, ⌘J. Each
-   * is still clickable; below 800 px only the key shows, below 640 px they
+   * is still clickable; below 1,040 px only the key shows, below 640 px they
    * sit in the ⋯ menu. */
   onSearchChat?: () => void
   onFocusComposer?: () => void
@@ -511,12 +517,14 @@ export function StreamManagerStatusBar({
               )}
               data-slot="stream-manager-actions"
             >
+              {/* The words at Wide only, like Hide screen's: below it the
+                  bar's every control and the platforms' icons need the room. */}
               {hints.map((hint) => (
                 <StatusBarHint
                   key={hint.id}
                   accelerator={shortcutAccelerator(hint.id)}
                   label={hint.label}
-                  labelClassName={COMPACT_LABEL}
+                  labelClassName={WIDE_LABEL}
                   onClick={hint.run}
                 />
               ))}
@@ -582,10 +590,14 @@ export function StreamManagerStatusBar({
               ) : null}
               {onMarkClip
                 ? clipButtons(clip).map((button, index) => (
+                    // Below 800 px "Clip 30 s" names it alone, like Banners
+                    // and Clear: the words need no hover mid-stream.
                     <StatusBarAction
                       key={button.seconds}
                       hint={button.hint}
-                      icon={index === 0 ? <ClipIcon aria-hidden /> : undefined}
+                      icon={
+                        index === 0 ? <ClipIcon aria-hidden className={COMPACT_ICON} /> : undefined
+                      }
                       label={button.label}
                       text={button.text}
                       onClick={() => onMarkClip(button.seconds)}

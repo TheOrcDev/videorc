@@ -490,6 +490,27 @@ export interface CameraSelectionDiagnostics {
   state: PreviewCameraState
 }
 
+/**
+ * Plan 216 A5: one user-facing error the renderer showed, so the support
+ * bundle explains the last toast. The backend redacts `raw` with the rest of
+ * the bundle (paths, URLs, secrets).
+ */
+export interface RendererUserErrorRecord {
+  /** When it was shown, ISO 8601. */
+  at: string
+  /** The verb the streamer asked for ("switch") and its object ("the scene"). */
+  action?: string
+  object?: string
+  /** The backend's error code, when the error carried one. */
+  code?: string
+  /** How the copy read it: a known cause, Videorc offline, or unknown. */
+  kind: 'offline' | 'known' | 'canceled' | 'unknown'
+  /** The toast title the streamer read. */
+  title: string
+  /** The raw text behind it. */
+  raw: string
+}
+
 export interface RendererDiagnosticsSnapshot {
   cameraSelection?: CameraSelectionDiagnostics
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
@@ -497,6 +518,8 @@ export interface RendererDiagnosticsSnapshot {
   runtimeInfo?: RuntimeInfo
   /** Plan 214 E3: Videorc Camera's line. */
   virtualCamera?: VirtualCameraBundleLine
+  /** Plan 216 A5: the newest user-facing errors, oldest first. */
+  recentUserErrors?: RendererUserErrorRecord[]
 }
 
 export type AudioTrackSource = 'microphone' | 'test-tone' | 'system-audio'
@@ -1931,7 +1954,11 @@ export interface CaptionsSessionParams {
   textSize?: 's' | 'm' | 'l'
 }
 
+export type MicrophoneNoiseSuppression = 'off' | 'rnnoise'
+
 export interface AudioSettings {
+  /** Older saved settings default to Off. */
+  microphoneNoiseSuppression?: MicrophoneNoiseSuppression
   microphoneGainDb: number
   microphoneMuted: boolean
   microphoneSyncOffsetMs: number
@@ -1952,6 +1979,8 @@ export const SYSTEM_AUDIO_GAIN_DB_MAX = 12
 export const SYSTEM_AUDIO_GAIN_DB_DEFAULT = -6
 
 export interface AudioProcessingUpdateParams {
+  /** Omitted means unchanged, including requests from older clients. */
+  microphoneNoiseSuppression?: MicrophoneNoiseSuppression
   sessionId: string
   microphoneGainDb: number
   microphoneMuted: boolean
@@ -1969,6 +1998,7 @@ export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams
     | 'no-active-session'
     | 'stale-session'
     | 'native-audio-unavailable'
+    | 'microphone-noise-suppression-unavailable'
     | 'live-audio-control-unavailable'
     | 'live-audio-control-state-unknown'
     | 'session-ended'
@@ -1976,6 +2006,7 @@ export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams
   confirmedMicrophoneGainDb?: number
   /** Present when the backend can conclusively report settings remaining after rejection. */
   confirmedMicrophoneMuted?: boolean
+  confirmedMicrophoneNoiseSuppression?: MicrophoneNoiseSuppression
 }
 
 export interface RemuxSessionParams {
@@ -3111,6 +3142,11 @@ export interface AudioLevelsEvent {
   master?: AudioLevelReading
   /** Samples the mix clipped since the previous event. */
   masterClippedSamples: number
+  /**
+   * Issue 1064: the session's silence watchdog reports the captured
+   * microphone as digital silence (sent only while true).
+   */
+  microphoneSilent?: boolean
 }
 
 export interface AudioMeterSampleSnapshot {
@@ -4561,9 +4597,10 @@ export interface FirstFrameDecisionRecord {
   evidence?: FirstFrameDecisionEvidence
 }
 
-/** One backend process exit worth keeping: every non-intentional exit plus
- * intentional shutdowns that still reported a non-zero code. Written by the
- * main-process supervisor to `userData/backend-crashes.json`. */
+/** One backend process exit worth keeping: every exit main did not ask for
+ * (a backend recycle is kept as intentional) plus stops main asked for that
+ * still reported a non-zero code. Written by the main-process supervisor to
+ * `userData/backend-crashes.json`. */
 export interface BackendCrashRecord {
   /** ISO timestamp of the exit observation. */
   at: string
@@ -4575,7 +4612,12 @@ export interface BackendCrashRecord {
    * was scheduled (app quitting, intentional stop with a non-zero code). */
   attempt: number | null
   uptimeMs: number
+  /** Videorc ended it: main stopped it, or the backend recycled itself
+   * (exit 0, no signal). False for crashes and for kills from outside. */
   intentional: boolean
+  /** NTSTATUS name when Windows reported a crash code, e.g.
+   * `STATUS_ACCESS_VIOLATION`. Absent otherwise and on older records. */
+  windowsStatus?: string
   /** Last stderr lines of that process (each line truncated). */
   stderrTail: string[]
 }
@@ -4831,6 +4873,49 @@ export interface SetCommentHighlightParams {
 export interface CommentHighlightCanvases {
   vertical?: { width: number; height: number }
 }
+
+// --- Chat on stream (plan 215 G, D5) -----------------------------------------
+// The last five chat messages as one card the renderer paints
+// (`lib/chat-overlay.ts`) and the backend draws on every leg the overlay
+// layout's `chat` switches carry, like the highlight card. Off by default.
+
+/** `chat.overlay.set`: mirrors Rust `SetChatOverlayParams`. */
+export interface SetChatOverlayParams {
+  pngBase64: string
+  /** The placed chat rect for the horizontal canvas; omitted keeps the
+   *  default corner. */
+  rect?: OverlayRect
+  /** The box rasterized for the vertical simulcast leg; sent only when
+   *  `chat.overlay.canvases` reports a vertical canvas. */
+  verticalPngBase64?: string
+  /** The placed chat rect for the vertical leg. */
+  verticalRect?: OverlayRect
+}
+
+/** What `chat.overlay.set` and `chat.overlay.clear` answer: mirrors Rust
+ *  `ChatOverlayInfo`. */
+export interface ChatOverlayInfo {
+  active: boolean
+  width: number
+  height: number
+  revision: number
+  /** A portrait raster is installed beside the landscape one. */
+  vertical: boolean
+}
+
+/** `chat.overlay.canvases`: the canvases of the running session the box is
+ *  rasterized for, whatever the chat switches say. Mirrors Rust
+ *  `ChatOverlayCanvases`. Both absent without a session, or off the
+ *  compositor bridge. */
+export interface ChatOverlayCanvases {
+  /** The landscape leg the box lands on: with a vertical leg the horizontal
+   *  stream is the primary leg at the session's own size, not the stream
+   *  profile's, and a box painted for the wrong width is cropped. */
+  horizontal?: { width: number; height: number }
+  /** The vertical simulcast leg's portrait canvas, for its own box. */
+  vertical?: { width: number; height: number }
+}
+// --- end chat on stream (plan 215 G) -----------------------------------------
 
 export interface CommentsCommandResolution<T> {
   requestId: string
@@ -6439,7 +6524,9 @@ export interface OverlayItemLayout {
   showInRecording: boolean
 }
 
-export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy'] as const
+/** The placeable overlay items; `chat` (plan 215 G) is the chat box, off by
+ * default because it shows viewers' names. */
+export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy', 'chat'] as const
 export type OverlayItem = (typeof OVERLAY_ITEMS)[number]
 
 export type OverlayLayout = Record<OverlayItem, OverlayItemLayout>
@@ -7642,6 +7729,10 @@ export interface CohostWindowState {
    * and operates. Absent from a relay seeded without it (older Studio,
    * smokes); the window then shows no header. */
   buddy?: CohostWindowBuddy
+  /** Chat on stream (plan 215 G, D5): `overlayLayout.chat.showOnStream`, for
+   * the chat pane's switch. Absent from a relay seeded without it (older
+   * Studio, smokes); the window then shows no switch. */
+  chatOnStream?: boolean
 }
 
 /** The Buddy as the Stream Manager operates it (plan 164 S-C4). The window
@@ -7726,11 +7817,15 @@ export type CohostBuddyActionCommand =
   /** Plan 168 S-D3: a reaction chip beside the Say box; Studio routes it to
    * `cohost.pet.react`. `reaction` is a reaction id (`[a-z0-9-]{1,40}`). */
   | { requestId: string; kind: 'buddy-react'; reaction: string }
+  /** Plan 215 G (D5): the chat pane's Chat on stream switch. It rides this
+   * relay like the Buddy's switch; Studio writes `overlayLayout.chat`. */
+  | { requestId: string; kind: 'chat-show-on-stream'; showOnStream: boolean }
 
 export const COHOST_BUDDY_ACTION_KINDS = [
   'buddy-say',
   'buddy-show-on-stream',
-  'buddy-react'
+  'buddy-react',
+  'chat-show-on-stream'
 ] as const
 
 /** Correlated co-host action from the Comments window, brokered through main

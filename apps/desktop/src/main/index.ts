@@ -294,6 +294,7 @@ import {
   refusePackagedTestHooks
 } from './packaged-test-hooks'
 import { SmokeAppQuitGuard } from './smoke-app-quit-guard'
+import { smokeRaiseWindowPlacement } from './smoke-raise-window-level'
 import { PreviewLifecycleSmokeEvidence } from './preview-lifecycle-smoke-evidence'
 import {
   PACKAGED_SMOKE_COMMAND_NAMES,
@@ -335,6 +336,7 @@ import {
   appendBackendCrashRecord,
   backendCrashLogPath,
   buildBackendCrashRecord,
+  classifyBackendExit,
   describeBackendCrashRecord,
   readBackendCrashLog,
   shouldRecordBackendExit
@@ -425,6 +427,7 @@ import {
   proofSurfaceHostNote,
   type ProofSurfaceHost
 } from './in-window-proof-surface'
+import { executeProofSurfaceScript, settleWithProofSurface } from './proof-surface-call'
 import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_FETCH_TIMEOUT_MS,
@@ -3916,7 +3919,8 @@ function buddyActionCommand(
     }
     return { requestId, kind, text: trimmed, state, sessionId }
   }
-  if (kind === 'buddy-show-on-stream') {
+  // Plan 215 G: Chat on stream needs no live session either; it is a switch.
+  if (kind === 'buddy-show-on-stream' || kind === 'chat-show-on-stream') {
     const { showOnStream } = value as { showOnStream?: unknown }
     if (typeof showOnStream !== 'boolean') {
       return new Error('Show on stream needs true or false.')
@@ -5669,7 +5673,7 @@ async function loadNativePreviewSurfaceHtml(surfaceWindow: ProofSurfaceHost): Pr
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const htmlPath = writeNativePreviewSurfaceHtmlShell()
     try {
-      await surfaceWindow.loadFile(htmlPath)
+      await settleWithProofSurface(surfaceWindow, () => surfaceWindow.loadFile(htmlPath))
       return
     } catch (error) {
       lastError = error
@@ -7303,7 +7307,8 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       if (proofPollingSuppressed) {
         await waitForNativePreviewSurfaceScript(surfaceWindow)
         if (!surfaceWindow.isDestroyed() && previewWindowSurfaceGenerationIsCurrent(generation)) {
-          await surfaceWindow.webContents.executeJavaScript(
+          await executeProofSurfaceScript(
+            surfaceWindow,
             'window.__videorcSetFramePollingSuppressed?.(true)',
             true
           )
@@ -7313,7 +7318,8 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       if (nativePreviewSurfaceScene) {
         await waitForNativePreviewSurfaceScript(surfaceWindow)
         if (!surfaceWindow.isDestroyed() && previewWindowSurfaceGenerationIsCurrent(generation)) {
-          await surfaceWindow.webContents.executeJavaScript(
+          await executeProofSurfaceScript(
+            surfaceWindow,
             `window.__videorcSetPreviewScene?.(${jsonForInlineScript(nativePreviewSurfaceScene)})`,
             true
           )
@@ -7855,7 +7861,8 @@ async function applyNativePreviewSurfaceScene(
     }
     const sceneJson = jsonForInlineScript(nativePreviewSurfaceScene)
     if (nativePreviewSurfaceWindow === surfaceWindow && !surfaceWindow.isDestroyed()) {
-      await surfaceWindow.webContents.executeJavaScript(
+      await executeProofSurfaceScript(
+        surfaceWindow,
         `window.__videorcSetPreviewScene?.(${sceneJson})`,
         true
       )
@@ -7958,7 +7965,8 @@ async function applyNativePreviewSurfaceBanners(generation: number): Promise<Pre
   }
   // The latest scene: a compositor present may have replaced it meanwhile,
   // and every builder already reads the new list.
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcSetPreviewScene?.(${jsonForInlineScript(nativePreviewSurfaceScene)})`,
     true
   )
@@ -8199,7 +8207,8 @@ async function presentNativePreviewSurfaceCompositor(
     // status channel. Present + metrics happen in ONE script round trip.
     const statusJson = jsonForInlineScript(nativePreviewProofPresentStatus(effectiveStatus))
     if (nativePreviewSurfaceWindow === surfaceWindow && !surfaceWindow.isDestroyed()) {
-      metrics = await surfaceWindow.webContents.executeJavaScript(
+      metrics = await executeProofSurfaceScript(
+        surfaceWindow,
         `${sceneScript}window.__videorcSetCompositorStatus?.(${statusJson});` +
           `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
         true
@@ -8965,7 +8974,8 @@ async function syncNativePreviewProofPollingProfile(): Promise<void> {
     nativePreviewAppliedProofPollingProfile = null
     return
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcSetFramePollingProfile?.(${jsonForInlineScript(profile)})`,
     true
   )
@@ -9052,7 +9062,8 @@ async function setNativePreviewProofAnimationSuspended(suspended: boolean): Prom
     nativePreviewProofAnimationSuspended = null
     return
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcSetProofSurfaceSuspended?.(${suspended ? 'true' : 'false'})`,
     true
   )
@@ -9081,7 +9092,8 @@ async function syncNativePreviewProofPollingSuppression(): Promise<boolean> {
   ) {
     return nativePreviewProofPollingIsSuppressed()
   }
-  await surfaceWindow.webContents.executeJavaScript(
+  await executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcSetFramePollingSuppressed?.(${desired ? 'true' : 'false'})`,
     true
   )
@@ -9107,7 +9119,8 @@ async function readNativePreviewSurfaceMetricsAfterPaint(
   ) {
     return null
   }
-  return surfaceWindow.webContents.executeJavaScript(
+  return executeProofSurfaceScript(
+    surfaceWindow,
     `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
     true
   )
@@ -9413,7 +9426,8 @@ async function waitForNativePreviewSurfaceScript(
       if (surfaceWindow.isDestroyed()) {
         return
       }
-      lastState = await surfaceWindow.webContents.executeJavaScript(
+      lastState = await executeProofSurfaceScript(
+        surfaceWindow,
         'typeof window.__videorcSetPreviewScene',
         true
       )
@@ -10506,10 +10520,13 @@ function recordBackendExit(
   runtime: BackendRuntime,
   code: number | null,
   signal: NodeJS.Signals | null,
-  intentional: boolean,
+  markedByMain: boolean,
   attempt: number | null
 ): void {
-  if (!shouldRecordBackendExit({ intentional, code, signal })) {
+  // Read the mark at the exit itself: main sets it before any signal it sends,
+  // so the exit event can never land ahead of it.
+  const exit = classifyBackendExit({ markedByMain, code, signal, platform: process.platform })
+  if (!shouldRecordBackendExit({ cause: exit.cause, code })) {
     return
   }
   const evidence = backendGenerationEvidence.get(runtime)
@@ -10520,7 +10537,8 @@ function recordBackendExit(
     signal,
     attempt,
     uptimeMs: evidence ? Date.now() - evidence.startedAtMs : 0,
-    intentional,
+    intentional: exit.intentional,
+    windowsStatus: exit.windowsStatus,
     stderrTail: evidence?.stderrTail.snapshot() ?? []
   })
   try {
@@ -12754,8 +12772,12 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'comments-window-state') {
+    // The client area too: a framed Windows window's outer bounds include its
+    // invisible resize border, so the renderer is narrower than `bounds`.
+    const window = commentsWindow
     return {
       ...commentsWindowState(),
+      contentBounds: commentsWindowIsOpen() && window ? window.getContentBounds() : null,
       ...smokeNativeWindowIdentity(commentsWindow)
     }
   }
@@ -13259,6 +13281,7 @@ async function runSmokePreviewMotionCommand(
           statsMenuItems,
           menuOpenAfter: Boolean(document.querySelector('[role="menu"]')),
           windowWidth: window.innerWidth,
+          numberFormatLocale: new Intl.NumberFormat().resolvedOptions().locale,
           documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 0.5,
           header: box(header),
           headerItems: visibleDescendants(header),
@@ -13968,6 +13991,9 @@ async function runSmokePreviewMotionCommand(
   // Lifts one app window just above the floating backdrop and reports where it
   // is, so a probe can shoot exactly its rect. `focus: true` also makes it key;
   // probes leave it off so the run never steals the user's focus.
+  // `level: 'screen-saver'` lifts it above the invisibility smokes' native
+  // motion stimulus instead (plan 215 C5), so the recording can see the
+  // window whenever the capture filter lets it through.
   // close-backdrop-window restores every lifted window's own level.
   if (command === 'raise-window') {
     const role = typeof params.role === 'string' ? params.role : ''
@@ -13975,6 +14001,7 @@ async function runSmokePreviewMotionCommand(
     if (!target || target.isDestroyed()) {
       throw new Error(`No open window for role: ${role}`)
     }
+    const placement = smokeRaiseWindowPlacement(params.level)
     // Every other app window drops below the floating backdrop: a window's
     // glass blurs whatever sits directly behind it, so an overlapping app
     // window would be measured instead of the backdrop.
@@ -13986,7 +14013,7 @@ async function runSmokePreviewMotionCommand(
       }
     }
     smokeRaisedWindowRoles.set(target, role)
-    target.setAlwaysOnTop(true, 'floating', 1)
+    target.setAlwaysOnTop(true, placement.level, placement.relativeLevel)
     if (params.focus === true) {
       target.show()
       target.focus()
@@ -13997,6 +14024,7 @@ async function runSmokePreviewMotionCommand(
     const match = /^window:(\d+):/.exec(target.getMediaSourceId())
     return {
       role,
+      level: placement.level,
       bounds: target.getBounds(),
       windowId: match ? Number(match[1]) : null,
       focused: target.isFocused(),

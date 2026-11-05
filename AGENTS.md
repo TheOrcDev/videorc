@@ -39,7 +39,7 @@ Use the smallest gate that proves the change, then run the broader gate before h
 - Rust format: `cargo fmt --check --all`
 - Rust advisory audit: `pnpm audit:rust` (requires `cargo install cargo-audit --locked` locally)
 - Rust tests: `cargo test -p videorc-backend`
-- Rust lint: `cargo clippy -p videorc-backend -- -D warnings`
+- Rust lint: `cargo clippy -p videorc-backend --all-targets -- -D warnings` and `cargo clippy --release -p videorc-backend -- -D warnings` (release compiles out the `debug_assertions` smoke paths; locally add `CARGO_PROFILE_RELEASE_STRIP=false` if your toolchain lacks `rust-objcopy`)
 - Combined dependency advisory audit: `pnpm audit:deps`
 - Local smoke bundle: `pnpm smoke:local-gates`
 - Linux FFmpeg provisioning (Linux x64 only): `pnpm ffmpeg:fetch:linux`
@@ -53,6 +53,8 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 - App smokes queue behind one host lock per machine, held across app relaunches.
 - Backend prebuilds and `pnpm cargo:slot …` share two build slots; use the wrapper for heavy cargo work.
 - App launches wait for host memory pressure to clear before starting.
+- While Videorc streams live on this machine (its FFmpeg pushing FLV to a non-loopback ingest), app smokes, build slots, `pnpm cargo:slot` and `pnpm package:backend:macos` wait until the stream ends; a smoke's loopback sink never counts. Run other heavy local work through those wrappers. `VIDEORC_BUILD_WHILE_LIVE=1` skips the wait.
+- Windows has no host lock or build slots (off by design); see `docs/windows-dev-loop.md`.
 - `VIDEORC_SMOKE_LOCK_PORT` selects the lock port; `VIDEORC_SMOKE_BUILD_SLOTS` sets capacity (0 disables).
 - `VIDEORC_SMOKE_HOST_LOCK=0` and `VIDEORC_SMOKE_MEMORY_CHECK=0` disable their respective checks.
 - Wait limits: `VIDEORC_SMOKE_HOST_LOCK_WAIT_MS`, `VIDEORC_SMOKE_BUILD_SLOT_WAIT_MS`, `VIDEORC_SMOKE_MEMORY_WAIT_MS`.

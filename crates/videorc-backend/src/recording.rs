@@ -168,8 +168,8 @@ const AUDIO_LEVELS_INTERVAL: Duration = Duration::from_millis(50);
 /// Level ticks between checks that the session is still the active one.
 const AUDIO_LEVELS_LIVENESS_TICKS: u32 = 20;
 /// Silent-mic health check (plan 021 F3): how deep into a recording the mic may
-/// stay silent before the session gets a truthful warning, and the session-peak
-/// floor below which a track counts as silence (TCC-unauthorized processes get
+/// stay silent before the session gets a truthful warning, and the raw-input
+/// peak floor below which capture counts as silence (TCC-unauthorized processes get
 /// silent zeros from CoreAudio — frames advance, the track holds nothing).
 const MIC_SILENT_CHECK_AFTER: Duration = Duration::from_secs(10);
 const MIC_SILENT_PEAK_EPSILON: f32 = 0.001;
@@ -202,11 +202,14 @@ enum SilentMicKind {
     AllSilence,
 }
 
-fn silent_mic_verdict(captured_frames: u64, session_peak: f32) -> Option<SilentMicKind> {
-    if captured_frames == 0 {
+fn silent_mic_verdict(
+    received_capture_frames: u64,
+    capture_session_peak: f32,
+) -> Option<SilentMicKind> {
+    if received_capture_frames == 0 {
         return Some(SilentMicKind::NoFrames);
     }
-    if session_peak < MIC_SILENT_PEAK_EPSILON {
+    if capture_session_peak < MIC_SILENT_PEAK_EPSILON {
         return Some(SilentMicKind::AllSilence);
     }
     None
@@ -400,6 +403,66 @@ impl Drop for PublishedSessionStartGuard {
 /// Health code for a session that keeps its microphone through the direct
 /// DirectShow input because the capture worker could not open it (plan 065).
 pub(crate) const WORKER_MICROPHONE_FALLBACK_CODE: &str = "microphone-capture-worker-fallback";
+
+/// Health code for a session that asked for noise reduction on a microphone
+/// that bypasses the session audio bus; also the live update's reason code
+/// for the same refusal.
+pub(crate) const MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE: &str =
+    "microphone-noise-suppression-unavailable";
+const MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_MESSAGE: &str =
+    "Noise reduction isn't available for this microphone, so this session goes on without it.";
+
+/// Noise reduction runs on the session audio bus. A microphone that bypasses
+/// it (the Windows DirectShow or Linux Pulse fallback, a build without the
+/// capture worker) starts anyway, without noise reduction for this session;
+/// the remembered setting is untouched. The renderer confirms the mode once
+/// after start and shows Off through the live update's
+/// `microphone-noise-suppression-unavailable` rejection, so this health event
+/// is the session's record, not a second notice. Returns whether it
+/// downgraded the session.
+fn drop_noise_reduction_without_session_audio(
+    state: &AppState,
+    session_id: &str,
+    params: &mut StartSessionParams,
+    has_session_audio: bool,
+) -> bool {
+    if has_session_audio
+        || params.audio.microphone_noise_suppression
+            != crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+    {
+        return false;
+    }
+    params.audio.microphone_noise_suppression = crate::protocol::MicrophoneNoiseSuppression::Off;
+    state.emit_log(
+        "warn",
+        "Noise reduction is unavailable for the selected microphone (it bypasses the session audio bus); this session runs without it.",
+    );
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Warn,
+        MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE,
+        MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_MESSAGE,
+    );
+    true
+}
+
+/// Parses the RNNoise model off the async runtime before the bus can read a
+/// setting that asks for it (PR #1036, decision 3): the first construction
+/// took 2.7 to 16 ms on the bus thread mid-session. Once warm a construction
+/// is about a microsecond, so a session that turns it on later pays nothing
+/// here either. A session that stays Off never calls this.
+async fn prewarm_noise_reduction() -> Result<()> {
+    let started = Instant::now();
+    tokio::task::spawn_blocking(crate::microphone_denoise::prewarm)
+        .await
+        .context("Noise reduction model warm-up was interrupted")?;
+    tracing::debug!(
+        "Noise reduction model ready in {} ms.",
+        started.elapsed().as_millis()
+    );
+    Ok(())
+}
 
 /// What a session does when the capture worker cannot open its microphone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2204,6 +2267,9 @@ pub struct ActiveRecording {
     native_audio_silent_drain: bool,
     capture_notice: Option<String>,
     pub native_audio: Option<NativeAudioCaptureSession>,
+    /// The debug FFmpeg-tone incident control's writer (#1008); always None
+    /// outside that opted-in smoke session.
+    _incident_tone: Option<crate::incident_tone::IncidentToneWriter>,
     /// Reduced evidence from this process's final arguments, never an argv or
     /// destination cache. Only the authenticated debug disconnect can read it.
     #[cfg(debug_assertions)]
@@ -2269,6 +2335,18 @@ pub struct ActiveRecording {
     /// Portrait canvas `(width, height)` of the vertical simulcast leg when it
     /// burns the comment card. The renderer rasterizes a second card for it.
     pub comment_highlight_vertical_canvas: Option<(u32, u32)>,
+    /// Portrait canvas `(width, height)` of the vertical simulcast leg
+    /// whenever the session has one (plan 215 G): the renderer rasterizes a
+    /// second chat box for it, whatever the chat switches say at start, so a
+    /// switch flipped mid-session lands on the next repaint.
+    pub simulcast_vertical_canvas: Option<(u32, u32)>,
+    /// Landscape canvas `(width, height)` the renderer rasterizes the chat
+    /// box for (plan 215 G): the smallest landscape leg of the session. The
+    /// box is exactly its rect's width and the blit keeps pixel size, so a
+    /// box painted for a wider canvas than the leg it lands on is cropped
+    /// (the dual-orientation fix). None off the compositor bridge, where no
+    /// leg draws it.
+    pub chat_overlay_horizontal_canvas: Option<(u32, u32)>,
     /// The session shape the overlay leg plan was built for (plan 164), kept
     /// so a layout saved mid-session can re-plan the compositor flags. None
     /// on paths without the compositor bridge (nothing draws overlays there).
@@ -2390,6 +2468,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         native_audio_silent_drain: false,
         capture_notice: None,
         native_audio: None,
+        _incident_tone: None,
         #[cfg(debug_assertions)]
         source_switch_output_audio_timing: None,
         system_audio: None,
@@ -2418,6 +2497,8 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         performance_check: false,
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
+        simulcast_vertical_canvas: None,
+        chat_overlay_horizontal_canvas: None,
         overlay_session_shape: None,
         accepts_banners: true,
         accepts_live_scene_edits: true,
@@ -3290,6 +3371,27 @@ pub async fn active_capture_elapsed_seconds(state: &AppState) -> Option<f64> {
     Some(active.capture_elapsed_seconds())
 }
 
+/// Report audio transport failure with the last confirmed values without
+/// claiming that the video session ended.
+fn reject_closed_microphone_controls(
+    result: &mut AudioProcessingUpdateResult,
+    state: crate::audio::NativeAudioInputState,
+    confirmed: AudioProcessingSettings,
+) -> bool {
+    if !matches!(
+        state,
+        crate::audio::NativeAudioInputState::DownstreamClosed
+            | crate::audio::NativeAudioInputState::Stopped
+    ) {
+        return false;
+    }
+    result.reason_code = Some("live-audio-control-unavailable".into());
+    result.confirmed_microphone_gain_db = Some(confirmed.gain_db);
+    result.confirmed_microphone_muted = Some(confirmed.muted);
+    result.confirmed_microphone_noise_suppression = Some(confirmed.noise_suppression);
+    true
+}
+
 /// Applies renderer mic controls to the active CoreAudio or FFmpeg-owned
 /// capture session. The session id and recording lock make delayed websocket
 /// commands harmless across stop/start boundaries. CoreAudio consumes updates
@@ -3298,9 +3400,12 @@ pub async fn update_active_audio_processing(
     state: &AppState,
     params: AudioProcessingUpdateParams,
 ) -> AudioProcessingUpdateResult {
-    let settings =
+    let mut settings =
         normalized_audio_processing_settings(params.microphone_gain_db, params.microphone_muted);
+    settings.noise_suppression = params.microphone_noise_suppression.unwrap_or_default();
     let mut result = AudioProcessingUpdateResult {
+        confirmed_microphone_noise_suppression: None,
+        microphone_noise_suppression: settings.noise_suppression,
         applied: false,
         session_id: params.session_id.clone(),
         microphone_gain_db: settings.gain_db,
@@ -3309,6 +3414,23 @@ pub async fn update_active_audio_processing(
         confirmed_microphone_gain_db: None,
         confirmed_microphone_muted: None,
     };
+
+    // The bus never constructs the model itself: warm it here, off the
+    // runtime and before the recording lock, so the setting the bus reads
+    // flips to On only once the model is ready.
+    if params.microphone_noise_suppression
+        == Some(crate::protocol::MicrophoneNoiseSuppression::Rnnoise)
+        && let Err(error) = prewarm_noise_reduction().await
+    {
+        state.emit_log(
+            "warn",
+            format!("Noise reduction stays Off for this session: {error:#}"),
+        );
+        result.reason_code = Some(MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE.to_string());
+        result.confirmed_microphone_noise_suppression =
+            Some(crate::protocol::MicrophoneNoiseSuppression::Off);
+        return result;
+    }
 
     let mut system_audio_bypass_requested = false;
     let (ffmpeg_live_audio_session, ffmpeg_pid) = {
@@ -3323,6 +3445,26 @@ pub async fn update_active_audio_processing(
         }
         if active.stop_requested {
             result.reason_code = Some("session-ended".to_string());
+            return result;
+        }
+
+        if let Some(native_audio) = active.native_audio.as_ref() {
+            if reject_closed_microphone_controls(
+                &mut result,
+                native_audio.input_state(),
+                native_audio.processing_settings(),
+            ) {
+                return result;
+            }
+            settings.noise_suppression = params
+                .microphone_noise_suppression
+                .unwrap_or_else(|| native_audio.processing_settings().noise_suppression);
+            result.microphone_noise_suppression = settings.noise_suppression;
+        } else if settings.noise_suppression == crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+        {
+            result.reason_code = Some(MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE.to_string());
+            result.confirmed_microphone_noise_suppression =
+                Some(crate::protocol::MicrophoneNoiseSuppression::Off);
             return result;
         }
 
@@ -3350,6 +3492,7 @@ pub async fn update_active_audio_processing(
 
         if let Some(native_audio) = active.native_audio.as_ref() {
             native_audio.update_processing_settings(settings);
+            result.confirmed_microphone_noise_suppression = Some(settings.noise_suppression);
             result.applied = true;
             return result;
         }
@@ -3418,6 +3561,8 @@ pub async fn update_active_audio_processing(
     }
 
     result.applied = true;
+    result.confirmed_microphone_noise_suppression =
+        Some(crate::protocol::MicrophoneNoiseSuppression::Off);
     result
 }
 
@@ -3890,6 +4035,26 @@ pub async fn start_session(state: AppState, params: StartSessionParams) -> Resul
 /// start the software-encoder guard may refuse.
 fn replay_auto_start_requested(replay_only: bool, params: &StartSessionParams) -> bool {
     replay_only && params.replay.as_ref().is_some_and(|replay| replay.auto)
+}
+
+/// Plan 181 guard for Record and Go Live: they carry the default ring
+/// (`auto`) too, and on a software encoder path it is a second encode beside
+/// the one the user pressed for (live lab 2026-11-04 on ogre: Go Live came
+/// before the launch's buffer-only start was refused, so one FFmpeg child ran
+/// two OpenH264 1080p30 encodes). The press is the user's, so the session
+/// starts without the ring instead of failing. A ring the user turned on
+/// (`auto: false`) still rides along. Returns why the ring was dropped.
+fn drop_automatic_ring_on_software_encoder(
+    replay_only: bool,
+    params: &mut StartSessionParams,
+    backend: EncodeBackend,
+) -> Option<crate::replay_buffer::AutoStartRefused> {
+    if replay_only || !params.replay.as_ref().is_some_and(|replay| replay.auto) {
+        return None;
+    }
+    let refusal = crate::replay_buffer::auto_start_refusal(backend)?;
+    params.replay = None;
+    Some(refusal)
 }
 
 /// An automatic ring on the bridge waits for a visible camera's first frame:
@@ -4496,7 +4661,8 @@ async fn start_session_with_timeline(
         authorize_session_start_publication(&state, &session_id, &params, has_native_audio).await?;
     // Input topology is fixed for the lifetime of this output process. An empty
     // selection has a real paced zero-PCM producer. The separately opted-in
-    // debug control below deliberately bypasses that bus with FFmpeg tone.
+    // debug control below deliberately bypasses that bus: its own writer
+    // feeds an 880 Hz tone through the same paced PCM FIFO shape (#1008).
     let diagnostic_ffmpeg_tone = incident_ffmpeg_tone_allowed(
         cfg!(debug_assertions),
         std::env::var("VIDEORC_ENABLE_SMOKE_RPC").as_deref() == Ok("1"),
@@ -4504,16 +4670,25 @@ async fn start_session_with_timeline(
         params.sources.microphone_id.is_some(),
         capture.microphone.is_some(),
     );
-    if diagnostic_ffmpeg_tone {
+    let incident_tone_fifo = if diagnostic_ffmpeg_tone {
         emit_health_event(
             &state,
             Some(&session_id),
             HealthLevel::Info,
             "incident-ffmpeg-tone-enabled",
-            "Diagnostic control: FFmpeg lavfi 880 Hz tone; native PCM and physical microphone capture are not used.",
+            "Diagnostic control: 880 Hz tone on a paced PCM FIFO of its own; the native audio bus and physical microphone capture are not used.",
         )?;
-    }
-    let silent_audio_fifo = if capture.microphone.is_none() && !diagnostic_ffmpeg_tone {
+        let path = native_audio_fifo_path(&session_id);
+        create_native_audio_fifo(&path)?;
+        startup_resources.track_fifo(&path);
+        capture.microphone = Some(MicrophoneInput::SessionPcm {
+            fifo_path: path.clone(),
+        });
+        Some(path)
+    } else {
+        None
+    };
+    let silent_audio_fifo = if capture.microphone.is_none() {
         let path = native_audio_fifo_path(&session_id);
         create_native_audio_fifo(&path)?;
         startup_resources.track_fifo(&path);
@@ -4525,6 +4700,32 @@ async fn start_session_with_timeline(
         None
     };
     let has_session_audio = has_native_audio || silent_audio_fifo.is_some();
+    // An empty microphone selection still owns a persistent SessionPcm bus.
+    // Keep the remembered mode for a later source attachment; only a route
+    // that bypasses that bus (direct FFmpeg capture) runs without it, and
+    // the session starts either way.
+    drop_noise_reduction_without_session_audio(&state, &session_id, &mut params, has_session_audio);
+    // The bus reads the request through its settings from its first chunk:
+    // the model must be parsed before the bus is attached below.
+    // A failed warm-up starts the session without it, like a bypassing route.
+    if params.audio.microphone_noise_suppression
+        == crate::protocol::MicrophoneNoiseSuppression::Rnnoise
+        && let Err(error) = prewarm_noise_reduction().await
+    {
+        state.emit_log(
+            "warn",
+            format!("Noise reduction stays Off for this session: {error:#}"),
+        );
+        params.audio.microphone_noise_suppression =
+            crate::protocol::MicrophoneNoiseSuppression::Off;
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Warn,
+            MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE,
+            MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_MESSAGE,
+        );
+    }
     let audio_tracks = capture_audio_tracks(&capture);
     let active_screen = state.database.active_stream_screen()?;
     // Plan 186 S4: the banners showing when the session starts decide whether
@@ -4652,6 +4853,22 @@ async fn start_session_with_timeline(
         )
     {
         return Err(refusal.into());
+    }
+    if let Some(refusal) = drop_automatic_ring_on_software_encoder(
+        replay_only,
+        &mut params,
+        windows_encoded_bridge_decision.effective_encode_backend,
+    ) {
+        // The ring's status carries the reason, as after a refused
+        // buffer-only start, so the renderer stops offering it.
+        crate::replay_buffer::note_auto_start_refused(&state, &refusal.message);
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Info,
+            "replay-buffer-software-encoder",
+            &format!("Clips are off for this session: {}", refusal.message),
+        );
     }
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
     if source_iso_plan.is_some() {
@@ -4789,6 +5006,9 @@ async fn start_session_with_timeline(
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
+    // The chat box too (plan 215 G): a new session never inherits the last
+    // session's messages; the renderer repaints it from this session's chat.
+    let _ = crate::chat_overlay::clear_chat_overlay(&state);
     // The Buddy's bubble too (plan 164): the avatar stays (its raster is the
     // renderer's, re-pushed for this session's canvases), the words do not.
     let _ = crate::buddy_overlay::clear(&state).await;
@@ -4979,18 +5199,28 @@ async fn start_session_with_timeline(
                     overlay_layout.buddy.show_on_stream,
                     overlay_layout.buddy.show_in_recording,
                 );
+                // Plan 215 G: the chat box rides the same plan as the card.
+                let chat_in_program = crate::overlay_layout::program_shows(
+                    d3d11_program_shape,
+                    overlay_layout.chat.show_on_stream,
+                    overlay_layout.chat.show_in_recording,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
+                    chat: state.chat_overlay.clone(),
                     buddy: state.buddy_overlay.clone(),
                     buddy_sprite: state.buddy_sprite.clone(),
                     caption_on_primary: session_caption_plan.primary,
                     caption_on_auxiliary: session_caption_plan.aux,
                     highlight_on_primary,
                     highlight_on_auxiliary,
+                    chat_on_primary: d3d11_overlay_plans.chat.primary,
+                    chat_on_auxiliary: d3d11_overlay_plans.chat.aux,
                     buddy_on_primary: d3d11_overlay_plans.buddy.primary,
                     buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
                     highlight_in_program,
+                    chat_in_program,
                     buddy_in_program,
                     // Plan 186 S4: banners follow this session's leg plan
                     // live, from the compositor's banner set.
@@ -5361,6 +5591,8 @@ async fn start_session_with_timeline(
             aux = highlight_overlay_plan.1,
             buddy_primary = overlay_plans.buddy.primary,
             buddy_aux = overlay_plans.buddy.aux,
+            chat_primary = overlay_plans.chat.primary,
+            chat_aux = overlay_plans.chat.aux,
             // S-B2.2: any item (not only captions) whose switches disagree
             // on a shared leg asks for the split; the topology decides.
             needs_split = crate::overlay_layout::overlay_layout_needs_split(
@@ -5438,6 +5670,8 @@ async fn start_session_with_timeline(
         && !highlight_overlay_plan.1
         && !overlay_plans.buddy.primary
         && !overlay_plans.buddy.aux
+        && !overlay_plans.chat.primary
+        && !overlay_plans.chat.aux
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
@@ -5605,8 +5839,11 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        chat_overlay_on_primary: overlay_plans.chat.primary,
+                        chat_overlay_on_aux: overlay_plans.chat.aux,
                         highlight_overlay_on_program: overlay_flags.highlight_on_program,
                         buddy_overlay_on_program: overlay_flags.buddy_on_program,
+                        chat_overlay_on_program: overlay_flags.chat_on_program,
                     },
                 )
                 .await
@@ -5691,6 +5928,8 @@ async fn start_session_with_timeline(
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
                         buddy_overlay_on_primary: overlay_plans.buddy.primary,
                         buddy_overlay_on_aux: overlay_plans.buddy.aux,
+                        chat_overlay_on_primary: overlay_plans.chat.primary,
+                        chat_overlay_on_aux: overlay_plans.chat.aux,
                         // Plan 205 S6: the same program verdict the in-place
                         // arm carries. A buffer-only session lands here on a
                         // cold launch (the ring starts before the Preview's
@@ -5700,6 +5939,7 @@ async fn start_session_with_timeline(
                         replay_only,
                         highlight_overlay_on_program: overlay_flags.highlight_on_program,
                         buddy_overlay_on_program: overlay_flags.buddy_on_program,
+                        chat_overlay_on_program: overlay_flags.chat_on_program,
                     },
                 )
                 .await;
@@ -6237,6 +6477,18 @@ async fn start_session_with_timeline(
                 )
             })
         });
+    // The debug tone attaches at the same point as the bus and waits on the
+    // same video epoch, so FFmpeg's audio input starts exactly as it does
+    // for a microphone.
+    let incident_tone = incident_tone_fifo
+        .map(|path| {
+            crate::incident_tone::IncidentToneWriter::spawn(
+                path,
+                use_encoder_bridge.then(|| video_epoch.clone()),
+            )
+        })
+        .transpose()
+        .context("Could not start the diagnostic tone writer")?;
     if let (Some(audio), Some(taps)) = (attached_native_audio.as_ref(), source_iso_taps.as_ref()) {
         audio.set_source_taps(taps.clone());
     }
@@ -6999,6 +7251,7 @@ async fn start_session_with_timeline(
             encoder_bridge.is_some(),
         ),
         native_audio: attached_native_audio,
+        _incident_tone: incident_tone,
         #[cfg(debug_assertions)]
         source_switch_output_audio_timing,
         system_audio: session_system_audio,
@@ -7028,6 +7281,13 @@ async fn start_session_with_timeline(
             highlight_overlay_plan,
         ),
         comment_highlight_vertical_canvas,
+        simulcast_vertical_canvas: simulcast_vertical_canvas(encoder_bridge_stream_output.as_ref()),
+        chat_overlay_horizontal_canvas: use_encoder_bridge.then(|| {
+            chat_overlay_horizontal_canvas(
+                (params.output.video.width, params.output.video.height),
+                encoder_bridge_stream_output.as_ref(),
+            )
+        }),
         overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
         accepts_banners,
         accepts_live_scene_edits,
@@ -8133,7 +8393,7 @@ impl Mp4FinalizationFault {
     fn after_workspace_create(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterWorkspaceCreate);
+            matches!(self, Self::AfterWorkspaceCreate)
         }
         #[cfg(not(test))]
         false
@@ -8142,7 +8402,7 @@ impl Mp4FinalizationFault {
     fn after_ffmpeg(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterFfmpeg);
+            matches!(self, Self::AfterFfmpeg)
         }
         #[cfg(not(test))]
         false
@@ -8151,7 +8411,7 @@ impl Mp4FinalizationFault {
     fn after_publication(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterPublication);
+            matches!(self, Self::AfterPublication)
         }
         #[cfg(not(test))]
         false
@@ -8160,7 +8420,7 @@ impl Mp4FinalizationFault {
     fn after_database_commit(self) -> bool {
         #[cfg(test)]
         {
-            return matches!(self, Self::AfterDatabaseCommit);
+            matches!(self, Self::AfterDatabaseCommit)
         }
         #[cfg(not(test))]
         false
@@ -10478,6 +10738,7 @@ fn audio_levels_event(
         sounds: levels.sounds,
         master: levels.master,
         master_clipped_samples: levels.master_clipped_samples,
+        microphone_silent: levels.microphone_silent,
     })
 }
 
@@ -10503,7 +10764,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             observation.captured_frames,
                             observation.dropped_frames,
                             observation.live_peak,
-                            observation.session_peak,
+                            observation.capture_session_peak,
+                            observation.received_capture_frames,
                             observation.device_name,
                             observation.elapsed_secs,
                             observation.input_state,
@@ -10513,6 +10775,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             system_audio_sample(active),
                             observation.recoveries,
                             observation.output_stalls,
+                            observation.silence_events,
+                            observation.denoise_events,
                         )
                     })
                 }
@@ -10523,7 +10787,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             captured_frames,
             dropped_frames,
             live_peak,
-            session_peak,
+            capture_session_peak,
+            received_capture_frames,
             device_name,
             capture_elapsed_secs,
             input_state,
@@ -10533,6 +10798,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             system_audio,
             recoveries,
             output_stalls,
+            silence_events,
+            denoise_events,
         )) = counters
         else {
             return;
@@ -10546,6 +10813,9 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         {
             reemit_active_recording_status(&state, &session_id).await;
         }
+        for event in &denoise_events {
+            emit_microphone_noise_reduction_silenced_health_event(&state, &session_id, event);
+        }
         for report in &output_stalls {
             emit_audio_output_stalled_health_event(&state, &session_id, report);
         }
@@ -10556,6 +10826,13 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         if generation != microphone_generation {
             microphone_generation = generation;
             silent_mic_reported = false;
+        }
+        // Issue 1064: the watchdog's report is the news; the once-per-session
+        // check below would only repeat it for this microphone.
+        for change in &silence_events {
+            silent_mic_reported |= change.generation == generation
+                && change.change == crate::session_audio::MicrophoneSilenceChange::Silent;
+            emit_microphone_silence_health_event(&state, &session_id, change);
         }
         for source_loss_after_ms in source_loss_event_after_ms {
             silent_mic_reported |= source_loss_after_ms.generation == generation;
@@ -10584,14 +10861,14 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         // Early truthful warning (plan 021 F3): a mic that has produced nothing
         // this deep into the recording will not fix itself — tell the user NOW,
         // while stopping and fixing still saves the take. A TCC-unauthorized
-        // process receives silent zeros (frames count, peak stays 0), so both
+        // process receives silent zeros (frames count, raw peak stays 0), so both
         // "no frames" and "all-silence" trip the check. Fires at most once.
         if matches!(
             input_state,
             NativeAudioInputState::Starting | NativeAudioInputState::Live
         ) && !silent_mic_reported
             && capture_elapsed_secs.unwrap_or_default() >= MIC_SILENT_CHECK_AFTER.as_secs_f64()
-            && let Some(kind) = silent_mic_verdict(captured_frames, session_peak)
+            && let Some(kind) = silent_mic_verdict(received_capture_frames, capture_session_peak)
         {
             silent_mic_reported = true;
             let message = match kind {
@@ -10728,6 +11005,34 @@ fn emit_audio_output_stalled_health_event(
     );
 }
 
+/// Noise reduction refused or failed a microphone frame, so the bus wrote
+/// exact zeros for the microphone over that stretch and went on; nothing
+/// else on the bus noticed. One event per episode.
+pub(crate) const MICROPHONE_NOISE_REDUCTION_SILENCED_CODE: &str =
+    "microphone-noise-reduction-silenced";
+const MICROPHONE_NOISE_REDUCTION_SILENCED_MESSAGE: &str = "Noise reduction got an invalid signal from the microphone, so Videorc silenced the microphone for a moment. The session continues.";
+
+fn emit_microphone_noise_reduction_silenced_health_event(
+    state: &AppState,
+    session_id: &str,
+    event: &crate::session_audio::MicrophoneDenoiseSilencedEvent,
+) {
+    state.emit_log(
+        "warn",
+        format!(
+            "Noise reduction silenced microphone \"{}\" after {} ms: {}.",
+            event.device_name, event.after_ms, event.reason
+        ),
+    );
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Warn,
+        MICROPHONE_NOISE_REDUCTION_SILENCED_CODE,
+        MICROPHONE_NOISE_REDUCTION_SILENCED_MESSAGE,
+    );
+}
+
 const AUDIO_OUTPUT_STALLED_CODE: &str = "audio-output-stalled";
 
 fn audio_output_stalled_message(report: &crate::session_audio::OutputStallReport) -> String {
@@ -10760,6 +11065,58 @@ fn emit_microphone_recovered_health_event(
 }
 
 const MICROPHONE_TIMELINE_RECOVERED_CODE: &str = "microphone-timeline-recovered";
+
+/// Issue 1064: the captured microphone held nothing but digital silence for
+/// the watchdog's hold, and sound came back after such a run. The renderer
+/// shows the first through the microphone-loss notice and clears it on the
+/// second (its code ends in `-recovered`, like the loss flow's).
+pub(crate) const MICROPHONE_SILENT_CODE: &str = "microphone-silent";
+pub(crate) const MICROPHONE_SIGNAL_RECOVERED_CODE: &str = "microphone-signal-recovered";
+
+fn emit_microphone_silence_health_event(
+    state: &AppState,
+    session_id: &str,
+    change: &crate::session_audio::MicrophoneSilenceEvent,
+) {
+    use crate::session_audio::MicrophoneSilenceChange;
+    let (level, code, message) = match change.change {
+        MicrophoneSilenceChange::Silent => (
+            HealthLevel::Warn,
+            MICROPHONE_SILENT_CODE,
+            microphone_silent_message(&change.device_name, change.after_ms, change.silent_ms),
+        ),
+        MicrophoneSilenceChange::Recovered => (
+            HealthLevel::Info,
+            MICROPHONE_SIGNAL_RECOVERED_CODE,
+            microphone_signal_recovered_message(&change.device_name, change.silent_ms),
+        ),
+    };
+    state.emit_log(
+        if matches!(level, HealthLevel::Warn) {
+            "warn"
+        } else {
+            "info"
+        },
+        &message,
+    );
+    let _ = emit_health_event(state, Some(session_id), level, code, &message);
+}
+
+/// Activity-neutral, like the loss message: the renderer's title says
+/// whether a recording, a livestream or Clips is affected.
+fn microphone_silent_message(device_name: &str, after_ms: u64, silent_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" has sent only silence since {:.1} seconds into this session. Try choosing it again.",
+        after_ms.saturating_sub(silent_ms) as f64 / 1_000.0
+    )
+}
+
+fn microphone_signal_recovered_message(device_name: &str, silent_ms: u64) -> String {
+    format!(
+        "Microphone \"{device_name}\" has sound again after {:.1} seconds of silence.",
+        silent_ms as f64 / 1_000.0
+    )
+}
 
 /// Plan 076: system audio places again after a timeline loss.
 fn emit_system_audio_recovered_health_event(
@@ -11265,12 +11622,14 @@ async fn monitor_session(
                     device_name: observation.device_name,
                     captured_frames: observation.captured_frames,
                     dropped_frames: observation.dropped_frames,
-                    session_peak: observation.session_peak,
+                    capture_session_peak: observation.capture_session_peak,
+                    received_capture_frames: observation.received_capture_frames,
                     input_state: observation.input_state,
                     source_loss_after_ms: observation.source_loss_after_ms,
                     unreported_source_loss_after_ms: observation.losses,
                     unreported_recoveries: observation.recoveries,
                     unreported_output_stalls: observation.output_stalls,
+                    unreported_denoise_events: observation.denoise_events,
                     system_audio: system_audio_sample(active),
                 }
             });
@@ -11304,6 +11663,12 @@ async fn monitor_session(
             .stop(&session_id);
     }
     drop(guard);
+    let final_audio = retired_active.as_ref().and_then(|active| {
+        active
+            .native_audio
+            .as_ref()
+            .map(|audio| audio.switch_handle())
+    });
     #[cfg(target_os = "windows")]
     if monitored_recording.is_some() {
         state
@@ -11567,6 +11932,14 @@ async fn monitor_session(
         }
     }
 
+    // SessionAudio Drop has joined the writer. Claim the noise reduction
+    // episodes published after the initial stats snapshot, including one
+    // racing user Stop.
+    if let Some(audio) = final_audio {
+        for event in audio.claim_denoise_events() {
+            emit_microphone_noise_reduction_silenced_health_event(&state, &session_id, &event);
+        }
+    }
     mark_stop_timeline(&state, RecordingStopPhase::BridgeStopped);
     // Dropping ActiveRecording stops the native post-controls audio producer.
     // Close the caption bus now, drain the provider's final utterance within a
@@ -11585,6 +11958,9 @@ async fn monitor_session(
     // session's card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_end(&state, &session_id)
         .await;
+    // The chat box (plan 215 G) leaves with the session like the caption bars
+    // above; a newer session's renderer repaints it on its next message.
+    let _ = crate::chat_overlay::clear_chat_overlay(&state);
     state.soundboard.session_ended(&state, &session_id);
 
     if let Some(native_audio_stats) = monitored_recording.native_audio_stats.as_ref() {
@@ -11616,6 +11992,9 @@ async fn monitor_session(
         );
         if let Some(sample) = native_audio_stats.system_audio.as_ref() {
             emit_system_audio_sample_events(&state, &session_id, sample);
+        }
+        for event in &native_audio_stats.unreported_denoise_events {
+            emit_microphone_noise_reduction_silenced_health_event(&state, &session_id, event);
         }
         for report in &native_audio_stats.unreported_output_stalls {
             emit_audio_output_stalled_health_event(&state, &session_id, report);
@@ -14073,13 +14452,16 @@ struct NativeAudioStats {
     device_name: String,
     captured_frames: u64,
     dropped_frames: u64,
-    session_peak: f32,
+    capture_session_peak: f32,
+    received_capture_frames: u64,
     input_state: NativeAudioInputState,
     source_loss_after_ms: Option<u64>,
     unreported_source_loss_after_ms: Vec<crate::session_audio::SourceLoss>,
     /// Recoveries and output stalls the sampler had not reported (plan 076).
     unreported_recoveries: Vec<crate::session_audio::SourceRecovery>,
     unreported_output_stalls: Vec<crate::session_audio::OutputStallReport>,
+    /// Noise reduction episodes the sampler had not reported.
+    unreported_denoise_events: Vec<crate::session_audio::MicrophoneDenoiseSilencedEvent>,
     /// Final system-audio counters and events the sampler had not reported
     /// (plan 069 S4); `None` where the session cannot mix system audio.
     system_audio: Option<SystemAudioSample>,
@@ -14090,7 +14472,7 @@ impl NativeAudioStats {
         if !self.selected_input || self.input_state == NativeAudioInputState::SourceLost {
             return None;
         }
-        silent_mic_verdict(self.captured_frames, self.session_peak)
+        silent_mic_verdict(self.received_capture_frames, self.capture_session_peak)
     }
 }
 
@@ -16068,10 +16450,154 @@ fn select_linux_h264_encoder(
     })
 }
 
+/// What one FFmpeg run of the VAAPI probe came back with. The process glue
+/// (`run_linux_vaapi_probe`) produces these on Linux; the decision over them
+/// (`probe_linux_vaapi_candidates`) is platform-independent so it is tested
+/// with fakes on every host and never touches a render node from a test.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LinuxVaapiProbeOutcome {
+    /// FFmpeg encoded the probe frames and exited 0.
+    Passed,
+    /// FFmpeg returned non-zero: the driver rejected this argument profile.
+    Rejected(String),
+    /// FFmpeg could not be spawned or waited on; nothing reached the GPU.
+    Failed(String),
+    /// FFmpeg was still running at the probe deadline: the node hung.
+    TimedOut,
+}
+
+/// 30 frames of 1080p30 take a healthy node well under a second; a node that
+/// has not answered in 20 s is the one the quarantine exists for (amdgpu's
+/// own ring timeout fires at 10 s).
+#[cfg(any(test, target_os = "linux"))]
+const LINUX_VAAPI_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Probes the planned nodes in order and stops at the first success. Every
 /// probe is wrapped in the quarantine sentinel: if the host hangs mid-probe,
 /// the next start quarantines that node instead of trying it again. A node
 /// whose sentinel cannot be armed is not probed at all.
+///
+/// A probe that times out is the same hang seen from inside the process
+/// (#1027): the node is quarantined on the spot, the `Compat` profile is
+/// never tried on it (a timeout is not an argument rejection), and no further
+/// node is probed this lifetime, because the timed-out FFmpeg may still hold
+/// its GPU and the driver may be mid-reset. The nodes left over are reported
+/// as skipped and probed at the next start, when the quarantine already
+/// names the one that hung.
+#[cfg(any(test, target_os = "linux"))]
+async fn probe_linux_vaapi_candidates<Run, Fut>(
+    ffmpeg_path: &str,
+    candidates: &[crate::linux_vaapi::RenderNodeCandidate],
+    quarantine: &crate::linux_vaapi::ProbeQuarantine,
+    mut run_probe: Run,
+) -> (
+    Option<(PathBuf, LinuxVaapiArgProfile)>,
+    Option<String>,
+    Vec<LinuxRenderNodeDiagnostic>,
+)
+where
+    Run: FnMut(crate::linux_vaapi::RenderNodeCandidate, LinuxVaapiArgProfile) -> Fut,
+    Fut: std::future::Future<Output = LinuxVaapiProbeOutcome>,
+{
+    use crate::protocol::LinuxRenderNodeState;
+    let mut rejections = Vec::new();
+    let mut reports = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let mut profile_rejections = Vec::new();
+        let mut timed_out = None;
+        // Standard first; Compat only after the standard set was rejected on
+        // this same node, so a compat selection is always evidence-backed.
+        for profile in [LinuxVaapiArgProfile::Standard, LinuxVaapiArgProfile::Compat] {
+            let armed = match quarantine.begin_probe(candidate, ffmpeg_path) {
+                Ok(armed) => armed,
+                Err(error) => {
+                    let detail = format!("probe sentinel could not be armed: {error}");
+                    profile_rejections.push(format!("{}: {detail}", profile));
+                    break;
+                }
+            };
+            let outcome = run_probe(candidate.clone(), profile).await;
+            // The probe returned (pass or reject): the sentinel no longer
+            // means a hang.
+            let returned = |armed: crate::linux_vaapi::ArmedProbe<'_>| {
+                if let Err(error) = armed.finish() {
+                    tracing::warn!(
+                        "Could not clear the VAAPI probe sentinel for {}: {error}",
+                        candidate.node_name()
+                    );
+                }
+            };
+            match outcome {
+                LinuxVaapiProbeOutcome::Passed => {
+                    returned(armed);
+                    reports.push(candidate.report(
+                        LinuxRenderNodeState::ProbedOk,
+                        Some(format!("{} argument profile", profile)),
+                    ));
+                    return (Some((candidate.path.clone(), profile)), None, reports);
+                }
+                LinuxVaapiProbeOutcome::Rejected(reason) => {
+                    returned(armed);
+                    profile_rejections.push(format!("{}: {reason}", profile));
+                }
+                LinuxVaapiProbeOutcome::Failed(error) => {
+                    returned(armed);
+                    // Nothing reached the driver, so there is no rejection
+                    // for Compat to answer.
+                    profile_rejections.push(format!("{}: {error}", profile));
+                    break;
+                }
+                LinuxVaapiProbeOutcome::TimedOut => {
+                    let detail = match armed.quarantine_timed_out(LINUX_VAAPI_PROBE_TIMEOUT) {
+                        Ok(entry) => {
+                            tracing::error!(
+                                "Quarantined Linux render node {} ({}): its VAAPI probe did not return within {} s. It will not be probed again unless {} names it.",
+                                entry.node,
+                                entry.driver.as_deref().unwrap_or("driver unknown"),
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs(),
+                                crate::linux_vaapi::DEVICE_PIN_ENV
+                            );
+                            entry.detail()
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                "The VAAPI probe of {} did not return within {} s and its quarantine entry could not be written: {error}",
+                                candidate.node_name(),
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+                            );
+                            format!(
+                                "a VAAPI probe of this node did not return within {} s; the quarantine entry could not be written ({error})",
+                                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+                            )
+                        }
+                    };
+                    timed_out = Some(detail);
+                    break;
+                }
+            }
+        }
+        if let Some(detail) = timed_out {
+            rejections.push(format!("{}: {detail}", candidate.node_name()));
+            reports.push(candidate.report(LinuxRenderNodeState::Quarantined, Some(detail)));
+            let skipped = format!(
+                "not probed: {} did not return within {} s and may still hold its GPU; probed at the next start",
+                candidate.node_name(),
+                LINUX_VAAPI_PROBE_TIMEOUT.as_secs()
+            );
+            for left in &candidates[index + 1..] {
+                reports.push(left.report(LinuxRenderNodeState::Skipped, Some(skipped.clone())));
+            }
+            break;
+        }
+        let detail = profile_rejections.join(" | ");
+        rejections.push(format!("{}: {detail}", candidate.node_name()));
+        reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
+    }
+    let reason = (!rejections.is_empty()).then(|| rejections.join("; "));
+    (None, reason, reports)
+}
+
 #[cfg(target_os = "linux")]
 async fn probe_linux_vaapi_encoder(
     ffmpeg_path: &str,
@@ -16082,64 +16608,94 @@ async fn probe_linux_vaapi_encoder(
     Option<String>,
     Vec<LinuxRenderNodeDiagnostic>,
 ) {
-    use crate::protocol::LinuxRenderNodeState;
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut rejections = Vec::new();
-    let mut reports = Vec::new();
-    for candidate in candidates {
-        let mut profile_rejections = Vec::new();
-        // Standard first; Compat only after the standard set was rejected on
-        // this same node, so a compat selection is always evidence-backed.
-        for profile in [LinuxVaapiArgProfile::Standard, LinuxVaapiArgProfile::Compat] {
-            if let Err(error) = quarantine.begin_probe(candidate, ffmpeg_path) {
-                let detail = format!("probe sentinel could not be armed: {error}");
-                profile_rejections.push(format!("{}: {detail}", profile));
-                break;
+    probe_linux_vaapi_candidates(
+        ffmpeg_path,
+        candidates,
+        quarantine,
+        |candidate, profile| async move {
+            run_linux_vaapi_probe(ffmpeg_path, &candidate, profile).await
+        },
+    )
+    .await
+}
+
+/// One FFmpeg run of the real-args probe, bounded by the probe deadline. The
+/// child is killed if this future is dropped and killed and reaped on a
+/// timeout, so a probe never leaves FFmpeg running on the GPU (#1027: two
+/// timed-out probes outlived the test binary on the Arch T2 box).
+#[cfg(target_os = "linux")]
+async fn run_linux_vaapi_probe(
+    ffmpeg_path: &str,
+    candidate: &crate::linux_vaapi::RenderNodeCandidate,
+    profile: LinuxVaapiArgProfile,
+) -> LinuxVaapiProbeOutcome {
+    const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+    let probe_args = linux_vaapi_probe_args(&candidate.path, profile);
+    // The exact command, so a tester can bisect it verbatim on the box.
+    tracing::info!(
+        "VAAPI probe on {} ({} profile): {} {}",
+        candidate.node_name(),
+        profile,
+        ffmpeg_path,
+        probe_args.join(" ")
+    );
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .args(&probe_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return LinuxVaapiProbeOutcome::Failed(format!("ffmpeg could not be spawned: {error}"));
+        }
+    };
+    // Drained beside the wait so a chatty driver never blocks FFmpeg on a
+    // full pipe and reads as a hang.
+    let stderr = child.stderr.take();
+    let stderr_drain = tokio::spawn(async move {
+        let mut collected = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let _ = stderr.read_to_end(&mut collected).await;
+        }
+        collected
+    });
+    match timeout(LINUX_VAAPI_PROBE_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => {
+            let stderr = stderr_drain.await.unwrap_or_default();
+            if status.success() {
+                LinuxVaapiProbeOutcome::Passed
+            } else {
+                LinuxVaapiProbeOutcome::Rejected(bounded_stream_output_topology_fallback_reason(
+                    &String::from_utf8_lossy(&stderr),
+                ))
             }
-            let probe_args = linux_vaapi_probe_args(&candidate.path, profile);
-            // The exact command, so a tester can bisect it verbatim on the box.
-            tracing::info!(
-                "VAAPI probe on {} ({} profile): {} {}",
-                candidate.node_name(),
-                profile,
-                ffmpeg_path,
-                probe_args.join(" ")
-            );
-            let mut command = Command::new(ffmpeg_path);
-            command
-                .args(&probe_args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-            let outcome = timeout(PROBE_TIMEOUT, command.output()).await;
-            if let Err(error) = quarantine.finish_probe() {
-                tracing::warn!(
-                    "Could not clear the VAAPI probe sentinel for {}: {error}",
-                    candidate.node_name()
+        }
+        Ok(Err(error)) => {
+            stderr_drain.abort();
+            LinuxVaapiProbeOutcome::Failed(format!("ffmpeg could not be waited on: {error}"))
+        }
+        Err(_) => {
+            // SIGKILL, then a short bounded reap. A child wedged in the driver
+            // (D state) ignores even SIGKILL until the kernel lets go; tokio
+            // keeps it as an orphan and reaps it on SIGCHLD when it finally
+            // exits, so this wait stays bounded and no zombie is left behind
+            // by this process.
+            let _ = child.start_kill();
+            if timeout(REAP_TIMEOUT, child.wait()).await.is_err() {
+                tracing::error!(
+                    "The VAAPI probe of {} ({} profile) did not exit within {} s of SIGKILL; it is stuck in the driver and is reaped when it exits",
+                    candidate.node_name(),
+                    profile,
+                    REAP_TIMEOUT.as_secs()
                 );
             }
-            let detail = match outcome {
-                Ok(Ok(output)) if output.status.success() => {
-                    reports.push(candidate.report(
-                        LinuxRenderNodeState::ProbedOk,
-                        Some(format!("{} argument profile", profile)),
-                    ));
-                    return (Some((candidate.path.clone(), profile)), None, reports);
-                }
-                Ok(Ok(output)) => bounded_stream_output_topology_fallback_reason(
-                    &String::from_utf8_lossy(&output.stderr),
-                ),
-                Ok(Err(error)) => error.to_string(),
-                Err(_) => "probe timed out".to_string(),
-            };
-            profile_rejections.push(format!("{}: {detail}", profile));
+            stderr_drain.abort();
+            LinuxVaapiProbeOutcome::TimedOut
         }
-        let detail = profile_rejections.join(" | ");
-        rejections.push(format!("{}: {detail}", candidate.node_name()));
-        reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
     }
-    let reason = (!rejections.is_empty()).then(|| rejections.join("; "));
-    (None, reason, reports)
 }
 
 /// One decision per backend lifetime per FFmpeg binary, preference and pin.
@@ -16312,6 +16868,21 @@ async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpeg
                 .as_deref(),
         )
         .map_err(anyhow::Error::msg)?;
+        // A unit test never probes a render node it did not name: the backend
+        // suite reached this resolver with a bare `ffmpeg`, probed every node
+        // on the Arch T2 box and hung its AMD GPU (#1027). A pin is the
+        // tester's explicit opt-in, the same one the quarantine honours.
+        #[cfg(test)]
+        if pin.is_none() {
+            return select_linux_h264_encoder(
+                preference,
+                None,
+                Some(format!(
+                    "unit tests never probe render nodes; set {} to the one node a test may use",
+                    crate::linux_vaapi::DEVICE_PIN_ENV
+                )),
+            );
+        }
         let key = format!(
             "{ffmpeg_path}|{preference:?}|{}",
             pin.as_deref()
@@ -17015,6 +17586,17 @@ fn tee_output_args(spec: String) -> Vec<String> {
     ]
 }
 
+/// The encoder bridge's proven envelopes above 30 fps, as (long side, short
+/// side) in either orientation. The renderer mirrors them in
+/// `lib/bridge-envelope.ts`, so a change here changes both.
+const RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES: (u32, u32) = (2560, 1440);
+const STREAMING_BRIDGE_60FPS_MAX_SIDES: (u32, u32) = (1920, 1080);
+const BRIDGE_60FPS_MAX_FPS: u32 = 60;
+
+fn video_fits_sides(video: &VideoSettings, (long_side, short_side): (u32, u32)) -> bool {
+    video.width.max(video.height) <= long_side && video.width.min(video.height) <= short_side
+}
+
 /// Record-only 60fps recordings ride the encoder bridge up to 1440p (the
 /// perf-gated envelope): same compositor the preview shows, platform encoder,
 /// epoch-trimmed start, and bounded stop. 4K60 remains outside that envelope.
@@ -17022,12 +17604,10 @@ fn record_only_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
     if params.output.stream_enabled {
         return false;
     }
-    if params.output.video.fps > 60 {
+    if params.output.video.fps > BRIDGE_60FPS_MAX_FPS {
         return false;
     }
-    let long_side = params.output.video.width.max(params.output.video.height);
-    let short_side = params.output.video.width.min(params.output.video.height);
-    long_side <= 2560 && short_side <= 1440
+    video_fits_sides(&params.output.video, RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES)
 }
 
 /// Livestreaming has a narrower proven 60fps bridge envelope than local
@@ -17051,9 +17631,8 @@ fn streaming_bridge_60fps_eligible(params: &StartSessionParams) -> bool {
         profiles.push(params.output.video.clone());
     }
     profiles.into_iter().all(|profile| {
-        profile.fps <= 60
-            && profile.width.max(profile.height) <= 1920
-            && profile.width.min(profile.height) <= 1080
+        profile.fps <= BRIDGE_60FPS_MAX_FPS
+            && video_fits_sides(&profile, STREAMING_BRIDGE_60FPS_MAX_SIDES)
     })
 }
 
@@ -17132,8 +17711,80 @@ fn compositor_encoder_bridge_ruled_out(params: &StartSessionParams) -> bool {
     // The bridge cap: record-only runs to 1440p60; livestreaming runs to
     // 1080p60 across every encoded role. Profiles outside those measured
     // envelopes retain the legacy path, and the session log says so.
+    outside_compositor_bridge_60fps_envelope(params)
+}
+
+/// The request asks for more than 30 fps at a profile outside both measured
+/// bridge envelopes: the only reason, short of the developer env override,
+/// that a validated request takes the legacy path.
+fn outside_compositor_bridge_60fps_envelope(params: &StartSessionParams) -> bool {
     requested_compositor_bridge_fps(params) > 30
         && !(record_only_bridge_60fps_eligible(params) || streaming_bridge_60fps_eligible(params))
+}
+
+/// The resolution class in the renderer's one spelling (`formatVideoQuality`):
+/// "4K" or the short edge ("1440p") for a landscape canvas, both sides
+/// ("1440 × 2560") for a portrait one.
+#[cfg(any(test, target_os = "windows"))]
+fn video_size_name(video: &VideoSettings) -> String {
+    if video.height > video.width {
+        return format!("{} × {}", video.width, video.height);
+    }
+    match video.width.min(video.height) {
+        2160 => "4K".to_string(),
+        short_side => format!("{short_side}p"),
+    }
+}
+
+/// The largest canvas of `video`'s orientation inside an envelope, named.
+#[cfg(any(test, target_os = "windows"))]
+fn envelope_size_name(video: &VideoSettings, (long_side, short_side): (u32, u32)) -> String {
+    let (width, height) = if video.height > video.width {
+        (short_side, long_side)
+    } else {
+        (long_side, short_side)
+    };
+    video_size_name(&VideoSettings {
+        preset: VideoPreset::Custom,
+        width,
+        height,
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps,
+    })
+}
+
+/// Issue #1062: on Windows the legacy FFmpeg path encodes with software
+/// OpenH264, which ran 4K60 at about 0.35x realtime and wrote a truncated,
+/// time-compressed file with no warning. A request the envelope rules out of
+/// the bridge is refused at validation instead, with the choices that stay
+/// inside it. `bridge_disabled_by_env` is the developer override, which keeps
+/// its legacy path. Pure and cross-platform so every host unit-tests it;
+/// only a Windows start consults it.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_bridge_envelope_refusal(
+    params: &StartSessionParams,
+    bridge_disabled_by_env: bool,
+) -> Option<String> {
+    if bridge_disabled_by_env || !outside_compositor_bridge_60fps_envelope(params) {
+        return None;
+    }
+    let fps = requested_compositor_bridge_fps(params);
+    let video = &params.output.video;
+    if params.output.stream_enabled {
+        // Not reached after `validate_video_profile_policy`: a livestream
+        // above 30 fps shares one encode at or below 1080p, or splits only
+        // inside the envelope. Kept so no validated request takes the legacy
+        // path, whatever a later policy allows.
+        let cap = envelope_size_name(video, STREAMING_BRIDGE_60FPS_MAX_SIDES);
+        return Some(format!(
+            "Livestreaming at {fps} fps on Windows works up to {cap} for the recording and every destination. Choose {cap}, or 30 fps."
+        ));
+    }
+    let name = video_size_name(video);
+    let cap = envelope_size_name(video, RECORD_ONLY_BRIDGE_60FPS_MAX_SIDES);
+    Some(format!(
+        "{name} at {fps} fps isn't supported on Windows yet. Choose {name} at 30 fps or {cap} at {fps} fps."
+    ))
 }
 
 /// The video output the encoder bridge is asked for, or the raw legacy
@@ -22720,11 +23371,13 @@ fn session_audio_options(
 /// 37 s of mic lost in a 12-minute 1080p take, 2 s in a 10-minute 720p one).
 /// The delay changes when bytes are written, never which bytes
 /// (`playout_delay_150ms_writes_the_same_bytes_as_50ms`).
+/// Elsewhere the deadline also covers the noise reduction lookahead.
 fn default_session_playout_delay() -> std::time::Duration {
     if cfg!(target_os = "linux") {
         crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
     } else {
         crate::session_audio::PLAYOUT_DELAY
+            + crate::session_audio::MICROPHONE_DENOISE_PLAYOUT_HEADROOM
     }
 }
 
@@ -22815,6 +23468,7 @@ fn capture_audio_filter(input_layout: &InputLayout, audio: &AudioSettings) -> St
 
 fn normalized_audio_processing_settings(gain_db: f32, muted: bool) -> AudioProcessingSettings {
     AudioProcessingSettings {
+        noise_suppression: Default::default(),
         gain_db: if gain_db.is_finite() {
             gain_db.clamp(-24.0, 24.0)
         } else {
@@ -24014,6 +24668,19 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     validate_caption_output_policy(params)?;
     validate_video_profile_policy(params)?;
     crate::source_iso::validate_separate_source_recordings(params)?;
+    // Issue #1062: Windows has no hardware legacy path, so a request outside
+    // the bridge envelope is refused here, before the clip buffer hands over
+    // and before any probe, rather than recorded through software OpenH264.
+    #[cfg(target_os = "windows")]
+    if let Some(message) = windows_bridge_envelope_refusal(
+        params,
+        compositor_encoder_bridge_disabled(
+            params.output.record_enabled,
+            params.output.stream_enabled,
+        ),
+    ) {
+        bail!(message);
+    }
 
     Ok(())
 }
@@ -24395,8 +25062,11 @@ pub async fn apply_overlay_layout_to_active_session(
         highlight_aux = plans.highlight.aux,
         buddy_primary = plans.buddy.primary,
         buddy_aux = plans.buddy.aux,
+        chat_primary = plans.chat.primary,
+        chat_aux = plans.chat.aux,
         highlight_program = flags.highlight_on_program,
         buddy_program = flags.buddy_on_program,
+        chat_program = flags.chat_on_program,
         buddy_legs_prepared = buddy_canvases,
         swapped,
         "overlay layout changed mid-session"
@@ -24430,6 +25100,7 @@ async fn apply_overlay_layout_to_idle_preview(
     tracing::info!(
         highlight_primary = flags.highlight_on_primary,
         buddy_primary = flags.buddy_on_primary,
+        chat_primary = flags.chat_on_primary,
         swapped,
         "overlay layout changed while nothing runs"
     );
@@ -24489,6 +25160,36 @@ fn comment_highlight_vertical_canvas(
     stream_output
         .filter(|output| output.composes_simulcast_scene && leg_plan.1)
         .map(|output| (output.width, output.height))
+}
+
+/// Portrait canvas of the vertical simulcast leg whenever the session runs
+/// one (plan 215 G): the chat box is rasterized for it whatever the chat
+/// switches say at start (`chat_overlay::chat_overlay_canvases`).
+fn simulcast_vertical_canvas(
+    stream_output: Option<&CompositorAuxiliaryOutput>,
+) -> Option<(u32, u32)> {
+    stream_output
+        .filter(|output| output.composes_simulcast_scene)
+        .map(|output| (output.width, output.height))
+}
+
+/// The landscape canvas the renderer rasterizes the chat box for (plan 215
+/// G): the primary leg's, or a split stream leg's when that is smaller. The
+/// box is exactly its rect's width and every leg blits it at pixel size, so
+/// one landscape raster can only be complete on both legs when it is painted
+/// for the smaller one (on the larger it then hugs the rect's edge, whole).
+/// The vertical simulcast leg has its own portrait raster and never counts.
+/// Fixed for the run: leg sizes never change mid-session, so the renderer
+/// reads it once per livestream, whatever the chat switches say at start.
+fn chat_overlay_horizontal_canvas(
+    primary: (u32, u32),
+    stream_output: Option<&CompositorAuxiliaryOutput>,
+) -> (u32, u32) {
+    stream_output
+        .filter(|output| !output.composes_simulcast_scene)
+        .map(|output| (output.width, output.height))
+        .filter(|aux| aux.0 * aux.1 < primary.0 * primary.1)
+        .unwrap_or(primary)
 }
 
 #[cfg(test)]
@@ -26605,10 +27306,13 @@ fn output_mode(record_enabled: bool, stream_enabled: bool) -> &'static str {
 }
 
 fn audio_processing_settings(params: &StartSessionParams) -> AudioProcessingSettings {
-    normalized_audio_processing_settings(
-        params.audio.microphone_gain_db,
-        params.audio.microphone_muted,
-    )
+    AudioProcessingSettings {
+        noise_suppression: params.audio.microphone_noise_suppression,
+        ..normalized_audio_processing_settings(
+            params.audio.microphone_gain_db,
+            params.audio.microphone_muted,
+        )
+    }
 }
 
 fn parse_avfoundation_id(id: &str) -> Option<usize> {
@@ -27280,6 +27984,7 @@ mod tests {
                 sounds: None,
                 master: Some(reading),
                 master_clipped_samples: 3,
+                microphone_silent: true,
             },
         )
         .expect("an event");
@@ -27287,9 +27992,14 @@ mod tests {
         assert_eq!(event.microphone, Some(reading));
         assert_eq!(event.system_audio, None);
         assert_eq!(event.master_clipped_samples, 3);
+        assert!(event.microphone_silent);
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the std lock also serializes the sync lifecycle tests; this test owns its current-thread runtime, so the guard blocks no other task"
+    )]
     async fn shutdown_and_partial_start_share_signal_all_absolute_deadline_path() {
         let _serial = crate::encoder_bridge::ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
             .lock()
@@ -27474,17 +28184,26 @@ mod tests {
             device_name: "No microphone".into(),
             captured_frames: 0,
             dropped_frames: 0,
-            session_peak: 0.0,
+            capture_session_peak: 0.0,
+            received_capture_frames: 0,
             input_state: NativeAudioInputState::Stopped,
             source_loss_after_ms: None,
             unreported_source_loss_after_ms: vec![],
             unreported_recoveries: vec![],
             unreported_output_stalls: vec![],
+            unreported_denoise_events: vec![],
             system_audio: None,
         };
         assert_eq!(stats.silence_verdict(), None);
         stats.selected_input = true;
         assert_eq!(stats.silence_verdict(), Some(SilentMicKind::NoFrames));
+        stats.received_capture_frames = 480;
+        assert_eq!(stats.silence_verdict(), Some(SilentMicKind::AllSilence));
+        stats.capture_session_peak = 0.004;
+        // Placement/output counters may remain zero after a blocked writer.
+        assert_eq!(stats.captured_frames, 0);
+        assert_eq!(stats.silence_verdict(), None);
+        stats.capture_session_peak = 0.0;
         stats.input_state = NativeAudioInputState::SourceLost;
         assert_eq!(stats.silence_verdict(), None);
     }
@@ -27513,6 +28232,26 @@ mod tests {
             microphone_input_lost_message("Desk Mic", 92_345),
             "Microphone \"Desk Mic\" stopped after 92.3 seconds. Videorc replaced the missing input with silence."
         );
+    }
+
+    #[test]
+    fn microphone_silence_messages_name_the_device_and_the_run() {
+        // Issue 1064: the report arrives at the end of the hold, so the
+        // silence began a hold earlier.
+        assert_eq!(
+            microphone_silent_message("HD Pro Webcam C920", 15_300, 3_000),
+            "Microphone \"HD Pro Webcam C920\" has sent only silence since 12.3 seconds into this session. Try choosing it again."
+        );
+        assert_eq!(
+            microphone_silent_message("Desk Mic", 1_000, 3_000),
+            "Microphone \"Desk Mic\" has sent only silence since 0.0 seconds into this session. Try choosing it again."
+        );
+        assert_eq!(
+            microphone_signal_recovered_message("Desk Mic", 7_450),
+            "Microphone \"Desk Mic\" has sound again after 7.5 seconds of silence."
+        );
+        assert_eq!(MICROPHONE_SILENT_CODE, "microphone-silent");
+        assert!(MICROPHONE_SIGNAL_RECOVERED_CODE.ends_with("-recovered"));
     }
 
     #[test]
@@ -29896,6 +30635,327 @@ mod tests {
         assert!(matches!(recovered, BlockingProbeOutcome::Finished("ok")));
     }
 
+    /// A scripted stand-in for `run_linux_vaapi_probe`: the outcome per
+    /// (node, profile), every call recorded, and a missing script entry is a
+    /// probe that must never have run (a timed-out node's Compat profile, a
+    /// node after a timeout).
+    struct ScriptedVaapiProbe {
+        outcomes: Vec<((&'static str, LinuxVaapiArgProfile), LinuxVaapiProbeOutcome)>,
+        calls: std::rc::Rc<std::cell::RefCell<Vec<(String, LinuxVaapiArgProfile)>>>,
+        quarantine_directory: PathBuf,
+    }
+
+    impl ScriptedVaapiProbe {
+        fn new(
+            label: &str,
+            outcomes: Vec<((&'static str, LinuxVaapiArgProfile), LinuxVaapiProbeOutcome)>,
+        ) -> Self {
+            Self {
+                outcomes,
+                calls: Default::default(),
+                quarantine_directory: std::env::temp_dir().join(format!(
+                    "videorc-vaapi-probe-decision-{label}-{}",
+                    uuid::Uuid::new_v4()
+                )),
+            }
+        }
+
+        fn quarantine(&self) -> crate::linux_vaapi::ProbeQuarantine {
+            crate::linux_vaapi::ProbeQuarantine::new(self.quarantine_directory.clone())
+        }
+
+        fn sentinel_armed(&self) -> bool {
+            self.quarantine_directory
+                .join("probe-in-progress.json")
+                .exists()
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn runner(
+            &self,
+        ) -> Box<
+            dyn FnMut(
+                crate::linux_vaapi::RenderNodeCandidate,
+                LinuxVaapiArgProfile,
+            ) -> std::future::Ready<LinuxVaapiProbeOutcome>,
+        > {
+            let outcomes = self.outcomes.clone();
+            let calls = self.calls.clone();
+            Box::new(move |candidate, profile| {
+                let node = candidate.node_name();
+                calls.borrow_mut().push((node.clone(), profile));
+                let outcome = outcomes
+                    .iter()
+                    .find(|((scripted, scripted_profile), _)| {
+                        *scripted == node && *scripted_profile == profile
+                    })
+                    .map(|(_, outcome)| outcome.clone())
+                    .unwrap_or_else(|| {
+                        panic!("{node} was probed with {profile}, which must never run")
+                    });
+                std::future::ready(outcome)
+            })
+        }
+
+        fn calls(&self) -> Vec<(String, LinuxVaapiArgProfile)> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Drop for ScriptedVaapiProbe {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.quarantine_directory).ok();
+        }
+    }
+
+    fn render_node(node: &str, driver: &str) -> crate::linux_vaapi::RenderNodeCandidate {
+        crate::linux_vaapi::RenderNodeCandidate {
+            path: PathBuf::from("/dev/dri").join(node),
+            driver: Some(driver.to_string()),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_timed_out_probe_quarantines_its_node_and_probes_nothing_else() {
+        use crate::protocol::LinuxRenderNodeState;
+        // The Arch T2 box: amdgpu first in probe order, i915 behind it. The
+        // AMD probe hangs; before #1027 Compat ran on the same hung GPU and
+        // the node was probed again at the next launch.
+        let amd = render_node("renderD128", "amdgpu");
+        let intel = render_node("renderD129", "i915");
+        let probe = ScriptedVaapiProbe::new(
+            "timeout",
+            vec![(
+                ("renderD128", LinuxVaapiArgProfile::Standard),
+                LinuxVaapiProbeOutcome::TimedOut,
+            )],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, reason, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[amd.clone(), intel.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, None);
+        assert_eq!(
+            probe.calls(),
+            vec![("renderD128".to_string(), LinuxVaapiArgProfile::Standard)],
+            "Compat on the hung node or any probe of the next node"
+        );
+        assert!(!probe.sentinel_armed(), "the sentinel outlived the probe");
+        let quarantined = quarantine.quarantined();
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(quarantined[0].node, "renderD128");
+        assert_eq!(quarantined[0].driver.as_deref(), Some("amdgpu"));
+        assert_eq!(quarantined[0].ffmpeg_path, "/opt/ffmpeg");
+        assert_eq!(
+            quarantined[0].timed_out_after_secs,
+            Some(LINUX_VAAPI_PROBE_TIMEOUT.as_secs())
+        );
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].node, "renderD128");
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Quarantined);
+        assert!(
+            reports[0]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("did not return within 20 s"))
+        );
+        assert_eq!(reports[1].node, "renderD129");
+        assert_eq!(reports[1].state, LinuxRenderNodeState::Skipped);
+        assert!(
+            reports[1]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("renderD128 did not return"))
+        );
+        let reason = reason.expect("the fallback names the hang");
+        assert!(reason.contains("renderD128"), "{reason}");
+        assert!(reason.contains("did not return within 20 s"), "{reason}");
+
+        // The next start plans around the hung node and reaches the healthy
+        // one; the quarantine is read from disk, not remembered in memory.
+        let (to_probe, planned) = crate::linux_vaapi::plan_probe_order(
+            &[amd, intel.clone()],
+            None,
+            &probe.quarantine().quarantined(),
+        )
+        .expect("plan");
+        assert_eq!(to_probe, vec![intel]);
+        assert_eq!(planned[0].state, LinuxRenderNodeState::Quarantined);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_rejected_standard_profile_tries_compat_on_the_same_node_only() {
+        use crate::protocol::LinuxRenderNodeState;
+        let intel = render_node("renderD128", "i915");
+        let amd = render_node("renderD129", "amdgpu");
+        let probe = ScriptedVaapiProbe::new(
+            "rejection",
+            vec![
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Rejected("no CQP support".to_string()),
+                ),
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Compat),
+                    LinuxVaapiProbeOutcome::Rejected("level 4 refused".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Rejected("hwupload failed".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Compat),
+                    LinuxVaapiProbeOutcome::Passed,
+                ),
+            ],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, reason, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[intel, amd.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, Some((amd.path, LinuxVaapiArgProfile::Compat)));
+        assert_eq!(reason, None);
+        assert_eq!(
+            probe.calls(),
+            vec![
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Compat),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Compat),
+            ]
+        );
+        assert!(!probe.sentinel_armed());
+        assert!(
+            quarantine.quarantined().is_empty(),
+            "a rejection is not a hang"
+        );
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Rejected);
+        assert_eq!(
+            reports[0].detail.as_deref(),
+            Some("standard: no CQP support | compat: level 4 refused")
+        );
+        assert_eq!(reports[1].state, LinuxRenderNodeState::ProbedOk);
+        assert_eq!(
+            reports[1].detail.as_deref(),
+            Some("compat argument profile")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_probe_that_never_spawned_has_no_rejection_for_compat_to_answer() {
+        use crate::protocol::LinuxRenderNodeState;
+        let intel = render_node("renderD128", "i915");
+        let amd = render_node("renderD129", "amdgpu");
+        let probe = ScriptedVaapiProbe::new(
+            "spawn-failure",
+            vec![
+                (
+                    ("renderD128", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Failed("ffmpeg could not be spawned".to_string()),
+                ),
+                (
+                    ("renderD129", LinuxVaapiArgProfile::Standard),
+                    LinuxVaapiProbeOutcome::Passed,
+                ),
+            ],
+        );
+        let quarantine = probe.quarantine();
+
+        let (accepted, _, reports) = probe_linux_vaapi_candidates(
+            "/opt/ffmpeg",
+            &[intel, amd.clone()],
+            &quarantine,
+            probe.runner(),
+        )
+        .await;
+
+        assert_eq!(accepted, Some((amd.path, LinuxVaapiArgProfile::Standard)));
+        assert_eq!(
+            probe.calls(),
+            vec![
+                ("renderD128".to_string(), LinuxVaapiArgProfile::Standard),
+                ("renderD129".to_string(), LinuxVaapiArgProfile::Standard),
+            ]
+        );
+        assert!(quarantine.quarantined().is_empty());
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Rejected);
+        assert_eq!(
+            reports[0].detail.as_deref(),
+            Some("standard: ffmpeg could not be spawned")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cancelled_probe_leaves_no_sentinel_for_the_next_resolve_to_adopt() {
+        // The resolve future is dropped mid-probe (a test runtime ending, a
+        // timeout around start_session, quit). This process is alive, so
+        // the node did not hang the host: nothing may be left for the next
+        // start to adopt. The Arch T2 box lost its healthy Intel node to
+        // exactly this (#1027, problem 2).
+        let intel = render_node("renderD128", "i915");
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-vaapi-probe-cancelled-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let quarantine = crate::linux_vaapi::ProbeQuarantine::new(directory.clone());
+        let (armed_tx, armed) = oneshot::channel::<()>();
+        let mut armed_tx = Some(armed_tx);
+        let sentinel_path = directory.join("probe-in-progress.json");
+        let sentinel_path_in_probe = sentinel_path.clone();
+        let never_returns = move |_: crate::linux_vaapi::RenderNodeCandidate,
+                                  _: LinuxVaapiArgProfile| {
+            // The sentinel is on disk while the probe runs.
+            assert!(
+                sentinel_path_in_probe.exists(),
+                "probe ran without a sentinel"
+            );
+            if let Some(armed_tx) = armed_tx.take() {
+                let _ = armed_tx.send(());
+            }
+            std::future::pending::<LinuxVaapiProbeOutcome>()
+        };
+
+        {
+            let resolve = probe_linux_vaapi_candidates(
+                "/opt/ffmpeg",
+                std::slice::from_ref(&intel),
+                &quarantine,
+                never_returns,
+            );
+            tokio::pin!(resolve);
+            tokio::select! {
+                _ = &mut resolve => panic!("a pending probe resolved"),
+                armed = armed => armed.expect("the probe armed its sentinel"),
+            }
+            // The resolve future is dropped here, mid-probe.
+        }
+
+        assert!(
+            !sentinel_path.exists(),
+            "the cancelled probe left its sentinel armed"
+        );
+        assert_eq!(
+            quarantine.adopt_stale_sentinel().expect("no sentinel"),
+            None,
+            "the next resolve quarantined a node that never hung"
+        );
+        assert!(quarantine.quarantined().is_empty());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "current_thread")]
     async fn a_decision_asked_for_during_a_probe_waits_and_never_quarantines_that_node() {
@@ -29920,14 +30980,14 @@ mod tests {
             async move {
                 resolutions.fetch_add(1, Ordering::SeqCst);
                 quarantine.adopt_stale_sentinel()?;
-                quarantine.begin_probe(intel, "/opt/ffmpeg")?;
+                let probing = quarantine.begin_probe(intel, "/opt/ffmpeg")?;
                 if let Some(armed) = armed {
                     let _ = armed.send(());
                 }
                 if let Some(probe_returns) = probe_returns {
                     let _ = probe_returns.await;
                 }
-                quarantine.finish_probe()?;
+                probing.finish()?;
                 select_linux_h264_encoder(
                     LinuxH264EncoderPreference::Auto,
                     Some((intel.path.clone(), LinuxVaapiArgProfile::Standard)),
@@ -31157,6 +32217,100 @@ mod tests {
         assert!(!record_only_bridge_60fps_eligible(&streaming));
     }
 
+    /// Issue #1062: a Windows request the envelope rules out of the bridge
+    /// is refused with the choices that stay inside it, never recorded
+    /// through software OpenH264 at a third of realtime.
+    #[test]
+    fn windows_refuses_a_60fps_recording_outside_the_bridge_envelope() {
+        let mut params = base_params(true, false);
+        params.output.video = video_preset_defaults(VideoPreset::Record4k60Experimental);
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "4K at 60 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 60 fps."
+            )
+        );
+        // The developer env override keeps its legacy path.
+        assert_eq!(windows_bridge_envelope_refusal(&params, true), None);
+
+        // The advice keeps the requested rate: every rate up to 60 fits.
+        params.output.video.fps = 48;
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "4K at 48 fps isn't supported on Windows yet. Choose 4K at 30 fps or 1440p at 48 fps."
+            )
+        );
+
+        // A portrait canvas is named by both sides, like the renderer.
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2160,
+            height: 3840,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        assert_eq!(
+            windows_bridge_envelope_refusal(&params, false).as_deref(),
+            Some(
+                "2160 × 3840 at 60 fps isn't supported on Windows yet. Choose 2160 × 3840 at 30 fps or 1440 × 2560 at 60 fps."
+            )
+        );
+    }
+
+    #[test]
+    fn windows_keeps_every_request_inside_the_bridge_envelope() {
+        let mut params = base_params(true, false);
+        for preset in [
+            VideoPreset::Record4k30,
+            VideoPreset::Tutorial1440p30,
+            VideoPreset::Tutorial1080p30,
+            VideoPreset::StreamSafe1080p60,
+            VideoPreset::Vertical1080x1920,
+        ] {
+            params.output.video = video_preset_defaults(preset.clone());
+            assert_eq!(
+                windows_bridge_envelope_refusal(&params, false),
+                None,
+                "{preset:?} rides the bridge"
+            );
+        }
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2560,
+            height: 1440,
+            fps: 60,
+            bitrate_kbps: 16_000,
+        };
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+        params.output.video.width = 1440;
+        params.output.video.height = 2560;
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+    }
+
+    #[test]
+    fn windows_keeps_a_livestream_inside_the_streaming_envelope() {
+        let mut params = base_params(false, true);
+        let mut streaming = streaming_for(&[(
+            StreamPlatform::Youtube,
+            "rtmp://a.rtmp.youtube.com/live2",
+            "youtube-key",
+        )]);
+        streaming.default_output_preset = VideoPreset::StreamYoutube1080p60;
+        streaming.default_bitrate_kbps = 12_000;
+        params.streaming = Some(streaming);
+        normalize_stream_only_output_video(&mut params).unwrap();
+        assert_eq!(requested_compositor_bridge_fps(&params), 60);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+
+        // The recording beside it at 1080p: the proven streaming envelope.
+        params.output.record_enabled = true;
+        params.output.video = video_preset_defaults(VideoPreset::Tutorial1080p30);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+        params.output.video = video_preset_defaults(VideoPreset::StreamYoutube1080p60);
+        assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+    }
+
     #[tokio::test]
     async fn a_refused_request_is_refused_before_the_clip_buffer_hands_over() {
         // Retest 152: separate files refused on Linux, but only after Record
@@ -31745,7 +32899,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             system.detach().await.expect("live system Off acknowledged");
             let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
-                session_id: session_id.into(), microphone_gain_db: -6.0, microphone_muted: false,
+                session_id: session_id.into(), microphone_noise_suppression: None, microphone_gain_db: -6.0, microphone_muted: false,
                 system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
             }).await;
             assert!(changed.applied);
@@ -31760,7 +32914,7 @@ mod tests {
             )), Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap();
             system.attach(source).await.expect("live system On acknowledged");
             let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
-                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: true,
+                session_id: session_id.into(), microphone_noise_suppression: None, microphone_gain_db: 0.0, microphone_muted: true,
                 system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
             }).await;
             assert!(changed.applied);
@@ -31768,7 +32922,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             control_intervals.push(serde_json::json!({"start": mute_at + 0.2, "duration": 0.4, "microphone": 0.0, "system": 0.2 * 10_f64.powf(f64::from(params.audio.system_audio_gain_db) / 20.0)}));
             let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
-                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: false,
+                session_id: session_id.into(), microphone_noise_suppression: None, microphone_gain_db: 0.0, microphone_muted: false,
                 system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
             }).await;
             assert!(changed.applied);
@@ -32694,6 +33848,7 @@ mod tests {
             native_audio_silent_drain: false,
             capture_notice: None,
             native_audio: None,
+            _incident_tone: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
             system_audio: None,
@@ -32719,6 +33874,8 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            simulcast_vertical_canvas: None,
+            chat_overlay_horizontal_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
             accepts_live_scene_edits: true,
@@ -36735,8 +37892,7 @@ mod tests {
             let segment = position(&args, "segment");
             let ring_video = args[..segment]
                 .windows(2)
-                .filter(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
-                .last()
+                .rfind(|pair| pair[0] == "-map" && pair[1].ends_with(":v"))
                 .unwrap()[1]
                 .clone();
             assert_eq!(ring_video, format!("{recording_input}:v"));
@@ -39696,9 +40852,12 @@ mod tests {
                 highlight_overlay_on_aux: false,
                 buddy_overlay_on_primary: false,
                 buddy_overlay_on_aux: false,
+                chat_overlay_on_primary: false,
+                chat_overlay_on_aux: false,
                 replay_only: false,
                 highlight_overlay_on_program: false,
                 buddy_overlay_on_program: false,
+                chat_overlay_on_program: false,
             },
         )
         .await;
@@ -39944,6 +41103,7 @@ mod tests {
     fn ffmpeg_live_microphone_commands_are_broadcast_clamped_and_injection_safe() {
         assert_eq!(
             ffmpeg_live_microphone_command(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 6.5,
                 muted: false,
             }),
@@ -39951,6 +41111,7 @@ mod tests {
         );
         assert_eq!(
             ffmpeg_live_microphone_command(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 99.0,
                 muted: false,
             }),
@@ -39958,6 +41119,7 @@ mod tests {
         );
         assert_eq!(
             ffmpeg_live_microphone_command(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: f32::NAN,
                 muted: false,
             }),
@@ -39965,6 +41127,7 @@ mod tests {
         );
         assert_eq!(
             ffmpeg_live_microphone_command(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: -12.0,
                 muted: true,
             }),
@@ -40500,6 +41663,84 @@ mod tests {
         assert!(
             !replay_auto_start_requested(true, &params),
             "a ring the user turned on runs anywhere"
+        );
+    }
+
+    #[test]
+    fn record_and_go_live_drop_the_automatic_ring_on_a_software_encoder() {
+        let automatic = |params: &mut StartSessionParams| {
+            params.replay = Some(crate::protocol::ReplayParams {
+                seconds: 60,
+                auto: true,
+            });
+        };
+        for backend in [
+            EncodeBackend::SoftwareOpenH264,
+            EncodeBackend::SoftwareMediaFoundation,
+            EncodeBackend::SoftwareX264,
+        ] {
+            let mut go_live = base_params(false, true);
+            automatic(&mut go_live);
+            let refusal = drop_automatic_ring_on_software_encoder(false, &mut go_live, backend)
+                .expect("a second encode beside the stream");
+            assert!(
+                refusal.message.contains("second encode"),
+                "{}",
+                refusal.message
+            );
+            assert!(
+                go_live.replay.is_none(),
+                "{backend:?}: the stream starts without the ring"
+            );
+        }
+
+        let mut record = base_params(true, false);
+        automatic(&mut record);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut record,
+                EncodeBackend::HardwareVaapi
+            )
+            .is_none()
+        );
+        assert!(record.replay.is_some(), "a hardware encoder keeps the ring");
+
+        record.replay.as_mut().unwrap().auto = false;
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut record,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none()
+        );
+        assert!(
+            record.replay.is_some(),
+            "a ring the user turned on runs anywhere"
+        );
+
+        let mut buffer_only = base_params(true, false);
+        automatic(&mut buffer_only);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                true,
+                &mut buffer_only,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none(),
+            "a buffer-only start is refused by the guard above, never started bare"
+        );
+        assert!(buffer_only.replay.is_some());
+
+        let mut no_ring = base_params(true, false);
+        assert!(
+            drop_automatic_ring_on_software_encoder(
+                false,
+                &mut no_ring,
+                EncodeBackend::SoftwareOpenH264
+            )
+            .is_none()
         );
     }
 
@@ -41297,6 +42538,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 6.0,
                     muted: false,
                 },
@@ -41337,6 +42579,7 @@ mod tests {
                 .apply(
                     &mut stdin,
                     AudioProcessingSettings {
+                        noise_suppression: Default::default(),
                         gain_db,
                         muted: false,
                     },
@@ -41354,6 +42597,7 @@ mod tests {
     async fn ffmpeg_live_audio_control_confirms_identical_healthy_settings_without_io() {
         let (_sender, replies) = mpsc::unbounded_channel();
         let initial = AudioProcessingSettings {
+            noise_suppression: Default::default(),
             gain_db: 6.0,
             muted: false,
         };
@@ -41421,6 +42665,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 3.0,
                     muted: false,
                 },
@@ -41431,6 +42676,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: -6.0,
                     muted: false,
                 },
@@ -41470,6 +42716,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: -6.0,
                     muted: false,
                 },
@@ -41500,6 +42747,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 6.0,
                     muted: false,
                 },
@@ -41515,6 +42763,7 @@ mod tests {
             .apply(
                 &mut stdin,
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: -6.0,
                     muted: true,
                 },
@@ -41575,6 +42824,7 @@ mod tests {
             tokio::spawn(async move {
                 session
                     .apply(AudioProcessingSettings {
+                        noise_suppression: Default::default(),
                         gain_db: 6.0,
                         muted: false,
                     })
@@ -41633,6 +42883,7 @@ mod tests {
         let failure = session
             .apply_with_ready_timeout(
                 AudioProcessingSettings {
+                    noise_suppression: Default::default(),
                     gain_db: 6.0,
                     muted: false,
                 },
@@ -41679,6 +42930,7 @@ mod tests {
             tokio::spawn(async move {
                 session
                     .apply(AudioProcessingSettings {
+                        noise_suppression: Default::default(),
                         gain_db: 6.0,
                         muted: false,
                     })
@@ -41736,6 +42988,7 @@ mod tests {
             native_audio_silent_drain: false,
             capture_notice: None,
             native_audio: None,
+            _incident_tone: None,
             #[cfg(debug_assertions)]
             source_switch_output_audio_timing: None,
             system_audio: None,
@@ -41764,6 +43017,8 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            simulcast_vertical_canvas: None,
+            chat_overlay_horizontal_canvas: None,
             overlay_session_shape: None,
             accepts_banners: true,
             accepts_live_scene_edits: true,
@@ -41780,6 +43035,7 @@ mod tests {
             update_active_audio_processing(
                 &update_state,
                 AudioProcessingUpdateParams {
+                    microphone_noise_suppression: None,
                     session_id: "live-audio-lock-test".to_string(),
                     microphone_gain_db: 6.0,
                     microphone_muted: false,
@@ -41829,6 +43085,7 @@ mod tests {
         let late_result = update_active_audio_processing(
             &state,
             AudioProcessingUpdateParams {
+                microphone_noise_suppression: None,
                 session_id: "live-audio-lock-test".to_string(),
                 microphone_gain_db: -3.0,
                 microphone_muted: true,
@@ -41849,6 +43106,150 @@ mod tests {
         drop(live_audio_session);
     }
 
+    #[test]
+    fn rnnoise_dead_audio_transport_does_not_claim_video_session_ended() {
+        for state in [
+            crate::audio::NativeAudioInputState::DownstreamClosed,
+            crate::audio::NativeAudioInputState::Stopped,
+        ] {
+            let mut result = AudioProcessingUpdateResult {
+                applied: false,
+                session_id: "active-video".into(),
+                microphone_gain_db: 6.0,
+                microphone_muted: false,
+                microphone_noise_suppression: crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+                reason_code: None,
+                confirmed_microphone_gain_db: None,
+                confirmed_microphone_muted: None,
+                confirmed_microphone_noise_suppression: None,
+            };
+            assert!(reject_closed_microphone_controls(
+                &mut result,
+                state,
+                AudioProcessingSettings::default()
+            ));
+            assert_eq!(
+                result.reason_code.as_deref(),
+                Some("live-audio-control-unavailable")
+            );
+            assert_eq!(result.confirmed_microphone_gain_db, Some(0.0));
+            assert_eq!(result.confirmed_microphone_muted, Some(false));
+            assert_eq!(
+                result.confirmed_microphone_noise_suppression,
+                Some(crate::protocol::MicrophoneNoiseSuppression::Off)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rnnoise_live_update_rejects_bypassed_microphone_without_claiming_applied() {
+        let state = test_state();
+        *state.recording.lock().await = Some(test_active_recording_stub("rnnoise-unavailable"));
+        let result = update_active_audio_processing(
+            &state,
+            AudioProcessingUpdateParams {
+                session_id: "rnnoise-unavailable".into(),
+                microphone_gain_db: 6.0,
+                microphone_muted: false,
+                microphone_noise_suppression: Some(
+                    crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+                ),
+                system_audio_enabled: None,
+                system_audio_gain_db: None,
+                system_audio_echo_guard: None,
+            },
+        )
+        .await;
+        assert!(!result.applied);
+        assert_eq!(
+            result.reason_code.as_deref(),
+            Some("microphone-noise-suppression-unavailable")
+        );
+        assert_eq!(
+            result.confirmed_microphone_noise_suppression,
+            Some(crate::protocol::MicrophoneNoiseSuppression::Off)
+        );
+    }
+
+    /// A microphone that bypasses the session audio bus (the DirectShow or
+    /// Pulse fallback, a build without the capture worker) starts with noise
+    /// reduction Off for that session and one Warn event; a bus-backed
+    /// session keeps the request and says nothing.
+    #[tokio::test]
+    async fn rnnoise_start_without_the_session_audio_bus_runs_off_and_warns_once() {
+        use crate::protocol::MicrophoneNoiseSuppression;
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("rnnoise-direct")
+            .unwrap();
+        let mut params = base_params(true, false);
+        params.audio.microphone_noise_suppression = MicrophoneNoiseSuppression::Rnnoise;
+        assert!(!drop_noise_reduction_without_session_audio(
+            &state,
+            "rnnoise-direct",
+            &mut params,
+            true
+        ));
+        assert_eq!(
+            params.audio.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Rnnoise,
+            "a bus-backed session keeps the request"
+        );
+        assert!(
+            state
+                .database
+                .list_health_events("rnnoise-direct")
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(drop_noise_reduction_without_session_audio(
+            &state,
+            "rnnoise-direct",
+            &mut params,
+            false
+        ));
+        assert_eq!(
+            params.audio.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Off
+        );
+        assert_eq!(
+            audio_processing_settings(&params).noise_suppression,
+            MicrophoneNoiseSuppression::Off,
+            "the FFmpeg live control is seeded Off"
+        );
+        let events = state.database.list_health_events("rnnoise-direct").unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(matches!(events[0].level, HealthLevel::Warn), "{events:?}");
+        assert_eq!(
+            events[0].code,
+            MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_CODE
+        );
+        assert_eq!(
+            events[0].message,
+            MICROPHONE_NOISE_SUPPRESSION_UNAVAILABLE_MESSAGE
+        );
+        assert!(!events[0].message.contains('\u{2014}'), "no em dashes");
+        assert_eq!(events[0].session_id.as_deref(), Some("rnnoise-direct"));
+
+        // Off stays Off, with nothing more to say.
+        assert!(!drop_noise_reduction_without_session_audio(
+            &state,
+            "rnnoise-direct",
+            &mut params,
+            false
+        ));
+        assert_eq!(
+            state
+                .database
+                .list_health_events("rnnoise-direct")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn live_audio_stop_marker_rejects_a_precloned_late_update() {
         let (mut child, stdin) = spawn_test_stdin_sink().await;
@@ -41863,6 +43264,7 @@ mod tests {
         let error = timeout(
             Duration::from_millis(100),
             precloned_session.apply(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: 6.0,
                 muted: false,
             }),
@@ -41882,6 +43284,7 @@ mod tests {
         }
         let sticky_error = precloned_session
             .apply(AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: -6.0,
                 muted: true,
             })
@@ -43429,15 +44832,19 @@ mod tests {
             -STREAM_OUTPUT_AUDIO_ADVANCE_MS
         );
 
-        let mut tuned = AudioSettings::default();
-        tuned.microphone_sync_offset_ms = 80;
+        let tuned = AudioSettings {
+            microphone_sync_offset_ms: 80,
+            ..Default::default()
+        };
         assert_eq!(
             stream_output_audio_settings(&tuned).microphone_sync_offset_ms,
             80 - STREAM_OUTPUT_AUDIO_ADVANCE_MS
         );
 
-        let mut near_min = AudioSettings::default();
-        near_min.microphone_sync_offset_ms = MICROPHONE_SYNC_OFFSET_MIN_MS + 10;
+        let near_min = AudioSettings {
+            microphone_sync_offset_ms: MICROPHONE_SYNC_OFFSET_MIN_MS + 10,
+            ..Default::default()
+        };
         assert_eq!(
             stream_output_audio_settings(&near_min).microphone_sync_offset_ms,
             MICROPHONE_SYNC_OFFSET_MIN_MS
@@ -45987,8 +47394,19 @@ mod tests {
             bitrate_kbps: 50_000,
         };
 
-        validate_outputs(&params).unwrap();
+        validate_video_profile_policy(&params).unwrap();
+        // Issue #1062: Windows refuses 4K60 at validation, since it would
+        // fall outside the bridge envelope, unless the developer override
+        // keeps the legacy path.
+        if cfg!(target_os = "windows") && !compositor_encoder_bridge_disabled(true, false) {
+            let error = validate_outputs(&params).unwrap_err().to_string();
+            assert!(error.contains("isn't supported on Windows yet"), "{error}");
+        } else {
+            validate_outputs(&params).unwrap();
+        }
 
+        // The experimental preset is still required: the profile policy runs
+        // before the Windows refusal, so every host names it.
         params.output.video.preset = VideoPreset::Custom;
         let error = validate_outputs(&params).unwrap_err().to_string();
         assert!(error.contains("4K60 is experimental"), "{error}");
@@ -46133,6 +47551,50 @@ mod tests {
             None
         );
         assert_eq!(comment_highlight_vertical_canvas(None, (true, false)), None);
+    }
+
+    /// Plan 215 G, the dual-orientation fix: the chat box is painted for the
+    /// landscape leg it lands on. With a vertical leg the horizontal stream
+    /// rides the primary (the session's own size, not the stream profile's);
+    /// a smaller split stream leg wins over the recording; a larger one does
+    /// not, so the raster is never wider than the rect of any leg.
+    #[test]
+    fn chat_overlay_horizontal_canvas_is_the_smallest_landscape_leg() {
+        let vertical = CompositorAuxiliaryOutput {
+            width: 720,
+            height: 1280,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            composes_simulcast_scene: true,
+        };
+        let smaller_split = CompositorAuxiliaryOutput {
+            composes_simulcast_scene: false,
+            width: 1280,
+            height: 720,
+            ..vertical
+        };
+        let larger_split = CompositorAuxiliaryOutput {
+            composes_simulcast_scene: false,
+            width: 2560,
+            height: 1440,
+            ..vertical
+        };
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1280, 720), Some(&vertical)),
+            (1280, 720),
+            "the dual-orientation horizontal stream is the primary leg"
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), None),
+            (1920, 1080)
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), Some(&smaller_split)),
+            (1280, 720)
+        );
+        assert_eq!(
+            chat_overlay_horizontal_canvas((1920, 1080), Some(&larger_split)),
+            (1920, 1080)
+        );
     }
 
     #[test]
@@ -47513,9 +48975,11 @@ mod tests {
 
         #[test]
         fn the_bus_runs_the_system_audio_timing_only_where_it_can_mix() {
-            let mut audio = AudioSettings::default();
-            audio.microphone_sync_offset_ms = 120;
-            audio.system_audio_gain_db = -9.0;
+            let mut audio = AudioSettings {
+                microphone_sync_offset_ms: 120,
+                system_audio_gain_db: -9.0,
+                ..Default::default()
+            };
             let capable = session_audio_options(&audio, true);
             assert_eq!(
                 capable.playout_delay,
@@ -47525,8 +48989,9 @@ mod tests {
             assert_eq!(capable.system_delay_frames, 0);
             assert_eq!(capable.system_gain_db, -9.0);
 
-            // Elsewhere the bus keeps its pre-mixer defaults, except Linux's
-            // longer deadline for the Pulse worker (retest 150).
+            // Elsewhere the bus keeps its pre-mixer defaults, except a longer
+            // deadline: Linux for the Pulse worker (retest 150), others for the
+            // noise reduction lookahead, which can turn on mid-session.
             let elsewhere = session_audio_options(&audio, false);
             assert_eq!(
                 crate::session_audio::SessionAudioOptions {
@@ -47542,6 +49007,7 @@ mod tests {
                     crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY
                 } else {
                     crate::session_audio::PLAYOUT_DELAY
+                        + crate::session_audio::MICROPHONE_DENOISE_PLAYOUT_HEADROOM
                 }
             );
 
@@ -47599,8 +49065,10 @@ mod tests {
         fn moving_a_positive_offset_into_the_bus_keeps_every_leg_timing() {
             for offset in (MICROPHONE_SYNC_OFFSET_MIN_MS..=MICROPHONE_SYNC_OFFSET_MAX_MS).step_by(5)
             {
-                let mut audio = AudioSettings::default();
-                audio.microphone_sync_offset_ms = offset;
+                let audio = AudioSettings {
+                    microphone_sync_offset_ms: offset,
+                    ..Default::default()
+                };
                 let split = session_audio_sync(&audio, true).unwrap();
                 let bus_delay_ms = (split.microphone_delay_frames / 48) as i32;
                 assert_eq!(split.microphone_delay_frames % 48, 0);
@@ -47838,6 +49306,14 @@ mod tests {
         /// A published session whose bus is the paced-silence path (no
         /// microphone): the system-only shape.
         async fn live_session(session_id: &str) -> LiveSession {
+            live_session_with_source(session_id, None, AudioProcessingSettings::default()).await
+        }
+
+        async fn live_session_with_source(
+            session_id: &str,
+            source: Option<crate::audio::NativeAudioSource>,
+            settings: AudioProcessingSettings,
+        ) -> LiveSession {
             let state = test_state();
             state
                 .database
@@ -47857,13 +49333,15 @@ mod tests {
                 let mut buffer = [0_u8; 16_384];
                 while matches!(file.read(&mut buffer), Ok(read) if read > 0) {}
             });
-            let mut audio = AudioSettings::default();
-            audio.system_audio_enabled = false;
+            let audio = AudioSettings {
+                system_audio_enabled: false,
+                ..Default::default()
+            };
             let session_audio = crate::session_audio::attach_prepared_with(
-                None,
+                source.map(crate::session_audio::InitialAudioSource::warm),
                 path,
                 None,
-                AudioProcessingSettings::default(),
+                settings,
                 crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
                 session_audio_options(&audio, true),
             );
@@ -47893,6 +49371,7 @@ mod tests {
                 update_active_audio_processing(
                     &self.state,
                     AudioProcessingUpdateParams {
+                        microphone_noise_suppression: None,
                         session_id: self.session_id.clone(),
                         microphone_gain_db: 2.0,
                         microphone_muted: false,
@@ -48024,8 +49503,10 @@ mod tests {
         async fn start_on_joins_after_publication_and_start_off_opens_nothing() {
             let session = live_session("system-audio-start-on").await;
             let mut events = session.state.events.subscribe();
-            let mut off = AudioSettings::default();
-            off.system_audio_enabled = false;
+            let off = AudioSettings {
+                system_audio_enabled: false,
+                ..Default::default()
+            };
             {
                 let recording = session.state.recording.lock().await;
                 request_initial_system_audio(recording.as_ref().unwrap(), &off);
@@ -48033,8 +49514,10 @@ mod tests {
             sleep(Duration::from_millis(100)).await;
             assert_eq!(session.fake.opens(), 0, "Off means not captured at all");
 
-            let mut on = AudioSettings::default();
-            on.system_audio_enabled = true;
+            let on = AudioSettings {
+                system_audio_enabled: true,
+                ..Default::default()
+            };
             {
                 let recording = session.state.recording.lock().await;
                 request_initial_system_audio(recording.as_ref().unwrap(), &on);
@@ -48042,6 +49525,202 @@ mod tests {
             next_status_with(&mut events, &session.session_id, true).await;
             assert_eq!(session.fake.opens(), 1);
             session.end().await;
+        }
+
+        /// A frame noise reduction refuses (65.0, past its +36 dBFS headroom)
+        /// silences the microphone for that stretch and nothing else: the
+        /// bus keeps running, system audio stays in the mix, the live
+        /// controls still apply, and one Warn event reports the episode.
+        /// The finalizer claims an episode no sampler observed, and a fresh
+        /// session reports nothing.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rnnoise_fault_silences_the_microphone_and_keeps_mixed_audio_running() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let settings = AudioProcessingSettings {
+                noise_suppression: crate::protocol::MicrophoneNoiseSuppression::Rnnoise,
+                ..Default::default()
+            };
+            let reported = |state: &AppState, session_id: &str| -> usize {
+                state
+                    .database
+                    .list_health_events(session_id)
+                    .unwrap()
+                    .iter()
+                    .filter(|event| event.code == MICROPHONE_NOISE_REDUCTION_SILENCED_CODE)
+                    .count()
+            };
+            for policy in ["sampler", "finalizer", "fresh"] {
+                let fail = policy != "fresh";
+                let mut source = crate::audio::test_native_audio_source(settings);
+                let (sender, receiver) = std::sync::mpsc::channel();
+                source.receiver = Some(receiver);
+                let fault = Arc::new(AtomicBool::new(false));
+                let produce_fault = fault.clone();
+                let producer = tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(Duration::from_millis(10));
+                    let mut position = 0_u64;
+                    loop {
+                        ticker.tick().await;
+                        let bad = produce_fault.load(Ordering::Acquire);
+                        let samples = (0..480)
+                            .flat_map(|i| {
+                                let sample = if bad {
+                                    65.0
+                                } else {
+                                    ((position + i) as f32 * 0.071).sin() * 0.12
+                                };
+                                [sample, sample]
+                            })
+                            .collect();
+                        if sender
+                            .send(crate::audio::AudioFrame {
+                                timestamp_micros: position * 1_000_000 / 48_000,
+                                captured_at: std::time::Instant::now(),
+                                sample_rate: 48_000,
+                                channels: 2,
+                                samples,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        position += 480;
+                    }
+                });
+                let session = live_session_with_source(
+                    &format!("rnnoise-soft-{policy}"),
+                    Some(source),
+                    settings,
+                )
+                .await;
+                session.toggle(Some(true)).await;
+                if policy != "finalizer" {
+                    tokio::spawn(sample_native_audio_during_recording(
+                        session.state.clone(),
+                        session.session_id.clone(),
+                    ));
+                }
+                timeout(Duration::from_secs(10), async {
+                    loop {
+                        let ready = {
+                            let recording = session.state.recording.lock().await;
+                            recording
+                                .as_ref()
+                                .unwrap()
+                                .native_audio
+                                .as_ref()
+                                .unwrap()
+                                .status()
+                                .counters
+                                .captured_frames
+                                >= 4800
+                                && session.fake.live() > 0
+                        };
+                        if ready {
+                            break;
+                        }
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("healthy mixed audio before fault");
+                if fail {
+                    let final_audio = {
+                        let recording = session.state.recording.lock().await;
+                        let audio = recording.as_ref().unwrap().native_audio.as_ref().unwrap();
+                        assert!(
+                            audio.observation(true).denoise_events.is_empty(),
+                            "no episode before the fault"
+                        );
+                        audio.switch_handle()
+                    };
+                    fault.store(true, Ordering::Release);
+                    if policy == "finalizer" {
+                        // FFmpeg may observe PCM EOF before a sampler ticks:
+                        // the finalizer claims the episode after the join.
+                        let events = timeout(Duration::from_secs(10), async {
+                            loop {
+                                let claimed = final_audio.claim_denoise_events();
+                                if !claimed.is_empty() {
+                                    break claimed;
+                                }
+                                sleep(Duration::from_millis(10)).await;
+                            }
+                        })
+                        .await
+                        .expect("the finalizer claims the episode");
+                        assert_eq!(events.len(), 1, "{events:?}");
+                        assert!(
+                            events[0].reason.contains("non-finite or exceeds"),
+                            "{events:?}"
+                        );
+                        assert_eq!(events[0].generation, 0);
+                    } else {
+                        let event = health_event(
+                            &session.state,
+                            &session.session_id,
+                            MICROPHONE_NOISE_REDUCTION_SILENCED_CODE,
+                        )
+                        .await;
+                        assert!(matches!(event.level, HealthLevel::Warn), "{event:?}");
+                        assert_eq!(event.message, MICROPHONE_NOISE_REDUCTION_SILENCED_MESSAGE);
+                        assert!(
+                            event.message.contains("silenced the microphone"),
+                            "{event:?}"
+                        );
+                        assert!(!event.message.contains('\u{2014}'), "no em dashes");
+                    }
+                    // A continuous fault is one episode, and the session goes on.
+                    sleep(Duration::from_millis(400)).await;
+                    {
+                        let recording = session.state.recording.lock().await;
+                        let active = recording
+                            .as_ref()
+                            .expect("an audio fault never ends the session");
+                        let audio = active.native_audio.as_ref().unwrap();
+                        assert_eq!(audio.input_state(), NativeAudioInputState::Live);
+                        let system = audio.system_audio().observation();
+                        assert!(system.attached, "system audio stays in the mix: {system:?}");
+                        assert!(
+                            audio.observation(false).denoise_events.is_empty(),
+                            "one event per episode"
+                        );
+                    }
+                    assert_eq!(session.fake.live(), 1, "the system capture stays open");
+                    assert!(final_audio.claim_denoise_events().is_empty());
+                    let result = session.toggle(None).await;
+                    assert!(
+                        result.applied,
+                        "the live controls survive the fault: {result:?}"
+                    );
+                    if policy == "sampler" {
+                        assert_eq!(reported(&session.state, &session.session_id), 1);
+                        // Clean input for longer than the episode recovery,
+                        // then the fault again: a second episode, reported once.
+                        fault.store(false, Ordering::Release);
+                        sleep(Duration::from_millis(1_500)).await;
+                        fault.store(true, Ordering::Release);
+                        timeout(Duration::from_secs(10), async {
+                            while reported(&session.state, &session.session_id) < 2 {
+                                sleep(Duration::from_millis(20)).await;
+                            }
+                        })
+                        .await
+                        .expect("a second episode is reported");
+                        sleep(Duration::from_millis(400)).await;
+                        assert_eq!(reported(&session.state, &session.session_id), 2);
+                    }
+                } else {
+                    let recording = session.state.recording.lock().await;
+                    let audio = recording.as_ref().unwrap().native_audio.as_ref().unwrap();
+                    assert!(audio.observation(false).denoise_events.is_empty());
+                    assert_eq!(audio.input_state(), NativeAudioInputState::Live);
+                    assert_eq!(reported(&session.state, &session.session_id), 0);
+                }
+                session.end().await;
+                producer.abort();
+                let _ = producer.await;
+            }
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -48144,6 +49823,7 @@ mod tests {
             let result = update_active_audio_processing(
                 &state,
                 AudioProcessingUpdateParams {
+                    microphone_noise_suppression: None,
                     session_id: "no-system".into(),
                     microphone_gain_db: 1.0,
                     microphone_muted: true,
@@ -48313,6 +49993,7 @@ mod tests {
             // The renderer's System audio toggle carries the unchanged mic
             // values: no FFmpeg command, and the reply is a success.
             let update = |enabled: Option<bool>| AudioProcessingUpdateParams {
+                microphone_noise_suppression: None,
                 session_id: session_id.into(),
                 microphone_gain_db: 0.0,
                 microphone_muted: false,

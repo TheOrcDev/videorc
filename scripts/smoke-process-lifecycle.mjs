@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -15,6 +15,7 @@ import {
   waitForNoLiveProcessState
 } from './lib/process-census.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-process-lifecycle-'))
@@ -131,7 +132,7 @@ try {
     console.log('\n=== clean process census ===')
     console.log(formatCensus(clean))
   } finally {
-    await rm(stateRoot, { recursive: true, force: true })
+    await removeProfileDir(stateRoot, { label: 'process-lifecycle smoke' })
   }
 }
 

@@ -132,6 +132,11 @@ pnpm package:backend:macos && pnpm ffmpeg:build:macos \
   && pnpm release:validate:macos
 ```
 
+`package:backend:macos` waits while Videorc is streaming live on this Mac: a
+release build started mid-stream on 2026-11-04 took the CPU the owner's stream
+needed. Never skip the wait with `VIDEORC_BUILD_WHILE_LIVE=1` unless the owner
+asks; report that the build is waiting for the stream to end.
+
 This local path intentionally bypasses `release:preflight:macos`, whose
 `CSC_LINK` requirement does not apply to the keychain identity. Do not bypass
 artifact validation, signing, notarization, stapling, changelog, or upload

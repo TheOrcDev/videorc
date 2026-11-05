@@ -37,14 +37,33 @@ function NavigableRow({
     'h-row rounded-row flex w-full items-center gap-2.5 px-3 text-sm in-data-[slot=grouped-list]:rounded-none',
     className
   )
+  // A text value gives way first: the label keeps its width and the value
+  // truncates ("Microphone" beside "Microphone (HD Pro Webcam C920)", never
+  // "Mic…"). A control value (a Stop button) keeps its width instead, and the
+  // label truncates.
+  const textValue = typeof value === 'string'
   const body = (
     <>
       {RowIcon ? (
         <RowIcon className="text-muted-foreground size-4 shrink-0" weight="duotone" />
       ) : null}
-      <span className="text-muted-foreground flex-1 truncate text-left">{label}</span>
-      <span className="text-foreground flex min-w-0 items-center gap-1.5 font-medium">
-        {typeof value === 'string' ? <span className="truncate">{value}</span> : value}
+      <span
+        className={cn(
+          'text-muted-foreground truncate text-left',
+          textValue ? 'max-w-full shrink-0' : 'flex-1'
+        )}
+        data-slot="navigable-row-label"
+      >
+        {label}
+      </span>
+      <span
+        className={cn(
+          'text-foreground flex min-w-0 items-center gap-1.5 font-medium',
+          textValue && 'flex-1 justify-end'
+        )}
+        data-slot="navigable-row-value"
+      >
+        {textValue ? <span className="truncate">{value}</span> : value}
         {onNavigate ? (
           <ChevronRightIcon className="text-muted-foreground size-3.5 shrink-0" />
         ) : null}

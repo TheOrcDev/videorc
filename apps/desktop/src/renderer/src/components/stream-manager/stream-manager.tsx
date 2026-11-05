@@ -371,6 +371,10 @@ export interface StreamManagerProps {
   onBuddySay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   /** `overlayLayout.buddy.showOnStream`, through the Studio relay. */
   onBuddyShowOnStream?: (showOnStream: boolean) => void
+  /** Chat on stream (plan 215 G, D5): `overlayLayout.chat.showOnStream` and
+   * its switch in the chat pane, through the Studio relay. */
+  chatOnStream?: boolean
+  onChatOnStream?: (showOnStream: boolean) => void
   /** A reaction chip (plan 168 S-D3), through the Studio relay. */
   onBuddyReact?: (reaction: string) => void
   /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's
@@ -473,6 +477,8 @@ export function StreamManager({
   onBuddySay,
   onBuddyShowOnStream,
   onBuddyReact,
+  chatOnStream,
+  onChatOnStream,
   cohostAutoChat,
   onCohostAutoChatChange,
   onCohostOpenChatSettings,
@@ -1283,6 +1289,8 @@ export function StreamManager({
             onSound={inHistory ? undefined : onSound}
             onBuddy={inHistory ? undefined : onBuddy}
             onUseSignIn={inHistory ? undefined : onUseSignIn}
+            chatOnStream={inHistory ? undefined : chatOnStream}
+            onChatOnStreamChange={inHistory ? undefined : onChatOnStream}
             onSignInToVideorc={inHistory ? undefined : onSignInToVideorc}
             onSend={onSend}
           />

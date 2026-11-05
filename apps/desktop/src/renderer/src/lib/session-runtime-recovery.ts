@@ -23,6 +23,7 @@ import { requestSystemAudioResume, SYSTEM_AUDIO_ECHO_TOAST_ID } from '@/lib/syst
 import { shouldToastBackendError } from '@/lib/backend-transport'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { OFFLINE_TOAST_ID, userErrorMessage, type UserErrorContext } from '@/lib/user-error'
+import { recordUserError } from '@/lib/user-error-log'
 import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifyOnce } from '@/lib/notify-once'
@@ -303,6 +304,7 @@ export function showBackendError(
   const copy = userErrorMessage(error, context)
   if (copy.kind === 'canceled') return
   console.warn(`[backend-error] ${copy.title}:`, message)
+  recordUserError(copy, error, context)
   if (copy.kind === 'offline') {
     const show = copy.tone === 'warning' ? toast.warning : toast.error
     show(copy.title, { id: OFFLINE_TOAST_ID, description: copy.description })
@@ -581,11 +583,19 @@ function showLiveOutputNews(event: HealthEvent): void {
 
 /**
  * Plan 076: what the audio bus reports mid-session. An echo pause stays up
- * until it is resumed (a live loop repeats every word); a stall and a
- * recovered microphone are news the interface shows nowhere else.
+ * until it is resumed (a live loop repeats every word); a stall, a silenced
+ * microphone and a recovered microphone are news the interface shows
+ * nowhere else.
  */
 function showSessionAudioNews(event: HealthEvent): void {
-  if (event.code === 'system-audio-echo-paused') {
+  if (event.code === 'microphone-noise-reduction-silenced') {
+    // Noise reduction refused a stretch of microphone input and the bus
+    // wrote silence for it; the session went on. One episode, one toast.
+    notifyOnce(event.code, 'warning', 'Microphone silenced for a moment', {
+      description: event.message,
+      duration: 12_000
+    })
+  } else if (event.code === 'system-audio-echo-paused') {
     toast.warning('System audio paused: your stream was echoing', {
       id: SYSTEM_AUDIO_ECHO_TOAST_ID,
       description: event.message,
@@ -603,6 +613,12 @@ function showSessionAudioNews(event: HealthEvent): void {
     event.code === 'microphone-input-recovered'
   ) {
     notifyOnce(event.code, 'success', 'Microphone is back', {
+      description: event.message,
+      duration: 8_000
+    })
+  } else if (event.code === 'microphone-signal-recovered') {
+    // Issue 1064: sound came back after a run of digital silence.
+    notifyOnce(event.code, 'success', 'Your microphone has sound again', {
       description: event.message,
       duration: 8_000
     })

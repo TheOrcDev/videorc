@@ -233,6 +233,7 @@ describe('studio context invalidation boundaries', () => {
             droppedFrames: 0,
             updatedAt: new Date(0).toISOString()
           },
+          previewCameraLowFrameRate: null,
           previewScreenStatus: {
             state: 'live',
             targetFps: 60,

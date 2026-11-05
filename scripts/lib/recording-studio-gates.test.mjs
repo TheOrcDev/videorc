@@ -182,7 +182,8 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /live_layout::tests::/)
     assert.match(
       report,
-      /VIDEORC_BUNDLED_FFMPEG_PATH=\S+ cargo test -p videorc-backend recording::tests::camera_look_ffmpeg_lut_agrees_with_float_law -- --ignored --exact/
+      // The checkout path may contain spaces (C:\Users\...\Web Projects).
+      /VIDEORC_BUNDLED_FFMPEG_PATH=.+ cargo test -p videorc-backend recording::tests::camera_look_ffmpeg_lut_agrees_with_float_law -- --ignored --exact/
     )
     assert.match(report, /smoke:freeform-editor/)
     assert.match(report, /smoke:captions-contract/)

@@ -78,9 +78,17 @@ The backend remembers a probe that never returned. Before it probes a node it
 writes `linux-vaapi/probe-in-progress.json` under the app data directory; if
 that file is still there at the next start, the node moves to
 `linux-vaapi/quarantined.json` and is never probed again unless
-`VIDEORC_LINUX_VAAPI_DEVICE` names it explicitly. After a host hang, plant
-the quarantine entry by hand before the next launch rather than letting the
-app discover it a second time.
+`VIDEORC_LINUX_VAAPI_DEVICE` names it explicitly. A probe that is still
+running after 20 s is quarantined on the spot (its FFmpeg is killed, the
+entry carries `timedOutAfterSecs`) and nothing else is probed until the
+next start. After a host hang, plant the quarantine entry by hand before the
+next launch rather than letting the app discover it a second time.
+
+`cargo test -p videorc-backend` never probes a render node and never touches
+the real quarantine (#1027): without `VIDEORC_DATABASE_PATH` the tests use a
+throwaway quarantine directory, and the encoder resolver answers with the
+OpenH264 fallback unless `VIDEORC_LINUX_VAAPI_DEVICE` names the one node a
+test may probe.
 
 ## Run the app
 

@@ -178,7 +178,7 @@ try {
   await cdp.eval(`localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1')`)
   await cdp.eval(`(${installGestureEndRecorder.toString()})()`)
   // A cold dev server can still be transforming the lazy Sources tab here
-  // (its fallback reads "Opening Videorc..."): give it a few tries.
+  // (its fallback reads "Loading Sources…"): give it a few tries.
   for (let attempt = 1; ; attempt++) {
     try {
       await command('enable-synthetic-source', { settleMs: 100 })

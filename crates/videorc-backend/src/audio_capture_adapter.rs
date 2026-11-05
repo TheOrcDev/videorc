@@ -2333,7 +2333,7 @@ mod tests {
         let (position, captured) = place(&mut timeline, 1_920 + 1_920);
         assert_eq!(captured, 1_920 + 1_920);
         assert!(
-            position <= 1_920 + 1_920 && position >= 1_920 + 1_920 - 2 * PULSE_SLEW_FRAMES,
+            (1_920 + 1_920 - 2 * PULSE_SLEW_FRAMES..=1_920 + 1_920).contains(&position),
             "{position}"
         );
         assert_eq!(place(&mut timeline, 2_880 + 1_920).0, position + 960);
@@ -2546,7 +2546,8 @@ mod tests {
         for packet in 0..2_000_i64 {
             // A sound card 200 ppm slow against the wall clock, plus a
             // 15 ms stall every 100 packets that the next ones catch up.
-            stamp += 480 + 480 * 200 / 1_000_000 + 1;
+            let drift = 480 * 200 / 1_000_000;
+            stamp += 480 + drift + 1;
             let late = if packet % 100 == 50 { 720 } else { 0 };
             let (_, captured) = timeline.place(stamp + late, 480);
             if let Some(previous) = previous {
@@ -3103,7 +3104,7 @@ mod tests {
         );
         assert_eq!(worker_start_failure_kind(&spawn_failed), None);
         // The typed kind survives the context layers session_audio adds.
-        let wrapped = anyhow::Error::from(timed_out).context("Microphone opening failed");
+        let wrapped = timed_out.context("Microphone opening failed");
         assert_eq!(
             worker_start_failure_kind(&wrapped),
             Some(WorkerStartFailureKind::ProbeTimedOut)

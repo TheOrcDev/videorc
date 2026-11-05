@@ -43,7 +43,7 @@ import './lib/smoke-env.mjs'
 
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -94,6 +94,7 @@ import {
   wallOffsetMs
 } from './lib/virtual-camera-smoke.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const { values: args, positionals } = parseArgs({
   allowPositionals: true,
@@ -1217,9 +1218,8 @@ async function cleanup() {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   }
   if (run.profileDirectory) {
-    await attempt(`removing the profile ${run.profileDirectory}`, async () =>
-      rmSync(run.profileDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 })
-    )
+    // A profile Windows still holds is a warning, never a failed run (#1080).
+    await removeProfileDir(run.profileDirectory, { label: 'virtual-camera' })
   }
   return problems
 }

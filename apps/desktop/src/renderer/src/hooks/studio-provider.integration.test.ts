@@ -453,7 +453,11 @@ class StudioBackend {
   // the active output revision, so live layout commits settle instead of
   // waiting out the proof timeout.
   reportsActiveSceneRevision = false
-  layoutApplyFailure: 'definite' | 'request-outcome-unknown-after-commit' | null = null
+  layoutApplyFailure:
+    | 'definite'
+    | 'camera-not-ready'
+    | 'request-outcome-unknown-after-commit'
+    | null = null
   screenActivateFailure: 'definite' | null = null
   screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
@@ -986,6 +990,15 @@ class StudioBackend {
           throw Object.assign(new Error('The test backend rejected the layout change.'), {
             code: 'layout-preview-failed'
           })
+        }
+        if (this.layoutApplyFailure === 'camera-not-ready') {
+          // Plan 216 A3: the backend names the source that never sent a frame.
+          throw Object.assign(
+            new Error(
+              'Live preview layout switch blocked after camera (15s) exceeded its source-start/readiness budget: camera session never delivered a frame (frames captured: 0, /Users/streamer/Library/Logs/camera.log).'
+            ),
+            { code: 'layout-camera-not-ready' }
+          )
         }
         this.currentLayout = params.layout as LayoutSettings
         this.currentScene = sceneForLayout(this.currentLayout)
@@ -1545,14 +1558,24 @@ class StudioBackend {
       case 'events.setIncluded':
       case 'events.setExcluded':
         return null
-      case 'audio.processing.update':
+      case 'audio.processing.update': {
+        const reasonCode =
+          this.audioProcessingReasonCode === 'microphone-noise-suppression-unavailable' &&
+          params.microphoneNoiseSuppression !== 'rnnoise'
+            ? null
+            : this.audioProcessingReasonCode
         return {
           sessionId: params.sessionId,
-          applied: this.audioProcessingReasonCode === null,
+          applied: reasonCode === null,
+          microphoneNoiseSuppression: params.microphoneNoiseSuppression ?? 'off',
           microphoneGainDb: params.microphoneGainDb,
           microphoneMuted: params.microphoneMuted,
-          ...(this.audioProcessingReasonCode ? { reasonCode: this.audioProcessingReasonCode } : {})
+          ...(reasonCode ? { reasonCode } : {}),
+          ...(reasonCode === 'microphone-noise-suppression-unavailable'
+            ? { confirmedMicrophoneNoiseSuppression: 'off' }
+            : {})
         }
+      }
       case 'session.start': {
         if (this.sessionStartError) {
           throw new Error(this.sessionStartError)
@@ -4240,6 +4263,61 @@ describe('real StudioProvider lifecycle', () => {
     expect(revealSupportBundle).toHaveBeenCalledExactlyOnceWith(
       'C:\\Videorc\\support-bundles\\videorc-support-bundle-20261011-093000Z.json'
     )
+  })
+
+  // Plan 216 A3 + A5: a switch that gave up on a camera says so, and the next
+  // support bundle carries the raw refusal in the renderer's error ring.
+  it('names the camera that never sent video, and the bundle keeps the raw refusal', async () => {
+    const backend = new StudioBackend()
+    backend.layoutApplyFailure = 'camera-not-ready'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    const latest = (): StudioObservation => observations.at(-1)!
+    await waitForObservation(() => latest().core.wsStatus === 'connected')
+
+    await act(async () => latest().core.applyCameraPreset({ layoutPreset: 'camera-only' }))
+    await waitForObservation(() =>
+      toastSpies.error.mock.calls.some(([title]) => title === "Couldn't switch the scene")
+    )
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      "Couldn't switch the scene",
+      expect.objectContaining({
+        description: "Your camera isn't sending video. Check it in Sources, then try again."
+      })
+    )
+
+    backend.layoutApplyFailure = null
+    await act(async () => {
+      await latest().core.exportSupportBundle()
+    })
+    const exported = backend.commands.find(
+      (command) => command.method === 'diagnostics.supportBundle.export'
+    )
+    const ring = (
+      exported?.params as {
+        rendererDiagnostics?: { recentUserErrors?: Array<Record<string, unknown>> }
+      }
+    ).rendererDiagnostics?.recentUserErrors
+    expect(ring?.at(-1)).toMatchObject({
+      action: 'switch',
+      object: 'the scene',
+      code: 'layout-camera-not-ready',
+      kind: 'known',
+      title: "Couldn't switch the scene",
+      raw: expect.stringContaining('camera session never delivered a frame')
+    })
   })
 
   it('shows one persistent recovery error when an active recording fails', async () => {
@@ -7242,7 +7320,10 @@ describe('real StudioProvider lifecycle', () => {
           latest().sourceSelectionState.snapshot?.confirmed.screenId === screenId &&
           heldProofs.length === 1
       )
-      expect(latest().layoutSwitchPending).toBe('camera-only')
+      expect(latest().layoutSwitchPending).toEqual({
+        layoutPreset: 'camera-only',
+        arrangementMode: 'preset'
+      })
       expect(latest().captureConfig.layout.layoutPreset).toBe('screen-camera')
       // The first committed composition is camera-only while its output proof
       // is held. A newer screen or mixed intent must still have selected IDs.
@@ -11967,7 +12048,12 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       latest()?.core.setCaptureConfig((current) => ({
         ...current,
-        audio: { ...current.audio, microphoneGainDb: 6, microphoneMuted: true }
+        audio: {
+          ...current.audio,
+          microphoneGainDb: 6,
+          microphoneMuted: true,
+          microphoneNoiseSuppression: 'rnnoise'
+        }
       }))
     })
     await act(async () => {
@@ -11985,6 +12071,7 @@ describe('real StudioProvider lifecycle', () => {
       expect.objectContaining({
         params: {
           sessionId: 'session-1',
+          microphoneNoiseSuppression: 'rnnoise',
           microphoneGainDb: 6,
           microphoneMuted: true
         }
@@ -12070,6 +12157,7 @@ describe('real StudioProvider lifecycle', () => {
       expect.objectContaining({
         params: {
           sessionId: 'session-1',
+          microphoneNoiseSuppression: 'off',
           microphoneGainDb: 0,
           microphoneMuted: false,
           systemAudioEnabled: true,
@@ -12115,6 +12203,7 @@ describe('real StudioProvider lifecycle', () => {
           payload: {
             id: 'health-system-audio-lost',
             sessionId: 'session-1',
+            microphoneNoiseSuppression: 'off',
             level: 'warn',
             code: 'system-audio-lost',
             message: 'System audio stopped. The session continues with the microphone.',
@@ -12267,7 +12356,10 @@ describe('real StudioProvider lifecycle', () => {
       }
     }
 
-    async function startSystemAudioSession(backend: StudioBackend): Promise<{
+    async function startSystemAudioSession(
+      backend: StudioBackend,
+      beforeStart?: (latest: () => StudioCoreContextValue) => Promise<void>
+    ): Promise<{
       latest: () => StudioCoreContextValue
       emit: (name: string, value: unknown) => void
       updates: () => Array<Record<string, unknown>>
@@ -12300,6 +12392,7 @@ describe('real StudioProvider lifecycle', () => {
           latest().wsStatus === 'connected' &&
           latest().captureConfig.sources.microphoneId === 'mic:1'
       )
+      if (beforeStart) await beforeStart(latest)
       await act(async () => {
         await latest().startSession()
       })
@@ -12416,6 +12509,113 @@ describe('real StudioProvider lifecycle', () => {
       await waitForObservation(() => updates().length === 5)
       expect(updates()[4]).toMatchObject({ systemAudioEnabled: false })
       expect(latest().systemAudioIssue).toBeNull()
+    })
+
+    it('restores Off after unavailable RNNoise while keeping gain and mute live', async () => {
+      const backend = new StudioBackend()
+      backend.audioProcessingReasonCode = 'microphone-noise-suppression-unavailable'
+      const { latest, updates } = await startSystemAudioSession(backend)
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneNoiseSuppression: 'rnnoise' }
+        }))
+      })
+      await waitForObservation(
+        () =>
+          updates().length >= 1 && latest().captureConfig.audio.microphoneNoiseSuppression === 'off'
+      )
+      expect(latest().lastError).toContain('Noise reduction is unavailable')
+      backend.audioProcessingReasonCode = null
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneGainDb: 6, microphoneMuted: true }
+        }))
+      })
+      await waitForObservation(() => updates().at(-1)?.microphoneGainDb === 6)
+      expect(updates().at(-1)).toMatchObject({
+        microphoneNoiseSuppression: 'off',
+        microphoneGainDb: 6,
+        microphoneMuted: true
+      })
+    })
+
+    const startWithNoiseReduction = async (latest: () => StudioCoreContextValue): Promise<void> => {
+      await act(async () => {
+        latest().setCaptureConfig((current) => ({
+          ...current,
+          audio: { ...current.audio, microphoneNoiseSuppression: 'rnnoise' }
+        }))
+      })
+    }
+
+    it('confirms noise reduction once after a start that asked for it', async () => {
+      const backend = new StudioBackend()
+      const { latest, updates } = await startSystemAudioSession(backend, startWithNoiseReduction)
+      const started = backend.sentCommands.find((command) => command.method === 'session.start')
+      expect(
+        (started?.params as { audio: { microphoneNoiseSuppression?: string } }).audio
+      ).toMatchObject({ microphoneNoiseSuppression: 'rnnoise' })
+      await waitForObservation(() => updates().length === 1)
+      expect(updates()[0]).toMatchObject({
+        sessionId: 'session-1',
+        microphoneNoiseSuppression: 'rnnoise'
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      expect(updates()).toHaveLength(1)
+      expect(latest().captureConfig.audio.microphoneNoiseSuppression).toBe('rnnoise')
+      expect(latest().lastError).toBeNull()
+      expect(toastSpies.error).not.toHaveBeenCalled()
+      expect(toastSpies.warning).not.toHaveBeenCalled()
+    })
+
+    it('shows Off and one message when the started session cannot run noise reduction', async () => {
+      // A microphone that bypasses the session audio bus starts without
+      // noise reduction: the confirmation after start is rejected, the
+      // rollback shows Off, and the backend's own record of the downgrade
+      // (its health event) adds no second notice.
+      const backend = new StudioBackend()
+      backend.audioProcessingReasonCode = 'microphone-noise-suppression-unavailable'
+      const { latest, updates, emitIssue } = await startSystemAudioSession(
+        backend,
+        startWithNoiseReduction
+      )
+      await waitForObservation(
+        () =>
+          updates().length >= 1 && latest().captureConfig.audio.microphoneNoiseSuppression === 'off'
+      )
+      expect(updates()[0]).toMatchObject({ microphoneNoiseSuppression: 'rnnoise' })
+      expect(latest().lastError).toContain(
+        'Noise reduction is unavailable for this capture. It is Off.'
+      )
+      const notices = (): number =>
+        toastSpies.error.mock.calls.length + toastSpies.warning.mock.calls.length
+      await waitForObservation(() => notices() === 1)
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      // A rejection re-sends the system audio fields (PR #477 review); that
+      // and anything after it asks for Off, never for noise reduction again.
+      const settled = updates().length
+      expect(
+        updates()
+          .slice(1)
+          .map((update) => update.microphoneNoiseSuppression)
+      ).toEqual(
+        updates()
+          .slice(1)
+          .map(() => 'off')
+      )
+      await emitIssue('microphone-noise-suppression-unavailable')
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+      })
+      expect(updates()).toHaveLength(settled)
+      expect(latest().captureConfig.audio.microphoneNoiseSuppression).toBe('off')
+      expect(notices()).toBe(1)
     })
 
     it('sends a rejected system audio update again instead of treating it as sent', async () => {

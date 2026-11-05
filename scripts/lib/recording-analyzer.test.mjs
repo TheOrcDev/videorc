@@ -543,6 +543,67 @@ describe('evaluateGates', () => {
     assert.equal(v.warnings.length, 1)
   })
 
+  // Issue 1064: a Windows take whose DirectShow microphone returned 1-LSB
+  // silence read "silence 11285 ms" over the whole take and still PASSED.
+  it('FAILS a track that is digital silence end to end when a microphone was declared', () => {
+    const silent = { ...clean, silentTrackMs: 11_285, silentTrackCoverage: 0.999 }
+    const v = evaluateGates(silent)
+    assert.equal(v.pass, false)
+    assert.match(v.failures.join(' '), /digital silence .*99\.9% of the take/)
+    // Nearly all of it is enough: the aligned lead-in and the stop drain are
+    // legitimately quiet.
+    assert.equal(evaluateGates({ ...silent, silentTrackCoverage: 0.95 }).pass, false)
+  })
+
+  // Hosted CI runners have no input device: the take is the paced-silence bus.
+  it('skips the silent-track gate with a warning when the run has no microphone device', () => {
+    const silent = { ...clean, silentTrackMs: 5_526, silentTrackCoverage: 1 }
+    const noDevice = evaluateGates({ ...silent, microphoneAvailable: false })
+    assert.equal(noDevice.pass, true, noDevice.failures.join('; '))
+    assert.ok(
+      noDevice.warnings.some((w) =>
+        /digital silence .*100\.0% .*silent-microphone check skipped/.test(w)
+      ),
+      noDevice.warnings.join('; ')
+    )
+    // A real (or unspecified) microphone that recorded silence still fails.
+    for (const microphoneAvailable of [true, undefined]) {
+      const v = evaluateGates({ ...silent, microphoneAvailable })
+      assert.equal(v.pass, false)
+      assert.match(v.failures.join(' '), /the microphone recorded nothing/)
+    }
+    // No device never excuses a missing audio stream.
+    const missing = evaluateGates({
+      ...clean,
+      hasAudio: false,
+      microphoneAvailable: false
+    })
+    assert.equal(missing.pass, false)
+    assert.match(missing.failures.join(' '), /audio expected but no audio stream/)
+  })
+
+  it('keeps a quiet-but-real take and a no-microphone run unaffected by the silent-track gate', () => {
+    // A room floor sits above -80 dBFS: no digital-silence run at all.
+    assert.equal(evaluateGates({ ...clean, silentTrackMs: 0, silentTrackCoverage: 0 }).pass, true)
+    // A pause mid-take is not a silent track.
+    assert.equal(
+      evaluateGates({ ...clean, silentTrackMs: 2_000, silentTrackCoverage: 0.5 }).pass,
+      true
+    )
+    // No microphone declared: the track may be whatever it is.
+    assert.equal(
+      evaluateGates({
+        ...clean,
+        expectAudio: false,
+        silentTrackMs: 3_000,
+        silentTrackCoverage: 1
+      }).pass,
+      true
+    )
+    // Metrics from an older report carry no coverage: nothing to judge.
+    assert.equal(evaluateGates({ ...clean, silentTrackCoverage: null }).pass, true)
+  })
+
   it('warns on missing color tags by default and fails under requireColorTags', () => {
     const untagged = {
       ...clean,
@@ -806,6 +867,7 @@ describe(
     let zerohole
     let leadInZerohole
     let screenonly
+    let silenttrack
 
     before(async () => {
       dir = mkdtempSync(join(tmpdir(), 'vrc-analyzer-'))
@@ -815,6 +877,7 @@ describe(
       zerohole = join(dir, 'zerohole.mp4')
       leadInZerohole = join(dir, 'lead-in-zerohole.mp4')
       screenonly = join(dir, 'screenonly.mp4')
+      silenttrack = join(dir, 'silenttrack.mp4')
 
       await generate([
         '-f',
@@ -940,6 +1003,27 @@ describe(
         'yuv420p',
         screenonly
       ])
+      // Issue 1064: a microphone that delivers digital silence end to end.
+      await generate([
+        '-f',
+        'lavfi',
+        '-i',
+        'testsrc2=size=320x240:rate=30',
+        '-f',
+        'lavfi',
+        '-i',
+        'anullsrc=r=48000:cl=stereo',
+        '-t',
+        '3',
+        '-fps_mode',
+        'cfr',
+        ...videoCodecArgs,
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        silenttrack
+      ])
     })
 
     after(() => {
@@ -1052,6 +1136,81 @@ describe(
       })
       assert.equal(report.verdict.pass, false)
       assert.ok(report.verdict.failures.some((f) => /audio expected/.test(f)))
+    })
+
+    // Issue 1064: the recording captured nothing from a declared microphone.
+    it('FAILS a digitally silent audio track when a microphone was declared', async () => {
+      const report = await analyzeRecording(silenttrack, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        expectAudio: true
+      })
+      assert.ok(
+        report.metrics.silentTrackCoverage >= 0.95,
+        `coverage ${report.metrics.silentTrackCoverage} (${report.metrics.silentTrackMs}ms)`
+      )
+      assert.equal(report.verdict.pass, false)
+      assert.ok(
+        report.verdict.failures.some((f) => /digital silence/.test(f)),
+        report.verdict.failures.join('; ')
+      )
+      // A bare analysis infers a microphone from the track: the same verdict.
+      const inferred = await analyzeRecording(silenttrack, { ffmpegPath, ffprobePath, intendedFps: 30 })
+      assert.equal(inferred.verdict.pass, false)
+    })
+
+    it('warns instead of failing a digitally silent track when no microphone device exists', async () => {
+      const report = await analyzeRecording(silenttrack, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        expectAudio: true,
+        microphoneAvailable: false
+      })
+      assert.equal(report.metrics.microphoneAvailable, false)
+      assert.equal(
+        report.verdict.pass,
+        true,
+        `unexpected failures: ${report.verdict.failures.join('; ')}`
+      )
+      assert.ok(
+        report.verdict.warnings.some((w) => /silent-microphone check skipped/.test(w)),
+        report.verdict.warnings.join('; ')
+      )
+    })
+
+    it('PASSES a digitally silent audio track when no microphone was declared', async () => {
+      const report = await analyzeRecording(silenttrack, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        expectAudio: false
+      })
+      assert.equal(
+        report.verdict.pass,
+        true,
+        `unexpected failures: ${report.verdict.failures.join('; ')}`
+      )
+    })
+
+    it('keeps a tone with a pause and a clean tone clear of the silent-track gate', async () => {
+      for (const file of [clean, silence]) {
+        const report = await analyzeRecording(file, {
+          ffmpegPath,
+          ffprobePath,
+          intendedFps: 30,
+          expectAudio: true
+        })
+        assert.ok(
+          (report.metrics.silentTrackCoverage ?? 0) < 0.95,
+          `${file}: coverage ${report.metrics.silentTrackCoverage}`
+        )
+        assert.ok(
+          !report.verdict.failures.some((f) => /digital silence/.test(f)),
+          report.verdict.failures.join('; ')
+        )
+      }
     })
   }
 )

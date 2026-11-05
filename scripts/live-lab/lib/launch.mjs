@@ -158,7 +158,7 @@ export async function readPublishedAppPid(
  * A macOS bundle goes through LaunchServices (TCC identity). A Linux app
  * directory is spawned directly in its own process group, so the app PID is
  * the child the launcher owns (no ownership file exists on Linux) and stop()
- * signals that group only.
+ * quits it through quitLinuxApp, then signals that group only.
  */
 export async function launchApp({
   appPath,
@@ -183,7 +183,7 @@ export async function launchApp({
   })
   return {
     backend: launched.connections['backend-ready'],
-    stop: launched.stop,
+    stop: bundle ? launched.stop : () => quitLinuxApp(launched.process, launched.stop),
     controller: launched.process,
     devtoolsUrl: async () => devtoolsUrl ?? (await readDevToolsActivePort(dirs.userDataDir)),
     appPid: bundle
@@ -205,6 +205,37 @@ function waitForExit(child, ms) {
       resolveExit(true)
     })
   })
+}
+
+// The app's backend shutdown waits up to 35 s (BACKEND_SHUTDOWN_TIMEOUT_MS in
+// apps/desktop/src/main/backend-process-shutdown.ts); the browser then closes
+// its own children.
+export const LINUX_APP_QUIT_GRACE_MS = 45_000
+
+/**
+ * Quits the Linux app the way a person would, then sweeps its group.
+ *
+ * The launcher's stop() sends SIGTERM to the whole process group at once, so
+ * Chromium's GPU process died under a browser that was still running. With
+ * hardware acceleration off (VIDEORC_DISABLE_GPU on the lab box) the browser
+ * cannot relaunch it and crashes on purpose
+ * (IntentionallyCrashBrowserForUnusableGpuProcess): a minidump in every
+ * run's crash/, read by the verdict as an Electron crash. The main process
+ * quits gracefully on SIGTERM (installPersistentBackendShutdownSignalHandlers),
+ * so it gets the signal alone first; groupStop then reaps whatever is left.
+ */
+export async function quitLinuxApp(
+  child,
+  groupStop,
+  { graceMs = LINUX_APP_QUIT_GRACE_MS, wait = waitForExit } = {}
+) {
+  let quit = 'not-running'
+  if (child?.pid && child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGTERM')
+    quit = (await wait(child, graceMs)) ? 'exited' : 'timed-out'
+  }
+  const swept = await groupStop()
+  return { ...swept, quit }
 }
 
 /** SIGTERM then SIGKILL, to this exact child only. */

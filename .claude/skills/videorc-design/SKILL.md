@@ -617,11 +617,16 @@ made it chat first: one thin stats bar and fewer words.
     only when something needs the streamer ("read-only", "reconnect to
     send"). The details open on hover and on focus.
   - Right, every action labelled: the window's hints ⌘F Search, ⌘L Write and
-    ⌘J Buddy (clickable; below 800 px the key alone, the word kept for
+    ⌘J Buddy (clickable; below 1,040 px the key alone, the word kept for
     screen readers), then Keep on top (`PinWindowButton`), Highlight
     position (a menu), Mark clip (its icon and the words "Mark clip"),
     Clear (the word; it asks first, because it cannot be undone) and Open
     Preview (an icon).
+  - Every control and the platforms' icons fit on one line from 640 px up,
+    live (plan 215 C added Hide from stream beside Keep on top): an icon
+    alone is a 22 px chip, and below 800 px Clip keeps its words and drops
+    its icon. A new control pays for its room the same way, never by
+    clipping the last one.
   - Below 640 px all of them fold into one ⋯ menu, "More Stream Manager
     actions", with the stats bar's show, hide and reset choices.
 - **One thin stats bar** (32 px, `components/stream-manager/stats-bar.tsx`),

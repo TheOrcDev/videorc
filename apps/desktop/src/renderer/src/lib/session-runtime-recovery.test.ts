@@ -269,6 +269,54 @@ describe('audio-loss provenance', () => {
       "Microphone audio couldn't be recorded: saved session has missing audio"
     )
   })
+  // Issue 1064: the microphone never stopped; its frames hold no sound.
+  it('says the microphone is silent, per activity, and ends the notice honestly', () => {
+    const message =
+      'Microphone "HD Pro Webcam C920" has sent only silence since 12.3 seconds into this session. Try choosing it again.'
+    const recording = microphoneLossPresentation({
+      event: event('microphone-silent', message),
+      recording: { state: 'recording' as const, sessionId: 'take' },
+      lastActivity: 'recording' as const,
+      currentDedupeKey: null
+    })!
+    expect(sessionRuntimeNoticeTitle(recording.notice)).toBe(
+      'Your microphone is silent in the recording'
+    )
+    expect(recording.notice.message).toBe(message)
+    expect(recording.notice.audioIssues).toEqual([{ code: 'microphone-silent', message }])
+    const live = microphoneLossPresentation({
+      event: event('microphone-silent', message),
+      recording: { state: 'streaming' as const, sessionId: 'take' },
+      lastActivity: 'live-stream' as const,
+      currentDedupeKey: null
+    })!
+    expect(sessionRuntimeNoticeTitle(live.notice)).toBe(
+      'Your microphone is silent on the livestream'
+    )
+    const clips = microphoneLossPresentation({
+      event: event('microphone-silent', message),
+      recording: { state: 'recording' as const, sessionId: 'take', replayOnly: true },
+      lastActivity: 'recording' as const,
+      currentDedupeKey: null
+    })!
+    expect(sessionRuntimeNoticeTitle(clips.notice)).toBe('Your microphone is silent in Clips')
+    expect(sessionRuntimeNoticeTitle({ ...recording.notice, phase: 'ended' })).toBe(
+      'Microphone was silent: saved recording contains silence'
+    )
+    expect(sessionRuntimeNoticeTitle({ ...live.notice, phase: 'ended' })).toBe(
+      'Microphone was silent during the livestream'
+    )
+    // Reported once per run: the same silence never stacks a second notice.
+    expect(
+      microphoneLossPresentation({
+        event: event('microphone-silent', message),
+        recording: { state: 'recording' as const, sessionId: 'take' },
+        lastActivity: 'recording' as const,
+        currentDedupeKey: recording.dedupeKey,
+        currentNotice: recording.notice
+      })
+    ).toBeNull()
+  })
 })
 
 it('recovers both audio sources after reconnect without dropping either explanation', () => {
@@ -351,6 +399,25 @@ describe('session audio news (plan 076)', () => {
     }
   })
 
+  it('says the microphone was silenced for a moment, once per episode and never sticky', () => {
+    const event = {
+      ...healthEvent('microphone-noise-reduction-silenced'),
+      message:
+        'Noise reduction got an invalid signal from the microphone, so Videorc silenced the microphone for a moment. The session continues.'
+    }
+    showSessionHealthEvent(event, false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone silenced for a moment',
+      expect.objectContaining({ description: event.message, duration: 12_000 })
+    )
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    // A second episode inside the notice window updates the same toast.
+    showSessionHealthEvent({ ...event, id: 'second' }, false)
+    expect(toastSpies.warning).toHaveBeenCalledTimes(2)
+    const ids = toastSpies.warning.mock.calls.map(([, options]) => (options as { id: string }).id)
+    expect(ids[0]).toBe(ids[1])
+  })
+
   it('reports a stalled output and a recovered microphone once each', () => {
     showSessionHealthEvent(healthEvent('audio-output-stalled'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(
@@ -372,6 +439,17 @@ describe('session audio news (plan 076)', () => {
       'Microphone is back',
       expect.objectContaining({ description: 'microphone-input-recovered message' })
     )
+  })
+
+  it('says the microphone has sound again after a run of digital silence (issue 1064)', () => {
+    showSessionHealthEvent(healthEvent('microphone-signal-recovered', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Your microphone has sound again',
+      expect.objectContaining({ description: 'microphone-signal-recovered message' })
+    )
+    // The silent report itself is the microphone-loss notice, not a toast here.
+    showSessionHealthEvent(healthEvent('microphone-silent'), false)
+    expect(toastSpies.warning).not.toHaveBeenCalled()
   })
 
   it('says the stream stopped when it stops, and keeps saying it', () => {

@@ -62,6 +62,13 @@ import {
   windowsStreamCaptureProtectionPlacement
 } from './lib/windows-stream-performance.mjs'
 
+class BlockedRunError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'BlockedRunError'
+  }
+}
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 // Incident diagnostics have their own authority, identity and verdict contract.
@@ -3893,11 +3900,4 @@ function redactedRunError(error, secrets) {
   const redacted = new Error(redactedMessage)
   redacted.name = error?.name ?? 'Error'
   return redacted
-}
-
-class BlockedRunError extends Error {
-  constructor(message) {
-    super(message)
-    this.name = 'BlockedRunError'
-  }
 }

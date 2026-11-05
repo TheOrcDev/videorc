@@ -408,7 +408,7 @@ mod transport_path_tests {
     fn audio_pipe_capacity_is_separate_from_video_and_bounded_in_pcm_time() {
         assert_eq!(PIPE_OUT_BUFFER_BYTES, 16 * 1024 * 1024);
         assert!(u64::from(AUDIO_PIPE_BUFFER_BYTES) * 1000 / (48_000 * 2 * 4) <= 22);
-        assert!(AUDIO_PIPE_BUFFER_BYTES < PIPE_OUT_BUFFER_BYTES);
+        const { assert!(AUDIO_PIPE_BUFFER_BYTES < PIPE_OUT_BUFFER_BYTES) };
     }
 
     #[test]

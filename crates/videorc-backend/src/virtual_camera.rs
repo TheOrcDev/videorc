@@ -2187,7 +2187,7 @@ mod tests {
         );
         assert_eq!(seen.lock().unwrap().connects, 2);
         assert!(demand.demanded());
-        assert_eq!(engine.shared().health().connected, true);
+        assert!(engine.shared().health().connected);
         assert_eq!(engine.shared().counters().snapshot().push_errors, 1);
     }
 

@@ -8,6 +8,7 @@ vi.mock('@/lib/toast', () => ({ toast }))
 
 import { bannerActionContext } from './banners'
 import { soundActionContext } from './sounds'
+import { recentUserErrors, resetUserErrorLogForTests } from './user-error-log'
 import {
   OFFLINE_REASON,
   OFFLINE_TOAST_ID,
@@ -163,6 +164,35 @@ describe('userErrorMessage', () => {
     ).toBe('known')
   })
 
+  // Plan 216 A3 (D5): a switch that adds a source gave up on its first frame.
+  it('names the source that never sent video when a scene switch gives up', () => {
+    const SWITCH = { action: 'switch', object: 'the scene' }
+    expect(
+      userErrorMessage(
+        backendError(
+          'layout-camera-not-ready',
+          'Live preview layout switch blocked after camera (15s) exceeded its source-start/readiness budget: camera session never delivered a frame.'
+        ),
+        SWITCH
+      )
+    ).toMatchObject({
+      kind: 'known',
+      title: "Couldn't switch the scene",
+      description: "Your camera isn't sending video. Check it in Sources, then try again.",
+      tone: 'error'
+    })
+    expect(
+      userErrorMessage(backendError('layout-screen-not-ready', 'screen never delivered'), SWITCH)
+        .description
+    ).toBe("Your screen isn't sending video. Check it in Sources, then try again.")
+    // The route's own code stays generic: that is the toast the streamer got
+    // on 0.18.0, which named no cause.
+    expect(
+      userErrorMessage(backendError('layout-preview-failed', 'camera budget exceeded'), SWITCH)
+        .description
+    ).toBe(UNKNOWN_REASON)
+  })
+
   it('keeps a renderer-written reason, and an unmapped code stays generic', () => {
     expect(
       userErrorMessage(new UserFacingError('The selected output folder is unavailable.'), IMPORT)
@@ -195,6 +225,31 @@ describe('userErrorMessage', () => {
     expect(couldNotTitle(undefined)).toBe('Videorc hit a problem')
     expect(couldNotTitle({ action: 'sign out' })).toBe("Couldn't sign out")
     expect(userErrorMessage('a thrown string').raw).toBe('a thrown string')
+  })
+})
+
+// Plan 216 A5: every shown error leaves a record for the support bundle.
+describe('the support bundle ring', () => {
+  beforeEach(() => resetUserErrorLogForTests())
+
+  it('records a toast and an inline line with the raw text, never a cancel', () => {
+    toastUserError(backendError('layout-camera-not-ready', 'camera never sent (0 frames)'), {
+      action: 'switch',
+      object: 'the scene'
+    })
+    inlineUserError(new Error('EACCES /Users/me/x.png'), { action: 'import', object: 'the image' })
+    toastUserError(Object.assign(new Error('gone'), { name: 'AbortError' }), IMPORT)
+    expect(recentUserErrors()).toMatchObject([
+      {
+        action: 'switch',
+        object: 'the scene',
+        code: 'layout-camera-not-ready',
+        kind: 'known',
+        title: "Couldn't switch the scene",
+        raw: 'camera never sent (0 frames)'
+      },
+      { action: 'import', object: 'the image', kind: 'unknown', raw: 'EACCES /Users/me/x.png' }
+    ])
   })
 })
 

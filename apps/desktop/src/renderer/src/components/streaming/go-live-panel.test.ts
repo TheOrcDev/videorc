@@ -13,6 +13,7 @@ import type {
   VideoSettings
 } from '@/lib/backend'
 import { defaultCaptureConfig, videoPresets, type ProviderStreamOutputPlan } from '@/lib/capture'
+import { NO_RECENT_DROPS } from '@/lib/stream-health-attribution'
 
 import {
   encoderLabel,
@@ -104,6 +105,7 @@ function readiness(props: {
     preflight: props.preflight ?? readyPreflight,
     liveOutputActive: false,
     diagnosticStats: {} as DiagnosticStats,
+    recentStreamDrops: NO_RECENT_DROPS,
     streamHealth: null,
     streamTargets: [],
     onOpenDestination: props.onOpenDestination ?? vi.fn(),
@@ -228,6 +230,7 @@ describe('Technical details', () => {
         { target: target('youtube', 'YouTube'), video: stream1080 },
         { target: target('tiktok', 'TikTok'), video: stream1080 }
       ]),
+      recentStreamDrops: NO_RECENT_DROPS,
       streamHealth: null,
       streamTargets: []
     })

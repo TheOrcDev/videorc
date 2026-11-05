@@ -6,6 +6,9 @@ import { join } from 'node:path'
 
 import {
   appQuitRecordingSessionParams,
+  barrierNeverEngagedError,
+  finalizationBarrierSessionFfmpegPath,
+  finalizationBarrierShimFiles,
   isMp4FinalizationExport,
   readFinalizationRecoveryRecords
 } from '../smoke-app-quit-recording-finalization.mjs'
@@ -132,4 +135,50 @@ test('reads only published JSON finalization recovery records', () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('the POSIX barrier shim stays one executable `ffmpeg` node script', () => {
+  const shim = finalizationBarrierShimFiles({
+    platform: 'darwin',
+    moduleUrl: 'file:///repo/scripts/smoke-app-quit-recording-finalization.mjs'
+  })
+  assert.equal(shim.entry, 'ffmpeg')
+  assert.equal(shim.files.length, 1)
+  assert.equal(shim.files[0].name, 'ffmpeg')
+  assert.match(shim.files[0].content, /^#!\/usr\/bin\/env node\n/)
+  assert.match(
+    shim.files[0].content,
+    /import \{ runFfmpegFinalizationBarrierShim \} from "file:\/\/\/repo\/scripts\/smoke-app-quit-recording-finalization\.mjs"/
+  )
+  assert.equal(
+    finalizationBarrierSessionFfmpegPath('/state/finalization-barrier-bin/ffmpeg', 'darwin'),
+    undefined
+  )
+})
+
+test('the Windows barrier shim is ffmpeg.cmd running a sibling module, named as the session FFmpeg (#1081)', () => {
+  const shim = finalizationBarrierShimFiles({
+    platform: 'win32',
+    moduleUrl: 'file:///C:/repo/scripts/smoke-app-quit-recording-finalization.mjs',
+    nodePath: 'C:\\Program Files\\nodejs\\node.exe'
+  })
+  assert.equal(shim.entry, 'ffmpeg.cmd')
+  const files = Object.fromEntries(shim.files.map((file) => [file.name, file.content]))
+  assert.deepEqual(Object.keys(files).sort(), ['ffmpeg.cmd', 'shim.mjs'])
+  assert.equal(files['ffmpeg.cmd'], '@"C:\\Program Files\\nodejs\\node.exe" "%~dp0shim.mjs" %*\r\n')
+  assert.doesNotMatch(files['shim.mjs'], /^#!/)
+  assert.match(files['shim.mjs'], /runFfmpegFinalizationBarrierShim\(process\.argv\.slice\(2\)\)/)
+
+  const shimPath = 'C:\\state\\finalization-barrier-bin\\ffmpeg.cmd'
+  const ffmpegPath = finalizationBarrierSessionFfmpegPath(shimPath, 'win32')
+  assert.equal(ffmpegPath, shimPath)
+  const params = appQuitRecordingSessionParams({ outputDirectoryCapability: 'c', ffmpegPath })
+  assert.equal(params.output.ffmpegPath, shimPath)
+})
+
+test('a process lost before the barrier engaged is reported as the barrier, not finalization', () => {
+  const error = barrierNeverEngagedError(new Error('Original backend pid 7 exited.'), '/s/ffmpeg')
+  assert.match(error.message, /never entered the barrier/)
+  assert.match(error.message, /\/s\/ffmpeg/)
+  assert.match(error.message, /Original backend pid 7 exited\./)
 })
