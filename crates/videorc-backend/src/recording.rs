@@ -29227,7 +29227,8 @@ mod tests {
 
     /// The same refusal through the real start path: a 4K60 recording
     /// (legacy FFmpeg) requested while hidden fails with the exact copy and
-    /// leaves no session, before any capture or encoder process spawns. The
+    /// leaves no session, before any capture or encoder process spawns. On
+    /// Windows the 4K60 refusal comes first and leaves no session either. The
     /// live_control_ prefix includes this in Windows' 25-pass stability gate.
     #[tokio::test]
     async fn live_control_legacy_session_start_while_hidden_is_refused_through_the_start_path() {
@@ -29288,11 +29289,17 @@ mod tests {
             "{:#}",
             result.expect_err("a hidden legacy start is refused")
         );
-        assert!(
-            error.contains(crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY),
-            "{error}"
-        );
-        assert!(error.contains(SCREEN_HIDE_LEGACY_START_DETAIL), "{error}");
+        // Issue #1062: Windows refuses 4K60 at validation, before the hide
+        // check, unless the developer override keeps the legacy path.
+        if cfg!(target_os = "windows") && !compositor_encoder_bridge_disabled(true, false) {
+            assert!(error.contains("isn't supported on Windows yet"), "{error}");
+        } else {
+            assert!(
+                error.contains(crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY),
+                "{error}"
+            );
+            assert!(error.contains(SCREEN_HIDE_LEGACY_START_DETAIL), "{error}");
+        }
         assert!(state.recording.lock().await.is_none());
         let _ = std::fs::remove_dir_all(&output_dir);
     }
