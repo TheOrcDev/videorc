@@ -3,6 +3,8 @@ import type { DiagnosticStats, StreamHealth, StreamTargetRuntime } from '@/lib/b
 export type StreamHealthAttribution =
   | 'device'
   | 'audio'
+  | 'choppy'
+  | 'uplink'
   | 'capture'
   | 'render'
   | 'encoder'
@@ -22,6 +24,10 @@ export function liveProblemLabel(attribution: StreamHealthAttribution): string {
       return 'Capture device lost'
     case 'audio':
       return 'Audio dropping'
+    case 'choppy':
+      return 'Stream skipping frames'
+    case 'uplink':
+      return 'Connection too slow'
     case 'capture':
       return 'Capture running slow'
     case 'render':
@@ -44,6 +50,14 @@ export function liveProblemLabel(attribution: StreamHealthAttribution): string {
 const MIN_MEDIA_FPS_RATIO = 0.9
 const MIN_ENCODER_SPEED = 0.98
 const MIN_AUDIO_CAPTURE_COVERAGE = 0.95
+
+/**
+ * How long a destination's fifo overflow keeps the stream on "Connection too
+ * slow" (plan 218). The backend warns about one leg at most once a minute,
+ * so a minute covers the gap between two overflows of a leg that keeps
+ * falling behind.
+ */
+export const RECENT_UPLINK_OVERFLOW_WINDOW_MS = 60_000
 
 /**
  * How long a drop keeps naming its stage after the last one (#981). The
@@ -178,7 +192,8 @@ export function classifyStreamHealthAttribution(
   diagnosticStats: DiagnosticStats,
   streamHealth: StreamHealth | null,
   streamTargets: readonly StreamTargetRuntime[],
-  recentDrops: RecentStreamDrops
+  recentDrops: RecentStreamDrops,
+  nowMs: number = Date.now()
 ): StreamHealthAttribution {
   const currentHealth = healthForDiagnosticSession(diagnosticStats, streamHealth)
   const targetFps = positiveFinite(diagnosticStats.targetFps ?? diagnosticStats.streamOutputFps)
@@ -194,6 +209,19 @@ export function classifyStreamHealthAttribution(
       diagnosticStats.micCaptureCoverage < MIN_AUDIO_CAPTURE_COVERAGE)
   ) {
     return 'audio'
+  }
+
+  // Plan 218: the backend's own verdicts on what the stream sends rank above
+  // the inferred stages below. A static screen idles, so the single
+  // bottleneck field reads "capture" while the stream skips frames for an
+  // unrelated reason, and the streamer was pointed at their capture. Slow
+  // capture repeats frames; it can never set either of these.
+  if (diagnosticStats.streamDelivery?.degraded) {
+    return 'choppy'
+  }
+
+  if (hasUplinkShortfall(diagnosticStats, streamTargets, nowMs)) {
+    return 'uplink'
   }
 
   if (
@@ -264,6 +292,32 @@ function hasAcknowledgedEncoderFallback(diagnosticStats: DiagnosticStats): boole
   const effective = diagnosticStats.encoderBridgeEffectiveVideoOutput?.trim()
   const reason = diagnosticStats.encoderBridgeEncodedOutputFallbackReason?.trim()
   return Boolean(requested && effective && requested !== effective && reason)
+}
+
+/**
+ * The connection cannot carry the stream (plan 218): Videorc lowered the
+ * stream's bitrate to fit it, the bitrate sits at its floor, or a
+ * destination's fifo overflowed within the last minute.
+ */
+function hasUplinkShortfall(
+  diagnosticStats: DiagnosticStats,
+  streamTargets: readonly StreamTargetRuntime[],
+  nowMs: number
+): boolean {
+  const delivery = diagnosticStats.streamDelivery
+  if (delivery?.atFloor) {
+    return true
+  }
+  const bitrateKbps = delivery?.bitrateKbps
+  const chosenBitrateKbps = delivery?.chosenBitrateKbps
+  if (finite(bitrateKbps) && finite(chosenBitrateKbps) && bitrateKbps < chosenBitrateKbps) {
+    return true
+  }
+  return streamTargets.some((target) => {
+    if (!target.uplinkOverflows || !target.uplinkOverflowAt) return false
+    const at = Date.parse(target.uplinkOverflowAt)
+    return Number.isFinite(at) && nowMs - at <= RECENT_UPLINK_OVERFLOW_WINDOW_MS
+  })
 }
 
 function hasTargetNetworkProblem(streamTargets: readonly StreamTargetRuntime[]): boolean {

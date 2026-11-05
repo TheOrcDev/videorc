@@ -50,8 +50,7 @@ use crate::diagnostics::{
     RecordingStartupBarrierDiagnosticSnapshot, apply_active_scene_revision, apply_audio_stats,
     apply_duplicate_capture_sources, apply_preview_frame_age, apply_preview_stats,
     apply_recording_startup_barrier_stats, apply_recording_timeline_stats,
-    apply_runtime_diagnostics_snapshot, apply_stream_health, apply_system_audio_stats,
-    starting_diagnostics,
+    apply_runtime_diagnostics_snapshot, apply_system_audio_stats, starting_diagnostics,
 };
 #[cfg(target_os = "windows")]
 use crate::encoder_bridge::DirectD3D11CameraOverlay;
@@ -5497,6 +5496,20 @@ async fn start_session_with_timeline(
         starting_diagnostics(&session_id, params.output.video.fps, mode),
         duplicate_capture_sources,
     );
+    // Plan 218 S2: the output settings a support bundle needs to read a
+    // session without its backend.log. Platforms only; never a URL or key.
+    if params.output.stream_enabled {
+        initial_diagnostics.stream_destination_count =
+            Some(u32::try_from(stream_targets.len()).unwrap_or(u32::MAX));
+        initial_diagnostics.stream_destination_platforms = Some(
+            stream_targets
+                .iter()
+                .map(|target| crate::streaming::stream_platform_id(target.platform).to_string())
+                .collect(),
+        );
+    }
+    initial_diagnostics.microphone_sync_offset_ms =
+        Some(clamped_microphone_sync_offset_ms(&params.audio));
     // Both the shared-compositor bridge and the legacy path request the platform H.264
     // encoder. The bridge is the protected consumer of the compositor output, paced by
     // the output clock; the legacy path captures via FFmpeg.
@@ -6596,6 +6609,23 @@ async fn start_session_with_timeline(
         let log_state = state.clone();
         let log_session_id = session_id.clone();
         let target_fps = params.output.video.fps;
+        // Plan 218: the overflow notice names the bitrate the connection
+        // could not carry; the stream's, never the recording's.
+        let stream_bitrate_kbps = encoder_bridge_stream_profile
+            .as_ref()
+            .map(|profile| profile.bitrate_kbps)
+            .or_else(|| {
+                params
+                    .output
+                    .stream_enabled
+                    .then(|| resolve_stream_output_video(&params).ok())
+                    .flatten()
+                    .map(|video| video.bitrate_kbps)
+            });
+        // FFmpeg's progress `bitrate=`/`total_size=` describe its first output
+        // only: the recording file when one is written (plan 218 S2), and
+        // nothing at all (`N/A`) when that output is a fifo leg.
+        let progress_describes_recording = params.output.record_enabled;
         let stream_targets_snapshot = stream_targets_snapshot.clone();
         let ffmpeg_audio_reply_sender = ffmpeg_audio_reply_sender;
         let ffmpeg_live_audio_session = ffmpeg_live_audio_stderr_session;
@@ -6613,6 +6643,7 @@ async fn start_session_with_timeline(
             let mut stream_legs = StreamLegMonitor::new(stream_url_positions);
             let mut ffmpeg_repeats = FfmpegRepeatThrottle::default();
             let mut reconnecting_since = std::collections::HashMap::new();
+            let mut overflow_throttle = StreamLegOverflowThrottle::default();
             let mut stream_health_accumulator =
                 StreamHealthAccumulator::new(&log_session_id, process_generation);
             let mut pending_stream_health = ParsedStreamHealthDelta::default();
@@ -6646,6 +6677,8 @@ async fn start_session_with_timeline(
                         &log_session_id,
                         &stream_targets_snapshot,
                         &mut reconnecting_since,
+                        &mut overflow_throttle,
+                        stream_bitrate_kbps,
                         update,
                     )
                     .await;
@@ -6749,6 +6782,7 @@ async fn start_session_with_timeline(
                         &log_session_id,
                         process_generation,
                         target_fps,
+                        progress_describes_recording,
                         &mut stream_health_accumulator,
                         &mut pending_stream_health,
                     )
@@ -6790,6 +6824,7 @@ async fn start_session_with_timeline(
                 &log_session_id,
                 process_generation,
                 target_fps,
+                progress_describes_recording,
                 &mut stream_health_accumulator,
                 &mut pending_stream_health,
             )
@@ -6940,6 +6975,17 @@ async fn start_session_with_timeline(
             encoder_bridge_video_output,
             encoder_bridge_stream_profile.is_some(),
         );
+        // Plan 218 S3b: how long FFmpeg holds each stream frame to interleave
+        // it with the later session audio.
+        let stream_queue_allowance_ms = if params.output.stream_enabled {
+            stream_queue_allowance_ms(
+                production_session_playout_delay(&params.audio, system_audio_capable),
+                encoder_bridge_stream_profile.is_some(),
+                clamped_microphone_sync_offset_ms(&params.audio),
+            )
+        } else {
+            0
+        };
         let mut recording_bridge = match start_synthetic_recording_bridge(
             state.clone(),
             session_id.clone(),
@@ -6967,6 +7013,9 @@ async fn start_session_with_timeline(
             recording_diagnostics_context,
             video_epoch.clone(),
             source_iso_start_barrier.clone(),
+            // Applied only when this writer runs the stream policy (a
+            // stream-only session); a recording keeps its own budget.
+            stream_queue_allowance_ms,
         ) {
             Ok(bridge) => Some(bridge),
             Err(error) => {
@@ -7032,6 +7081,7 @@ async fn start_session_with_timeline(
                         stream_diagnostics_context,
                         video_epoch.clone(),
                         source_iso_start_barrier.clone(),
+                        stream_queue_allowance_ms,
                     )?)
                 }
                 _ => None,
@@ -22312,6 +22362,48 @@ fn append_media_foundation_h264_copy_metadata_args(args: &mut Vec<String>, fps: 
     args.extend(h264_bt709_vui_rewrite_bsf_args());
 }
 
+/// FFmpeg 8's scheduler keeps every output stream within this of the slowest
+/// one (`SCHEDULE_TOLERANCE` in fftools/ffmpeg_sched.c): a video packet
+/// further ahead of the audio than this waits in the demuxer until the audio
+/// catches up.
+const FFMPEG_SCHEDULE_TOLERANCE_MS: u32 = 100;
+
+/// FFmpeg reads the session audio FIFO in bursts (it drains the 64 KiB Darwin
+/// pipe in gulps of about 170 ms of PCM, `session_audio.rs`), so the audio
+/// clock the scheduler holds the video against advances late by part of a
+/// gulp. Half of one is the typical extra wait: with 60 ms of added audio
+/// lateness the stream queue's oldest frame sat at a p95 of 121 to 133 ms
+/// against the 50 ms the playout delay alone predicts (plan 218 S1).
+const FFMPEG_AUDIO_FIFO_GULP_ALLOWANCE_MS: u32 = 50;
+
+/// Plan 218 S3b: how long FFmpeg deliberately holds each stream frame before
+/// it reads it. The session audio reaches FFmpeg a playout delay after
+/// capture, and a negative effective microphone offset (the split stream's
+/// `STREAM_OUTPUT_AUDIO_ADVANCE_MS` included) pulls its timestamps further
+/// behind the video, so the video demuxer waits for all of that minus the
+/// scheduler's tolerance, plus part of a FIFO gulp. The stream queue's
+/// limits are shifted by this, so
+/// they measure Videorc's backlog and not FFmpeg's interleave hold. Neither
+/// the bus playout delay nor the advance moves (A/V sync depends on them).
+fn stream_queue_allowance_ms(
+    playout_delay: Duration,
+    split_stream_advance: bool,
+    microphone_sync_offset_ms: i32,
+) -> u32 {
+    let playout_ms = u32::try_from(playout_delay.as_millis()).unwrap_or(u32::MAX);
+    let effective_offset_ms = if split_stream_advance {
+        microphone_sync_offset_ms
+            .saturating_sub(STREAM_OUTPUT_AUDIO_ADVANCE_MS)
+            .clamp(MICROPHONE_SYNC_OFFSET_MIN_MS, MICROPHONE_SYNC_OFFSET_MAX_MS)
+    } else {
+        microphone_sync_offset_ms
+    };
+    playout_ms
+        .saturating_sub(FFMPEG_SCHEDULE_TOLERANCE_MS)
+        .saturating_add(FFMPEG_AUDIO_FIFO_GULP_ALLOWANCE_MS)
+        .saturating_add(effective_offset_ms.min(0).unsigned_abs())
+}
+
 fn stream_output_audio_settings(audio: &AudioSettings) -> AudioSettings {
     let mut adjusted = audio.clone();
     adjusted.microphone_sync_offset_ms = adjusted
@@ -23397,7 +23489,8 @@ fn session_audio_options(
     audio: &AudioSettings,
     system_audio_capable: bool,
 ) -> crate::session_audio::SessionAudioOptions {
-    match session_audio_sync(audio, system_audio_capable) {
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut options = match session_audio_sync(audio, system_audio_capable) {
         Some(split) => crate::session_audio::SessionAudioOptions {
             playout_delay: crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY,
             microphone_delay_frames: split.microphone_delay_frames,
@@ -23409,8 +23502,53 @@ fn session_audio_options(
             playout_delay: default_session_playout_delay(),
             ..crate::session_audio::SessionAudioOptions::default()
         },
+    };
+    #[cfg(debug_assertions)]
+    {
+        options.playout_delay += smoke_audio_fifo_extra_delay();
+    }
+    options
+}
+
+/// The bus playout delay production runs with: `session_audio_options` minus
+/// the debug-only smoke extra. The stream queue allowance (plan 218 S3b) is
+/// sized from this, so the `audio-late` smoke variant tests the production
+/// allowance against later audio instead of growing it to match.
+fn production_session_playout_delay(
+    audio: &AudioSettings,
+    system_audio_capable: bool,
+) -> std::time::Duration {
+    let options = session_audio_options(audio, system_audio_capable);
+    #[cfg(debug_assertions)]
+    {
+        options
+            .playout_delay
+            .saturating_sub(smoke_audio_fifo_extra_delay())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        options.playout_delay
     }
 }
+
+/// Plan 218 S1 (the H2 variant of `smoke:stream-thin-uplink`): a debug build
+/// with `VIDEORC_SMOKE_AUDIO_FIFO_EXTRA_DELAY_MS=<ms>` writes every session
+/// audio chunk that much later than production. FFmpeg's scheduler keeps
+/// each output within 100 ms of its slowest stream, so later audio holds the
+/// video reads longer. Only the write time moves (plan 069 decision 13): the
+/// bytes and their timestamps are the production ones. Capped at one second;
+/// a release build does not compile it.
+#[cfg(debug_assertions)]
+fn smoke_audio_fifo_extra_delay() -> std::time::Duration {
+    std::env::var(SMOKE_AUDIO_FIFO_EXTRA_DELAY_MS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|ms| std::time::Duration::from_millis(ms.min(1_000)))
+        .unwrap_or_default()
+}
+
+#[cfg(debug_assertions)]
+const SMOKE_AUDIO_FIFO_EXTRA_DELAY_MS_ENV: &str = "VIDEORC_SMOKE_AUDIO_FIFO_EXTRA_DELAY_MS";
 
 /// The bus's write deadline where no system audio is mixed. Linux's Pulse
 /// worker delivers PCM tens of ms late under load; at 50 ms the bus wrote
@@ -26674,11 +26812,106 @@ where
 /// Health event and snapshot broadcast for one FFmpeg-reported leg change
 /// (plan 161). `reconnecting_since` remembers when each leg went down so the
 /// resume notice can say for how long.
+pub(crate) const STREAM_LEG_OVERFLOW_CODE: &str = "stream-leg-overflow";
+/// One overflow notice per destination per minute (plan 218 S2): a leg on a
+/// thin connection overflows every few seconds, and the snapshot carries
+/// the count.
+const STREAM_LEG_OVERFLOW_WARN_WINDOW: Duration = Duration::from_secs(60);
+
+/// Rate limit for the per-leg overflow notice. Pure: positions and instants
+/// in, "say it now" out. An unattributed overflow has its own slot.
+#[derive(Debug, Default)]
+struct StreamLegOverflowThrottle {
+    last_warned: std::collections::HashMap<Option<usize>, Instant>,
+}
+
+impl StreamLegOverflowThrottle {
+    fn admit(&mut self, position: Option<usize>, now: Instant) -> bool {
+        if self
+            .last_warned
+            .get(&position)
+            .is_some_and(|at| now.saturating_duration_since(*at) < STREAM_LEG_OVERFLOW_WARN_WINDOW)
+        {
+            return false;
+        }
+        self.last_warned.insert(position, now);
+        true
+    }
+}
+
+/// "6 Mbps", "4.5 Mbps"; the bitrate the connection could not carry.
+fn format_stream_bitrate(bitrate_kbps: Option<u32>) -> String {
+    match bitrate_kbps {
+        Some(kbps) if kbps.is_multiple_of(1000) => format!("{} Mbps", kbps / 1000),
+        Some(kbps) => format!("{:.1} Mbps", f64::from(kbps) / 1000.0),
+        None => "its bitrate".to_string(),
+    }
+}
+
+fn stream_leg_overflow_message(label: &str, bitrate_kbps: Option<u32>, overflows: u64) -> String {
+    let times = if overflows > 1 {
+        format!(" This has happened {overflows} times this session.")
+    } else {
+        String::new()
+    };
+    format!(
+        "{label} could not keep up with {} from this connection; frames were skipped for its viewers.{times}",
+        format_stream_bitrate(bitrate_kbps)
+    )
+}
+
+/// Counts one fifo overflow on a leg (plan 218 S2). Returns the label, the
+/// new count and the snapshot to publish; `None` for a leg that is not
+/// configured or already failed.
+fn record_stream_target_overflow(
+    shared: &SharedStreamTargetsSnapshot,
+    position: usize,
+    at: String,
+) -> Option<(String, u64, StreamTargetsSnapshot)> {
+    let mut snapshot = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = snapshot.targets.get_mut(position)?;
+    if matches!(
+        entry.state,
+        StreamTargetState::NotConfigured | StreamTargetState::Failed
+    ) {
+        return None;
+    }
+    let overflows = entry.uplink_overflows.unwrap_or(0).saturating_add(1);
+    entry.uplink_overflows = Some(overflows);
+    entry.uplink_overflow_at = Some(at);
+    let label = entry.label.clone();
+    Some((label, overflows, snapshot.clone()))
+}
+
+/// The per-leg overflow counts a support bundle keeps (plan 218 S2): every
+/// leg that overflowed, by platform and label, never by URL.
+fn stream_leg_overflow_counts(
+    snapshot: &StreamTargetsSnapshot,
+) -> Vec<crate::protocol::StreamLegOverflowCount> {
+    snapshot
+        .targets
+        .iter()
+        .filter_map(|target| {
+            Some(crate::protocol::StreamLegOverflowCount {
+                target_id: target.target_id.clone(),
+                platform: crate::streaming::stream_platform_id(target.platform).to_string(),
+                label: target.label.clone(),
+                overflows: target.uplink_overflows?,
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn publish_stream_leg_update(
     state: &AppState,
     session_id: &str,
     targets: &SharedStreamTargetsSnapshot,
     reconnecting_since: &mut std::collections::HashMap<usize, Instant>,
+    overflow_throttle: &mut StreamLegOverflowThrottle,
+    stream_bitrate_kbps: Option<u32>,
     update: StreamLegUpdate,
 ) {
     // A failed destination is terminal: a dead tee slave, a finished output,
@@ -26776,6 +27009,69 @@ async fn publish_stream_leg_update(
                     HealthLevel::Info,
                     STREAM_TARGET_RECONNECTED_CODE,
                     "A live destination dropped its connection and reconnected by itself. Viewers there saw a short interruption.",
+                );
+            })
+            .await;
+        }
+        StreamLegUpdate::Overflow { position } => {
+            let Some((label, overflows, snapshot)) =
+                record_stream_target_overflow(targets, position, Utc::now().to_rfc3339())
+            else {
+                return;
+            };
+            crate::encoder_bridge::record_stream_uplink_overflow(session_id);
+            let overflow_counts = stream_leg_overflow_counts(&snapshot);
+            {
+                let mut diagnostics = state.diagnostics.lock().await;
+                if diagnostics.session_id.as_deref() == Some(session_id) {
+                    diagnostics.stream_leg_overflows = Some(overflow_counts);
+                }
+            }
+            let warn = overflow_throttle.admit(Some(position), Instant::now());
+            with_active_session(state, session_id, || {
+                if warn {
+                    let _ = emit_health_event(
+                        state,
+                        Some(session_id),
+                        HealthLevel::Warn,
+                        STREAM_LEG_OVERFLOW_CODE,
+                        &stream_leg_overflow_message(&label, stream_bitrate_kbps, overflows),
+                    );
+                }
+                state.emit_event("stream.targets", snapshot);
+            })
+            .await;
+        }
+        StreamLegUpdate::UnattributedOverflow { candidates } => {
+            crate::encoder_bridge::record_stream_uplink_overflow(session_id);
+            if !overflow_throttle.admit(None, Instant::now()) {
+                return;
+            }
+            let snapshot = stream_targets_snapshot_value(targets);
+            let labels = candidates
+                .iter()
+                .filter_map(|position| snapshot.targets.get(*position))
+                .map(|target| target.label.as_str())
+                .collect::<Vec<_>>();
+            let who = match labels.as_slice() {
+                [] => "One of your destinations".to_string(),
+                [one] => (*one).to_string(),
+                many => format!(
+                    "{} or {}",
+                    many[..many.len() - 1].join(", "),
+                    many[many.len() - 1]
+                ),
+            };
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    STREAM_LEG_OVERFLOW_CODE,
+                    &format!(
+                        "{who} could not keep up with {} from this connection; frames were skipped for its viewers. FFmpeg does not say which of them.",
+                        format_stream_bitrate(stream_bitrate_kbps)
+                    ),
                 );
             })
             .await;
@@ -27033,6 +27329,8 @@ fn build_stream_runtime(
             state: StreamTargetState::Live,
             message: None,
             redacted_url: Some(target.redacted_url.clone()),
+            uplink_overflows: None,
+            uplink_overflow_at: None,
         });
     }
     for skip in skipped {
@@ -27043,6 +27341,8 @@ fn build_stream_runtime(
             state: StreamTargetState::NotConfigured,
             message: Some(skip.reason.clone()),
             redacted_url: None,
+            uplink_overflows: None,
+            uplink_overflow_at: None,
         });
     }
 
@@ -27204,6 +27504,15 @@ enum StreamLegUpdate {
     UnattributedReconnecting { reason: String },
     /// A fifo we cannot attribute dropped and reconnected immediately.
     UnattributedResumed,
+    /// The leg's fifo queue filled (plan 218): the connection to that
+    /// destination could not carry the stream, so FFmpeg threw the leg's
+    /// whole queue away and resumes at the next keyframe. Viewers there see
+    /// a freeze and a jump; the other destinations are untouched.
+    Overflow { position: usize },
+    /// A fifo we cannot attribute overflowed (two or more legs never printed
+    /// their URL, so elimination cannot name it). `candidates` are the legs
+    /// it could be, in leg order.
+    UnattributedOverflow { candidates: Vec<usize> },
 }
 
 /// One session's stream legs as FFmpeg reports them. Pure: stripped stderr
@@ -27214,6 +27523,12 @@ enum StreamLegUpdate {
 /// later `Recovery failed` / `Recovery successful` lines carry the context
 /// alone. The startup dump (`Output #N, fifo, to '<url>'`) maps FFmpeg's
 /// output index for the per-output mux failure.
+///
+/// `FIFO queue full` (plan 218) carries the context alone too, and a leg that
+/// never failed to open never prints its URL. A fifo context is unique and
+/// stable for its leg's whole life, so when every leg but one has a known
+/// context, an unknown context can only be the remaining leg; that is the one
+/// inference the monitor makes (it covers a single destination outright).
 #[derive(Debug, Default)]
 struct StreamLegMonitor {
     url_positions: Vec<(String, usize)>,
@@ -27235,6 +27550,23 @@ impl StreamLegMonitor {
             .iter()
             .find(|(candidate, _)| candidate == url)
             .map(|(_, position)| *position)
+    }
+
+    /// The legs whose fifo context is still unknown, in leg order.
+    fn unknown_positions(&self) -> Vec<usize> {
+        self.url_positions
+            .iter()
+            .map(|(_, position)| *position)
+            .filter(|position| !self.fifo_contexts.values().any(|known| known == position))
+            .collect()
+    }
+
+    /// The one leg whose fifo context is still unknown, if exactly one is.
+    fn remaining_unknown_position(&self) -> Option<usize> {
+        match self.unknown_positions().as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
     }
 
     fn observe(&mut self, line: &str) -> Option<StreamLegUpdate> {
@@ -27277,6 +27609,24 @@ impl StreamLegMonitor {
                 return Some(StreamLegUpdate::Failed {
                     position: position?,
                     reason: "Videorc stopped reconnecting".to_string(),
+                });
+            }
+            if message == "FIFO queue full" {
+                let position = match position {
+                    Some(position) => Some(position),
+                    None => {
+                        let remaining = self.remaining_unknown_position();
+                        if let Some(remaining) = remaining {
+                            self.fifo_contexts.insert(context.to_string(), remaining);
+                        }
+                        remaining
+                    }
+                };
+                return Some(match position {
+                    Some(position) => StreamLegUpdate::Overflow { position },
+                    None => StreamLegUpdate::UnattributedOverflow {
+                        candidates: self.unknown_positions(),
+                    },
                 });
             }
             return None;
@@ -27889,11 +28239,13 @@ impl StreamHealthAccumulator {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_pending_ffmpeg_stream_health(
     state: &AppState,
     session_id: &str,
     process_generation: u64,
     target_fps: u32,
+    progress_describes_recording: bool,
     accumulator: &mut StreamHealthAccumulator,
     pending: &mut ParsedStreamHealthDelta,
 ) -> bool {
@@ -27913,17 +28265,35 @@ async fn publish_pending_ffmpeg_stream_health(
     {
         return false;
     }
-    let (stream_health, dropped_frames_increased) =
+    let (mut stream_health, dropped_frames_increased) =
         accumulator.apply(session_id, process_generation, std::mem::take(pending));
+    let progress_output = if progress_describes_recording {
+        crate::diagnostics::FfmpegProgressOutput::Recording
+    } else {
+        crate::diagnostics::FfmpegProgressOutput::Stream
+    };
     let diagnostic_stats = {
         let mut diagnostics = state.diagnostics.lock().await;
         let next = apply_active_scene_revision(
-            apply_stream_health(diagnostics.clone(), &stream_health, target_fps),
+            crate::diagnostics::apply_stream_health_from(
+                diagnostics.clone(),
+                &stream_health,
+                target_fps,
+                progress_output,
+            ),
             scene_revision,
         );
         *diagnostics = next.clone();
         next
     };
+    // Plan 218 S2: `stream.health` says what the stream sends. FFmpeg's
+    // figures described the recording file; the stream encoder's replace
+    // them (the diagnostics carry the recording's under their own names).
+    if progress_describes_recording {
+        stream_health.bitrate_kbps = diagnostic_stats.stream_measured_bitrate_kbps;
+        stream_health.total_bytes = (diagnostic_stats.stream_output_total_bytes > 0)
+            .then_some(diagnostic_stats.stream_output_total_bytes);
+    }
     state.emit_event(
         "diagnostics.stats",
         apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
@@ -35942,6 +36312,158 @@ mod tests {
         ])
     }
 
+    // Plan 218 S2: `FIFO queue full` is attributed by a known context, then
+    // by elimination once every other leg has one; never guessed.
+    #[test]
+    fn fifo_queue_full_is_attributed_by_context_then_by_elimination() {
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe("[fifo @ 0xa] FIFO queue full"),
+            Some(StreamLegUpdate::UnattributedOverflow {
+                candidates: vec![0, 1]
+            }),
+            "two unknown legs: no guess, both named as candidates"
+        );
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0xb] Error opening {TWITCH_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 1,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xb] FIFO queue full"),
+            Some(StreamLegUpdate::Overflow { position: 1 })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xa] FIFO queue full"),
+            Some(StreamLegUpdate::Overflow { position: 0 }),
+            "the one remaining leg is the unknown context"
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xa] FIFO queue flushed"),
+            None,
+            "the flush that follows is not a second overflow"
+        );
+        let mut single = StreamLegMonitor::new(vec![(YOUTUBE_URL.to_string(), 0)]);
+        assert_eq!(
+            single.observe("[fifo @ 0x1] FIFO queue full"),
+            Some(StreamLegUpdate::Overflow { position: 0 }),
+            "a single destination is attributed outright"
+        );
+    }
+
+    #[test]
+    fn overflow_notice_is_once_a_minute_per_leg() {
+        let mut throttle = StreamLegOverflowThrottle::default();
+        let start = Instant::now();
+        assert!(throttle.admit(Some(0), start));
+        assert!(!throttle.admit(Some(0), start + Duration::from_secs(30)));
+        assert!(throttle.admit(Some(1), start + Duration::from_secs(30)));
+        assert!(throttle.admit(None, start + Duration::from_secs(30)));
+        assert!(throttle.admit(Some(0), start + STREAM_LEG_OVERFLOW_WARN_WINDOW));
+    }
+
+    #[test]
+    fn record_stream_target_overflow_counts_live_legs_only() {
+        let shared: SharedStreamTargetsSnapshot = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: "s".to_string(),
+            targets: vec![
+                StreamTargetRuntime {
+                    target_id: "youtube".to_string(),
+                    platform: StreamPlatform::Youtube,
+                    label: "YouTube".to_string(),
+                    state: StreamTargetState::Live,
+                    message: None,
+                    redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
+                },
+                StreamTargetRuntime {
+                    target_id: "x".to_string(),
+                    platform: StreamPlatform::X,
+                    label: "X".to_string(),
+                    state: StreamTargetState::Failed,
+                    message: None,
+                    redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
+                },
+            ],
+        }));
+        let (label, overflows, snapshot) =
+            record_stream_target_overflow(&shared, 0, "t1".to_string()).expect("live leg");
+        assert_eq!((label.as_str(), overflows), ("YouTube", 1));
+        assert_eq!(snapshot.targets[0].uplink_overflows, Some(1));
+        assert_eq!(
+            snapshot.targets[0].uplink_overflow_at.as_deref(),
+            Some("t1")
+        );
+        assert_eq!(
+            snapshot.targets[0].state,
+            StreamTargetState::Live,
+            "an overflow never changes the leg's state"
+        );
+        let (_, overflows, snapshot) =
+            record_stream_target_overflow(&shared, 0, "t2".to_string()).expect("live leg");
+        assert_eq!(overflows, 2);
+        assert_eq!(
+            stream_leg_overflow_counts(&snapshot),
+            vec![crate::protocol::StreamLegOverflowCount {
+                target_id: "youtube".to_string(),
+                platform: "youtube".to_string(),
+                label: "YouTube".to_string(),
+                overflows: 2,
+            }]
+        );
+        assert!(
+            record_stream_target_overflow(&shared, 1, "t3".to_string()).is_none(),
+            "a failed leg has no viewers to skip frames for"
+        );
+        assert_eq!(
+            stream_leg_overflow_message("YouTube", Some(6_000), 1),
+            "YouTube could not keep up with 6 Mbps from this connection; frames were skipped for its viewers."
+        );
+        assert_eq!(
+            stream_leg_overflow_message("X", Some(4_500), 3),
+            "X could not keep up with 4.5 Mbps from this connection; frames were skipped for its viewers. This has happened 3 times this session."
+        );
+    }
+
+    // Plan 218 S3b: the allowance follows the audio lag FFmpeg waits for.
+    #[test]
+    fn stream_queue_allowance_follows_the_audio_lag() {
+        let system = crate::session_audio::SYSTEM_AUDIO_PLAYOUT_DELAY;
+        let gulp = FFMPEG_AUDIO_FIFO_GULP_ALLOWANCE_MS;
+        assert_eq!(stream_queue_allowance_ms(system, false, 0), 50 + gulp);
+        assert_eq!(
+            stream_queue_allowance_ms(system, true, 0),
+            50 + gulp + STREAM_OUTPUT_AUDIO_ADVANCE_MS as u32
+        );
+        assert_eq!(
+            stream_queue_allowance_ms(system, false, -40),
+            90 + gulp,
+            "a negative microphone offset pulls the audio further behind"
+        );
+        assert_eq!(
+            stream_queue_allowance_ms(system, false, 80),
+            50 + gulp,
+            "a positive offset delays audio in the bus, not in FFmpeg"
+        );
+        assert_eq!(
+            stream_queue_allowance_ms(system, true, STREAM_OUTPUT_AUDIO_ADVANCE_MS),
+            50 + gulp,
+            "a positive offset that cancels the split advance leaves no advance"
+        );
+        assert_eq!(
+            stream_queue_allowance_ms(Duration::from_millis(50), false, 0),
+            gulp,
+            "a 50 ms bus is inside the scheduler's tolerance; the gulp remains"
+        );
+    }
+
     #[test]
     fn ffmpeg_level_tags_are_stripped_after_the_context() {
         assert_eq!(
@@ -36367,6 +36889,8 @@ mod tests {
                     state: StreamTargetState::Live,
                     message: None,
                     redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 },
                 StreamTargetRuntime {
                     target_id: "kick".to_string(),
@@ -36375,6 +36899,8 @@ mod tests {
                     state: StreamTargetState::NotConfigured,
                     message: Some("No key".to_string()),
                     redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 },
             ],
         }));
@@ -36507,6 +37033,8 @@ mod tests {
                 state: StreamTargetState::Live,
                 message: None,
                 redacted_url: Some("rtmp://youtube.example/live/••••".to_string()),
+                uplink_overflows: None,
+                uplink_overflow_at: None,
             }],
         }));
 
@@ -36560,6 +37088,8 @@ mod tests {
                 state: StreamTargetState::Live,
                 message: None,
                 redacted_url: Some("rtmp://youtube.example/live/••••".to_string()),
+                uplink_overflows: None,
+                uplink_overflow_at: None,
             }],
         };
         *state.recording.lock().await = Some(test_active_recording_with_stream_targets(
@@ -42351,6 +42881,7 @@ mod tests {
                 "partial-health",
                 0,
                 30,
+                false,
                 &mut accumulator,
                 &mut pending,
             )
@@ -42396,6 +42927,7 @@ mod tests {
                     session_id,
                     0,
                     30,
+                    false,
                     &mut accumulator,
                     &mut pending,
                 )
@@ -42436,6 +42968,7 @@ mod tests {
                 "retired-session",
                 0,
                 30,
+                false,
                 &mut accumulator,
                 &mut pending,
             )
@@ -42465,6 +42998,8 @@ mod tests {
                 state: StreamTargetState::Live,
                 message: None,
                 redacted_url: Some("rtmp://example.invalid/live/REDACTED".to_string()),
+                uplink_overflows: None,
+                uplink_overflow_at: None,
             }],
         }));
         let replacement_targets = state

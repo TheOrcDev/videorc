@@ -1018,6 +1018,7 @@ pub fn start_source_iso_writers(
                 diagnostics_context,
                 video_epoch.clone(),
                 start_barrier.clone(),
+                0,
             )
             .with_context(|| {
                 format!(

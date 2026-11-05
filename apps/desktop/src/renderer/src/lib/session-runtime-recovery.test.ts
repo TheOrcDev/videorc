@@ -477,6 +477,46 @@ describe('session audio news (plan 076)', () => {
     )
   })
 
+  // Plan 218: a choppy stream and a short connection are live news, each on
+  // one key, so the good news replaces the bad and nothing stacks.
+  it('keeps a choppy-stream warning up until the stream is smooth again', () => {
+    showSessionHealthEvent(healthEvent('stream-delivery-degraded'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Your stream is choppy',
+      expect.objectContaining({
+        id: 'stream-delivery',
+        description: 'stream-delivery-degraded message',
+        duration: Infinity
+      })
+    )
+    showSessionHealthEvent(healthEvent('stream-delivery-recovered', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Your stream is smooth again',
+      expect.objectContaining({ id: 'stream-delivery' })
+    )
+  })
+
+  it('tells the connection story on one key: overflow, step down, floor, back', () => {
+    const cases = [
+      ['stream-leg-overflow', 'warn', 'warning', 'Your connection can’t keep up'],
+      [
+        'stream-bitrate-lowered',
+        'warn',
+        'warning',
+        'Stream quality lowered to fit your connection'
+      ],
+      ['stream-bitrate-floor', 'warn', 'warning', 'Your connection can’t carry this stream'],
+      ['stream-bitrate-restored', 'info', 'success', 'Stream quality is back']
+    ] as const
+    for (const [code, level, variant, title] of cases) {
+      showSessionHealthEvent(healthEvent(code, level), false)
+      expect(toastSpies[variant]).toHaveBeenCalledWith(
+        title,
+        expect.objectContaining({ id: 'stream-uplink', description: `${code} message` })
+      )
+    }
+  })
+
   it('says once that a Screen file stopped, and that the Combined recording keeps going', () => {
     // Plan 198 (D1): the role-failed event rides the Combined session.
     const event = {
@@ -652,6 +692,18 @@ describe('record+stream notices (plan 174 B-6)', () => {
         priorSessionState: 'recording'
       })
     ).toMatchObject({ activity: 'recording' })
+  })
+
+  it('ends the live stream news with the session (plan 218)', async () => {
+    const { toast } = await import('sonner')
+    showSessionFinished({
+      status: { state: 'idle' as const, sessionId: 'live' },
+      activity: 'live-stream',
+      currentNotice: null,
+      replaceNotice: vi.fn()
+    })
+    expect(toast.dismiss).toHaveBeenCalledWith('stream-delivery')
+    expect(toast.dismiss).toHaveBeenCalledWith('stream-uplink')
   })
 
   it('still announces the saved recording when Go Live ends, and never for stream-only', () => {

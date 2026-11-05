@@ -8,6 +8,7 @@ import {
   liveProblemLabel,
   NO_RECENT_DROPS,
   RECENT_DROP_WINDOW_MS,
+  RECENT_UPLINK_OVERFLOW_WINDOW_MS,
   recentStreamDrops,
   type RecentStreamDrops,
   type StreamHealthAttribution
@@ -20,6 +21,8 @@ describe('liveProblemLabel', () => {
     const labels: Record<StreamHealthAttribution, string> = {
       device: 'Capture device lost',
       audio: 'Audio dropping',
+      choppy: 'Stream skipping frames',
+      uplink: 'Connection too slow',
       capture: 'Capture running slow',
       render: 'Rendering slow',
       encoder: 'Encoder dropping frames',
@@ -84,6 +87,32 @@ function streamHealth(overrides: Partial<StreamHealth> = {}): StreamHealth {
   }
 }
 
+function streamDelivery(
+  overrides: Partial<NonNullable<DiagnosticStats['streamDelivery']>> = {}
+): NonNullable<DiagnosticStats['streamDelivery']> {
+  return {
+    targetFps: 60,
+    deliveredFps: 60,
+    dropPercent: 0,
+    windowSeconds: 30,
+    degraded: false,
+    atFloor: false,
+    uplinkOverflows: 0,
+    ...overrides
+  }
+}
+
+function overflowingTarget(atMs: number): StreamTargetRuntime {
+  return {
+    targetId: 'target-overflowing',
+    platform: 'youtube',
+    label: 'YouTube',
+    state: 'live',
+    uplinkOverflows: 2,
+    uplinkOverflowAt: new Date(atMs).toISOString()
+  }
+}
+
 function streamTarget(state: StreamTargetRuntime['state'], message?: string): StreamTargetRuntime {
   return {
     targetId: `target-${state}`,
@@ -110,6 +139,13 @@ const problemSignals: Array<{
 }> = [
   { expected: 'device', diagnosticStats: { deviceDisconnected: true } },
   { expected: 'audio', recentDrops: { audio: true } },
+  {
+    expected: 'choppy',
+    diagnosticStats: {
+      streamDelivery: streamDelivery({ degraded: true, deliveredFps: 42, dropPercent: 30 })
+    }
+  },
+  { expected: 'uplink', streamTargets: [overflowingTarget(Date.now())] },
   { expected: 'capture', diagnosticStats: { captureFps: 30 } },
   { expected: 'render', diagnosticStats: { renderFps: 30 } },
   { expected: 'encoder', diagnosticStats: { encoderSpeed: 0.8 } },
@@ -249,6 +285,72 @@ describe('classifyStreamHealthAttribution', () => {
     }
     expect(
       classify(withOverrides({ streamTargets: [streamTarget('connecting', 'Connecting…')] }))
+    ).toBe('healthy')
+  })
+
+  // Plan 218: the streamer's sessions reported bottleneck "capture" (a static
+  // screen idles) while a third of the stream's frames were skipped.
+  it('names a choppy stream over the inferred capture bottleneck', () => {
+    expect(
+      classify(
+        withOverrides({
+          diagnosticStats: {
+            bottleneck: 'capture',
+            streamDelivery: streamDelivery({ degraded: true, deliveredFps: 21, dropPercent: 30 })
+          }
+        })
+      )
+    ).toBe('choppy')
+    expect(
+      classify(
+        withOverrides({
+          diagnosticStats: { streamDelivery: streamDelivery({ deliveredFps: 59, dropPercent: 2 }) }
+        })
+      )
+    ).toBe('healthy')
+  })
+
+  it('names a slow connection while the bitrate is lowered, at its floor, or a leg overflowed', () => {
+    const lowered = streamDelivery({ bitrateKbps: 4_800, chosenBitrateKbps: 6_000 })
+    expect(classify(withOverrides({ diagnosticStats: { streamDelivery: lowered } }))).toBe('uplink')
+    expect(
+      classify(
+        withOverrides({
+          diagnosticStats: {
+            streamDelivery: streamDelivery({
+              bitrateKbps: 3_000,
+              chosenBitrateKbps: 6_000,
+              atFloor: true
+            })
+          }
+        })
+      )
+    ).toBe('uplink')
+    const restored = streamDelivery({ bitrateKbps: 6_000, chosenBitrateKbps: 6_000 })
+    expect(classify(withOverrides({ diagnosticStats: { streamDelivery: restored } }))).toBe(
+      'healthy'
+    )
+    const nowMs = Date.parse('2026-11-05T12:00:00.000Z')
+    const input = healthyInput()
+    input.streamTargets = [overflowingTarget(nowMs - 30_000)]
+    expect(
+      classifyStreamHealthAttribution(
+        input.diagnosticStats,
+        input.streamHealth,
+        input.streamTargets,
+        NO_RECENT_DROPS,
+        nowMs
+      )
+    ).toBe('uplink')
+    input.streamTargets = [overflowingTarget(nowMs - RECENT_UPLINK_OVERFLOW_WINDOW_MS - 1)]
+    expect(
+      classifyStreamHealthAttribution(
+        input.diagnosticStats,
+        input.streamHealth,
+        input.streamTargets,
+        NO_RECENT_DROPS,
+        nowMs
+      )
     ).toBe('healthy')
   })
 
