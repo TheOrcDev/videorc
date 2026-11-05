@@ -121,9 +121,13 @@ const htmlPath = resolve(
 // The additions are small Studio wiring (the recent-drop window, the camera
 // frame-rate tracker, the silent-mic meter source, the bridge envelope, the
 // page-scoped loading line). Raise raw to 2,320,000; gzip holds at 475,000.
+// 2026-11-04 (owner-approved): microphone noise reduction (PR #1036: the
+// Sources switch, the live-update confirm and rollback, the silenced toast)
+// adds 308 gzip bytes to main's 474,854, landing at 475,162. Raise gzip to
+// 476,000.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_320_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 475_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 476_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

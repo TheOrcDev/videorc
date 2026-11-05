@@ -27,7 +27,12 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
 import './smoke-env.mjs'
-import { acquireHostSmokeLock, waitForHostMemory, withBuildSlot } from './host-lock.mjs'
+import {
+  acquireHostSmokeLock,
+  waitForHostMemory,
+  waitWhileVideorcLive,
+  withBuildSlot
+} from './host-lock.mjs'
 
 import { spawnProcessGroup } from './process-group.mjs'
 
@@ -371,9 +376,11 @@ export async function prepareSmokeLaunch({
   },
   buildSlot = withBuildSlot,
   hostLock = acquireHostSmokeLock,
-  memory = waitForHostMemory
+  memory = waitForHostMemory,
+  live = waitWhileVideorcLive
 } = {}) {
   const options = { env, log: onLine }
+  await live(options)
   if (dev && env.VIDEORC_SMOKE_SKIP_PREBUILD !== '1') await buildSlot(prebuild, options)
   await hostLock(options)
   await memory(options)

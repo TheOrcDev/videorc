@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { withBuildSlot } from './lib/host-lock.mjs'
+import { withLiveAwareBuildSlot } from './lib/host-lock.mjs'
 
 const [command, ...args] = process.argv.slice(2)
 if (!command) {
@@ -7,7 +7,7 @@ if (!command) {
   process.exitCode = 1
 } else {
   try {
-    const result = await withBuildSlot(
+    const result = await withLiveAwareBuildSlot(
       () =>
         new Promise((resolve, reject) => {
           const child = spawn(command, args, { stdio: 'inherit', env: process.env })

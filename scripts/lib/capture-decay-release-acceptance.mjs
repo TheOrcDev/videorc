@@ -130,6 +130,7 @@ export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
   'scripts/smoke-recording-session.mjs',
   'scripts/upload-macos-beta-release.mjs',
   'scripts/validate-macos-release-artifact.mjs',
+  'scripts/wait-until-not-live.mjs',
   'scripts/lib/acceptance-gate.mjs',
   'scripts/lib/app-launcher.mjs',
   'scripts/lib/host-lock.mjs',
