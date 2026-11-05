@@ -616,7 +616,19 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         stream_measured_bitrate_min_kbps: None,
         stream_measured_bitrate_max_kbps: None,
         stream_output_total_bytes: 0,
+        recording_measured_bitrate_kbps: None,
+        recording_output_total_bytes: 0,
         stream_duplicated_frames: 0,
+        stream_delivery: None,
+        stream_leg_overflows: None,
+        stream_destination_count: None,
+        stream_destination_platforms: None,
+        microphone_sync_offset_ms: None,
+        encoder_bridge_stream_video_toolbox_fifo_write_p95_ms: None,
+        encoder_bridge_stream_queue_age_p95_ms: None,
+        encoder_bridge_stream_queue_depth_trips: 0,
+        encoder_bridge_stream_queue_age_trips: 0,
+        encoder_bridge_stream_queue_last_trip: None,
         encoder_bridge_active_video_toolbox_output_encoders: 0,
         encoder_bridge_recording_video_toolbox_output_frames: 0,
         encoder_bridge_recording_video_toolbox_output_bytes: 0,
@@ -1275,10 +1287,51 @@ pub fn apply_active_scene_revision(
     stats
 }
 
+/// Which output FFmpeg's progress `bitrate=` / `total_size=` describe: its
+/// first output (plan 218 S2). With a recording that is the recording file;
+/// without one the first output is an RTMP leg and FFmpeg prints `N/A`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfmpegProgressOutput {
+    Stream,
+    Recording,
+}
+
+#[cfg(test)]
 pub fn apply_stream_health(
+    stats: DiagnosticStats,
+    health: &StreamHealth,
+    target_fps: u32,
+) -> DiagnosticStats {
+    apply_stream_health_from(stats, health, target_fps, FfmpegProgressOutput::Stream)
+}
+
+/// Folds the stream's measured video bitrate into the diagnostics, keeping
+/// the session's non-zero minimum and maximum.
+pub fn apply_measured_stream_bitrate(
+    mut stats: DiagnosticStats,
+    bitrate_kbps: f64,
+) -> DiagnosticStats {
+    stats.stream_measured_bitrate_kbps = Some(bitrate_kbps);
+    if bitrate_kbps > 0.0 {
+        stats.stream_measured_bitrate_min_kbps = Some(
+            stats
+                .stream_measured_bitrate_min_kbps
+                .map_or(bitrate_kbps, |minimum| minimum.min(bitrate_kbps)),
+        );
+        stats.stream_measured_bitrate_max_kbps = Some(
+            stats
+                .stream_measured_bitrate_max_kbps
+                .map_or(bitrate_kbps, |maximum| maximum.max(bitrate_kbps)),
+        );
+    }
+    stats
+}
+
+pub fn apply_stream_health_from(
     mut stats: DiagnosticStats,
     health: &StreamHealth,
     target_fps: u32,
+    progress_output: FfmpegProgressOutput,
 ) -> DiagnosticStats {
     let new_session = stats.session_id.as_deref() != Some(health.session_id.as_str());
     if new_session {
@@ -1286,6 +1339,8 @@ pub fn apply_stream_health(
         stats.stream_measured_bitrate_min_kbps = None;
         stats.stream_measured_bitrate_max_kbps = None;
         stats.stream_output_total_bytes = 0;
+        stats.recording_measured_bitrate_kbps = None;
+        stats.recording_output_total_bytes = 0;
         stats.stream_duplicated_frames = 0;
     }
     stats.session_id = Some(health.session_id.clone());
@@ -1305,26 +1360,27 @@ pub fn apply_stream_health(
         stats.dropped_frames = dropped_frames;
         stats.skipped_frames = dropped_frames;
     }
-    if let Some(bitrate_kbps) = health
+    let bitrate_kbps = health
         .bitrate_kbps
-        .filter(|bitrate_kbps| bitrate_kbps.is_finite() && *bitrate_kbps >= 0.0)
-    {
-        stats.stream_measured_bitrate_kbps = Some(bitrate_kbps);
-        if bitrate_kbps > 0.0 {
-            stats.stream_measured_bitrate_min_kbps = Some(
-                stats
-                    .stream_measured_bitrate_min_kbps
-                    .map_or(bitrate_kbps, |minimum| minimum.min(bitrate_kbps)),
-            );
-            stats.stream_measured_bitrate_max_kbps = Some(
-                stats
-                    .stream_measured_bitrate_max_kbps
-                    .map_or(bitrate_kbps, |maximum| maximum.max(bitrate_kbps)),
-            );
+        .filter(|bitrate_kbps| bitrate_kbps.is_finite() && *bitrate_kbps >= 0.0);
+    match progress_output {
+        FfmpegProgressOutput::Stream => {
+            if let Some(bitrate_kbps) = bitrate_kbps {
+                stats = apply_measured_stream_bitrate(stats, bitrate_kbps);
+            }
+            if let Some(total_bytes) = health.total_bytes {
+                stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+            }
         }
-    }
-    if let Some(total_bytes) = health.total_bytes {
-        stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+        FfmpegProgressOutput::Recording => {
+            if bitrate_kbps.is_some() {
+                stats.recording_measured_bitrate_kbps = bitrate_kbps;
+            }
+            if let Some(total_bytes) = health.total_bytes {
+                stats.recording_output_total_bytes =
+                    stats.recording_output_total_bytes.max(total_bytes);
+            }
+        }
     }
     if let Some(duplicated_frames) = health.duplicated_frames {
         stats.stream_duplicated_frames = stats.stream_duplicated_frames.max(duplicated_frames);
@@ -1437,6 +1493,17 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub stream_video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
     pub recording_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
     pub stream_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// Plan 218 S2: the stream encoder's own figures. `None`/`0` where this
+    /// emission does not come from the writer that feeds the stream, so the
+    /// previous stream values are kept.
+    pub stream_measured_bitrate_kbps: Option<f64>,
+    pub stream_output_total_bytes: Option<u64>,
+    pub stream_video_toolbox_fifo_write_p95_ms: Option<f64>,
+    pub stream_queue_age_p95_ms: Option<f64>,
+    pub stream_queue_depth_trips: Option<u64>,
+    pub stream_queue_age_trips: Option<u64>,
+    pub stream_queue_last_trip: Option<String>,
+    pub stream_delivery: Option<crate::protocol::StreamDeliveryState>,
     pub error: Option<String>,
 }
 
@@ -1558,6 +1625,36 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_schedule_skipped_ms = bridge.schedule_skipped_ms;
     stats.encoder_bridge_recording_input_fps = recording_input_fps;
     stats.encoder_bridge_stream_input_fps = stream_input_fps;
+    // Plan 218 S2: the stream's bitrate is what its encoder produced. A
+    // recording-role emission in a split session carries none and keeps the
+    // stream writer's last figures.
+    if let Some(bitrate_kbps) =
+        finite_non_negative_encoder_stat(bridge.stream_measured_bitrate_kbps)
+    {
+        stats = apply_measured_stream_bitrate(stats, bitrate_kbps);
+    }
+    if let Some(total_bytes) = bridge.stream_output_total_bytes {
+        stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+    }
+    if bridge.stream_video_toolbox_fifo_write_p95_ms.is_some() {
+        stats.encoder_bridge_stream_video_toolbox_fifo_write_p95_ms =
+            bridge.stream_video_toolbox_fifo_write_p95_ms;
+    }
+    if bridge.stream_queue_age_p95_ms.is_some() {
+        stats.encoder_bridge_stream_queue_age_p95_ms = bridge.stream_queue_age_p95_ms;
+    }
+    if let Some(trips) = bridge.stream_queue_depth_trips {
+        stats.encoder_bridge_stream_queue_depth_trips = trips;
+    }
+    if let Some(trips) = bridge.stream_queue_age_trips {
+        stats.encoder_bridge_stream_queue_age_trips = trips;
+    }
+    if bridge.stream_queue_last_trip.is_some() {
+        stats.encoder_bridge_stream_queue_last_trip = bridge.stream_queue_last_trip;
+    }
+    if bridge.stream_delivery.is_some() {
+        stats.stream_delivery = bridge.stream_delivery;
+    }
     stats.encoder_bridge_recording_queue_depth = bridge.recording_queue_depth;
     stats.encoder_bridge_recording_queue_oldest_frame_age_ms =
         bridge.recording_queue_oldest_frame_age_ms;
@@ -2769,6 +2866,84 @@ mod tests {
             );
             assert_eq!(stats.encoder_speed, None);
         }
+    }
+
+    // Plan 218 S2: FFmpeg's progress describes its first output. With a
+    // recording that is the recording file, and it must never pose as the
+    // stream; the stream's own encoder fills the stream fields.
+    #[test]
+    fn ffmpeg_progress_for_the_recording_file_fills_the_recording_fields() {
+        let health = StreamHealth {
+            session_id: "session-a".to_string(),
+            fps: Some(30.0),
+            dropped_frames: Some(0),
+            speed: Some(1.0),
+            bitrate_kbps: Some(8_166.0),
+            total_bytes: Some(50_000),
+            duplicated_frames: Some(0),
+            created_at: "first".to_string(),
+        };
+        let stats = apply_stream_health_from(
+            idle_diagnostics(),
+            &health,
+            30,
+            FfmpegProgressOutput::Recording,
+        );
+        assert_eq!(stats.recording_measured_bitrate_kbps, Some(8_166.0));
+        assert_eq!(stats.recording_output_total_bytes, 50_000);
+        assert_eq!(stats.stream_measured_bitrate_kbps, None);
+        assert_eq!(stats.stream_output_total_bytes, 0);
+
+        let bridge = EncoderBridgeDiagnosticSnapshot {
+            stream_measured_bitrate_kbps: Some(5_900.0),
+            stream_output_total_bytes: Some(40_000),
+            stream_video_toolbox_fifo_write_p95_ms: Some(79.8),
+            stream_queue_age_p95_ms: Some(133.0),
+            stream_queue_depth_trips: Some(2),
+            stream_queue_age_trips: Some(300),
+            stream_queue_last_trip: Some("age".to_string()),
+            stream_delivery: Some(crate::protocol::StreamDeliveryState {
+                target_fps: 30,
+                delivered_fps: 21.0,
+                drop_percent: 30.0,
+                window_seconds: 30.0,
+                degraded: true,
+                degraded_since: Some("t".to_string()),
+                bitrate_kbps: Some(4_800),
+                chosen_bitrate_kbps: Some(6_000),
+                at_floor: false,
+                uplink_overflows: 1,
+            }),
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(stats, bridge, 30);
+        assert_eq!(stats.stream_measured_bitrate_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_measured_bitrate_min_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_output_total_bytes, 40_000);
+        assert_eq!(
+            stats.encoder_bridge_stream_video_toolbox_fifo_write_p95_ms,
+            Some(79.8)
+        );
+        assert_eq!(stats.encoder_bridge_stream_queue_age_p95_ms, Some(133.0));
+        assert_eq!(stats.encoder_bridge_stream_queue_depth_trips, 2);
+        assert_eq!(stats.encoder_bridge_stream_queue_age_trips, 300);
+        assert_eq!(
+            stats.encoder_bridge_stream_queue_last_trip.as_deref(),
+            Some("age")
+        );
+        assert!(stats.stream_delivery.as_ref().is_some_and(|d| d.degraded));
+
+        // A recording-role emission carries none of it and erases nothing.
+        let quiet = EncoderBridgeDiagnosticSnapshot {
+            stream_measured_bitrate_kbps: Some(4_100.0),
+            ..Default::default()
+        };
+        let stats = apply_encoder_bridge_stats(stats, quiet, 30);
+        assert_eq!(stats.stream_measured_bitrate_min_kbps, Some(4_100.0));
+        assert_eq!(stats.stream_measured_bitrate_max_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_output_total_bytes, 40_000);
+        assert_eq!(stats.encoder_bridge_stream_queue_age_trips, 300);
+        assert!(stats.stream_delivery.is_some());
     }
 
     #[test]
@@ -4274,6 +4449,14 @@ mod tests {
                 stream_video_toolbox_fifo_enqueue_p95_ms: None,
                 recording_video_toolbox_fifo_enqueue_max_ms: None,
                 stream_video_toolbox_fifo_enqueue_max_ms: None,
+                stream_measured_bitrate_kbps: None,
+                stream_output_total_bytes: None,
+                stream_video_toolbox_fifo_write_p95_ms: None,
+                stream_queue_age_p95_ms: None,
+                stream_queue_depth_trips: None,
+                stream_queue_age_trips: None,
+                stream_queue_last_trip: None,
+                stream_delivery: None,
                 error: None,
             },
             30,
@@ -4378,6 +4561,14 @@ mod tests {
                 stream_video_toolbox_fifo_enqueue_p95_ms: Some(9.0),
                 recording_video_toolbox_fifo_enqueue_max_ms: Some(14.0),
                 stream_video_toolbox_fifo_enqueue_max_ms: Some(18.0),
+                stream_measured_bitrate_kbps: None,
+                stream_output_total_bytes: None,
+                stream_video_toolbox_fifo_write_p95_ms: None,
+                stream_queue_age_p95_ms: None,
+                stream_queue_depth_trips: None,
+                stream_queue_age_trips: None,
+                stream_queue_last_trip: None,
+                stream_delivery: None,
                 error: None,
             },
             30,

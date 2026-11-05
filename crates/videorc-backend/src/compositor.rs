@@ -9587,6 +9587,26 @@ fn synthetic_hard_content_enabled() -> bool {
     })
 }
 
+/// Plan 218: the thin-uplink smoke paints its noise as constant blocks this
+/// many pixels wide at full canvas resolution
+/// (`VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN`, off by default). The default
+/// quarter-canvas noise is scaled up by the compositor's linear sampler, which
+/// turns every pixel into a gradient the H.264 encoder cannot bring under
+/// about 6.5 Mbps at 1080p30 even at its highest quantizer, so no bitrate
+/// target binds it; hard-edged 32 px blocks encode at about 4.3 Mbps under a
+/// 6 Mbps target and follow a 3 Mbps target to 2.8 Mbps (the on-box
+/// VideoToolbox sweep, 2026-11-05), while every block still changes every
+/// frame.
+fn synthetic_hard_content_grain() -> Option<usize> {
+    static GRAIN: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *GRAIN.get_or_init(|| {
+        std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|grain| (2..=256).contains(grain))
+    })
+}
+
 fn xorshift64(state: &mut u64) -> u64 {
     let mut value = *state;
     value ^= value << 13;
@@ -9601,18 +9621,41 @@ fn synthetic_hard_content_bgra(
     canvas_width: u32,
     canvas_height: u32,
 ) -> SyntheticTestPatternBgra {
-    let width = (canvas_width as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 960);
-    let height = (canvas_height as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 960);
-    let mut bytes = vec![0; width * height * 4];
     // Deterministic per (frame, run): reproducible artifacts, zero skip blocks.
     let mut rng = sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
-    for pixel in bytes.as_chunks_mut::<4>().0 {
-        let noise = xorshift64(&mut rng);
-        pixel[0] = noise as u8;
-        pixel[1] = (noise >> 8) as u8;
-        pixel[2] = (noise >> 16) as u8;
-        pixel[3] = 255;
-    }
+    let (width, height, mut bytes) = match synthetic_hard_content_grain() {
+        Some(grain) => {
+            let width = (canvas_width as usize).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 3840);
+            let height = (canvas_height as usize).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 2160);
+            let cells = width.div_ceil(grain);
+            let mut cell_colors = vec![[0u8; 3]; cells * height.div_ceil(grain)];
+            for color in cell_colors.iter_mut() {
+                let noise = xorshift64(&mut rng);
+                *color = [noise as u8, (noise >> 8) as u8, (noise >> 16) as u8];
+            }
+            let mut bytes = vec![0; width * height * 4];
+            for (y, row) in bytes.chunks_exact_mut(width * 4).enumerate() {
+                for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                    let color = cell_colors[(y / grain) * cells + x / grain];
+                    pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+                }
+            }
+            (width, height, bytes)
+        }
+        None => {
+            let width = (canvas_width as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 960);
+            let height = (canvas_height as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 960);
+            let mut bytes = vec![0; width * height * 4];
+            for pixel in bytes.as_chunks_mut::<4>().0 {
+                let noise = xorshift64(&mut rng);
+                pixel[0] = noise as u8;
+                pixel[1] = (noise >> 8) as u8;
+                pixel[2] = (noise >> 16) as u8;
+                pixel[3] = 255;
+            }
+            (width, height, bytes)
+        }
+    };
     crate::synthetic_diagnostic::overlay_frame_markers(
         &mut bytes,
         width,

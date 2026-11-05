@@ -1548,7 +1548,11 @@ const streamTargetRuntimeSchema = objectSchema(
       'stopped'
     ]),
     message: optionalText,
-    redactedUrl: optionalText
+    redactedUrl: optionalText,
+    // Plan 218: fifo overflows on this leg (the connection could not carry
+    // the stream to it); additive to `state`, absent until the first one.
+    uplinkOverflows: optionalSchema(nonNegativeInteger),
+    uplinkOverflowAt: optionalSchema(timestamp)
   },
   { allowUnknown: false }
 )
@@ -2337,6 +2341,24 @@ const captureRecoveryStatusSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CaptureRecoveryStatus>
 
+// Plan 218 S2: `degraded` holds while more than 10 % of the stream's frames
+// were skipped before encode over the last 30 s (clears under 5 %).
+const streamDeliveryStateSchema = objectSchema(
+  {
+    targetFps: nonNegativeInteger,
+    deliveredFps: numberSchema({ min: 0 }),
+    dropPercent: numberSchema({ min: 0, max: 100 }),
+    windowSeconds: numberSchema({ min: 0 }),
+    degraded: booleanSchema,
+    degradedSince: optionalSchema(timestamp),
+    bitrateKbps: optionalSchema(nonNegativeInteger),
+    chosenBitrateKbps: optionalSchema(nonNegativeInteger),
+    atFloor: booleanSchema,
+    uplinkOverflows: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
 const diagnosticStatsSchema = boundedSemanticValue(
   'bounded diagnostic statistics',
   objectSchema(
@@ -2365,6 +2387,35 @@ const diagnosticStatsSchema = boundedSemanticValue(
       encoderBridgeVideoToolboxPendingEncodeFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeVideoToolboxPendingFifoFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeEncodedAccessUnitDroppedFrames: optionalSchema(nonNegativeInteger),
+      // Plan 218 S2: the live stream's delivery over a rolling 30 s window
+      // (absent without a stream) and per-leg fifo overflow counts.
+      streamDelivery: optionalSchema(streamDeliveryStateSchema),
+      streamLegOverflows: optionalSchema(
+        arraySchema(
+          objectSchema(
+            {
+              targetId: boundedString,
+              platform: streamPlatformSchema,
+              label: boundedString,
+              overflows: nonNegativeInteger
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: 16 }
+        )
+      ),
+      streamDestinationCount: optionalSchema(nonNegativeInteger),
+      streamDestinationPlatforms: optionalSchema(
+        arraySchema(streamPlatformSchema, { maxLength: 16 })
+      ),
+      microphoneSyncOffsetMs: optionalSchema(numberSchema({ integer: true })),
+      recordingMeasuredBitrateKbps: optionalSchema(numberSchema({ min: 0 })),
+      recordingOutputTotalBytes: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamVideoToolboxFifoWriteP95Ms: optionalSchema(numberSchema({ min: 0 })),
+      encoderBridgeStreamQueueAgeP95Ms: optionalSchema(numberSchema({ min: 0 })),
+      encoderBridgeStreamQueueDepthTrips: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamQueueAgeTrips: optionalSchema(nonNegativeInteger),
+      encoderBridgeStreamQueueLastTrip: optionalSchema(enumSchema(['depth', 'age'])),
       windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
       previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
       compositorSourceCaptureTextureReuses: nonNegativeInteger,
