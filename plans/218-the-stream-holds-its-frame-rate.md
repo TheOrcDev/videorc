@@ -15,10 +15,26 @@ crates/videorc-backend/src/support_bundle.rs crates/videorc-backend/src/metrics_
 
 ## Status
 
-- **Status:** EXECUTING 2026-11-05. S1, S2 and S3 (both branches) are
-  built on branch `plan/218-stream-holds-frame-rate`; the renderer's live
-  warning (S2's UI half) is the orchestrator's. Owner took D1 to D3 as
+- **Status:** BUILT 2026-11-05 on branch `plan/218-stream-holds-frame-rate`:
+  S1, S2 (backend and UI) and S3 (both branches). Owner took D1 to D3 as
   recommended. S0 is the owner's ask; not waited for.
+  - **Owed:** the real 15-minute stream to YouTube plus one platform with
+    the uplink capped (AGENTS.md: going live needs the owner's go);
+    `baseline:stream:split-output-4k-record` (needs a 4K screen); a measured
+    `baseline:stream:av-sync` (on this Mac its stimulus click never reaches
+    the microphone: 1 click in 15 to 60 flashes on every leg, record-only
+    included, twice).
+  - **S2 UI as built:** `stream-health-attribution.ts` names `choppy`
+    ("Stream skipping frames", from `streamDelivery.degraded`) and `uplink`
+    ("Connection too slow": bitrate lowered, at the floor, or a leg overflow
+    within 60 s) above the inferred capture stage. The streamer's three
+    sessions reported `bottleneck: "capture"` (a static screen idles), so the
+    page told them their capture was slow. Technical details show the
+    delivered "21 of 30 fps" and, while lowered, "Bitrate target 4.8 of
+    6 Mbps". A destination row that fell behind gets a "Falling behind" badge
+    and a count. The toasts use two keys, `stream-delivery` and
+    `stream-uplink`, so good news replaces bad, and both are dismissed when
+    the session ends. Checked in dark and light.
 - **S1 measurements (this Mac, 2026-11-05, `pnpm smoke:stream-thin-uplink`,
   per-frame noise content so the encoder spends its whole budget; the host
   carried other sessions' compiles, load 1 to 2.6 per core):**
@@ -39,7 +55,7 @@ crates/videorc-backend/src/support_bundle.rs crates/videorc-backend/src/metrics_
     target). With 16 px grains the same session followed 6 then 2 Mbps as
     5.7 then 2.8 Mbps, within the first second of the change. So
     `AverageBitRate` moves a running session fine (S3a's premise holds), the
-    smoke paints coarser grains (`VIDEORC_SYNTHETIC_HARD_CONTENT_DIVISOR`),
+    smoke paints coarser grains (`VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN`),
     and a streamer whose content sits above its floor at the chosen bitrate
     (a game, a video) cannot be helped by any bitrate; the floor is reported
     (`stream-bitrate-floor`) and the next step is fewer destinations.
