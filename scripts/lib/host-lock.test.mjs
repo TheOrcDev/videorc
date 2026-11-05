@@ -11,7 +11,9 @@ import {
   parseDarwinMemory,
   parseLinuxMemory,
   parseAvailableMemory,
-  waitForHostMemory
+  waitForHostMemory,
+  liveStreamPids,
+  waitWhileVideorcLive
 } from './host-lock.mjs'
 import { prepareSmokeLaunch } from './app-launcher.mjs'
 
@@ -247,6 +249,55 @@ test('memory waits, times out clearly, and CI only logs', async () => {
   })
   assert.equal(calls, 2)
 })
+const FFMPEG = '/Applications/Videorc.app/Contents/Resources/ffmpeg/bin/ffmpeg'
+test('a live stream is Videorc ffmpeg pushing FLV to a real ingest, never a loopback smoke sink', () => {
+  const ps = [
+    // The 2026-11-04 shape: recording MKV plus fifo-wrapped FLV legs to YouTube and Twitch.
+    ` 4242 ${FFMPEG} -f mpegts -i /tmp/rec.ts -map 0:v -c:v copy /Users/me/Movies/Videorc/Recordings/a.mkv -f fifo -fifo_format flv -queue_size 512 rtmp://a.rtmp.youtube.com/live2/key -f fifo -fifo_format flv rtmps://ingest.global-contribute.live-video.net/app/key`,
+    // Linux tee slave.
+    ` 4343 /usr/bin/ffmpeg -i - -f tee [f=matroska]/tmp/a.mkv|[f=flv:onfail=ignore]rtmp://live.twitch.tv/app/key`,
+    // A smoke streaming to its own local sink, and the sink itself.
+    ` 5000 ${FFMPEG} -f mpegts -i /tmp/x.ts -f fifo -fifo_format flv rtmp://127.0.0.1:19501/live/test`,
+    ` 5001 ffmpeg -listen 1 -i rtmp://127.0.0.1:19501/live/test -c copy /tmp/recv.flv`,
+    ` 5002 ${FFMPEG} -f flv rtmp://localhost/live/a -f flv rtmp://[::1]:1935/live/b`,
+    // A record-only session, an app named after a stream, and junk.
+    ` 6000 ${FFMPEG} -f mpegts -i /tmp/rec.ts -c copy /tmp/b.mkv`,
+    ` 6001 /Applications/Notes.app/Contents/MacOS/Notes rtmp://a.rtmp.youtube.com/live2 flv`,
+    // An agent shell whose script quotes a live command line is not a stream.
+    ` 6002 /bin/zsh -c eval 'node -e "${FFMPEG} -f fifo -fifo_format flv rtmp://a.rtmp.youtube.com/live2/k"'`,
+    'not a ps line'
+  ].join('\n')
+  assert.deepEqual(liveStreamPids(ps), [4242, 4343])
+  assert.deepEqual(liveStreamPids(''), [])
+})
+test('heavy work waits while live, says why once per notice window, and has an off switch', async () => {
+  const lines = []
+  let reads = 0
+  await waitWhileVideorcLive({
+    env: {},
+    platform: 'darwin',
+    pollMs: 1,
+    noticeMs: 60000,
+    log: (line) => lines.push(line),
+    read: () => (++reads < 4 ? [4242] : [])
+  })
+  assert.equal(reads, 4)
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /Videorc is live on this machine \(ffmpeg pid 4242\)/)
+  assert.match(lines[0], /VIDEORC_BUILD_WHILE_LIVE=1/)
+  const never = () => {
+    throw new Error('must not scan')
+  }
+  for (const [env, platform] of [
+    [{ VIDEORC_BUILD_WHILE_LIVE: '1' }, 'darwin'],
+    [{ CI: 'true' }, 'darwin'],
+    [{}, 'win32']
+  ]) {
+    await waitWhileVideorcLive({ env, platform, read: never })
+  }
+  // A scan that fails never holds work back.
+  await waitWhileVideorcLive({ env: {}, platform: 'darwin', read: never })
+})
 test('zero knobs disable each feature', async () => {
   await (
     await acquireHostSmokeLock({
@@ -279,11 +330,12 @@ test('launch preparation orders prebuild, release, host lock, memory for every l
       },
       prebuild: () => order.push('build'),
       hostLock: () => order.push('lock'),
-      memory: () => order.push('memory')
+      memory: () => order.push('memory'),
+      live: () => order.push('live')
     })
     assert.deepEqual(
       order,
-      dev ? ['slot', 'build', 'release', 'lock', 'memory'] : ['lock', 'memory']
+      dev ? ['live', 'slot', 'build', 'release', 'lock', 'memory'] : ['live', 'lock', 'memory']
     )
   }
 })

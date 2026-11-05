@@ -4,7 +4,7 @@
 // from injected codesign/plutil readings. Used by scripts/check-packaged-app.mjs;
 // the release validator runs the same assertions as shell checks on top
 // (scripts/lib/macos-release-artifact-validation.mjs).
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 
 import {
   cameraExtensionBundleRelativePath,
@@ -121,9 +121,16 @@ export function cameraExtensionLayoutProblems(layout, { identifiers, signature }
   return problems
 }
 
+// A path inside the bundle, always written with `/` like
+// cameraExtensionBundleRelativePath, whatever host runs the check.
 function relativeToApp(path, appProfilePath) {
   const appRoot = dirname(dirname(appProfilePath))
-  return path.startsWith(appRoot) ? path.slice(appRoot.length + 1) : path
+  return path.startsWith(appRoot)
+    ? path
+        .slice(appRoot.length + 1)
+        .split(sep)
+        .join('/')
+    : path
 }
 
 /** Pure. Whether every required camera file is present. */

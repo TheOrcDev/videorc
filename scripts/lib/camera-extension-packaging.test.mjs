@@ -91,14 +91,17 @@ describe('decodeProfileValue', () => {
   const der = Buffer.concat([Buffer.from([0x30, 0x82]), Buffer.alloc(100, 7)])
 
   it('reads an existing path, expanding ~', () => {
-    const files = { '/home/me/app.provisionprofile': der }
+    // Host paths, built the way the code builds them, so the fake holds on Windows too.
+    const homeDir = resolve('/home/me')
+    const profile = join(homeDir, 'app.provisionprofile')
+    const files = { [profile]: der }
     const io = {
       exists: (path) => path in files,
       readFile: (path) => files[path],
-      homeDir: '/home/me'
+      homeDir
     }
     assert.equal(decodeProfileValue('~/app.provisionprofile', io), der)
-    assert.equal(decodeProfileValue('/home/me/app.provisionprofile', io), der)
+    assert.equal(decodeProfileValue(profile, io), der)
   })
 
   it('decodes base64 CMS data', () => {
@@ -443,24 +446,26 @@ describe('nested code paths', () => {
   })
 
   it('orders inside out: deepest Mach-O first, then frameworks, then helper apps', () => {
+    // Depth counts host separators, so the paths are host paths.
+    const a = (path) => join(resolve('/A.app'), path)
     const ordered = orderNestedCodePaths([
-      { path: '/A.app/Contents/Frameworks/X.app', kind: 'app' },
-      { path: '/A.app/Contents/Frameworks/F.framework', kind: 'framework' },
-      { path: '/A.app/Contents/Resources/tool', kind: 'mach-o' },
+      { path: a('Contents/Frameworks/X.app'), kind: 'app' },
+      { path: a('Contents/Frameworks/F.framework'), kind: 'framework' },
+      { path: a('Contents/Resources/tool'), kind: 'mach-o' },
       {
-        path: '/A.app/Contents/Frameworks/F.framework/Versions/A/Resources/ShipIt',
+        path: a('Contents/Frameworks/F.framework/Versions/A/Resources/ShipIt'),
         kind: 'mach-o'
       },
-      { path: '/A.app/Contents/Frameworks/F.framework/Versions/A/F', kind: 'mach-o' }
+      { path: a('Contents/Frameworks/F.framework/Versions/A/F'), kind: 'mach-o' }
     ])
     assert.deepEqual(
       ordered.map((entry) => entry.path),
       [
-        '/A.app/Contents/Frameworks/F.framework/Versions/A/Resources/ShipIt',
-        '/A.app/Contents/Frameworks/F.framework/Versions/A/F',
-        '/A.app/Contents/Resources/tool',
-        '/A.app/Contents/Frameworks/F.framework',
-        '/A.app/Contents/Frameworks/X.app'
+        a('Contents/Frameworks/F.framework/Versions/A/Resources/ShipIt'),
+        a('Contents/Frameworks/F.framework/Versions/A/F'),
+        a('Contents/Resources/tool'),
+        a('Contents/Frameworks/F.framework'),
+        a('Contents/Frameworks/X.app')
       ]
     )
   })
@@ -509,8 +514,9 @@ describe('sign plans', () => {
       appEntitlementsPath: '/app.plist',
       inheritEntitlementsPath: '/inherit.plist'
     })
+    // Labels name the path relative to the app with the host separator.
     assert.deepEqual(
-      steps.map((step) => step.label),
+      steps.map((step) => step.label.split(sep).join('/')),
       [
         'nested Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt',
         'nested Contents/Resources/videorc-backend',
@@ -610,17 +616,24 @@ describe('embedCameraExtension', () => {
     }
   }
 
+  // The fake filesystem is keyed by the same join the code uses, so the
+  // lookups hit on Windows (\repo\apps\...) as they do on macOS.
   const identifiersJson = JSON.stringify(identifiers)
   const root = '/repo'
   const app = '/out/Videorc.app'
   const baseFiles = {
-    '/repo/apps/desktop/camera-extension/identifiers.json': identifiersJson,
-    '/repo/apps/desktop/build-resources/entitlements.mac.plist': basePlist
+    [join(root, 'apps/desktop/camera-extension/identifiers.json')]: identifiersJson,
+    [join(root, 'apps/desktop/build-resources/entitlements.mac.plist')]: basePlist
   }
-  const built =
-    '/repo/apps/desktop/build/camera-extension/dev.theorcdev.videorc.camera.systemextension'
-  const extension =
-    '/out/Videorc.app/Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension'
+  const built = join(
+    root,
+    'apps/desktop/build/camera-extension/dev.theorcdev.videorc.camera.systemextension'
+  )
+  const extension = join(
+    app,
+    'Contents/Library/SystemExtensions/dev.theorcdev.videorc.camera.systemextension'
+  )
+  const appProfile = join(app, 'Contents', 'embedded.provisionprofile')
   const twoKeysShown = plistXml({
     'com.apple.security.app-sandbox': true,
     'com.apple.security.application-groups': ['C2PA37RB58.dev.theorcdev.videorc']
@@ -709,7 +722,7 @@ describe('embedCameraExtension', () => {
     const stale = fakeFs({
       ...baseFiles,
       [built]: 'bundle',
-      [`${built}/Contents/embedded.provisionprofile`]: 'stale B0 shape'
+      [join(built, 'Contents', 'embedded.provisionprofile')]: 'stale B0 shape'
     })
     stale.dirs.add(built)
     await assert.rejects(
@@ -768,11 +781,11 @@ describe('embedCameraExtension', () => {
 
     assert.equal(result.embedded, true)
     assert.equal(result.extensionPath, extension)
-    assert.ok(fs.files.has('/out/Videorc.app/Contents/embedded.provisionprofile'))
-    assert.equal(fs.files.has(`${extension}/Contents/embedded.provisionprofile`), false)
+    assert.ok(fs.files.has(appProfile))
+    assert.equal(fs.files.has(join(extension, 'Contents', 'embedded.provisionprofile')), false)
     assert.deepEqual(
       [...fs.files.keys()].filter((path) => path.endsWith('embedded.provisionprofile')),
-      ['/out/Videorc.app/Contents/embedded.provisionprofile']
+      [appProfile]
     )
     const replaced = commands.filter(
       (command) => command[0] === 'plutil' && command[1] === '-replace'

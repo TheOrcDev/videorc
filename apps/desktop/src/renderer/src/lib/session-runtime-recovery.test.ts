@@ -399,6 +399,25 @@ describe('session audio news (plan 076)', () => {
     }
   })
 
+  it('says the microphone was silenced for a moment, once per episode and never sticky', () => {
+    const event = {
+      ...healthEvent('microphone-noise-reduction-silenced'),
+      message:
+        'Noise reduction got an invalid signal from the microphone, so Videorc silenced the microphone for a moment. The session continues.'
+    }
+    showSessionHealthEvent(event, false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Microphone silenced for a moment',
+      expect.objectContaining({ description: event.message, duration: 12_000 })
+    )
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    // A second episode inside the notice window updates the same toast.
+    showSessionHealthEvent({ ...event, id: 'second' }, false)
+    expect(toastSpies.warning).toHaveBeenCalledTimes(2)
+    const ids = toastSpies.warning.mock.calls.map(([, options]) => (options as { id: string }).id)
+    expect(ids[0]).toBe(ids[1])
+  })
+
   it('reports a stalled output and a recovered microphone once each', () => {
     showSessionHealthEvent(healthEvent('audio-output-stalled'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(

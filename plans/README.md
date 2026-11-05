@@ -1,5 +1,17 @@
 # Implementation Plans
 
+- 2026-11-04: [Plan 217](217-the-stream-never-waits-for-the-recording.md),
+  the owner's live stream lagged while recording 4K. PLANNED, not started:
+  - Cause: one FFmpeg carries the audio, the 4K recording and the 1080p
+    stream, and FFmpeg holds every input to the slowest output. When a local
+    release build pushed the load to 24 on 10 cores, the 4K leg fell behind
+    and the stream stalled for 2–3 s at a time, with up to 12 s of silent
+    audio.
+  - Fix: split-output sessions run the stream in its own FFmpeg process; the
+    recording reads a mixed audio tap that can never slow the bus.
+  - Already shipped beside it: agent builds and smokes wait while Videorc is
+    live on this Mac (`waitWhileVideorcLive`).
+  - Open: D1 (replay buffer side), D2 (stream process dies), D3 (Windows).
 - 2026-11-03: [Plan 216](216-freeform-screen-box-and-drag.md), a streamer's
   bug report with a video and a support bundle (0.18.0, all three bugs still
   on main). BUILT 2026-11-03 (#1100, #1102, #1098, #1097); the owner took

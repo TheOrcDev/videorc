@@ -51,6 +51,12 @@ afterPack: ../../scripts/electron-builder-after-pack-macos.cjs
 # (it does not override) — a global entry with a mac-only path breaks the
 # Windows build and vice versa.
 extraResources:
+  - from: ../../licenses/rnnoise-rs
+    to: licenses/rnnoise-rs
+    filter:
+      - LICENSE.txt
+      - UPSTREAM-NOTICES.txt
+      - SOURCE.txt
   - from: src/renderer/src/assets/videorc-logo.png
     to: videorc-logo.png
   - from: src/renderer/src/assets/backgrounds
