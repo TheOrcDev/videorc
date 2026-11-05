@@ -463,11 +463,13 @@ fn pipewire_socket_candidates(
     if name.starts_with('/') {
         return vec![std::path::PathBuf::from(name)];
     }
+    // Joined with '/' as libpipewire does, so the tests read the same on every
+    // host (`Path::join` would use '\' on Windows).
     set(pipewire_runtime_dir)
         .or(set(xdg_runtime_dir))
         .into_iter()
         .chain(["/run/pipewire"])
-        .map(|dir| std::path::Path::new(dir).join(name))
+        .map(|dir| std::path::PathBuf::from(format!("{dir}/{name}")))
         .collect()
 }
 
