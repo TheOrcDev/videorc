@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ffmpeg::ffmpeg_file_path;
 use crate::process_job::spawn_owned_std;
 
 pub const MAINTENANCE_CANCELLED: &str = "maintenance cancelled";
@@ -240,8 +241,8 @@ pub fn probe_media_cancellable(
         "-show_streams",
         "-of",
         "json",
-        file_path,
     ]);
+    command.arg(ffmpeg_file_path(Path::new(file_path)));
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run ffprobe: {error}"))?;
     if !output.status.success() {
@@ -609,7 +610,7 @@ fn analyze_audio_balance_in(
     command.args(ffmpeg_window_input_args(window));
     command.args([
         "-i",
-        file_path,
+        &ffmpeg_file_path(Path::new(file_path)),
         "-map",
         "0:a:0",
         "-af",
@@ -709,7 +710,15 @@ fn detect_freezes_in(
     command.args(["-hide_banner", "-threads", "1", "-filter_threads", "1"]);
     command.args(ffmpeg_window_input_args(window));
     command.args([
-        "-i", file_path, "-map", "0:v:0", "-vf", &filter, "-f", "null", "-",
+        "-i",
+        &ffmpeg_file_path(Path::new(file_path)),
+        "-map",
+        "0:v:0",
+        "-vf",
+        &filter,
+        "-f",
+        "null",
+        "-",
     ]);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run freezedetect: {error}"))?;
@@ -864,7 +873,14 @@ fn detect_repeated_frames_in(
     command.args(["-hide_banner", "-nostats", "-threads", "1"]);
     command.args(ffmpeg_window_input_args(window));
     command.args([
-        "-i", file_path, "-an", "-map", "0:v:0", "-f", "framemd5", "-",
+        "-i",
+        &ffmpeg_file_path(Path::new(file_path)),
+        "-an",
+        "-map",
+        "0:v:0",
+        "-f",
+        "framemd5",
+        "-",
     ]);
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run framemd5: {error}"))?;
@@ -965,7 +981,7 @@ fn detect_audio_gaps_in(
             format!("{:.3}%+{:.3}", window.start, window.duration),
         ]);
     }
-    command.arg(file_path);
+    command.arg(ffmpeg_file_path(Path::new(file_path)));
     let output = run_output_cancellable(&mut command, is_cancelled)
         .map_err(|error| format!("could not run ffprobe audio packet scan: {error}"))?;
     if !output.status.success() {
@@ -1281,7 +1297,7 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
         "-filter_complex_threads".to_string(),
         "1".to_string(),
         "-i".to_string(),
-        input.to_string(),
+        ffmpeg_file_path(Path::new(input)),
         "-map".to_string(),
         "0".to_string(),
         "-map".to_string(),
@@ -1363,7 +1379,7 @@ pub fn build_repair_args(input: &str, output: &str, plan: &RepairPlan) -> Vec<St
     if faststart {
         args.extend(["-movflags".to_string(), "+faststart".to_string()]);
     }
-    args.push(output.to_string());
+    args.push(ffmpeg_file_path(Path::new(output)));
     args
 }
 

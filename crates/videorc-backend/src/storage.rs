@@ -10146,7 +10146,7 @@ fn optimize_screen_image(
             "1",
         ])
         .arg("-i")
-        .arg(source_path)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(source_path))
         .arg("-filter_complex")
         .arg(filter)
         .arg("-map")
@@ -10154,7 +10154,7 @@ fn optimize_screen_image(
         .arg("-frames:v")
         .arg("1")
         .args(["-threads", "1"])
-        .arg(destination_path);
+        .arg(crate::ffmpeg::ffmpeg_path_arg(destination_path));
     let output = output_owned_std_with_timeout(&mut command, SCREEN_IMAGE_OPTIMIZER_TIMEOUT)
         .with_context(|| {
             format!(

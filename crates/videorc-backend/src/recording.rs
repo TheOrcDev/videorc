@@ -67,6 +67,7 @@ use crate::encoder_bridge::{
     start_synthetic_recording_bridge, wait_for_encoder_bridge_start_admission,
 };
 use crate::entitlements;
+use crate::ffmpeg::ffmpeg_file_path;
 use crate::ffmpeg::{ffprobe_path_for, resolve_ffmpeg_path};
 use crate::ffmpeg_work::ExportPermit;
 use crate::ffmpeg_work::{CapturePermit, MaintenanceCancelToken};
@@ -8668,7 +8669,7 @@ async fn probe_mp4_export_input(ffprobe_path: &str, input: &Path) -> Mp4ExportPr
             "-of",
             "json",
         ])
-        .arg(input)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(input))
         .output()
         .await
     else {
@@ -26241,23 +26242,6 @@ fn redact_stream_url(url: &str) -> String {
         Some((prefix, _)) => format!("{prefix}/••••"),
         None => "••••".to_string(),
     }
-}
-
-/// Converts an application-owned filesystem path into the spelling FFmpeg accepts.
-/// Windows file APIs use the `\\?\` namespace for long-path safety, but FFmpeg's
-/// tee muxer treats that prefix as an invalid slave filename. Keep verbatim paths
-/// internally and remove the namespace only at the subprocess boundary.
-pub(crate) fn ffmpeg_file_path(path: &Path) -> String {
-    let path = path.display().to_string();
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
-            return format!(r"\\{unc_path}");
-        }
-        path.strip_prefix(r"\\?\").unwrap_or(&path).to_string()
-    }
-    #[cfg(not(target_os = "windows"))]
-    path
 }
 
 fn escape_tee_target(target: &str) -> String {
@@ -48510,25 +48494,6 @@ mod tests {
         assert!(error.contains("must be 3840x2160@30"), "{error}");
     }
 
-    #[test]
-    fn ffmpeg_file_path_unwraps_windows_verbatim_paths() {
-        #[cfg(target_os = "windows")]
-        {
-            assert_eq!(
-                ffmpeg_file_path(std::path::Path::new(r"\\?\C:\recordings\capture.mkv")),
-                r"C:\recordings\capture.mkv"
-            );
-            assert_eq!(
-                ffmpeg_file_path(std::path::Path::new(r"\\?\UNC\server\share\capture.mkv")),
-                r"\\server\share\capture.mkv"
-            );
-        }
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            ffmpeg_file_path(std::path::Path::new("/tmp/capture.mkv")),
-            "/tmp/capture.mkv"
-        );
-    }
     #[tokio::test]
     async fn preview_command_times_out() {
         #[cfg(target_os = "windows")]

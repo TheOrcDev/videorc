@@ -316,11 +316,11 @@ fn decode_with_ffmpeg(ffmpeg_path: &str, source: &Path, destination: &Path) -> R
         .arg("-hide_banner")
         .args(["-v", "error"])
         .arg("-i")
-        .arg(source)
+        .arg(crate::ffmpeg::ffmpeg_path_arg(source))
         .args(["-map", "0:a:0", "-vn", "-ac", "2", "-ar", "48000"])
         .args(["-t", SOUND_DECODE_CAP_SECONDS])
         .args(["-c:a", "pcm_s16le", "-f", "wav"])
-        .arg(destination);
+        .arg(crate::ffmpeg::ffmpeg_path_arg(destination));
     let output = match output_owned_std_with_timeout(&mut command, SOUND_DECODE_TIMEOUT) {
         Ok(output) => output,
         Err(error) => {

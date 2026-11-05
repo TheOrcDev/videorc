@@ -3410,7 +3410,7 @@ fn encoder_bridge_ffmpeg_args(settings: &EncoderBridgeSettings) -> Vec<String> {
         format!("{}k", settings.bitrate_kbps),
         "-movflags".to_string(),
         "+faststart".to_string(),
-        settings.output_path.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(&settings.output_path),
     ]
 }
 
