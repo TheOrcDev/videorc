@@ -4939,6 +4939,21 @@ async fn start_session_with_timeline(
             // synthetic compositor composes today.
             unsupported_scene_features.push("dual-orientation-simulcast".to_string());
         }
+        // #1067: an explicit scene (a background, or a start from the scene
+        // editor) is drawn by the D3D11 scene plan; only the layers it cannot
+        // draw keep the session on the synthetic compositor.
+        if let Some(scene) = params.scene.as_ref() {
+            for feature in
+                crate::windows_d3d11_session::windows_d3d11_unmapped_scene_features(scene)
+            {
+                if !unsupported_scene_features
+                    .iter()
+                    .any(|known| known == feature)
+                {
+                    unsupported_scene_features.push(feature.to_string());
+                }
+            }
+        }
         let request = WindowsD3d11SessionRequest {
             platform_supported: true,
             screen_id: params.sources.screen_id.clone(),
@@ -4951,7 +4966,6 @@ async fn start_session_with_timeline(
             supported_layout: layout_capability.is_some(),
             camera_required,
             camera_source_available: !camera_required || camera_input.is_some(),
-            explicit_scene: params.scene.is_some(),
             unsupported_scene_features,
             // A leg whose MFT passed only with system-memory input cannot be
             // handed D3D11 textures (plan 065, B2).
@@ -5094,12 +5108,38 @@ async fn start_session_with_timeline(
                     (plan.primary.width, plan.primary.height),
                     plan.auxiliary.map(|video| (video.width, video.height)),
                 ));
+                // #1067: the pump draws the compositor's committed scene. An
+                // explicit scene is installed first (its background picture
+                // prepared), as the synthetic compositor's arm does, and the
+                // commit edge is held until the pump's startup evidence is in,
+                // so an idle reload cannot replace it meanwhile.
+                let live_sources =
+                    crate::windows_d3d11_session::WindowsLiveSources::new(&state, &session_id);
+                let (_d3d11_startup_scene, live_sources) = match params.scene.as_ref() {
+                    Some(scene) => (
+                        Some(
+                            commit_recording_startup_scene_at_time(
+                                &state,
+                                scene,
+                                params.layout.clone(),
+                                active_screen.clone(),
+                                u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+                                Some(&params.sources),
+                            )
+                            .await,
+                        ),
+                        live_sources
+                            .with_startup_scene(params.sources.clone())
+                            .await,
+                    ),
+                    None => (None, live_sources),
+                };
                 match WindowsD3d11SessionPump::start(
                     &state.windows_d3d11_media,
                     plan.clone(),
                     camera_input.clone(),
                     overlays.clone(),
-                    crate::windows_d3d11_session::WindowsLiveSources::new(&state, &session_id),
+                    live_sources,
                 ) {
                     Ok(pump) => {
                         match validate_windows_d3d11_startup_evidence(

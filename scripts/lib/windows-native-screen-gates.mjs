@@ -14,6 +14,10 @@ export function parseWindowsNativeScreenArgs(argv = []) {
   const d3d11 = takeFlag(values, '--d3d11')
   const requireD3d11 = takeFlag(values, '--require-d3d11')
   const expectFallback = takeOption(values, '--expect-fallback')
+  // #1067: record a screen scene over the bundled background, so a session
+  // with a background proves the D3D11 path (with --require-d3d11) and the
+  // background on its first frame.
+  const background = takeFlag(values, '--background')
   if (values.length > 0) {
     throw new Error(`Unknown Windows native-screen argument: ${values[0]}`)
   }
@@ -29,7 +33,8 @@ export function parseWindowsNativeScreenArgs(argv = []) {
   return {
     d3d11,
     requireD3d11,
-    expectFallback: expectFallback ?? null
+    expectFallback: expectFallback ?? null,
+    background
   }
 }
 

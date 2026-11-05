@@ -1559,6 +1559,21 @@ export function buildWindowsLocalGateSteps({
       }
     },
     {
+      // #1067: a scene with a background stays on the D3D11 path and
+      // carries the background from its first frame.
+      label: 'native Windows ScreenOnly D3D11 background-scene smoke',
+      command: 'pnpm',
+      args: ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11', '--background'],
+      env: {
+        VIDEORC_PERF_APP_EXECUTABLE: executable,
+        VIDEORC_SMOKE_OUTPUT_DIR: join(outputDir, 'native-screen-background'),
+        VIDEORC_SMOKE_FFMPEG_PATH: packagedFfmpeg,
+        VIDEORC_SMOKE_FFPROBE_PATH: packagedFfprobe,
+        VIDEORC_SMOKE_TIMEOUT_MS: '180000',
+        VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS: '6000'
+      }
+    },
+    {
       label: 'native Windows ScreenCamera D3D11 direct-record smoke 1080p30',
       command: 'pnpm',
       args: ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11'],
