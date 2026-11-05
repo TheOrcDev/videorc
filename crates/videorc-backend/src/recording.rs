@@ -47410,8 +47410,19 @@ mod tests {
             bitrate_kbps: 50_000,
         };
 
-        validate_outputs(&params).unwrap();
+        validate_video_profile_policy(&params).unwrap();
+        // Issue #1062: Windows refuses 4K60 at validation, since it would
+        // fall outside the bridge envelope, unless the developer override
+        // keeps the legacy path.
+        if cfg!(target_os = "windows") && !compositor_encoder_bridge_disabled(true, false) {
+            let error = validate_outputs(&params).unwrap_err().to_string();
+            assert!(error.contains("isn't supported on Windows yet"), "{error}");
+        } else {
+            validate_outputs(&params).unwrap();
+        }
 
+        // The experimental preset is still required: the profile policy runs
+        // before the Windows refusal, so every host names it.
         params.output.video.preset = VideoPreset::Custom;
         let error = validate_outputs(&params).unwrap_err().to_string();
         assert!(error.contains("4K60 is experimental"), "{error}");
