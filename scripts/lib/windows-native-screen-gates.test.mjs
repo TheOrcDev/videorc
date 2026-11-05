@@ -10,6 +10,8 @@ import {
   nativeWindowsScreenCandidates,
   nativeWindowsScreenRecordingActive,
   parseWindowsNativeScreenArgs,
+  SCENE_EDIT_SCREEN_TRANSFORM,
+  sceneEditFrameRegions,
   requiredBmpPreviewAdvances,
   selectNativeWindowsScreen,
   windowsNativeScreenPerformanceBudgetContext,
@@ -46,25 +48,64 @@ test('native Windows screen arguments select D3D11 or natural fallback strictly'
     d3d11: true,
     requireD3d11: true,
     expectFallback: null,
-    background: false
+    background: false,
+    sceneEdit: false
   })
   assert.deepEqual(parseWindowsNativeScreenArgs(['--expect-fallback', 'natural']), {
     d3d11: false,
     requireD3d11: false,
     expectFallback: 'natural',
-    background: false
+    background: false,
+    sceneEdit: false
   })
   assert.deepEqual(parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11', '--background']), {
     d3d11: true,
     requireD3d11: true,
     expectFallback: null,
-    background: true
+    background: true,
+    sceneEdit: false
   })
+  assert.deepEqual(
+    parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11', '--scene-edit', '--background']),
+    {
+      d3d11: true,
+      requireD3d11: true,
+      expectFallback: null,
+      background: true,
+      sceneEdit: true
+    }
+  )
   assert.throws(() => parseWindowsNativeScreenArgs(['--require-d3d11']), /requires --d3d11/)
   assert.throws(
     () =>
       parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11', '--expect-fallback', 'natural']),
     /cannot be combined/
+  )
+})
+
+test('a scene-edit recording is judged outside and inside the moved screen, never across it', () => {
+  const width = 640
+  const height = 360
+  const { uncovered, covered } = sceneEditFrameRegions(width, height)
+  const box = {
+    x0: SCENE_EDIT_SCREEN_TRANSFORM.x * width,
+    y0: SCENE_EDIT_SCREEN_TRANSFORM.y * height,
+    x1: (SCENE_EDIT_SCREEN_TRANSFORM.x + SCENE_EDIT_SCREEN_TRANSFORM.width) * width,
+    y1: (SCENE_EDIT_SCREEN_TRANSFORM.y + SCENE_EDIT_SCREEN_TRANSFORM.height) * height
+  }
+  // The uncovered rectangle sits left of the screen's box, inside the frame.
+  assert.ok(uncovered.x0 >= 0 && uncovered.y0 >= 0)
+  assert.ok(uncovered.x1 < box.x0 && uncovered.y1 < height)
+  assert.ok(uncovered.x1 - uncovered.x0 > width / 3)
+  // The covered rectangle is the middle half of the box, so a screen that is
+  // letterboxed or pillarboxed in its box still fills it.
+  assert.ok(covered.x0 > box.x0 && covered.x1 < box.x1)
+  assert.ok(covered.y0 > box.y0 && covered.y1 < box.y1)
+  assert.ok(covered.x1 > covered.x0 && covered.y1 > covered.y0)
+  // The transform is a real move: not the preset's full canvas.
+  assert.notDeepEqual(
+    { x: SCENE_EDIT_SCREEN_TRANSFORM.x, width: SCENE_EDIT_SCREEN_TRANSFORM.width },
+    { x: 0, width: 1 }
   )
 })
 

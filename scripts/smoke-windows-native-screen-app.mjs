@@ -34,13 +34,19 @@ import {
   parseWindowsNativeScreenArgs,
   requiredBmpPreviewAdvances,
   windowsNativeScreenPerformanceBudgetContext,
+  SCENE_EDIT_SCREEN_TRANSFORM,
+  sceneEditFrameRegions,
   windowsNativeScreenRecordingArtifactGates,
   windowsNativeScreenRequiresFinalDiagnostics
 } from './lib/windows-native-screen-gates.mjs'
 import {
   assertBundledBackgroundFrame,
   connectBackend,
-  request
+  extractRgbFrame,
+  meanRgbDifference,
+  request,
+  rgbRange,
+  sampleGrid
 } from './smoke-recording-session.mjs'
 
 const options = parseWindowsNativeScreenArgs(process.argv.slice(2))
@@ -93,8 +99,10 @@ const video = {
   bitrateKbps: Number(process.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS ?? 4_000)
 }
 
-if (options.background && includeCamera) {
-  throw new Error('--background records a screen-only scene; unset VIDEORC_WINDOWS_INCLUDE_CAMERA.')
+if ((options.background || options.sceneEdit) && includeCamera) {
+  throw new Error(
+    '--background and --scene-edit record a screen-only scene; unset VIDEORC_WINDOWS_INCLUDE_CAMERA.'
+  )
 }
 
 mkdirSync(outputDirectory, { recursive: true })
@@ -150,6 +158,7 @@ let selectedScreen = null
 let selectedCamera = null
 let bundledBackground = null
 let backgroundEvidence = null
+let sceneEditEvidence = null
 let cameraEvidence = null
 let cameraFramesAtRecordingStart = null
 let teardownEvidence = null
@@ -362,7 +371,28 @@ try {
     expectAudio: false,
     gates: windowsNativeScreenRecordingArtifactGates(screen)
   })
-  if (bundledBackground) {
+  if (options.sceneEdit) {
+    // #1175: the moved screen is where the scene put it from the first frame,
+    // and the half it left shows the canvas fill (the background, or black).
+    const backgroundSourcePath = bundledBackground
+      ? join(
+          repoRoot,
+          'apps/desktop/src/renderer/src/assets/backgrounds',
+          bundledBackground.fileName
+        )
+      : null
+    sceneEditEvidence = [0, Math.max(0.5, recordingMs / 2000)].map((seekSeconds) =>
+      assertSceneEditPlacementFrame({ outputPath, backgroundSourcePath, seekSeconds })
+    )
+    console.log(
+      `Windows native screen scene-edit PASS: the screen stays in its moved box over ${bundledBackground ? bundledBackground.id : 'black'} at ${sceneEditEvidence
+        .map(
+          ({ seekSeconds, uncoveredScore, coveredScore }) =>
+            `${seekSeconds}s (outside ${uncoveredScore.toFixed(1)}, inside ${coveredScore.toFixed(1)})`
+        )
+        .join(', ')}`
+    )
+  } else if (bundledBackground) {
     // The first frame is the startup case (#1067): the session draws its own
     // committed scene before its sources are confirmed, never the bare
     // full-canvas screen.
@@ -794,7 +824,9 @@ function sessionParams(sources, background = null) {
   return {
     sources,
     layout: sessionLayout(),
-    ...(background ? { scene: backgroundScene(sources.screenId, background) } : {}),
+    ...(background || options.sceneEdit
+      ? { scene: explicitScene(sources.screenId, background, options.sceneEdit) }
+      : {}),
     output: {
       recordEnabled: true,
       streamEnabled: false,
@@ -809,8 +841,10 @@ function sessionParams(sources, background = null) {
   }
 }
 
-function backgroundScene(screenId, background) {
-  const transform = {
+// The scene the renderer sends for a background (#1067) or in scene edit mode
+// (#1175): one screen source, moved into the right half for --scene-edit.
+function explicitScene(screenId, background, sceneEdit) {
+  const presetTransform = {
     x: 0,
     y: 0,
     width: 1,
@@ -821,34 +855,106 @@ function backgroundScene(screenId, background) {
     cropBottom: 0
   }
   return {
-    id: 'scene:windows-native-screen-background',
-    name: 'Windows native screen over a background',
+    id: sceneEdit ? 'scene:windows-native-screen-edit' : 'scene:windows-native-screen-background',
+    name: sceneEdit
+      ? 'Windows native screen moved in scene edit mode'
+      : 'Windows native screen over a background',
     sources: [
       {
         id: 'source:screen',
         name: 'Screen',
         kind: 'screen',
         deviceId: screenId,
-        transform,
-        defaultTransform: transform,
+        transform: sceneEdit ? { ...SCENE_EDIT_SCREEN_TRANSFORM } : presetTransform,
+        defaultTransform: presetTransform,
         visible: true,
         locked: false
       }
     ],
     outputs: [],
-    background: {
-      assetId: background.id,
-      managedAssetPath: background.managedAssetPath,
-      fit: 'stretch',
-      scale: 100,
-      offsetX: 0,
-      offsetY: 0,
-      blurPx: 0,
-      dimPercent: 0,
-      saturationPercent: 100,
-      vignettePercent: 0
-    }
+    ...(background
+      ? {
+          background: {
+            assetId: background.id,
+            managedAssetPath: background.managedAssetPath,
+            fit: 'stretch',
+            scale: 100,
+            offsetX: 0,
+            offsetY: 0,
+            blurPx: 0,
+            dimPercent: 0,
+            saturationPercent: 100,
+            vignettePercent: 0
+          }
+        }
+      : {})
   }
+}
+
+// #1175: one frame of a --scene-edit recording. Outside the moved screen's box
+// the frame shows the canvas fill: the decoded background, or the D3D11
+// compositor's black clear. Inside it, something that is not the fill.
+function assertSceneEditPlacementFrame({ outputPath, backgroundSourcePath, seekSeconds }) {
+  const width = 640
+  const height = 360
+  const stamp = `${Date.now()}-${Math.round(seekSeconds * 1000)}`
+  const recordedRawPath = join(outputDirectory, `scene-edit-recording-${stamp}.rgb`)
+  extractRgbFrame({
+    inputPath: outputPath,
+    outputPath: recordedRawPath,
+    ffmpegPath,
+    width,
+    height,
+    seekSeconds,
+    label: 'extract scene-edit recording frame'
+  })
+  const recorded = readFileSync(recordedRawPath)
+  let reference = Buffer.alloc(width * height * 3)
+  if (backgroundSourcePath) {
+    const referenceRawPath = join(outputDirectory, `scene-edit-reference-${stamp}.rgb`)
+    extractRgbFrame({
+      inputPath: backgroundSourcePath,
+      outputPath: referenceRawPath,
+      ffmpegPath,
+      width,
+      height,
+      label: 'decode scene-edit background reference asset'
+    })
+    reference = readFileSync(referenceRawPath)
+  }
+  const expectedBytes = width * height * 3
+  if (recorded.length < expectedBytes || reference.length < expectedBytes) {
+    throw new Error(
+      `Scene-edit frame at ${seekSeconds}s is truncated: recording=${recorded.length}, reference=${reference.length}, expected=${expectedBytes}.`
+    )
+  }
+  const regions = sceneEditFrameRegions(width, height)
+  const uncoveredPoints = sampleGrid({ ...regions.uncovered, columns: 12, rows: 12 })
+  const coveredPoints = sampleGrid({ ...regions.covered, columns: 8, rows: 6 })
+  const fill = backgroundSourcePath ? 'the background' : 'black'
+  // Outside: the fill. A background gets the border gate's tolerance (a
+  // scaled, encoded image); black gets a tight one, so a dark desktop drawn
+  // at its preset place still fails.
+  const uncoveredLimit = backgroundSourcePath ? 48 : 16
+  const uncoveredScore = meanRgbDifference(recorded, reference, width, uncoveredPoints)
+  if (uncoveredScore > uncoveredLimit) {
+    throw new Error(
+      `Scene-edit recording at ${seekSeconds}s does not show ${fill} where the moved screen used to be: mean RGB difference ${uncoveredScore.toFixed(1)} exceeded ${uncoveredLimit}. The session drew the screen at its preset place, not where the scene moved it.`
+    )
+  }
+  // Inside: the screen, so not the fill. Against a background only the
+  // difference counts (the background has its own range); against black, a
+  // dark desktop still has a range of pixel values.
+  const coveredDifference = meanRgbDifference(recorded, reference, width, coveredPoints)
+  const coveredScore = backgroundSourcePath
+    ? coveredDifference
+    : Math.max(coveredDifference, rgbRange(recorded, width, coveredPoints))
+  if (coveredScore < 24) {
+    throw new Error(
+      `Scene-edit recording at ${seekSeconds}s shows only ${fill} inside the moved screen's box (score ${coveredScore.toFixed(1)}, need 24): the screen was not drawn where the scene put it.`
+    )
+  }
+  return { seekSeconds, uncoveredScore, coveredScore }
 }
 
 async function monitorD3d11DuringRecording(ws, durationMs) {

@@ -18,6 +18,10 @@ export function parseWindowsNativeScreenArgs(argv = []) {
   // with a background proves the D3D11 path (with --require-d3d11) and the
   // background on its first frame.
   const background = takeFlag(values, '--background')
+  // #1175: record the scene the renderer sends in scene edit mode, with the
+  // screen moved off its preset place, so a moved source proves the D3D11
+  // path and its placement from the first frame. Combines with --background.
+  const sceneEdit = takeFlag(values, '--scene-edit')
   if (values.length > 0) {
     throw new Error(`Unknown Windows native-screen argument: ${values[0]}`)
   }
@@ -34,7 +38,51 @@ export function parseWindowsNativeScreenArgs(argv = []) {
     d3d11,
     requireD3d11,
     expectFallback: expectFallback ?? null,
-    background
+    background,
+    sceneEdit
+  }
+}
+
+/** #1175: where `--scene-edit` puts the screen: the right half, centred. */
+export const SCENE_EDIT_SCREEN_TRANSFORM = Object.freeze({
+  x: 0.5,
+  y: 0.25,
+  width: 0.5,
+  height: 0.5,
+  cropLeft: 0,
+  cropTop: 0,
+  cropRight: 0,
+  cropBottom: 0
+})
+
+/**
+ * The sample rectangles (in pixels of a `width`×`height` frame) a
+ * `--scene-edit` recording is judged on: `uncovered` lies wholly outside the
+ * moved screen, so it shows the canvas fill (the background, or black);
+ * `covered` lies inside the screen even when the screen is letterboxed or
+ * pillarboxed within its box.
+ */
+export function sceneEditFrameRegions(width, height, transform = SCENE_EDIT_SCREEN_TRANSFORM) {
+  const margin = Math.round(Math.min(width, height) * 0.04)
+  const box = {
+    x0: transform.x * width,
+    y0: transform.y * height,
+    x1: (transform.x + transform.width) * width,
+    y1: (transform.y + transform.height) * height
+  }
+  return {
+    uncovered: {
+      x0: margin,
+      y0: margin,
+      x1: Math.floor(box.x0) - margin,
+      y1: height - 1 - margin
+    },
+    covered: {
+      x0: Math.ceil(box.x0 + (box.x1 - box.x0) * 0.25),
+      y0: Math.ceil(box.y0 + (box.y1 - box.y0) * 0.25),
+      x1: Math.floor(box.x0 + (box.x1 - box.x0) * 0.75),
+      y1: Math.floor(box.y0 + (box.y1 - box.y0) * 0.75)
+    }
   }
 }
 
