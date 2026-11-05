@@ -43,14 +43,14 @@ pub fn poster_extract_args(input: &str, output: &str, duration_ms: Option<i64>) 
         "-ss".to_string(),
         format!("{:.2}", poster_seek_seconds(duration_ms)),
         "-i".to_string(),
-        input.to_string(),
+        crate::ffmpeg::ffmpeg_file_path(std::path::Path::new(input)),
         "-frames:v".to_string(),
         "1".to_string(),
         "-vf".to_string(),
         format!("scale={POSTER_WIDTH}:-2"),
         "-q:v".to_string(),
         "4".to_string(),
-        output.to_string(),
+        crate::ffmpeg::ffmpeg_file_path(std::path::Path::new(output)),
     ]
 }
 

@@ -10297,7 +10297,10 @@ function resolveCargoBinary(): string {
 }
 
 function devCargoEnvOverrides(): Record<string, string> {
-  if (app.isPackaged) {
+  // Incremental is off for the macOS arm64 stale-serde link bug. Elsewhere the
+  // dev app follows the developer's Cargo setting, so it does not fight a
+  // terminal build over the fingerprint and force a full backend rebuild.
+  if (app.isPackaged || process.platform !== 'darwin') {
     return {}
   }
 
