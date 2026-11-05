@@ -3492,3 +3492,120 @@ passed 3 of 3 runs alone (23 tests). `comments-snapshot-delta` hit the same
 5 s timeout on a second full run (6,912 passed, 1 failed, 1 skipped) and
 passed 3 of 3 runs alone (6 tests). None of the three files is changed by
 this branch.
+
+### Source ISO stop-flush margin by opt-level, 2026-11-03
+
+Correction to the merge note above: the 327 and 334 ms in the two failures
+were read at the length assertion, after decoding, not when Stop returned.
+
+A temporary probe, since reverted and never committed, recorded the frames
+written and the time `finish()` took in 20 runs of the test at test
+opt-level 0 and 20 at the app's dev opt-level 2, on an idle Ogre with cores
+near 800 MHz. All 40 passed, and every run reached the drain's target
+(127,680 frames written, against 127,209 to 127,301 needed). At opt-level 0
+Stop finished in 95 to 101 ms in 15 runs and 231 to 244 ms in 5, the slow
+ones 6 to 19 ms inside the 250 ms deadline; the two earlier failures went
+past it. At opt-level 2 it finished in 70.5 to 70.9 ms in 15 runs and 97 to
+108 ms in 5, at least 142 ms inside the deadline. The test's 1 s system
+delay is the production maximum. So on this box the failure comes from the
+unoptimized test binary, not from an optimized Stop truncating the delayed
+tail. The deadline still does not grow with the target, so a slower or
+heavily loaded machine could still truncate the tail; how much slower has
+not been measured. Whether to extend the deadline remains the owner's
+stop-latency decision.
+
+### CI at `232c8aea`, 2026-11-03
+
+macOS Rust CI (job 125868439916) passed: the backend's main binary ran 4,407
+passed, 0 failed, 23 ignored, including
+`audio::tests::native_audio_producer_eof_is_source_loss_and_claims_one_event`,
+and the benchmark-arm test finished. One green run shows `51e335b3` holds on
+macOS; it is not stability evidence for a race seen once in sixteen runs.
+Linux CI (job 125868473146) ran 4,242 passed, 0 failed, 20 ignored, the
+Source ISO stop-flush test among them. Its GLES golden "ok" may be a skip,
+because the log captures the test's output.
+
+Windows startup incident diagnostics (job 125868535800) fails as before: 48
+of 48 controlled cases pass; the FFmpeg-tone control passes 12 and fails 36
+on the packet-tail limit (114 to 267 ms), six also on frame count. Same as
+main.
+
+### Linux gates on main, 2026-11-03
+
+Every full Linux gates run since #1052 has died with "The runner has received
+a shutdown signal" (exit 143) while compiling the backend test binary, with no
+test failure: #1052 (`f3741067`), #1053 (`663c56fe`), main at `cbf45354` and
+`fa38c731`, #1055 twice plus one rerun, and plan 215 B. The image
+(ubuntu-26.04 20261021.618), rustc 1.99.1 and the rust-cache key match this
+branch's passing run at `232c8aea`, whose test compile finished in 2m 26s; the
+failing compiles were still running after 4m 36s. This branch's
+`[profile.test]` (`debug = 0`, backend `opt-level = 0`) is not the
+explanation: main, without it, ran the full suite on 2026-11-04 at `008cdfb3`
+and `ecfd30c5` (4,351 passed, 0 failed, 20 ignored each). The shutdowns'
+cause is unknown, and none of these runs is test evidence.
+
+### Main merged through `2b8b9d31`, 2026-11-04
+
+Merge `f13a3046` takes main through `2b8b9d31` (#1037 to #1170, 491 files).
+Main's proof-surface-call helpers (#1115) replace this branch's
+proof-surface-script helper, which is removed. The preview-supervisor
+timestamp test now follows main's recovery rule (#1037): a failed surface in
+an open window accepts a later `surfaceLive`.
+
+Gates on Ogre at the merge: typecheck, lint, format, test:scripts, cargo fmt,
+backend tests (4,387 passed, 0 failed, 20 ignored), Linux CI clippy and
+desktop tests (7,208 passed, 1 skipped) all pass.
+
+Main's plan numbering collides with this ledger: main also has
+`plans/212-the-preview-never-shows-test-noise.md`. This file keeps its number
+until the branch is split into PRs.
+
+### Ogre's 800 MHz throttle, 2026-11-05
+
+Under all-core load Ogre held 800 MHz at 8.5 W and 61 °C. In MSR 0x64F
+(core perf limit reasons) only PROCHOT was active, so the limit came from
+outside the package: the SMC/EC, most likely the worn battery (836 cycles,
+71% of design capacity). With the owner's go, BD_PROCHOT (bit 0 of MSR
+0x1FC) was cleared on all 12 CPUs, 0x6c005d to 0x6c005c. Afterwards the same
+load ran at 3.1 to 3.8 GHz, peaked at 73 W and held at the 100 °C TjMax
+through the CPU's own thermal control, with the fans at full speed. The
+battery discharged only in the first ~4 s turbo burst.
+
+The change does not survive a reboot or deep suspend, and the kernel marks
+itself CPU_OUT_OF_SPEC when the MSR is written. It is not boot-persistent;
+making it so is the owner's call. Writing 0x6c005d back reverts it. Every
+performance, endurance or matrix run on Ogre should first check that PROCHOT
+is clear in 0x64F and that the clocks are above 800 MHz. A replacement
+battery is the real fix.
+
+### Stop drain deadline follows the ISO system delay, 2026-11-05
+
+The owner approved extending the stop drain's deadline (the stop-latency
+decision recorded above). With ISO legs armed, `StopDrain::for_bus` now
+moves the deadline by the system delay as well as the target, so a paced
+cursor still reaches the delayed system tail. The flush still starts at most
+60 ms after Stop. The mid-write wait uses the same drain, so a stop during a
+blocked write no longer ends at the old deadline. A bus without ISO legs
+drains exactly as before. In production the deadline grows by at most 1 s:
+the system delay's maximum, which only a -1000 ms microphone offset with
+separate source recordings reaches.
+
+Validation on Ogre at `f13a3046` plus the change:
+
+- The `session_audio` module passed 102 of 102.
+- The three drain tests (the ISO stop flush, the drain bounds and the
+  microphone stop) passed 40 of 40 runs unloaded. Each run was checked for
+  "3 passed".
+- With 12 busy-loop processes on the 12 CPUs, they passed 39 of 40. The ISO
+  test passed all 40. Run 26 failed in
+  `stopping_writes_real_microphone_audio_up_to_the_stop_instant` at its
+  50 ms playout case, with 1,024 frames generated and 1,024 discarded before
+  the stop: the starved feeder thread missed a chunk. That test has no ISO
+  legs, so its drain is unchanged, but the same loaded loop has not been run
+  without this change. It is load sensitivity, unproven against the base,
+  not a pass.
+- cargo fmt, clippy with the Linux CI flags and
+  `pnpm smoke:separate-source-fixture` pass.
+
+A first unloaded loop named the tests `session_audio::tests::`, matched no
+test and proved nothing; the 40 of 40 above is its rerun under `mix_tests`.

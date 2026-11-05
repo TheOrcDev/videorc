@@ -5171,6 +5171,34 @@ impl StopDrain {
             playout_delay,
         )
     }
+    /// The drain of a bus with ISO legs armed. ISO muxers trim the common
+    /// negative track shift, so it also flushes the system samples already
+    /// captured behind that shift. The deadline moves with the target: a
+    /// paced cursor reaches it that much later, and cutting earlier leaves
+    /// the Screen file's tail to FFmpeg's silence (plan 212).
+    fn for_bus(
+        stop_requested_at: &OnceLock<Instant>,
+        epoch: Instant,
+        timing: BusTiming,
+        shared: &std::sync::Mutex<AudioShared>,
+    ) -> Self {
+        let mut drain = Self::at(stop_requested_at, epoch, timing.playout_delay);
+        if shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .source_taps
+            .is_some()
+        {
+            drain.extend(timing.system_delay_frames);
+        }
+        drain
+    }
+    fn extend(&mut self, frames: u64) {
+        self.target = self.target.saturating_add(frames);
+        self.deadline += Duration::from_nanos(
+            frames.saturating_mul(1_000_000_000) / u64::from(NATIVE_AUDIO_SAMPLE_RATE),
+        );
+    }
     fn done(&self, cursor: u64, now: Instant) -> bool {
         cursor >= self.target || now >= self.deadline
     }
@@ -5466,20 +5494,10 @@ fn run_bus_owned(
     let mut drain: Option<StopDrain> = None;
     loop {
         if stop.load(Ordering::Acquire) {
+            // The unpaced bounded drain flushes what was captured; it does
+            // not await new audio.
             let drain = drain.get_or_insert_with(|| {
-                let mut drain = StopDrain::at(stop_requested_at, epoch, playout_delay);
-                // ISO muxers trim the common negative track shift. Flush the
-                // already captured system samples delayed by that same shift;
-                // the existing unpaced bounded drain does not await new audio.
-                if shared
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .source_taps
-                    .is_some()
-                {
-                    drain.target = drain.target.saturating_add(timing.system_delay_frames);
-                }
-                drain
+                StopDrain::for_bus(stop_requested_at, epoch, timing, shared)
             });
             if drain.done(timeline.cursor(), Instant::now()) {
                 break;
@@ -6011,7 +6029,8 @@ fn run_bus_owned(
         let mut wait = || {
             // A stop that arrives mid-write drains too, until its deadline.
             if stop.load(Ordering::Acquire)
-                && StopDrain::at(stop_requested_at, epoch, playout_delay).done(0, Instant::now())
+                && StopDrain::for_bus(stop_requested_at, epoch, timing, shared)
+                    .done(0, Instant::now())
             {
                 write_stop.store(true, Ordering::Release);
             }
@@ -12242,6 +12261,16 @@ mod mix_tests {
         assert!(!drain.done(47_520, stop_at));
         assert!(drain.done(48_000, stop_at));
         assert!(drain.done(0, drain.deadline), "never past the deadline");
+        let mut iso = drain;
+        iso.extend(48_000);
+        assert_eq!(iso.target, 96_000);
+        assert_eq!(iso.flush_at, drain.flush_at, "the flush still starts early");
+        assert_eq!(
+            iso.deadline,
+            drain.deadline + Duration::from_secs(1),
+            "a paced cursor still reaches the delayed target"
+        );
+        assert!(!iso.done(48_000, drain.deadline));
         let short = StopDrain::new(stop_at, epoch, PLAYOUT_DELAY);
         assert_eq!(
             short.flush_at,
