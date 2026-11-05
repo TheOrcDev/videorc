@@ -15,8 +15,137 @@ crates/videorc-backend/src/support_bundle.rs crates/videorc-backend/src/metrics_
 
 ## Status
 
-- **Status:** PLANNED 2026-11-05. Not started. Owner decisions D1 to D3 are
-  open; each has a recommendation.
+- **Status:** EXECUTING 2026-11-05. S1, S2 and S3 (both branches) are
+  built on branch `plan/218-stream-holds-frame-rate`; the renderer's live
+  warning (S2's UI half) is the orchestrator's. Owner took D1 to D3 as
+  recommended. S0 is the owner's ask; not waited for.
+- **S1 measurements (this Mac, 2026-11-05, `pnpm smoke:stream-thin-uplink`,
+  per-frame noise content so the encoder spends its whole budget; the host
+  carried other sessions' compiles, load 1 to 2.6 per core):**
+
+  | Variant | Bridge stream drops | `FIFO queue full` | Viewers received | Stream queue at the trip |
+  | --- | --- | --- | --- | --- |
+  | stream-only, 2 legs, 8 Mbps cap | 2 of 2,665 (0.1 %) | 19 lines, one context per leg, neither attributable | 5.5 and 3.8 fps, holes of 8.7 to 8.9 s every few seconds | +2.2 s, depth, high-water 4 frames / 164 ms; FIFO write p95 32 ms, queue age p95 37 ms |
+  | split (1440p30 8 Mbps record + 1080p30 stream), 8 Mbps cap | 4 of 2,665 (0.2 %) | 18 lines | 4.6 and 4.8 fps, holes of 9.0 s | +2.3 s, age, high-water 9 frames / 303 ms; FIFO write p95 36 ms, queue age p95 65 ms, 0 depth / 4 age trips |
+  | audio-late (+60 ms on the bus write), uncapped | **336 of 2,662 (12.6 %)** | 0 | 26.2 fps, 312 gaps of up to 167 ms (a steady stutter) | +4.2 s, age, high-water 4 / 199 ms; FIFO write p95 90 ms, queue age p95 102 ms, 32 depth / 304 age trips; delivery window 25.7 of 30 fps, 14.3 % |
+
+  Two more facts the runs produced:
+  - **A bitrate target is advice VideoToolbox can only follow above the
+    content's floor.** The first runs painted 4 px noise grains and the
+    6 Mbps stream encoded at 23 to 28 Mbps of video (276 MB received in 90 s
+    uncapped): that is what 4 px grains cost at the encoder's highest
+    quantizer, and neither a lower `AverageBitRate` nor a `DataRateLimits`
+    cap brought it down (on-box check, 720p30: 18.5 Mbps whatever the
+    target). With 16 px grains the same session followed 6 then 2 Mbps as
+    5.7 then 2.8 Mbps, within the first second of the change. So
+    `AverageBitRate` moves a running session fine (S3a's premise holds), the
+    smoke paints coarser grains (`VIDEORC_SYNTHETIC_HARD_CONTENT_DIVISOR`),
+    and a streamer whose content sits above its floor at the chosen bitrate
+    (a game, a video) cannot be helped by any bitrate; the floor is reported
+    (`stream-bitrate-floor`) and the next step is fewer destinations.
+  - **A two-leg session cannot name the overflowing leg from FFmpeg's log.**
+    `[fifo @ 0x…] FIFO queue full` carries the fifo's context only, and a
+    fifo prints its URL only on `Error opening`. Attribution is exact when
+    the context is known or when every other leg's is (so a single
+    destination is always named); otherwise the notice names the candidates
+    ("YouTube or X could not keep up…") and says FFmpeg does not say which.
+
+- **Named mechanism:** both, in different places. **H2** is the bridge's
+  drops (M1): +60 ms of audio lateness alone turns a clean 30 fps stream into
+  12.6 % drops on the age limit, the streamer's shape (age-tripped, FIFO write
+  p95 90 ms against their 80 ms). This Mac's structural wait sits just under
+  the 100 ms coalesce age (queue age p95 96 ms at the first trip); theirs sits
+  over it. **H1** does not reproduce: a short uplink leaves the bridge alone
+  (0.1 to 0.2 % drops), exactly as the fifo's `drop_pkts_on_overflow` promises.
+  **M2** reproduces hard: at the cap every leg overflows every 6 to 9 s and
+  its viewers get 4 to 6 fps. So S3 runs both branches: S3a for M2, S3b for
+  H2. The 12.6 % is under the plan's 20 % bar; the shape, not the number,
+  names it, and the +60 ms is a guess at the streamer's Mac.
+- **S2 wire contract (for the renderer):**
+  - `DiagnosticStats.streamDelivery?: { targetFps, deliveredFps, dropPercent,
+    windowSeconds, degraded, degradedSince?, bitrateKbps?, chosenBitrateKbps?,
+    atFloor, uplinkOverflows }` on every `diagnostics.stats` emission while a
+    dedicated stream encoder runs (stream-only, or split record+stream);
+    absent otherwise and after the session. `degraded` holds while more than
+    10 % of the stream's frames were skipped before encode over the last 30 s
+    and clears under 5 %; the first verdict comes about 30 s in. Show "Your
+    stream is running at {deliveredFps} of {targetFps} fps" while it holds.
+  - Health events (`health.event`, persisted): `stream-delivery-degraded`
+    (warn) and `stream-delivery-recovered` (info) on the transitions;
+    `stream-leg-overflow` (warn, once a minute per leg, "YouTube could not
+    keep up with 6 Mbps from this connection; frames were skipped for its
+    viewers."); `stream-bitrate-lowered` (warn), `stream-bitrate-restored`
+    (info), `stream-bitrate-floor` (warn, once a minute while legs keep
+    overflowing at the floor). `stream-output-pressure` is gone.
+  - `StreamTargetRuntime.uplinkOverflows?` / `uplinkOverflowAt?` on the
+    `stream.targets` snapshot, additive: the leg stays `live`; `warning`
+    keeps meaning "the platform is not receiving".
+  - Support bundle (`finalDiagnostics`): `streamDestinationCount`,
+    `streamDestinationPlatforms`, `microphoneSyncOffsetMs`,
+    `streamLegOverflows[]`, `recordingMeasuredBitrateKbps` /
+    `recordingOutputTotalBytes` (what FFmpeg's progress really described),
+    `streamMeasuredBitrateKbps` / `streamOutputTotalBytes` now from the
+    stream encoder, and the stream writer's own
+    `encoderBridgeStreamVideoToolboxFifoWriteP95Ms`,
+    `encoderBridgeStreamQueueAgeP95Ms`, `…DepthTrips`, `…AgeTrips`,
+    `…LastTrip`.
+- **S3 gate runs (2026-11-05, final code, `pnpm smoke:stream-thin-uplink`):**
+
+  | Variant | Bridge stream drops | Adaptive bitrate path | Viewers received, last 60 s |
+  | --- | --- | --- | --- |
+  | stream-only, 7 Mbps cap, 180 s | 0 of 5,384 | 6000 → 4800 @20 s → 3600 @49 s → 4200 @87 s → 3000 @113 s (4200 overflowed) → 3600 @143 s, held under the 4200 ceiling | both legs 30.0 fps, max gap 34 ms (6 overflows while learning, the last at +111 s) |
+  | split 1440p record + 1080p stream, 7 Mbps cap, 180 s | 0 of 5,387 | 6000 → 4800 @23 s → 3600 @51 s → 4200 @83 s → 3000 @105 s → 3600 @142 s | both legs 30.0 fps, max gap 34 ms (last overflow +109 s) |
+  | audio-late (+60 ms), uncapped, 90 s | **0 of 2,661** (was 12.6 %) | 6000 throughout, no overflow | both legs 30.0 fps, no gap; queue age p95 133 ms, high-water 139 ms, under the 200 ms coalesce age (allowance 100 ms) |
+
+  Before the ceiling rule the capped runs sawed 3.0 to 4.2 Mbps and back
+  every two minutes with a 7 to 9 s hole per tooth; before the gulp
+  allowance the audio-late run landed at 0.0 % once and 1.7 % once.
+- **S3 as built:**
+  - **S3a (`encoder_bridge.rs` `StreamBitrateController`):** a dedicated
+    stream encoder (stream-only, or the stream leg of a split session; never
+    the shared record+stream encoder, which would move the recording) steps
+    its `AverageBitRate` down by 20 % of the chosen bitrate on each signal
+    (a leg overflow FFmpeg reported, counted through
+    `stream_uplink_overflow_counter`, or 10 % of an interval's frames
+    coalesced in the bridge), holds 10 s between steps so the flushed fifo
+    can show whether the new rate carries, stops at 50 % (D2) and warns there
+    (`stream-bitrate-floor`, once a minute while legs keep overflowing), and
+    gives 10 % of the chosen bitrate back per clean 30 s. A rate a leg
+    overflowed at is a ceiling: recovery climbs to one step under it and
+    stops there, because the fifo only reports an overflow once its 6 s
+    queue is lost, and a climb past the uplink's capacity cost viewers 7 to
+    9 s of video every two minutes in the first S3 runs (the sawtooth 3.0 to
+    4.2 Mbps and back). After 5 min without an overflow the ceiling lifts by
+    one step. One encode feeds every leg (D1). The retune is `VideoToolboxH264Session::set_average_bit_rate`;
+    the stream's reference chain is untouched (no new parameter set, no
+    forced keyframe; the received FLVs decode clean).
+  - **S3b (`EncoderBridgeOutputQueuePolicy::with_stream_interleave_allowance`):**
+    the stream policy's coalesce and hard limits shift by FFmpeg's deliberate
+    interleave hold, `stream_queue_allowance_ms` in `recording.rs` = bus
+    playout delay (150 ms on macOS) minus the scheduler's 100 ms tolerance,
+    plus half an audio FIFO gulp (FFmpeg drains the pipe in ~170 ms bursts;
+    50 ms, measured: +60 ms of lateness put the queue's oldest frame at a p95
+    of 121 to 133 ms where the playout delay alone predicts 50), plus the
+    split stream's 130 ms audio advance and any negative microphone offset:
+    100 ms stream-only, 230 ms split. The hard limits move with the
+    coalesce limits because the admission checks them first; the wedge
+    bound (no progress at all) is the unchanged
+    `encoder_bridge_over_budget_escalation`. Neither the playout delay nor
+    the advance moved.
+  - **The smoke's content:** `smoke:stream-thin-uplink` paints hard-edged
+    32 px noise blocks at full canvas resolution
+    (`VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN=32`: about 4.3 Mbps under the
+    6 Mbps target, 2.8 Mbps under 3 Mbps; the default quarter-canvas noise is
+    scaled up into gradients the encoder cannot bring under 6.5 Mbps, so a
+    3 Mbps target changed nothing in the first S3 runs) and caps the uplink
+    at 7 Mbps by default: two legs of that content need about 8.9 Mbps with
+    AAC, a fifth more than the plan's 8 Mbps figure assumed of a 6 Mbps
+    stream, and at 8 Mbps the shortage takes minutes to show. The capped
+    variants run 180 s and are judged on their last 60 s (no overflow, every
+    leg at 28 fps or better with no hole over 1 s); the uncapped variant on
+    its 30 s delivery window. The `audio-late` variant sizes the allowance
+    from the production playout delay, not the delayed one, so it tests the
+    50 ms allowance against 60 ms of extra lateness.
 - **Source:** a streamer's support bundle
   (`videorc-support-bundle-20261103-170109Z.json`, 0.18.0, packaged, Apple
   Silicon, kernel Darwin 27.0.0). Their words: "it felt laggy on the YouTube
