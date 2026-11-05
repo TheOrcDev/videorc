@@ -21696,7 +21696,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
             &input_layout,
             &params.audio,
             OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
-            true,
+            OutputVideoSource::for_bridge(video_output),
         );
     }
 
@@ -21929,7 +21929,7 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
             &input_layout,
             &params.audio,
             OutputAudioCodec::StreamAac,
-            true,
+            OutputVideoSource::EncodedBridge,
         );
         args.push(ffmpeg_file_path(output_path));
     }
@@ -22345,7 +22345,13 @@ fn append_bridge_copy_output_args(
     ) {
         append_media_foundation_h264_copy_metadata_args(args, fps);
     }
-    append_audio_encoding_with_video_clock(args, input_layout, audio, audio_codec, true);
+    append_audio_encoding_with_video_clock(
+        args,
+        input_layout,
+        audio,
+        audio_codec,
+        OutputVideoSource::EncodedBridge,
+    );
 }
 
 /// Output metadata for a stream copy of the Media Foundation MPEG-TS FIFO.
@@ -22600,7 +22606,7 @@ fn ffmpeg_args_with_encoder_and_replay(
             &input_layout,
             &params.audio,
             OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
-            false,
+            OutputVideoSource::Legacy,
         );
     }
 
@@ -23164,6 +23170,37 @@ fn append_audio_encoding_args(
     args.extend(codec.encoder_args().iter().map(|arg| arg.to_string()));
 }
 
+/// Where an output's video comes from, for its `-shortest` policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputVideoSource {
+    /// The legacy composed graph: FFmpeg captures and encodes the video.
+    Legacy,
+    /// The encoder bridge's raw frames (Linux, and Windows' software and QSV
+    /// fallback): FFmpeg stamps them on arrival and encodes them.
+    RawBridge,
+    /// An encoded bridge (VideoToolbox, Media Foundation): FFmpeg copies it.
+    EncodedBridge,
+}
+
+impl OutputVideoSource {
+    fn for_bridge(video_output: EncoderBridgeVideoOutput) -> Self {
+        match video_output {
+            EncoderBridgeVideoOutput::RawYuv420p => Self::RawBridge,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => Self::EncodedBridge,
+        }
+    }
+
+    fn is_bridge(self) -> bool {
+        self != Self::Legacy
+    }
+}
+
+/// The `-shortest` sync queue bound for dense live A/V outputs. FFmpeg's
+/// default is 10 s.
+const LIVE_PCM_SHORTEST_BUF_DURATION: &str = "0.25";
+
 /// Applies audio encoding and its duration contract as one inseparable output
 /// policy. Microphone inputs are padded after their existing processing, so a
 /// microphone output must use video EOF as its authoritative clock. Encoder-
@@ -23176,28 +23213,40 @@ fn append_audio_encoding_with_video_clock(
     input_layout: &InputLayout,
     audio: &AudioSettings,
     codec: OutputAudioCodec,
-    preserve_bridge_shortest: bool,
+    video_source: OutputVideoSource,
 ) {
     append_audio_encoding_args(args, input_layout, audio, codec);
     let microphone_is_padded = input_layout
         .audio_inputs
         .iter()
         .any(|input| input.track.source == AudioTrackSource::Microphone);
-    if preserve_bridge_shortest || microphone_is_padded {
+    if video_source.is_bridge() || microphone_is_padded {
         args.push("-shortest".to_string());
-        if !codec.is_streaming()
+        // Live PCM can stall FFmpeg's pre-encode sync queue after the first
+        // audio packets: both Pulse/raw bridge inputs and legacy capture with
+        // padded microphone audio reproduce it. The default 10-second window
+        // can retain an entire short recording. Bound these dense live A/V
+        // queues to 250 ms so the overflow heartbeat advances the lagging
+        // stream, retaining PCM, apad and video-owned EOF. A record-only take
+        // keeps the bound whether it writes PCM or AAC.
+        let bounded_record = !codec.is_streaming()
             && (input_layout.microphone_is_linux_pulse
-                || (microphone_is_padded && !preserve_bridge_shortest))
-        {
-            // Live PCM can stall FFmpeg's pre-encode sync queue after the first
-            // audio packets: both Pulse/raw bridge inputs and legacy capture
-            // with padded microphone audio reproduce it. The default 10-second
-            // window can retain an entire short recording. Bound these dense
-            // live A/V queues to 250 ms so the overflow heartbeat advances the
-            // lagging stream, retaining PCM, apad and video-owned EOF. Encoded
-            // bridges and stream outputs keep their existing synchronization;
-            // a record-only take keeps the bound whether it writes PCM or AAC.
-            args.extend(["-shortest_buf_duration".to_string(), "0.25".to_string()]);
+                || (microphone_is_padded && video_source == OutputVideoSource::Legacy));
+        // The raw bridge needs it on stream outputs too (#1166). When its first
+        // encoded video packet reaches the muxer before audio's first AAC
+        // packet (AAC needs two frames), FFmpeg's scheduler chokes every input
+        // whose output already has a packet: video stops, while the sync queue
+        // holds audio until video advances. Nothing moves until the queue
+        // overflows, so the first output froze for the whole 10 s window
+        // (CI run 41878076547, pass 3). Encoded bridges keep their existing
+        // synchronization: FFmpeg encodes no video there.
+        let raw_bridge_live_audio =
+            microphone_is_padded && video_source == OutputVideoSource::RawBridge;
+        if bounded_record || raw_bridge_live_audio {
+            args.extend([
+                "-shortest_buf_duration".to_string(),
+                LIVE_PCM_SHORTEST_BUF_DURATION.to_string(),
+            ]);
         }
     }
 }
@@ -37656,22 +37705,20 @@ mod tests {
     }
 
     #[test]
-    fn live_pulse_pcm_recording_bounds_shortest_buffer_below_startup_deadline() {
-        for (microphone, pulse) in [
-            (
-                Some(MicrophoneInput::LinuxPulse {
-                    source_name: "test-pulse-source".into(),
-                }),
-                true,
-            ),
-            (
-                Some(MicrophoneInput::WindowsDshow {
-                    device_name: "test-directshow-source".into(),
-                }),
-                false,
-            ),
-            (None, false),
+    fn raw_bridge_live_microphone_bounds_shortest_buffer_below_startup_deadline() {
+        for microphone in [
+            Some(MicrophoneInput::LinuxPulse {
+                source_name: "test-pulse-source".into(),
+            }),
+            Some(MicrophoneInput::WindowsDshow {
+                device_name: "test-directshow-source".into(),
+            }),
+            Some(MicrophoneInput::SessionPcm {
+                fifo_path: PathBuf::from("/tmp/test-session-pcm.f32le"),
+            }),
+            None,
         ] {
+            let microphone_is_live = microphone.is_some();
             let capture = CaptureInputs {
                 video: VideoInput::TestPattern,
                 camera_index: None,
@@ -37692,11 +37739,13 @@ mod tests {
                     &layout,
                     &params.audio,
                     OutputAudioCodec::for_session(&params, streaming),
-                    true,
+                    OutputVideoSource::RawBridge,
                 );
 
                 let bound = arg_value(&args, "-shortest_buf_duration");
-                if pulse && !streaming {
+                // Every live microphone on the raw bridge, recorded or
+                // streamed (#1166); the synthetic tone keeps the 10 s default.
+                if microphone_is_live {
                     let seconds: f64 = bound
                         .expect("live PCM needs a bounded queue")
                         .parse()
@@ -37711,10 +37760,7 @@ mod tests {
                     let last_input = args.iter().rposition(|arg| arg == "-i").unwrap();
                     assert!(bound_index > last_input, "the bound belongs to the output");
                 } else {
-                    assert_eq!(
-                        bound, None,
-                        "other device paths and AAC retain their policy"
-                    );
+                    assert_eq!(bound, None, "the synthetic tone retains its policy");
                 }
                 assert!(args.iter().any(|arg| arg == "-shortest"));
             }
@@ -37811,19 +37857,30 @@ mod tests {
             OutputAudioCodec::StreamAac,
         ] {
             let streaming = codec.is_streaming();
-            for bridge in [false, true] {
+            for source in [
+                OutputVideoSource::Legacy,
+                OutputVideoSource::RawBridge,
+                OutputVideoSource::EncodedBridge,
+            ] {
                 let mut args = Vec::new();
                 append_audio_encoding_with_video_clock(
                     &mut args,
                     &layout,
                     &AudioSettings::default(),
                     codec,
-                    bridge,
+                    source,
                 );
+                // Legacy bounds record-only takes; the raw bridge bounds
+                // streams too (#1166); encoded bridges keep FFmpeg's default.
+                let bounded = match source {
+                    OutputVideoSource::Legacy => !streaming,
+                    OutputVideoSource::RawBridge => true,
+                    OutputVideoSource::EncodedBridge => false,
+                };
                 assert_eq!(
                     arg_value(&args, "-shortest_buf_duration"),
-                    (!streaming && !bridge).then_some("0.25"),
-                    "codec={codec:?}, bridge={bridge}: {args:?}"
+                    bounded.then_some(LIVE_PCM_SHORTEST_BUF_DURATION),
+                    "codec={codec:?}, source={source:?}: {args:?}"
                 );
                 assert_eq!(
                     arg_value(&args, "-c:a"),
@@ -45536,17 +45593,20 @@ mod tests {
             microphone_graph_gain: false,
             microphone_is_linux_pulse: false,
         };
-        let mut args = Vec::new();
-
-        append_audio_encoding_with_video_clock(
-            &mut args,
-            &input_layout,
-            &AudioSettings::default(),
-            OutputAudioCodec::StreamAac,
-            true,
-        );
-
-        assert_eq!(args, vec!["-shortest"]);
+        for source in [
+            OutputVideoSource::RawBridge,
+            OutputVideoSource::EncodedBridge,
+        ] {
+            let mut args = Vec::new();
+            append_audio_encoding_with_video_clock(
+                &mut args,
+                &input_layout,
+                &AudioSettings::default(),
+                OutputAudioCodec::StreamAac,
+                source,
+            );
+            assert_eq!(args, vec!["-shortest"], "{source:?}");
+        }
     }
 
     #[test]
@@ -46607,7 +46667,7 @@ mod tests {
             &input_layout,
             &audio,
             OutputAudioCodec::StreamAac,
-            false,
+            OutputVideoSource::Legacy,
         );
         args.push(output.display().to_string());
 

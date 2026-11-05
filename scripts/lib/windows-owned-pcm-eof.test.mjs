@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  OWNED_PCM_SHORTEST_BUF_DURATION,
   ownedPcmEofVerdict,
   ownedPcmEofAggregate,
   ownedPcmReaderClosed,
@@ -115,9 +116,26 @@ test('spawn failure closes the owned loopback inputs and returns failed evidence
       row.argv.some((value) => value.includes('arealtime')),
       false
     )
+    // #1166: the default 10 s shortest queue froze startup for its whole window.
+    const shortest = row.argv.indexOf('-shortest')
+    assert.ok(shortest > row.argv.lastIndexOf('-i'), '-shortest belongs to the output')
+    assert.deepEqual(row.argv.slice(shortest + 1, shortest + 3), [
+      '-shortest_buf_duration',
+      OWNED_PCM_SHORTEST_BUF_DURATION
+    ])
   } finally {
     rmSync(output, { recursive: true, force: true })
   }
+})
+
+test('owned PCM shortest bound mirrors the backend raw-bridge bound', () => {
+  const source = readFileSync(
+    new URL('../../crates/videorc-backend/src/recording.rs', import.meta.url),
+    'utf8'
+  )
+  const declared = source.match(/const LIVE_PCM_SHORTEST_BUF_DURATION: &str = "([^"]+)";/)
+  assert.ok(declared, 'recording.rs declares LIVE_PCM_SHORTEST_BUF_DURATION')
+  assert.equal(OWNED_PCM_SHORTEST_BUF_DURATION, declared[1])
 })
 
 test('owned PCM aggregate preserves the existing startup and stop p95 budgets', () => {

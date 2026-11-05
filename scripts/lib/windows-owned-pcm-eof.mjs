@@ -6,6 +6,10 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { RECORD_LATENCY_BUDGETS, percentileNearestRank } from './record-latency-gate.mjs'
 import { incidentPacketTail } from './windows-incident-packet-tail.mjs'
 
+// Must equal LIVE_PCM_SHORTEST_BUF_DURATION in
+// crates/videorc-backend/src/recording.rs; the test reads it from there.
+export const OWNED_PCM_SHORTEST_BUF_DURATION = '0.25'
+
 export function ownedPcmReaderClosed(row, kind, code) {
   if (!row.keepAudioAlive || kind !== 'audio' || row.cancelled) return false
   if (['EPIPE', 'ECONNRESET'].includes(code)) return true
@@ -305,6 +309,13 @@ export async function runOwnedPcmEof({
       '-b:a',
       '160k',
       '-shortest',
+      // Production's raw-bridge bound (LIVE_PCM_SHORTEST_BUF_DURATION in
+      // recording.rs, #1166). Without it, a run whose first video packet
+      // reaches the muxer before audio's first AAC packet froze for FFmpeg's
+      // default 10 s: the scheduler chokes video until audio has a packet,
+      // and the sync queue holds audio until video advances.
+      '-shortest_buf_duration',
+      OWNED_PCM_SHORTEST_BUF_DURATION,
       '-f',
       'flv',
       media

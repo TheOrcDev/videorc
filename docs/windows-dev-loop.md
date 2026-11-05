@@ -514,7 +514,12 @@ an early-PCM-EOF baseline, then ends captured input at three seconds while timed
 zeros continue until four seconds of video finish and FFmpeg exits. Normal and
 600 ms delayed/queued startup cases retain frame accounting, A/V start skew,
 packet tail, first-output time and video-EOF-to-exit time, plus their differences
-from the matching baseline. The 1500 ms diagnostic deadline bounds this probe;
+from the matching baseline. Like the raw bridge it mirrors, the owned PCM
+command bounds `-shortest` with `-shortest_buf_duration 0.25` (#1166): with
+FFmpeg's 10 s default, a run whose first video packet reached the muxer before
+audio's first AAC packet froze until the queue overflowed, because the scheduler
+chokes video until audio has a packet while the sync queue holds audio until
+video advances. The 1500 ms diagnostic deadline bounds this probe;
 application click-to-idle acceptance still uses the existing latency budget.
 
 `--eof-stability-passes 25` repeats each candidate case 25 times on hosted
