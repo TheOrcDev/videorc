@@ -250,3 +250,65 @@ export async function waitForHostMemory({
     await delay(Math.min(pollMs, Math.max(1, waitMs - (Date.now() - start))))
   }
 }
+
+// 2026-11-04: a local release build started mid-stream (load 3 → 24 on 10 cores) and the
+// owner's live stream stalled for two minutes with up to 12 s of silent audio. Heavy host
+// work waits while this machine streams to a real ingest. A smoke's loopback RTMP sink is
+// not a live stream, so smokes never wait on each other.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
+export function liveStreamPids(psOutput) {
+  const pids = []
+  for (const line of String(psOutput).split('\n')) {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/)
+    if (!match) continue
+    const [, pid, command] = match
+    // The program itself must be ffmpeg: a shell whose script merely mentions one is not.
+    if (!/^(\S*\/)?ffmpeg(\.exe)?\s/.test(command) || !/\bflv\b/.test(command)) continue
+    const hosts = [...command.matchAll(/rtmps?:\/\/(\[[^\]]*\]|[^/:\s|\]]+)/gi)].map((host) =>
+      host[1].toLowerCase()
+    )
+    if (hosts.some((host) => !LOOPBACK_HOSTS.has(host))) pids.push(Number(pid))
+  }
+  return pids
+}
+export function readLiveStreamPids() {
+  // `-A`, never `-e`: on macOS `-e` prints every process environment.
+  return liveStreamPids(
+    execFileSync('ps', ['-A', '-ww', '-o', 'pid=,command='], {
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 32 * 1024 * 1024
+    })
+  )
+}
+export async function waitWhileVideorcLive({
+  log = console.error,
+  env = process.env,
+  platform = process.platform,
+  read = readLiveStreamPids,
+  pollMs = 30000,
+  noticeMs = 300000
+} = {}) {
+  if (platform === 'win32' || env.CI === 'true' || env.VIDEORC_BUILD_WHILE_LIVE === '1') return
+  let noticedAt
+  for (;;) {
+    let pids
+    try {
+      pids = await read()
+    } catch {
+      return // A failed scan never holds work back.
+    }
+    if (pids.length === 0) return
+    if (noticedAt === undefined || Date.now() - noticedAt >= noticeMs) {
+      log(
+        `[host:live] Videorc is live on this machine (ffmpeg pid ${pids.join(', ')}); heavy builds and app smokes wait until the stream ends so it keeps the CPU. VIDEORC_BUILD_WHILE_LIVE=1 skips the wait.`
+      )
+      noticedAt = Date.now()
+    }
+    await delay(pollMs)
+  }
+}
+export async function withLiveAwareBuildSlot(fn, options = {}) {
+  await waitWhileVideorcLive(options)
+  return withBuildSlot(fn, options)
+}

@@ -12056,6 +12056,7 @@ mod tests {
 
     #[tokio::test]
     async fn listen_block_ends_listening_only_and_never_a_presenting_caption_session() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
         let state = test_caption_app_state();
         let mut events = state.events.subscribe();
 

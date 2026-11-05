@@ -111,6 +111,8 @@ pnpm package:desktop
 See [docs/distribution.md](docs/distribution.md) for signing, notarization,
 and FFmpeg distribution details.
 
+For live microphone noise suppression, see [RNNoise setup and behavior](docs/rnnoise.md).
+
 ## Development & verification
 
 [AGENTS.md](AGENTS.md) is the contributor guide: verification gates, recording
