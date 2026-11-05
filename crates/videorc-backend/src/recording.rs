@@ -16233,6 +16233,13 @@ fn windows_qsv_probe_args(video: &VideoSettings, platform: FfmpegH264Platform) -
         "-frames:v".to_string(),
         WINDOWS_QSV_PROBE_FRAMES.to_string(),
         "-an".to_string(),
+        // The tee muxer names no default codecs, so FFmpeg's automatic stream
+        // selection maps nothing into it: without this the probe failed with
+        // "Output file does not contain any stream" before h264_qsv was ever
+        // opened, and every Intel PC fell back to OpenH264 (2026-11-02 Iris Xe
+        // support bundle). The session maps its streams explicitly too.
+        "-map".to_string(),
+        "0:v".to_string(),
     ];
     append_h264_encoding_args_for_platform(
         &mut args,
@@ -30221,11 +30228,54 @@ mod tests {
         assert_eq!(arg_value(&args, "-c:v"), Some("h264_qsv"));
         assert_eq!(arg_value(&args, "-low_power"), Some("0"));
         assert_eq!(arg_value(&args, "-f"), Some("lavfi"));
+        // The tee output gets no automatic stream selection; an unmapped
+        // probe never reaches the encoder.
+        assert_eq!(arg_value(&args, "-map"), Some("0:v"));
         assert!(
             args.iter().any(|arg| arg.contains("f=matroska")),
             "{args:?}"
         );
         assert!(args.iter().any(|arg| arg.contains("f=flv")), "{args:?}");
+    }
+
+    /// The probe's real command line through a real FFmpeg, with the software
+    /// encoder standing in for `h264_qsv` so it runs on any host. The
+    /// 2026-11-02 Iris Xe bundle showed every Quick Sync probe rejected with
+    /// "Output file does not contain any stream": the shape itself was
+    /// broken, so no Intel driver could ever pass it.
+    #[tokio::test]
+    #[ignore = "spawns ffmpeg; run on recording-studio hosts"]
+    async fn quick_sync_probe_shape_opens_its_tee_output_on_a_real_ffmpeg() {
+        let ffmpeg = crate::ffmpeg::default_ffmpeg_path();
+        let video = VideoSettings {
+            width: 320,
+            height: 180,
+            ..qsv_test_video()
+        };
+        let mut args = windows_qsv_probe_args(&video, FfmpegH264Platform::WindowsQsv);
+        let codec = args
+            .iter()
+            .position(|arg| arg == "-c:v")
+            .expect("probe names its encoder")
+            + 1;
+        args[codec] = "libopenh264".to_string();
+        if let Some(pix_fmt) = args.iter().position(|arg| arg == "-pix_fmt") {
+            args[pix_fmt + 1] = "yuv420p".to_string();
+        }
+        assert_eq!(
+            run_windows_qsv_probe(&ffmpeg, &args, Duration::from_secs(30)).await,
+            Ok(())
+        );
+
+        let map = args.iter().position(|arg| arg == "-map").unwrap();
+        args.drain(map..map + 2);
+        let reason = run_windows_qsv_probe(&ffmpeg, &args, Duration::from_secs(30))
+            .await
+            .unwrap_err();
+        assert!(
+            reason.contains("does not contain any stream"),
+            "an unmapped tee output is what broke the probe: {reason}"
+        );
     }
 
     #[tokio::test]
