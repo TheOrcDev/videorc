@@ -297,7 +297,7 @@ export async function recordScenario({
     // The test-pattern session selects no microphone, so its audio is the
     // paced-silence bus (hosted runners have no input device at all). The
     // silent-microphone gate re-arms if a scenario ever selects one.
-    microphoneAvailable: Boolean(params.sources.microphone),
+    microphoneAvailable: sessionSelectsMicrophone(params.sources),
     gates: TEST_PATTERN_GATES
   })
   const reportPaths = writeReports(quality)
@@ -505,6 +505,15 @@ export function request(ws, timeoutMs, method, params) {
     ws.addEventListener('close', onClose)
     ws.send(JSON.stringify({ id, method, params }))
   })
+}
+
+/**
+ * Whether a session's sources select a microphone, read from the protocol's
+ * `microphoneId` (`SourceSelection`). Arms the analyzer's silent-microphone
+ * gate.
+ */
+export function sessionSelectsMicrophone(sources) {
+  return typeof sources?.microphoneId === 'string' && sources.microphoneId !== ''
 }
 
 function sessionParams({ outputDirectoryCapability, preset = 'screen-camera', background, video }) {

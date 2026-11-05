@@ -644,12 +644,13 @@ pub fn build_render_args(
     if let RenderEncoder::Vaapi { device, .. } = encoder {
         args.extend(["-vaapi_device".to_string(), device.display().to_string()]);
     }
-    args.extend(["-i".to_string(), source.display().to_string()]);
+    args.extend(["-i".to_string(), crate::ffmpeg::ffmpeg_file_path(source)]);
     match graph {
         GraphArgument::Inline(text) => args.extend(["-filter_complex".to_string(), text.clone()]),
-        GraphArgument::ScriptFile(path) => {
-            args.extend(["-/filter_complex".to_string(), path.display().to_string()])
-        }
+        GraphArgument::ScriptFile(path) => args.extend([
+            "-/filter_complex".to_string(),
+            crate::ffmpeg::ffmpeg_file_path(path),
+        ]),
     }
     args.extend(["-map".to_string(), format!("[{}]", labels.video_label)]);
     for label in &labels.audio_labels {
@@ -777,7 +778,7 @@ pub fn build_render_args(
         "+faststart".to_string(),
         "-progress".to_string(),
         "pipe:1".to_string(),
-        staging.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(staging),
     ]);
     args
 }
@@ -990,7 +991,7 @@ fn probe_file(ffprobe_path: &str, path: &Path) -> Result<RenderProbe, String> {
         "-show_streams",
         "-of",
         "json",
-        &path.display().to_string(),
+        &crate::ffmpeg::ffmpeg_file_path(path),
     ]);
     let output = output_owned_std_with_timeout(&mut command, PROBE_TIMEOUT)
         .map_err(|error| format!("could not run ffprobe: {error}"))?;
