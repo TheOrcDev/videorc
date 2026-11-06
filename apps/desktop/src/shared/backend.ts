@@ -4341,9 +4341,9 @@ export interface SessionListItem {
   takeId?: string
   /** Which file of the take this row is (plan 157); absent on ordinary rows. */
   recordingRole?: RecordingRole
-  /** A take Videorc stopped in the middle of (crash, killed backend, power
-   * loss): `recovered` once its MKV became an MP4 on the next start, `failed`
-   * when that did not work. Absent on every other row. */
+  /** A take that ended early (a crash, a killed backend, a power loss, or a
+   * recording that failed mid-take): `recovered` once its MKV became an MP4,
+   * `failed` when that did not work. Absent on every other row. */
   interruptionRecovery?: InterruptionRecovery
 }
 
