@@ -315,6 +315,24 @@ export function pacingStats(ptsTimes) {
 }
 
 /**
+ * The duration the frame-count and stretch gates hold the video to. MP4
+ * records the video stream's own duration, and that is trusted. FLV and MKV
+ * leave it unset, and their format duration also covers the audio a stop
+ * drain writes after the last frame (214 ms on a Linux RTMP stream), which
+ * would count frames the video never owed. There the span of the video
+ * packets stands in, plus one frame for the last packet's own duration.
+ * @returns {number|null}
+ */
+export function frameCountDurationSeconds(probe, ptsTimes, fps) {
+  if (Number.isFinite(probe.video?.duration)) return probe.video.duration
+  const sorted = [...ptsTimes].sort((a, b) => a - b)
+  if (sorted.length >= 2 && Number.isFinite(fps) && fps > 0) {
+    return sorted[sorted.length - 1] - sorted[0] + 1 / fps
+  }
+  return probe.formatDuration ?? null
+}
+
+/**
  * Duplicate-PTS statistics: container video packets stacked on (near-)identical
  * presentation stamps. Healthy encoders never emit these; wallclock-stamped
  * bursty inputs do (plan 023). `runLength` counts frames sharing one stamp.
@@ -635,7 +653,8 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
     metrics.durationStretchRatio > gates.maxDurationStretchRatio
   ) {
     failures.push(
-      `timestamp/duration stretch: container duration ${metrics.durationSeconds.toFixed(2)}s ` +
+      `timestamp/duration stretch: video duration ` +
+        `${(metrics.frameCountDurationSeconds ?? metrics.durationSeconds).toFixed(2)}s ` +
         `vs ${metrics.frameDerivedDurationSeconds.toFixed(2)}s implied by ` +
         `${metrics.observedFrames} frame(s) at ${metrics.intendedFps}fps ` +
         `(${metrics.durationStretchRatio.toFixed(1)}x, max ${gates.maxDurationStretchRatio.toFixed(1)}x)`
@@ -1132,7 +1151,7 @@ export async function analyzeRecording(filePath, options = {}) {
   const skewComponents = avSkewComponents(probe)
 
   const intendedFps = options.intendedFps ?? probe.video?.nominalFps ?? probe.video?.avgFps ?? null
-  const durationForCount = probe.video?.duration ?? probe.formatDuration ?? null
+  const durationForCount = frameCountDurationSeconds(probe, ptsTimes, intendedFps)
   const observedFrames =
     probe.video?.nbFrames ?? (frameHashes.length > 0 ? frameHashes.length : pacing.count || null)
   const expectedFrames =
@@ -1157,7 +1176,8 @@ export async function analyzeRecording(filePath, options = {}) {
     expectAudio,
     microphoneAvailable,
     intendedFps,
-    durationSeconds: durationForCount,
+    durationSeconds: probe.video?.duration ?? probe.formatDuration ?? null,
+    frameCountDurationSeconds: durationForCount,
     codec: probe.video?.codec ?? null,
     pixFmt: probe.video?.pixFmt ?? null,
     profile: probe.video?.profile ?? null,
@@ -1305,7 +1325,10 @@ export function renderMarkdownReport(report) {
         : '')
   )
   lines.push(
-    `- Frames: observed ${m.observedFrames ?? 'n/a'} | expected ~${m.expectedFrames ?? 'n/a'}`
+    `- Frames: observed ${m.observedFrames ?? 'n/a'} | expected ~${m.expectedFrames ?? 'n/a'}` +
+      (m.frameCountDurationSeconds != null && m.frameCountDurationSeconds !== m.durationSeconds
+        ? ` over the video's ${fmt(m.frameCountDurationSeconds, 2)}s`
+        : '')
   )
   lines.push(
     `- Decoded uniqueness: ${m.uniqueFrameCount ?? 'n/a'}/${m.observedFrameHashes ?? 'n/a'} unique ` +
