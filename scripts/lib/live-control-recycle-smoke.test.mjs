@@ -56,7 +56,13 @@ test('smoke uses the debug renderer seam and proves exact generation replacement
 })
 
 test('recycle proof runs during a recording and analyzes the safely finalized MP4', () => {
-  assert.match(smoke, /'session\.start'/)
+  // The start route comes from the shared helper: `session.start` on the
+  // renderer socket, or `recording.start_test` through the admin bridge when
+  // the session names the barrier shim.
+  assert.match(smoke, /finalizationBarrierSessionStart\(sessionParams\)/)
+  assert.match(smoke, /'backend-debug-rpc'/)
+  assert.match(smoke, /request\(oldSocket, timeoutMs, sessionStart\.method, sessionParams\)/)
+  assert.match(smoke, /microphoneAvailable: sessionSelectsMicrophone\(sessionParams\.sources\)/)
   assert.match(smoke, /appQuitRecordingSessionParams/)
   assert.match(smoke, /createFinalizationBarrierServer/)
   assert.match(smoke, /finalizationHoldMs <= minimumFinalizationHoldMs/)

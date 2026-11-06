@@ -554,10 +554,13 @@ export function classifyProcess(row) {
   if (executableNames.has('videorc-backend') || executableNames.has('videorc-backend.exe')) {
     return 'backend'
   }
-  if (lowerText.includes('ffmpeg')) {
+  // By executable name, not substring: a checkout under a directory named
+  // `…ffmpeg…` put every Electron process's argv over the line and the census
+  // read the whole app as FFmpeg (Linux, 2026-11-06).
+  if (executableNames.has('ffmpeg') || executableNames.has('ffmpeg.exe')) {
     return 'ffmpeg'
   }
-  if (lowerText.includes('ffprobe')) {
+  if (executableNames.has('ffprobe') || executableNames.has('ffprobe.exe')) {
     return 'ffprobe'
   }
   for (const role of ['notes', 'comments', 'captions']) {
