@@ -1260,6 +1260,10 @@ pub(crate) struct FfmpegProgressBeacon {
     /// Set when Videorc itself sent TERM/KILL. The process monitor reads it so
     /// our own forced stop is never reported as an encoder or FFmpeg crash.
     stop_escalated: Arc<AtomicBool>,
+    /// Set when the Record handover claimed a buffer-only session for an end
+    /// without its flush (`claim_unflushed_handover`): Stop kills FFmpeg and
+    /// the monitor reads the exit as that stop, not as a failure.
+    unflushed_stop: Arc<AtomicBool>,
     first_fatal: Arc<StdMutex<Option<&'static str>>>,
     evidence: Arc<StdMutex<FfmpegEvidenceSnapshot>>,
 }
@@ -1314,6 +1318,14 @@ impl FfmpegProgressBeacon {
 
     fn stop_escalated(&self) -> bool {
         self.stop_escalated.load(Ordering::Acquire)
+    }
+
+    fn mark_unflushed_stop(&self) {
+        self.unflushed_stop.store(true, Ordering::Release);
+    }
+
+    fn unflushed_stop(&self) -> bool {
+        self.unflushed_stop.load(Ordering::Acquire)
     }
 }
 
@@ -8300,6 +8312,7 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     let output_path = active.output_path.clone();
     let session_id = active.session_id.clone();
     let wait_session_id = session_id.clone();
+    let unflushed_stop = active.replay_only && active.ffmpeg_progress.unflushed_stop();
     set_stop_timeline_session(&state, &session_id);
     let mut force_stop_now = false;
     let mut native_audio_silent_drain_started = false;
@@ -8549,6 +8562,12 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         let _ = stdin.shutdown().await;
     }
 
+    if unflushed_stop {
+        // The handover claimed this ring: its flush feeds a ring `retire`
+        // deletes, so end FFmpeg now. The fallback below stays armed in case
+        // the signal fails.
+        let _ = send_process_signal(pid, "KILL").await;
+    }
     if force_stop_now {
         state.emit_log("warn", "Stop requested again; sending SIGTERM to FFmpeg.");
         mark_ffmpeg_stop_escalated(&state, pid).await;
@@ -11863,6 +11882,7 @@ async fn monitor_session(
             MonitoredRecording {
                 stop_intent_preceded_exit,
                 stop_escalated: active.ffmpeg_progress.stop_escalated(),
+                unflushed_stop: active.replay_only && active.ffmpeg_progress.unflushed_stop(),
                 recording_bridge_terminal_failure: active.recording_bridge_terminal_failure(),
                 stream_bridge_terminal_failure: active.stream_bridge_terminal_failure(),
                 ffmpeg_path: active.ffmpeg_path.clone(),
@@ -12371,6 +12391,34 @@ async fn monitor_session(
     let mut recording_file_gone =
         recording_file_gone_failure(monitored_recording.records_file, output_path.as_deref());
     let terminal_status = match status {
+        Ok(exit_status) if ends_unflushed_handover(&monitored_recording) => {
+            // Nothing was kept and nothing failed: the ring is already gone
+            // and the session that asked for the handover starts next.
+            monitored_recording.pipeline.mark_finished();
+            let _ = emit_session_log(
+                &state,
+                &session_id,
+                HealthLevel::Info,
+                "replay-buffer-handed-over",
+                &format!(
+                    "The Clips buffer ended without its flush for the session that follows ({exit_status})."
+                ),
+                None,
+            );
+            RecordingStatus {
+                state: RecordingState::Idle,
+                session_id: Some(session_id),
+                output_path: None,
+                stream_url: None,
+                started_at: None,
+                audio_tracks: Vec::new(),
+                pipeline: Some(monitored_recording.pipeline.status()),
+                duration_ms,
+                message: Some("Clips stopped for the next session.".to_string()),
+                replay_only: monitored_recording.replay_only,
+                accepts_live_scene_edits: None,
+            }
+        }
         Ok(_) if recording_file_gone.is_some() => {
             let (failed_stage, health_code, mut message) = recording_file_gone
                 .take()
@@ -14766,6 +14814,8 @@ impl NativeAudioStats {
 struct MonitoredRecording {
     stop_intent_preceded_exit: bool,
     stop_escalated: bool,
+    /// The Record handover ended this buffer-only session without its flush.
+    unflushed_stop: bool,
     recording_bridge_terminal_failure: Option<String>,
     stream_bridge_terminal_failure: Option<String>,
     ffmpeg_path: String,
@@ -14792,6 +14842,13 @@ impl MonitoredRecording {
             .tail
             .first_fatal_category
     }
+}
+
+/// A buffer-only session the Record handover ended without its flush, after
+/// its stop: whatever the exit status, that is the stop, not a failure.
+/// Without the stop intent first the exit stays FFmpeg's own.
+fn ends_unflushed_handover(monitored: &MonitoredRecording) -> bool {
+    monitored.replay_only && monitored.unflushed_stop && monitored.stop_intent_preceded_exit
 }
 
 fn should_finalize_recording_session(
@@ -21775,6 +21832,7 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
     tracing::info!("Replay buffer session {session_id} hands over to a new session.");
+    claim_unflushed_handover(state, &session_id).await;
     let status = stop_recording_with_intent(state.clone(), SessionStopParams::default())
         .await
         .context("Could not stop the replay buffer before starting the session")?;
@@ -21794,6 +21852,25 @@ async fn hand_over_replay_only_session(state: &AppState) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+/// Marks the buffer-only session for an end without its flush when its ring
+/// allows one (`replay_buffer::claim_unflushed_retire`: no clip save runs or
+/// waits). The stop that follows then kills FFmpeg instead of waiting the
+/// 250 to 300 ms a Linux VAAPI flush takes, since `retire` deletes the ring
+/// the moment FFmpeg exits. A save in flight keeps the flushed stop.
+async fn claim_unflushed_handover(state: &AppState, session_id: &str) -> bool {
+    let recording = state.recording.lock().await;
+    let Some(active) = recording.as_ref().filter(|active| {
+        active.session_id == session_id && active.replay_only && !active.stop_requested
+    }) else {
+        return false;
+    };
+    if !crate::replay_buffer::claim_unflushed_retire(state, session_id) {
+        return false;
+    }
+    active.ffmpeg_progress.mark_unflushed_stop();
+    true
 }
 
 /// Plan 181: a buffer-only session writes nothing permanent, so it blocks no
@@ -33322,6 +33399,54 @@ mod tests {
         assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
         params.output.video = video_preset_defaults(VideoPreset::StreamYoutube1080p60);
         assert_eq!(windows_bridge_envelope_refusal(&params, false), None);
+    }
+
+    /// Plan 181 S7: Record claims an idle buffer-only session for an end
+    /// without its flush, which tells the stop that follows to kill FFmpeg and
+    /// the monitor to read that exit as the stop. A session already stopping,
+    /// a recording that carries a ring, or a ring a clip save still reads
+    /// keeps the flushed stop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_handover_claims_only_an_idle_buffer_only_session_unflushed() {
+        let state = test_state();
+        let recordings =
+            std::env::temp_dir().join(format!("videorc-handover-claim-test-{}", Uuid::new_v4()));
+        let params = crate::replay_buffer::replay_only_test_params();
+        for (session_id, replay_only, stop_requested, saving, claimed) in [
+            ("handover-idle", true, false, false, true),
+            ("handover-stopping", true, true, false, false),
+            ("handover-recording", false, false, false, false),
+            ("handover-saving", true, false, true, false),
+        ] {
+            let _ring = crate::replay_buffer::prepare(
+                &state,
+                crate::replay_buffer::RingRequest {
+                    session_id,
+                    params: &params,
+                    replay_only,
+                    recordings_dir: &recordings,
+                    ffmpeg_path: "ffmpeg",
+                },
+            )
+            .unwrap();
+            if saving {
+                crate::replay_buffer::mark_save_in_progress_for_test(&state);
+            }
+            let mut active = test_active_recording_stub(session_id);
+            active.replay_only = replay_only;
+            active.stop_requested = stop_requested;
+            let beacon = active.ffmpeg_progress.clone();
+            *state.recording.lock().await = Some(active);
+
+            assert_eq!(
+                claim_unflushed_handover(&state, session_id).await,
+                claimed,
+                "{session_id}"
+            );
+            assert_eq!(beacon.unflushed_stop(), claimed, "{session_id}");
+            state.recording.lock().await.take();
+        }
+        assert!(!claim_unflushed_handover(&state, "handover-none").await);
     }
 
     #[tokio::test]

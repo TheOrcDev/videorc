@@ -161,6 +161,25 @@ function isSessionStatus(record) {
   return record.event === 'recording.status' && record.payload?.replayOnly !== true
 }
 
+/** The Warn and Error health events and session logs a run saw, for its
+ * report: a Record or Stop that measures fast but logs a failure is not a
+ * clean cycle. */
+export function warningEvents(events) {
+  return events
+    .filter(
+      (record) =>
+        (record.event === 'health.event' || record.event === 'session.log') &&
+        (record.payload?.level === 'warn' || record.payload?.level === 'error')
+    )
+    .map((record) => ({
+      event: record.event,
+      level: record.payload.level,
+      code: record.payload.code ?? null,
+      sessionId: record.payload.sessionId ?? null,
+      message: record.payload.message ?? null
+    }))
+}
+
 export function statusEvent(state, sessionId) {
   return (record) =>
     isSessionStatus(record) &&
