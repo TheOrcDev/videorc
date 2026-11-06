@@ -3881,3 +3881,11 @@ After the fix the forced run passes all 13 cases on Ogre, the five record
 and stream cases included, each with ring motion in both the file and the
 RTMP leg. The Metal test runs in the macOS CI job; it was not run on a Mac
 here.
+
+Main merge `cbe9f233` takes main through `773cffd3` (#1226) with no
+conflict. On Ogre: format, lint, typecheck, test:scripts (3,312 passed, 0
+failed, 3 skipped), desktop tests (7,297 passed, 1 skipped), cargo fmt,
+Linux CI clippy with `--all-targets`, backend tests (4,536 passed, 0 failed,
+23 ignored) and the direct 1080p30 matrix on both backends (OpenH264 level
+4.0, BT.709 TV range, 2 ms tail; VAAPI on renderD128 level 4.0, BT.709 TV
+range, 2 ms tail).

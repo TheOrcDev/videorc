@@ -13227,21 +13227,25 @@ fn settle_interrupted_take(
     Some(settled.to_string())
 }
 
-/// Health copy for a settled interrupted-take recovery.
+/// Health copy for a settled interrupted-take recovery. The same copy serves
+/// a take Videorc itself stopped in (recovered on the next start) and one
+/// whose recording failed while Videorc kept running (a full disk, a capture
+/// that died), so it says the recording ended early and never that Videorc
+/// stopped: the failed take's own error already says why.
 fn interrupted_take_recovery_message(recovered: bool, duration_ms: Option<i64>) -> String {
     if !recovered {
-        return "Videorc stopped during this recording and could not make an MP4 from it. \
+        return "This recording ended early, and Videorc could not make an MP4 from it. \
                 The MKV is kept in the recordings folder."
             .to_string();
     }
     match duration_ms.filter(|duration| *duration > 0) {
         Some(duration_ms) => format!(
-            "Recovered after Videorc stopped: {:.1} s saved as MP4, up to where the recording \
-             was interrupted. The original MKV is kept.",
+            "Recovered a recording that ended early: {:.1} s saved as MP4, up to where it \
+             ended. The original MKV is kept.",
             duration_ms as f64 / 1000.0
         ),
-        None => "Recovered after Videorc stopped: saved as MP4 up to where the recording was \
-                 interrupted. The original MKV is kept."
+        None => "Recovered a recording that ended early: saved as MP4 up to where it ended. \
+                 The original MKV is kept."
             .to_string(),
     }
 }
@@ -35763,10 +35767,34 @@ mod tests {
     fn interrupted_take_recovery_copy_states_the_saved_length() {
         assert_eq!(
             interrupted_take_recovery_message(true, Some(41_666)),
-            "Recovered after Videorc stopped: 41.7 s saved as MP4, up to where the recording was interrupted. The original MKV is kept."
+            "Recovered a recording that ended early: 41.7 s saved as MP4, up to where it ended. The original MKV is kept."
         );
-        assert!(interrupted_take_recovery_message(true, None).starts_with("Recovered after"));
-        assert!(interrupted_take_recovery_message(false, Some(1)).contains("MKV is kept"));
+        assert_eq!(
+            interrupted_take_recovery_message(true, None),
+            "Recovered a recording that ended early: saved as MP4 up to where it ended. The original MKV is kept."
+        );
+        assert_eq!(
+            interrupted_take_recovery_message(false, Some(1)),
+            "This recording ended early, and Videorc could not make an MP4 from it. The MKV is kept in the recordings folder."
+        );
+    }
+
+    /// A take whose recording failed while Videorc kept running (a full disk
+    /// stop) is recovered the moment it fails. Its recovery copy must not
+    /// read like a crash: Videorc never stopped, and the take's own error
+    /// already said why it ended.
+    #[test]
+    fn interrupted_take_recovery_copy_never_says_videorc_stopped() {
+        for recovered in [true, false] {
+            for duration_ms in [None, Some(0), Some(85_000)] {
+                let message = interrupted_take_recovery_message(recovered, duration_ms);
+                assert!(
+                    !message.contains("Videorc stopped"),
+                    "{recovered} {duration_ms:?}: {message}"
+                );
+                assert!(message.contains("ended early"), "{message}");
+            }
+        }
     }
 
     /// A power-loss capture: a live (headerless-size) Matroska file cut
