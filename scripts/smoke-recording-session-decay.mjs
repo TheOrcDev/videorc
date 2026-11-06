@@ -60,7 +60,7 @@ import {
   evaluateSessionDecayLifecycleEvents,
   waitForSessionTerminalStatus
 } from './lib/session-decay-gates.mjs'
-import { connectBackend, request } from './smoke-recording-session.mjs'
+import { connectBackend, request, sessionSelectsMicrophone } from './smoke-recording-session.mjs'
 
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
@@ -295,6 +295,9 @@ async function recordSession({ ws, smoke, index, sources, backendEvents }) {
     ffprobePath,
     intendedFps: PROFILE.fps,
     expectAudio: true,
+    // No source here selects a microphone, so the audio is the paced-silence
+    // bus, not a microphone that recorded nothing.
+    microphoneAvailable: sessionSelectsMicrophone(sources),
     gates: DECAY_GATES
   })
   writeReports(quality)

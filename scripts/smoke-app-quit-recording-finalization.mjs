@@ -25,7 +25,7 @@ import {
 } from './lib/process-census.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { connectBackend, request } from './smoke-recording-session.mjs'
+import { connectBackend, request, sessionSelectsMicrophone } from './smoke-recording-session.mjs'
 
 const SHIM_MODE = '--ffmpeg-finalization-barrier-shim'
 const BARRIER_HOST_ENV = 'VIDEORC_FINALIZATION_BARRIER_HOST'
@@ -134,9 +134,9 @@ export async function runFfmpegFinalizationBarrierShim(
 }
 
 async function runSmoke() {
-  if (process.platform !== 'darwin') {
+  if (process.platform !== 'darwin' && process.platform !== 'linux') {
     throw new Error(
-      'The live app quit-during-recording smoke currently requires macOS; its quit teardown census reads POSIX process groups.'
+      'The live app quit-during-recording smoke currently requires macOS or Linux; its quit teardown census reads POSIX process groups.'
     )
   }
 
@@ -221,24 +221,31 @@ async function runSmoke() {
       { kind: 'output-directory', path: outputDirectory },
       { timeoutMs }
     )
-    backendSocket = await connectBackend(backendConnection, timeoutMs)
-    const started = await request(
-      backendSocket,
-      timeoutMs,
-      'session.start',
-      appQuitRecordingSessionParams({
-        outputDirectoryCapability: requiredString(
-          outputAuthorization.capabilityId,
-          'output directory capability'
-        ),
-        ffmpegPath: sessionFfmpegPath
-      })
-    )
+    const sessionParams = appQuitRecordingSessionParams({
+      outputDirectoryCapability: requiredString(
+        outputAuthorization.capabilityId,
+        'output directory capability'
+      ),
+      ffmpegPath: sessionFfmpegPath
+    })
+    const sessionStart = finalizationBarrierSessionStart(sessionParams)
+    let started
+    if (sessionStart.route === 'backend-debug-rpc') {
+      started = await requestSmokeCommand(
+        smoke,
+        'backend-debug-rpc',
+        { method: sessionStart.method, params: sessionParams, timeoutMs },
+        { timeoutMs }
+      )
+    } else {
+      backendSocket = await connectBackend(backendConnection, timeoutMs)
+      started = await request(backendSocket, timeoutMs, sessionStart.method, sessionParams)
+      await closeWebSocket(backendSocket, 2_000)
+      backendSocket = null
+    }
     assert.equal(started?.state, 'recording', `Expected recording, got ${started?.state}.`)
     const sessionId = requiredString(started.sessionId, 'recording session ID')
     const mkvPath = requiredString(started.outputPath, 'recording MKV path')
-    await closeWebSocket(backendSocket, 2_000)
-    backendSocket = null
 
     await sleep(recordingMs)
     const quitAccepted = await requestSmokeCommand(smoke, 'app-quit', {}, { timeoutMs: 2_000 })
@@ -331,6 +338,7 @@ async function runSmoke() {
       ffprobePath: realFfprobe,
       intendedFps: 30,
       expectAudio: true,
+      microphoneAvailable: sessionSelectsMicrophone(sessionParams.sources),
       gates: TEST_PATTERN_GATES
     })
     const reports = writeReports(quality)
@@ -503,13 +511,29 @@ export function finalizationBarrierShimFiles({
 }
 
 /**
- * The `output.ffmpegPath` a barrier smoke's `session.start` sends: the shim on
- * Windows, through the debug admin socket's smoke-only FFmpeg override (the
- * backend reads no other caller-chosen FFmpeg). POSIX keeps the ordinary
- * PATH lookup, so it sends none.
+ * The `output.ffmpegPath` a barrier smoke's session start sends: the shim on
+ * Windows and Linux, through the debug admin socket's smoke-only FFmpeg
+ * override (the backend reads no other caller-chosen FFmpeg). Dev main pins
+ * the vendored FFmpeg on both and puts it ahead of the shim on PATH, so a
+ * session that names none records through the real binary and never reaches
+ * the barrier. macOS dev keeps the ordinary PATH lookup, so it sends none.
  */
 export function finalizationBarrierSessionFfmpegPath(shimPath, platform = process.platform) {
-  return platform === 'win32' ? shimPath : undefined
+  return platform === 'win32' || platform === 'linux' ? shimPath : undefined
+}
+
+/**
+ * How a barrier smoke starts its session. The renderer socket strips every
+ * `ffmpegPath` (`scrub_untrusted_ffmpeg_paths`), so a session that names the
+ * shim starts as `recording.start_test` through main's `backend-debug-rpc`
+ * bridge: the admin role in a debug smoke build is the one caller the backend
+ * lets choose its FFmpeg. A session that names none starts as the renderer's
+ * ordinary `session.start`.
+ */
+export function finalizationBarrierSessionStart(params) {
+  return params?.output?.ffmpegPath
+    ? { route: 'backend-debug-rpc', method: 'recording.start_test' }
+    : { route: 'renderer', method: 'session.start' }
 }
 
 export function createExecutableFfmpegShim(stateRoot) {
