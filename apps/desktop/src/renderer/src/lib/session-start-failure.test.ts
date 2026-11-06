@@ -78,6 +78,18 @@ describe('sessionStartFailureMessage', () => {
     )
     expect(sessionStartFailureMessage(new Error('   '))).toBe("The session couldn't start.")
   })
+
+  it('drops Electron’s remote-method wrapper from a main-process rejection', () => {
+    const reason =
+      'Videorc can’t find your recordings folder “Videorc”. If it’s on a drive, reconnect the drive. Otherwise choose a folder in Output → Where recordings go.'
+    expect(
+      sessionStartFailureMessage(
+        new Error(
+          `Error invoking remote method 'resource:authorize-output-directory': Error: ${reason}`
+        )
+      )
+    ).toBe(reason)
+  })
 })
 
 describe('reduceSessionStartFailure', () => {

@@ -6,6 +6,7 @@
 // main/index.ts owns the surface window and interpolates the scripts.
 
 import type {
+  CompositorSceneSourceStatus,
   EffectiveSceneBackground,
   LiveBackgroundStillReason,
   PreviewSurfaceLiveBackground,
@@ -108,6 +109,26 @@ export function previewSurfaceBackgroundLayer(
     mirror: false,
     ...(live ? { live } : {})
   }
+}
+
+/**
+ * Which background the proof surface draws for a compositor status. The
+ * status names the program's background (`background-image:<assetId>`) but
+ * not its look; the committed scene main last heard (`scene.get`, then
+ * `scene.changed`) carries the look. Null when the program has no
+ * background; the committed background when it is the one the status names;
+ * undefined when main has not heard of that background yet (keep the layer
+ * the surface has, and its stage).
+ */
+export function previewSurfaceStatusBackground(
+  sceneSources: readonly CompositorSceneSourceStatus[],
+  committed: EffectiveSceneBackground | null | undefined
+): EffectiveSceneBackground | null | undefined {
+  const source = sceneSources.find((candidate) => candidate.kind === 'background-image')
+  if (!source) {
+    return null
+  }
+  return committed && source.id === `background-image:${committed.assetId}` ? committed : undefined
 }
 
 const STILL_REASONS: readonly LiveBackgroundStillReason[] = [

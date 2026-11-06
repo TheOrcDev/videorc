@@ -32,6 +32,19 @@ const video = {
   fps: 30,
   bitrateKbps: 2000
 }
+// The stream's profile: the target's default preset at the default bitrate.
+const streamVideo = {
+  preset: 'custom',
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  bitrateKbps: 2000
+}
+// Linux has no split-output encoder bridge (VideoToolbox and Media Foundation
+// only), so one encode serves the recording and the stream, and the backend
+// refuses a recording below the stream's profile (plan 0016). There the
+// record-stream pass records at the stream's profile.
+const sharedEncodeHost = process.platform === 'linux'
 
 mkdirSync(outputDirectory, { recursive: true })
 
@@ -167,6 +180,7 @@ async function runSwitchScenario(ws, smoke, { label, sources, streamTarget, dura
     { path: outputDirectory, kind: 'output-directory' },
     { timeoutMs }
   )
+  const sessionVideo = streamTarget && sharedEncodeHost ? streamVideo : video
   const started = await request(
     ws,
     timeoutMs,
@@ -174,6 +188,7 @@ async function runSwitchScenario(ws, smoke, { label, sources, streamTarget, dura
     sessionParams({
       sources,
       streamTarget,
+      video: sessionVideo,
       outputDirectoryCapability: recordingDirectory.capabilityId
     })
   )
@@ -187,7 +202,7 @@ async function runSwitchScenario(ws, smoke, { label, sources, streamTarget, dura
     const status = await request(ws, timeoutMs, 'scene.layout.apply_live', {
       sources,
       layout: layout(preset),
-      video,
+      video: sessionVideo,
       background: null,
       protectedOverlayWindowIds: [],
       // Scene motion ON: each switch glides for 320ms mid-recording, so this
@@ -216,7 +231,7 @@ async function runSwitchScenario(ws, smoke, { label, sources, streamTarget, dura
   )
 }
 
-function sessionParams({ sources, streamTarget, outputDirectoryCapability }) {
+function sessionParams({ sources, streamTarget, video, outputDirectoryCapability }) {
   const timestamp = '2026-01-01T00:00:00.000Z'
   const streamEnabled = Boolean(streamTarget)
   return {

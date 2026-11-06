@@ -46,6 +46,30 @@ export function isLinuxAppImageExecutable(appExecutable, platform = process.plat
   return platform === 'linux' && /\.AppImage$/i.test(String(appExecutable ?? ''))
 }
 
+/**
+ * The `launchDevApp` options that run a packaged build instead of the dev app,
+ * or none when no executable is given. A packaged build serves the smoke
+ * command server only to the holder of this per-launch capability, and still
+ * refuses the dev-only commands (`authorize-smoke-resource`, `eval-js`), so a
+ * smoke that records lets the isolated profile pick the recordings folder.
+ */
+export function packagedSmokeLaunchOptions({ appExecutable, capability } = {}) {
+  if (!appExecutable) return { env: {} }
+  if (!capability) {
+    throw new Error('capability is required with appExecutable.')
+  }
+  return {
+    env: {
+      VIDEORC_SMOKE_PACKAGED_APP: '1',
+      VIDEORC_PACKAGED_SMOKE_TEST: '1',
+      VIDEORC_SMOKE_COMMAND_CAPABILITY: capability,
+      VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
+    },
+    packagedSmokeCommandCapability: capability,
+    spawnSpec: { command: resolve(appExecutable), args: [] }
+  }
+}
+
 export function assertPackagedSmokePlatform(platform = process.platform) {
   if (platform !== 'darwin' && platform !== 'win32' && platform !== 'linux') {
     throw new Error(
