@@ -2596,7 +2596,7 @@ const sessionSummarySchema = boundedSemanticValue(
       // Plan 157: separate-source take membership.
       takeId: optionalSchema(boundedString),
       recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera'])),
-      // A take Videorc stopped mid-recording, recovered on the next start.
+      // A take that ended early, recovered as MP4 (or not).
       interruptionRecovery: optionalSchema(interruptionRecoverySchema)
     },
     { allowUnknown: false }
