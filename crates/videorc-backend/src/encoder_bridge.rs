@@ -4568,16 +4568,15 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         next_frame_at = window_started_at + frame_interval;
         first_frame_wait_sequence = None;
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
-    } else if !matches!(
-        video_output,
-        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
-    ) {
+    } else if !video_output.uses_encoded_h264() {
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
     }
     // VideoToolbox outputs signal readiness at their FIRST FED FRAME below
     // (instant-record P4): `Recording` then means "the first frame is in the
-    // encoder", not merely "the writer thread exists".
+    // encoder", not merely "the writer thread exists". Media Foundation
+    // signals once its first access unit is in the FIFO (#1068), the same
+    // proof the D3D11 writer gives, so its software first frame is paid
+    // before `Recording` and FFmpeg's progress report can be a watchdog.
 
     while !stop.load(Ordering::Relaxed) {
         // Plan 200 D1: a shed separate file drains to its own last tick, even
@@ -5277,8 +5276,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                         "Recording audio epoch established from first video presentation"
                     );
                 }
-                // No-op for outputs that already signalled at startup.
-                signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+                // No-op for outputs that already signalled at startup. Media
+                // Foundation waits for its first access unit in the FIFO.
+                if !video_output.uses_media_foundation() {
+                    signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+                }
             }
             last_fed_sequence = Some(frame_sequence);
             max_source_to_encode_age_ms =
@@ -5605,6 +5607,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         };
         if write_result.is_ok() && video_toolbox_output_frames > output_frames_before_write {
             last_output_progress_at = Instant::now();
+            if video_output.uses_media_foundation() {
+                // #1068: the first access unit reached FFmpeg's FIFO. Later
+                // writes find the sender already taken.
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
+            }
         }
         if let Err(error) = write_result {
             // A closed downstream (EPIPE/EOF: FFmpeg exited or was stopped)
@@ -5619,6 +5626,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &error,
             );
             terminal_writer_error = Some(error.clone());
+            // Before the first access unit, a waiting session start gets
+            // this error instead of a generic "stopped before ready".
+            signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error.clone()));
             emit_encoder_bridge_diagnostics_from_thread(
                 &diagnostics_tx,
                 session_id.clone(),
