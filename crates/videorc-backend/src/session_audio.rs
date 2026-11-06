@@ -404,6 +404,15 @@ use crate::audio::{
 use crate::sound_mix::{SoundVoices, VoiceStart};
 
 const WRITE_DEADLINE: Duration = Duration::from_secs(5);
+/// How long one chunk may wait on a FIFO that accepts no PCM before the
+/// output counts as wedged. FFmpeg reads the session audio and the video in
+/// one process, so the audio waits as long as the video writers do (plan
+/// 087). Five seconds ended the audio during a six-second freeze the video
+/// waited out: FFmpeg saw its audio input end, `apad` filled the `-shortest`
+/// queue with silence, and FFmpeg exited about 20 s later with ENOSPC, taking
+/// the recording and the stream with it (ogre, 2026-11-04 and 2026-11-06).
+/// Stop still ends a blocked write at once, and its drain has its own deadline.
+const OUTPUT_WRITE_DEADLINE: Duration = crate::encoder_bridge::OUTPUT_WEDGED_TIMEOUT;
 const EPOCH_DEADLINE: Duration = Duration::from_secs(30);
 static OWNED_WRITERS: AtomicU64 = AtomicU64::new(0);
 
@@ -6953,7 +6962,7 @@ fn write_rendered_chunk(
     mut wait: impl FnMut(),
 ) -> io::Result<WrittenChunk> {
     let started = now();
-    let deadline = started + WRITE_DEADLINE;
+    let deadline = started + OUTPUT_WRITE_DEADLINE;
     let mut bytes = vec![0; samples * 4];
     let mut written = 0;
     let mut stale_from = None;
@@ -7725,7 +7734,7 @@ mod tests {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
-            || now.set(now.get() + WRITE_DEADLINE),
+            || now.set(now.get() + OUTPUT_WRITE_DEADLINE),
         );
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
         assert!(writer.bytes.is_empty());
@@ -7747,6 +7756,56 @@ mod tests {
         );
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::Interrupted);
         assert!(writer.bytes.is_empty());
+    }
+
+    /// Ogre, 2026-11-06 (`smoke:multistream-endurance` session B): FFmpeg
+    /// frozen for six seconds stopped reading the session audio. The video
+    /// writers waited it out; the audio gave up at five seconds and FFmpeg
+    /// later died on `apad` silence. The chunk now waits as long as the video
+    /// and goes out as stale silence once the reader drains again.
+    #[test]
+    fn a_six_second_freeze_is_waited_out_as_stale_silence() {
+        struct FrozenUntil<'a> {
+            bytes: Vec<u8>,
+            now: &'a std::cell::Cell<Instant>,
+            resume_at: Instant,
+        }
+        impl Write for FrozenUntil<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.now.get() < self.resume_at {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let started = Instant::now();
+        let now = std::cell::Cell::new(started);
+        let settings = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
+        let mut writer = FrozenUntil {
+            bytes: vec![],
+            now: &now,
+            resume_at: started + Duration::from_secs(6),
+        };
+        let written = write_chunk_with_clock(
+            &mut writer,
+            &[0.8; 960],
+            &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            || now.get(),
+            || now.set(now.get() + Duration::from_millis(10)),
+        )
+        .expect("a six-second freeze is a stall the session waits out")
+        .written;
+        assert_eq!(writer.bytes.len(), 960 * 4);
+        assert!(written.samples.iter().all(|sample| *sample == 0.0));
+        assert_eq!(written.stale_from, Some(0));
     }
 
     #[test]

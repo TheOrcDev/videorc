@@ -24272,7 +24272,7 @@ fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
         || line.contains("could not open encoder")
     {
         Some("encoder-open-failed")
-    } else if line.contains("no space left on device")
+    } else if (line.contains("no space left on device") && !ffmpeg_filter_thread_line(&line))
         // Windows ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL.
         || line.contains("not enough space on the disk")
         || line.contains("disk is full")
@@ -24285,6 +24285,18 @@ fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// FFmpeg also returns ENOSPC ("No space left on device") for a full
+/// in-memory frame queue. A filtergraph thread (`[af#…]`, `[vf#…]`, `[fc#…]`)
+/// never writes the file, so its ENOSPC is not a full disk: on ogre
+/// (2026-11-06) `apad` filled the `-shortest` queue after the session audio
+/// input ended, and the session told the streamer the recordings folder was
+/// full though no write had failed. A full disk fails in the muxer.
+fn ffmpeg_filter_thread_line(lowercase_line: &str) -> bool {
+    ["[af#", "[vf#", "[fc#"]
+        .iter()
+        .any(|context| lowercase_line.contains(context))
 }
 
 fn audio_output_channels(input_layout: &InputLayout) -> u16 {
@@ -44330,6 +44342,21 @@ mod tests {
         );
         assert_eq!(
             classify_ffmpeg_fatal_line("av_interleaved_write_frame(): No space left on device"),
+            Some("disk-full")
+        );
+        // Ogre, 2026-11-06: a filter's frame queue, not the recordings folder.
+        for line in [
+            "[af#0:1 @ 0x561c22933d00] Error sending frames to consumers: No space left on device",
+            "[af#0:1 @ 0x561c22933d00] Task finished with error code: -28 (No space left on device)",
+            "[vf#0:0 @ 0x55] Terminating thread with return code -28 (No space left on device)",
+            "[fc#0 @ 0x55] Error sending frames to consumers: No space left on device",
+        ] {
+            assert_eq!(classify_ffmpeg_fatal_line(line), None, "{line}");
+        }
+        assert_eq!(
+            classify_ffmpeg_fatal_line(
+                "[out#0/matroska @ 0x55] Error submitting a packet to the muxer: No space left on device"
+            ),
             Some("disk-full")
         );
         assert_eq!(
