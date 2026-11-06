@@ -17314,11 +17314,20 @@ fn append_h264_encoding_args_for_platform_with_timing(
             }
         },
         FfmpegH264Platform::LinuxSoftware => {
+            // A take keeps every frame. On hard content (per-frame noise, a
+            // fast game) OpenH264's bitrate rate control overshoots, and with
+            // skipping allowed it drops most frames: 10 s 1080p30 takes on
+            // ogre kept 39 of 301 frames (3.8 fps) and failed the
+            // session-decay cadence gate, while the same takes with skipping
+            // off kept all 300 at 30 fps. A record-only output takes the
+            // bitrate overshoot instead. A stream keeps the #149
+            // skip-on-overshoot posture: an ingest sent several times its
+            // bitrate buffers for every viewer.
             args.extend([
                 "-rc_mode".to_string(),
                 "bitrate".to_string(),
                 "-allow_skip_frames".to_string(),
-                "1".to_string(),
+                if low_latency { "1" } else { "0" }.to_string(),
             ]);
             args.extend(linux_openh264_threading_args(
                 std::thread::available_parallelism().map_or(1, |count| count.get()),
@@ -17451,9 +17460,9 @@ fn linux_openh264_threading_args(parallelism: usize) -> [String; 4] {
 /// answers noise by skipping almost every frame, so FFmpeg's `speed=` measured
 /// rate control rather than the CPU: a Ryzen 5 5600 read 0.017x at 720p30
 /// ("146 frames skipped") while encoding the same noise frame-for-frame at
-/// 2.9x, and every rung failed. Benchmark sessions encode every frame; real
-/// sessions keep the #149 skip-on-overshoot posture. No-op for encoders
-/// without the option.
+/// 2.9x, and every rung failed. Benchmark sessions encode every frame; Windows
+/// sessions and Linux streams keep the #149 skip-on-overshoot posture (Linux
+/// record-only sessions never skip). No-op for encoders without the option.
 fn disable_openh264_frame_skip(args: &mut [String]) {
     if let Some(index) = args.iter().position(|arg| arg == "-allow_skip_frames")
         && let Some(value) = args.get_mut(index + 1)
@@ -30282,6 +30291,29 @@ mod tests {
         assert_eq!(arg_value(&linux_software_args, "-c:v"), Some("libopenh264"));
         assert_eq!(arg_value(&linux_software_args, "-pix_fmt"), Some("yuv420p"));
         assert_eq!(arg_value(&linux_software_args, "-rc_mode"), Some("bitrate"));
+        // A stream keeps skip-on-overshoot; a record-only take keeps every
+        // frame (ogre hard-content decay: 39 of 301 frames with skipping).
+        assert_eq!(
+            arg_value(&linux_software_args, "-allow_skip_frames"),
+            Some("1")
+        );
+        let mut linux_software_record_args = Vec::new();
+        append_h264_encoding_args_for_platform(
+            &mut linux_software_record_args,
+            &video,
+            FfmpegH264Platform::LinuxSoftware,
+            false,
+            LinuxVaapiArgProfile::Standard,
+            false,
+        );
+        assert_eq!(
+            arg_value(&linux_software_record_args, "-rc_mode"),
+            Some("bitrate")
+        );
+        assert_eq!(
+            arg_value(&linux_software_record_args, "-allow_skip_frames"),
+            Some("0")
+        );
         // Slices are what libopenh264 threads across; -threads alone is a
         // no-op. Windows software keeps the #149-benchmarked single slice.
         let slices = arg_value(&linux_software_args, "-slices")
@@ -39769,14 +39801,18 @@ mod tests {
         let mut benchmark_params = base_params(true, false);
         benchmark_params.purpose = crate::protocol::SessionPurpose::PerformanceCheck;
 
-        for platform in [
-            FfmpegH264Platform::LinuxSoftware,
-            FfmpegH264Platform::WindowsSoftware,
+        for (platform, capture_skip) in [
+            (FfmpegH264Platform::LinuxSoftware, "0"),
+            (FfmpegH264Platform::WindowsSoftware, "1"),
         ] {
-            // Real sessions keep skip-on-overshoot; the benchmark must not let
-            // rate control skip its noise frames and fake a slow encoder.
+            // Windows record-only sessions keep skip-on-overshoot and Linux
+            // ones keep every frame; the benchmark must not let rate control
+            // skip its noise frames and fake a slow encoder.
             let capture_args = args_for(&capture_params, platform);
-            assert_eq!(arg_value(&capture_args, "-allow_skip_frames"), Some("1"));
+            assert_eq!(
+                arg_value(&capture_args, "-allow_skip_frames"),
+                Some(capture_skip)
+            );
             let benchmark_args = args_for(&benchmark_params, platform);
             assert_eq!(arg_value(&benchmark_args, "-c:v"), Some("libopenh264"));
             assert_eq!(arg_value(&benchmark_args, "-allow_skip_frames"), Some("0"));
@@ -39826,16 +39862,20 @@ mod tests {
         let mut benchmark_params = base_params(true, false);
         benchmark_params.purpose = crate::protocol::SessionPurpose::PerformanceCheck;
 
-        for platform in [
-            FfmpegH264Platform::LinuxSoftware,
-            FfmpegH264Platform::WindowsSoftware,
+        for (platform, capture_skip) in [
+            (FfmpegH264Platform::LinuxSoftware, "0"),
+            (FfmpegH264Platform::WindowsSoftware, "1"),
         ] {
             // The legacy builder is the escape hatch when
             // VIDEORC_ENCODER_BRIDGE / VIDEORC_RECORDING_ENCODER_BRIDGE
             // disable the compositor bridge. Benchmark sessions must still
-            // encode every noise frame; real sessions keep skip-on-overshoot.
+            // encode every noise frame; Windows record-only sessions keep
+            // skip-on-overshoot and Linux ones keep every frame.
             let capture_args = args_for(&capture_params, platform);
-            assert_eq!(arg_value(&capture_args, "-allow_skip_frames"), Some("1"));
+            assert_eq!(
+                arg_value(&capture_args, "-allow_skip_frames"),
+                Some(capture_skip)
+            );
             let benchmark_args = args_for(&benchmark_params, platform);
             assert_eq!(arg_value(&benchmark_args, "-c:v"), Some("libopenh264"));
             assert_eq!(arg_value(&benchmark_args, "-allow_skip_frames"), Some("0"));
