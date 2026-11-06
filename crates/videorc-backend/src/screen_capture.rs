@@ -30,6 +30,77 @@ impl ScreenCaptureCallbackCadence {
     }
 }
 
+/// Plan 219 S1: where a picked ScreenCaptureKit window is right now, from
+/// one window-server lookup (no ScreenCaptureKit discovery round trip).
+///
+/// ScreenCaptureKit's on-screen list (the one capture starts from) drops a
+/// window the moment it is minimized, its app is hidden, or it sits on
+/// another desktop; the window server still lists it, without the on-screen
+/// mark. A window that is not listed at all was closed or its app quit.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WindowPresence {
+    /// Listed and on screen: a capture of it delivers frames.
+    OnScreen { name: String },
+    /// Listed but not on screen (minimized, hidden app, another desktop):
+    /// a running stream goes silent and resumes by itself on restore; a new
+    /// stream starts but never delivers a complete frame.
+    OffScreen { name: String },
+    /// Not listed by the window server: closed, or its app quit.
+    Gone,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl WindowPresence {
+    /// What the streamer sees when the picked window is only out of sight.
+    /// The name is the window's app and title, the way Sources lists it.
+    pub(crate) fn out_of_sight_record_message(name: &str) -> String {
+        format!(
+            "{name} is minimized, hidden or on another desktop. Bring it back, then press Record."
+        )
+    }
+
+    /// What the streamer sees when the picked window was closed.
+    pub(crate) fn closed_message() -> String {
+        "The window you picked was closed. Pick it again in Sources.".to_string()
+    }
+
+    /// The health notice while a captured window is out of sight (plan 219
+    /// S1): the picture holds its last frame and comes back on its own.
+    pub(crate) fn out_of_sight_paused_message(name: &str) -> String {
+        format!(
+            "{name} is minimized, hidden or on another desktop. The picture is paused until it's back."
+        )
+    }
+
+    /// The health notice when the window is back and frames flow again.
+    pub(crate) fn back_message(name: &str) -> String {
+        format!("{name} is back. The picture is moving again.")
+    }
+}
+
+/// The name Sources shows for a window: "App - Title", or whichever half the
+/// window server knows, or "The window" when it knows neither.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn window_presence_name(owner: Option<&str>, title: Option<&str>) -> String {
+    let owner = owner.map(str::trim).filter(|value| !value.is_empty());
+    let title = title.map(str::trim).filter(|value| !value.is_empty());
+    match (owner, title) {
+        (Some(owner), Some(title)) => format!("{owner} - {title}"),
+        (Some(owner), None) => owner.to_string(),
+        (None, Some(title)) => title.to_string(),
+        (None, None) => "The window".to_string(),
+    }
+}
+
+/// Plan 219 S1: presence of one ScreenCaptureKit window id. macOS only; the
+/// other platforms have no equivalent trap (their window lists are not
+/// filtered by visibility) and keep their behaviour.
+#[cfg(target_os = "macos")]
+pub(crate) fn window_presence(window_id: u32) -> WindowPresence {
+    macos::window_presence(window_id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowsDxgiSourceId {
     pub adapter_luid: u64,
@@ -961,6 +1032,58 @@ pub(crate) mod macos {
         Ok(select_app_window(params, running, &windows))
     }
 
+    /// One `CGWindowListCopyWindowInfo(kCGWindowListOptionAll)` pass. The
+    /// on-screen-only and including-window options both drop a minimized or
+    /// hidden window (probed 2026-11-06), so the whole list is scanned for
+    /// the id; it is a few hundred small dictionaries.
+    pub(crate) fn window_presence(window_id: u32) -> WindowPresence {
+        use objc2::runtime::AnyObject;
+        use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
+        use objc2_foundation::NSDictionary;
+        let Some(list) = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0) else {
+            // The window server answered nothing: treat the window as out of
+            // sight rather than closed, so nothing is torn down on a hiccup.
+            return WindowPresence::OffScreen {
+                name: "The window".to_string(),
+            };
+        };
+        for index in 0..list.count() {
+            // CFDictionary/NSDictionary are toll-free bridged. The values are
+            // NSNumber (kCGWindowNumber, kCGWindowIsOnscreen) and NSString
+            // (kCGWindowOwnerName, kCGWindowName).
+            let dict = unsafe {
+                &*(list.value_at_index(index) as *const NSDictionary<NSString, AnyObject>)
+            };
+            let number = dict
+                .objectForKey(ns_string!("kCGWindowNumber"))
+                .and_then(|value| value.downcast::<NSNumber>().ok())
+                .map(|value| value.unsignedIntValue());
+            if number != Some(window_id) {
+                continue;
+            }
+            let owner = dict
+                .objectForKey(ns_string!("kCGWindowOwnerName"))
+                .and_then(|value| value.downcast::<NSString>().ok())
+                .map(|value| value.to_string());
+            let title = dict
+                .objectForKey(ns_string!("kCGWindowName"))
+                .and_then(|value| value.downcast::<NSString>().ok())
+                .map(|value| value.to_string());
+            let name = window_presence_name(owner.as_deref(), title.as_deref());
+            // The key is present (true) only while the window is on screen.
+            let on_screen = dict
+                .objectForKey(ns_string!("kCGWindowIsOnscreen"))
+                .and_then(|value| value.downcast::<NSNumber>().ok())
+                .is_some_and(|value| value.boolValue());
+            return if on_screen {
+                WindowPresence::OnScreen { name }
+            } else {
+                WindowPresence::OffScreen { name }
+            };
+        }
+        WindowPresence::Gone
+    }
+
     fn ordered_app_windows(content: &Content) -> Result<Vec<AppWindow>, String> {
         // CGWindowListCopyWindowInfo supplies documented front-to-back order;
         // SCShareableContent.windows does not promise a z-order.
@@ -1437,6 +1560,41 @@ pub(crate) mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_presence_copy_names_the_window_and_never_an_id() {
+        let name = window_presence_name(Some("Fixture Alpha"), Some("Alpha"));
+        assert_eq!(name, "Fixture Alpha - Alpha");
+        assert_eq!(window_presence_name(Some(" Notes "), None), "Notes");
+        assert_eq!(window_presence_name(None, Some("Untitled")), "Untitled");
+        assert_eq!(window_presence_name(None, Some("  ")), "The window");
+        let record = WindowPresence::out_of_sight_record_message(&name);
+        assert_eq!(
+            record,
+            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. Bring it back, then press Record."
+        );
+        assert_eq!(
+            WindowPresence::closed_message(),
+            "The window you picked was closed. Pick it again in Sources."
+        );
+        assert_eq!(
+            WindowPresence::out_of_sight_paused_message(&name),
+            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. The picture is paused until it's back."
+        );
+        assert_eq!(
+            WindowPresence::back_message(&name),
+            "Fixture Alpha - Alpha is back. The picture is moving again."
+        );
+        for copy in [
+            record,
+            WindowPresence::closed_message(),
+            WindowPresence::out_of_sight_paused_message(&name),
+        ] {
+            assert!(!copy.contains("screencapturekit"), "{copy}");
+            assert!(!copy.contains("SourceMissing"), "{copy}");
+            assert!(!copy.contains("ScreenCaptureKit"), "{copy}");
+        }
+    }
 
     #[test]
     fn app_previews_group_count_front_and_exclusions() {

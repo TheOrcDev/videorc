@@ -15,6 +15,8 @@ import {
   hideSpanVerdict,
   newScenesGate,
   passwordManagerGate,
+  outOfSightGate,
+  outOfSightRefusalCopyOk,
   relaunchGate,
   sharpFraction,
   smartScenesVerdict,
@@ -306,6 +308,46 @@ describe('passwordManagerGate', () => {
       'hid after 1200 ms (> 600 ms)',
       'a manual hide was auto-shown when the app left the front'
     ])
+  })
+})
+
+describe('outOfSightGate', () => {
+  const good = {
+    noticed: true,
+    back: true,
+    recoveryPhases: [],
+    sourceMissingSeen: false,
+    screenStates: ['live'],
+    framesBefore: 100,
+    framesWhileHidden: 130,
+    framesAfter: 400,
+    refusal: { state: 'source-missing', copyOk: true, liveAfterRestore: true }
+  }
+  it('passes a held window that came back on the same generation and a refused start', () => {
+    assert.ok(outOfSightGate(good).ok)
+  })
+  it('fails a restart, a reset frame counter, a missing notice or bad copy', () => {
+    assert.equal(outOfSightGate({ ...good, recoveryPhases: ['restarting'] }).failures.length, 1)
+    assert.equal(outOfSightGate({ ...good, framesWhileHidden: 0 }).failures.length, 1)
+    assert.equal(outOfSightGate({ ...good, noticed: false, back: false }).failures.length, 2)
+    assert.equal(
+      outOfSightGate({ ...good, refusal: { ...good.refusal, copyOk: false } }).failures.length,
+      1
+    )
+    assert.equal(outOfSightGate({ ...good, refusal: null }).failures.length, 1)
+  })
+  it('knows the refusal copy', () => {
+    assert.ok(
+      outOfSightRefusalCopyOk(
+        'Fixture Alpha - Fixture Alpha is minimized, hidden or on another desktop. Bring it back, then press Record.'
+      )
+    )
+    assert.ok(
+      !outOfSightRefusalCopyOk('ScreenCaptureKit window is missing: window:screencapturekit:40696')
+    )
+    assert.ok(
+      !outOfSightRefusalCopyOk('The window you picked was closed. Pick it again in Sources.')
+    )
   })
 })
 

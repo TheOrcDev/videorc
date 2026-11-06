@@ -37,6 +37,7 @@ export function launchFixtureApp(app, { x, y, width = 1280, height = 720, onLine
       windowId: null,
       lines: [],
       flashWaiters: [],
+      lineWaiters: [],
       exited: null
     }
     let buffer = ''
@@ -56,6 +57,9 @@ export function launchFixtureApp(app, { x, y, width = 1280, height = 720, onLine
         if (!line) continue
         fixture.lines.push(line)
         onLine?.(line)
+        for (const waiter of fixture.lineWaiters.splice(0)) {
+          if (!waiter(line)) fixture.lineWaiters.push(waiter)
+        }
         const ready = /^ready pid=(\d+) window_number=(\d+)/.exec(line)
         if (ready) {
           clearTimeout(timer)
@@ -118,6 +122,53 @@ export function flashFixtureApp(fixture, label) {
       })
     }
   })
+}
+
+/**
+ * Resolves with the first stdout line matching `pattern`, or rejects after
+ * `timeoutMs`. The fixture's own report, so no window-server query is needed.
+ */
+export function waitForFixtureLine(fixture, pattern, { timeoutMs = 5000, label = 'line' } = {}) {
+  return new Promise((resolveLine, rejectLine) => {
+    const timer = setTimeout(() => {
+      fixture.lineWaiters = fixture.lineWaiters.filter((entry) => entry !== waiter)
+      rejectLine(new Error(`${fixture.name} printed no ${label} within ${timeoutMs} ms`))
+    }, timeoutMs)
+    const waiter = (line) => {
+      const match = pattern.exec(line)
+      if (!match) return false
+      clearTimeout(timer)
+      resolveLine(match)
+      return true
+    }
+    fixture.lineWaiters.push(waiter)
+  })
+}
+
+/**
+ * Plan 219: SIGUSR2 minimizes the fixture's window (the fixture does it
+ * itself, so no Accessibility grant is needed). Resolves with the wall-clock
+ * ms AppKit reported the window minimized.
+ */
+export async function minimizeFixtureApp(fixture, { timeoutMs = 5000 } = {}) {
+  const reported = waitForFixtureLine(fixture, /^minimized at_ms=(\d+)/, {
+    timeoutMs,
+    label: 'minimized line'
+  })
+  process.kill(fixture.pid, 'SIGUSR2')
+  const match = await reported
+  return Number(match[1])
+}
+
+/** Plan 219: SIGUSR2 again restores a minimized fixture window. */
+export async function restoreFixtureApp(fixture, { timeoutMs = 5000 } = {}) {
+  const reported = waitForFixtureLine(fixture, /^restored at_ms=(\d+)/, {
+    timeoutMs,
+    label: 'restored line'
+  })
+  process.kill(fixture.pid, 'SIGUSR2')
+  const match = await reported
+  return Number(match[1])
 }
 
 /** SIGTERM, then SIGKILL after `graceMs`, for one fixture. Resolves when it is gone. */

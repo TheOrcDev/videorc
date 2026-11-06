@@ -17627,25 +17627,78 @@ async fn prepare_source_iso_selected_capture(
         },
         ensure_selected_preview_screen_live(state, params, ffmpeg_path)
     );
-    anyhow::ensure!(
-        matches!(camera.state, crate::protocol::PreviewCameraState::Live),
-        "Selected Camera could not be prepared for separate recording ({:?}): {}",
-        camera.state,
-        camera
-            .message
-            .as_deref()
-            .unwrap_or("capture did not become live")
-    );
-    anyhow::ensure!(
-        matches!(screen.state, crate::protocol::PreviewScreenState::Live),
-        "Selected Screen/Window could not be prepared for separate recording ({:?}): {}",
-        screen.state,
-        screen
-            .message
-            .as_deref()
-            .unwrap_or("capture did not become live")
-    );
+    // Plan 219 S2: the streamer reads the refusal verbatim, so it carries the
+    // capture's own sentence (or a plain fallback) and never a state enum or
+    // a source id; those go to the log.
+    if !matches!(camera.state, crate::protocol::PreviewCameraState::Live) {
+        tracing::warn!(
+            state = ?camera.state,
+            camera_id = ?params.sources.camera_id,
+            message = ?camera.message,
+            "separate-source preflight: the selected camera did not come live"
+        );
+        anyhow::bail!(
+            "{}",
+            source_iso_capture_refusal(SourceIsoRefusalRole::Camera, camera.message.as_deref())
+        );
+    }
+    if !matches!(screen.state, crate::protocol::PreviewScreenState::Live) {
+        tracing::warn!(
+            state = ?screen.state,
+            screen_id = ?params.sources.screen_id,
+            window_id = ?params.sources.window_id,
+            message = ?screen.message,
+            "separate-source preflight: the selected screen or window did not come live"
+        );
+        anyhow::bail!(
+            "{}",
+            source_iso_capture_refusal(SourceIsoRefusalRole::Screen, screen.message.as_deref())
+        );
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceIsoRefusalRole {
+    Camera,
+    Screen,
+}
+
+/// Plan 219 S2: what the streamer reads when a separate-source take's capture
+/// did not come live. A capture message written for people (the out-of-sight
+/// and closed-window copy, a permission sentence) passes through; one that
+/// names an engine or a source id is replaced by the role's plain fallback.
+fn source_iso_capture_refusal(role: SourceIsoRefusalRole, message: Option<&str>) -> String {
+    let message = message.map(str::trim).filter(|message| !message.is_empty());
+    if let Some(message) = message
+        && !capture_message_names_internals(message)
+    {
+        return message.to_string();
+    }
+    match role {
+        SourceIsoRefusalRole::Camera => {
+            "The camera didn't start. Try again. If it keeps happening, export a support bundle from Health."
+                .to_string()
+        }
+        SourceIsoRefusalRole::Screen => {
+            "The screen or window you picked didn't start. Pick it again in Sources, then press Record."
+                .to_string()
+        }
+    }
+}
+
+fn capture_message_names_internals(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "screencapturekit",
+        "avfoundation",
+        "ffmpeg",
+        "dxgi",
+        "gdigrab",
+        "::",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// Starts the selected Screen/Window preview unless it is already live on that
@@ -41899,6 +41952,61 @@ mod tests {
                 visible, iso,
                 "omitted source readiness belongs to ISO barrier, not Combined scene proof"
             );
+        }
+    }
+
+    /// Plan 219 S2: the separate-source refusal the streamer reads carries
+    /// the capture's own sentence and never an enum, an engine or a source id.
+    #[test]
+    fn separate_source_refusal_reads_as_a_sentence_and_never_names_internals() {
+        use crate::screen_capture::WindowPresence;
+        let out_of_sight = WindowPresence::out_of_sight_record_message("Fixture Alpha - Alpha");
+        assert_eq!(
+            source_iso_capture_refusal(SourceIsoRefusalRole::Screen, Some(&out_of_sight)),
+            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. Bring it back, then press Record."
+        );
+        let closed = WindowPresence::closed_message();
+        assert_eq!(
+            source_iso_capture_refusal(SourceIsoRefusalRole::Screen, Some(&closed)),
+            "The window you picked was closed. Pick it again in Sources."
+        );
+        let internal = source_iso_capture_refusal(
+            SourceIsoRefusalRole::Screen,
+            Some("ScreenCaptureKit window is missing: window:screencapturekit:40696"),
+        );
+        assert_eq!(
+            internal,
+            "The screen or window you picked didn't start. Pick it again in Sources, then press Record."
+        );
+        assert_eq!(
+            source_iso_capture_refusal(SourceIsoRefusalRole::Screen, None),
+            internal
+        );
+        assert_eq!(
+            source_iso_capture_refusal(SourceIsoRefusalRole::Camera, Some("  ")),
+            "The camera didn't start. Try again. If it keeps happening, export a support bundle from Health."
+        );
+        assert_eq!(
+            source_iso_capture_refusal(
+                SourceIsoRefusalRole::Camera,
+                Some("The camera is in use by another app.")
+            ),
+            "The camera is in use by another app."
+        );
+        for copy in [
+            source_iso_capture_refusal(SourceIsoRefusalRole::Screen, Some(&out_of_sight)),
+            source_iso_capture_refusal(SourceIsoRefusalRole::Screen, Some(&closed)),
+            internal,
+            source_iso_capture_refusal(
+                SourceIsoRefusalRole::Camera,
+                Some("AVFoundation device 0x1 failed: CameraStartError::Busy"),
+            ),
+        ] {
+            assert!(!copy.contains("SourceMissing"), "{copy}");
+            assert!(!copy.contains("screencapturekit"), "{copy}");
+            assert!(!copy.contains("::"), "{copy}");
+            assert!(!copy.contains("({"), "{copy}");
+            assert!(!copy.contains("could not"), "{copy}");
         }
     }
 
