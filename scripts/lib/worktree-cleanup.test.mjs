@@ -5,7 +5,8 @@ import {
   isInside,
   mergedPrFor,
   parseLsofCwds,
-  parseWorktreeList
+  parseWorktreeList,
+  readProcCwds
 } from './worktree-cleanup.mjs'
 
 const HEAD = 'a'.repeat(40)
@@ -72,6 +73,52 @@ test('parseLsofCwds pairs each cwd with its process and drops the caller', () =>
     { pid: 10, command: 'node', cwd: '/wt/feature' },
     { pid: 11, command: 'zsh', cwd: '/repo' }
   ])
+})
+
+const procError = (code) => Object.assign(new Error(code), { code })
+const fakeProc = (processes, entries = Object.keys(processes)) => ({
+  readdir: (path) => {
+    assert.equal(path, '/proc')
+    return entries
+  },
+  readlink: (path) => {
+    const fake = processes[/^\/proc\/(\d+)\/cwd$/.exec(path)[1]]
+    if (fake.cwdError) throw procError(fake.cwdError)
+    return fake.cwd
+  },
+  readFile: (path) => {
+    const fake = processes[/^\/proc\/(\d+)\/comm$/.exec(path)[1]]
+    if (fake.commError) throw procError(fake.commError)
+    return `${fake.command}\n`
+  }
+})
+
+test('readProcCwds reads each process cwd from /proc and drops the caller', () => {
+  const proc = fakeProc(
+    {
+      10: { command: 'node', cwd: '/wt/feature' },
+      11: { command: 'zsh', cwd: '/repo' },
+      12: { command: 'node', cwd: '/x' }
+    },
+    ['10', 'self', '11', 'net', '12']
+  )
+  assert.deepEqual(readProcCwds(proc, 12), [
+    { pid: 10, command: 'node', cwd: '/wt/feature' },
+    { pid: 11, command: 'zsh', cwd: '/repo' }
+  ])
+})
+
+test('readProcCwds skips processes it may not inspect or that exited, and fails on anything else', () => {
+  const proc = fakeProc({
+    1: { cwdError: 'EACCES' },
+    20: { cwdError: 'ENOENT' },
+    21: { command: 'cargo', cwd: '/wt/feature', commError: 'ESRCH' },
+    22: { command: 'node', cwd: '/wt/feature/apps/desktop' }
+  })
+  assert.deepEqual(readProcCwds(proc, 99), [
+    { pid: 22, command: 'node', cwd: '/wt/feature/apps/desktop' }
+  ])
+  assert.throws(() => readProcCwds(fakeProc({ 30: { cwdError: 'EIO' } }), 99), { code: 'EIO' })
 })
 
 test('a branch is done only when its HEAD is a merged PR head or behind one', () => {
