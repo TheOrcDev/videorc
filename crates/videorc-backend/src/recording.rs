@@ -266,6 +266,15 @@ fn published_output_startup_failure(
         })
 }
 
+/// FFmpeg exited before the start committed, usually because this FFmpeg
+/// rejects an argument or a device failed to open. `reason` is FFmpeg's own.
+fn ffmpeg_exited_during_startup(status: ExitStatus, reason: Option<String>) -> anyhow::Error {
+    match reason {
+        Some(reason) => anyhow::anyhow!("FFmpeg exited during startup ({status}): {reason}"),
+        None => anyhow::anyhow!("FFmpeg exited during startup ({status}) without giving a reason"),
+    }
+}
+
 /// Once Starting is observable, every uncommitted exit must publish a
 /// terminal replacement for that exact session. Otherwise the renderer keeps
 /// the backend-owned session id and cannot clear its Starting state when the
@@ -883,6 +892,55 @@ impl UncommittedCaptureProcess {
         }
     }
 
+    /// Resolves once FFmpeg exits on its own before the start commits, so a
+    /// startup step that waits on FFmpeg can fail with FFmpeg's reason
+    /// instead of at its own deadline. Stays pending without a child. Cancel
+    /// safe, and waiting closes nothing FFmpeg still reads: its stdin is
+    /// either null or was already taken for the live audio control.
+    async fn exited(&mut self) -> ExitStatus {
+        match self.child.as_mut() {
+            Some(child) => match child.wait().await {
+                Ok(status) => status,
+                Err(_) => std::future::pending().await,
+            },
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Runs encoder-bridge priming, which waits up to 4 s for FFmpeg to open
+    /// the bridge FIFO. An FFmpeg that exits first (an argument this build
+    /// rejects, a VAAPI device that fails to open) never opens it, so its
+    /// exit is raced and the start fails at once with FFmpeg's own reason
+    /// instead of a priming timeout. Priming goes first: a bridge that dies
+    /// also makes FFmpeg exit, and the bridge's error is then the origin.
+    async fn prime_bridges(
+        &mut self,
+        progress: &FfmpegProgressBeacon,
+        priming: impl std::future::Future<Output = Result<()>>,
+    ) -> Option<(PublishedSessionStartFailureOrigin, anyhow::Error)> {
+        let primed = tokio::select! {
+            biased;
+            result = priming => Ok(result),
+            status = self.exited() => Err(status),
+        };
+        match primed {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some((PublishedSessionStartFailureOrigin::EncoderBridge, error)),
+            Err(status) => {
+                // FFmpeg is gone, so its stderr is closed and drains at once.
+                drain_ffmpeg_stderr_monitor(
+                    self.stderr_monitor.take(),
+                    FFMPEG_STDERR_DRAIN_TIMEOUT,
+                )
+                .await;
+                Some((
+                    PublishedSessionStartFailureOrigin::FfmpegOutputStartup,
+                    ffmpeg_exited_during_startup(status, progress.stderr_failure_reason()),
+                ))
+            }
+        }
+    }
+
     /// Terminates and reaps FFmpeg before startup-owned FIFO writers are
     /// joined. Native audio uses blocking FIFO writes once FFmpeg attaches;
     /// merely relying on reverse local drop order can therefore deadlock an
@@ -1229,6 +1287,15 @@ impl FfmpegProgressBeacon {
             })
     }
 
+    /// See [`FfmpegStderrTail::failure_reason`].
+    fn stderr_failure_reason(&self) -> Option<String> {
+        self.evidence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tail
+            .failure_reason()
+    }
+
     fn observe_media_seconds(&self, seconds: f64) {
         if !seconds.is_finite() || seconds <= 0.0 {
             return;
@@ -1288,21 +1355,45 @@ fn sanitized_ffmpeg_diagnostic_line(line: &str, max_chars: usize) -> String {
 struct FfmpegStderrTail {
     lines: std::collections::VecDeque<String>,
     first_fatal_category: Option<&'static str>,
+    /// The line that set `first_fatal_category`, kept after the ring drops it.
+    first_fatal_line: Option<String>,
 }
 
 impl FfmpegStderrTail {
     fn observe(&mut self, line: &str) {
-        if self.first_fatal_category.is_none() {
-            self.first_fatal_category = classify_ffmpeg_fatal_line(line);
-        }
         // FFmpeg quotes output URLs in its errors and an RTMP URL carries the
         // stream key. Bundle redaction only matches whole-string URLs, so the
         // persisted tail never keeps a URL token at all.
         let bounded = sanitized_ffmpeg_diagnostic_line(line, FFMPEG_STDERR_TAIL_LINE_CHARS);
+        if self.first_fatal_category.is_none() {
+            self.first_fatal_category = classify_ffmpeg_fatal_line(line);
+            if self.first_fatal_category.is_some() {
+                self.first_fatal_line = Some(bounded.clone());
+            }
+        }
         if self.lines.len() == FFMPEG_STDERR_TAIL_LINES {
             self.lines.pop_front();
         }
         self.lines.push_back(bounded);
+    }
+
+    /// FFmpeg's own reason for stopping, `cause | last`, for a startup
+    /// failure message: the first fatal line (or the oldest kept line), then
+    /// the newest when it differs. An FFmpeg that rejects its arguments
+    /// prints only a few lines, so the ring still holds the cause. `None`
+    /// when FFmpeg said nothing worth keeping.
+    fn failure_reason(&self) -> Option<String> {
+        let last = self.lines.back()?;
+        let cause = self
+            .first_fatal_line
+            .as_ref()
+            .or(self.lines.front())
+            .unwrap_or(last);
+        if cause == last {
+            Some(last.clone())
+        } else {
+            Some(format!("{cause} | {last}"))
+        }
     }
 
     /// `None` when FFmpeg said nothing worth keeping.
@@ -1542,8 +1633,9 @@ async fn relay_ffmpeg_stderr_teed<R>(
                 if let Some(category) = classify_ffmpeg_fatal_line(&line)
                     && let Some(ready) = startup_ready.take()
                 {
+                    let reason = progress.stderr_failure_reason().unwrap_or_default();
                     let _ = ready.send(Err(format!(
-                        "FFmpeg reported a fatal {category} error before output startup"
+                        "FFmpeg reported a fatal {category} error before output startup: {reason}"
                     )));
                 } else if ffmpeg_output_startup_media_seconds(&line).is_some()
                     && let Some(ready) = startup_ready.take()
@@ -1556,9 +1648,11 @@ async fn relay_ffmpeg_stderr_teed<R>(
             }
             Ok(None) => {
                 if let Some(ready) = startup_ready.take() {
-                    let _ = ready.send(Err(
-                        "FFmpeg stopped before confirming its first output media clock".to_string(),
-                    ));
+                    let message = "FFmpeg stopped before confirming its first output media clock";
+                    let _ = ready.send(Err(match progress.stderr_failure_reason() {
+                        Some(reason) => format!("{message}: {reason}"),
+                        None => message.to_string(),
+                    }));
                 }
                 let _ = sender.send(FfmpegStderrEvent::Eof).await;
                 break;
@@ -7020,7 +7114,7 @@ async fn start_session_with_timeline(
             }
         };
         let mut stream_bridge = None;
-        let bridge_startup_result: Result<()> = async {
+        let bridge_startup = async {
             stream_bridge = match (
                 encoder_bridge_stream_fifo.clone(),
                 encoder_bridge_stream_profile.as_ref(),
@@ -7087,16 +7181,17 @@ async fn start_session_with_timeline(
             } else {
                 recording_bridge.wait_until_ready().await?;
             }
-            if let Some(iso) = source_iso_runtime.as_mut() { iso.wait_until_ready().await?; }
-            Ok(())
-        }
-        .await;
+            if let Some(iso) = source_iso_runtime.as_mut() {
+                iso.wait_until_ready().await?;
+            }
+            Result::<()>::Ok(())
+        };
+        let bridge_startup_failure = uncommitted_capture_process
+            .prime_bridges(&ffmpeg_progress, bridge_startup)
+            .await;
         timeline.mark(RecordingStartPhase::BridgeReady);
-        if let Err(error) = bridge_startup_result {
-            uncommitted_capture_process.set_failure(
-                PublishedSessionStartFailureOrigin::EncoderBridge,
-                &format!("{error:#}"),
-            );
+        if let Some((origin, error)) = bridge_startup_failure {
+            uncommitted_capture_process.set_failure(origin, &format!("{error:#}"));
             let batch = begin_recording_encoder_bridge_teardown(
                 &mut recording_bridge,
                 &mut stream_bridge,
@@ -28970,6 +29065,126 @@ mod tests {
         .expect("uncommitted capture child terminates");
     }
 
+    /// A capture child that rejects its arguments the way an FFmpeg without
+    /// libopenh264 rejects `-allow_skip_frames`: two lines, then exit 8.
+    #[cfg(unix)]
+    fn capture_process_rejecting_an_argument() -> (UncommittedCaptureProcess, FfmpegProgressBeacon)
+    {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "echo \"[error] Unrecognized option 'allow_skip_frames'.\" >&2; \
+                 echo '[fatal] Error splitting the argument list: Option not found' >&2; \
+                 exit 8",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = spawn_owned_tokio(&mut command).expect("spawn capture child");
+        let progress = FfmpegProgressBeacon::default();
+        let mut events =
+            spawn_ffmpeg_stderr_reader(child.stderr.take(), None, progress.clone(), None)
+                .expect("capture child stderr");
+        let mut process = UncommittedCaptureProcess::new(child, CaptureStartupResources::default());
+        process.stderr_monitor = Some(tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if matches!(event, FfmpegStderrEvent::Eof) {
+                    return;
+                }
+            }
+        }));
+        (process, progress)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ffmpeg_that_exits_during_bridge_priming_fails_the_start_at_once_with_its_reason() {
+        let (mut process, progress) = capture_process_rejecting_an_argument();
+        // Priming never resolves here; for real it would wait out its 4 s
+        // deadline and report only "Encoder bridge first-frame priming timed
+        // out".
+        let (origin, error) = timeout(
+            Duration::from_secs(2),
+            process.prime_bridges(&progress, std::future::pending()),
+        )
+        .await
+        .expect("FFmpeg's exit ends priming before the bridge deadline")
+        .expect("an FFmpeg that exited fails the start");
+
+        assert_eq!(
+            origin,
+            PublishedSessionStartFailureOrigin::FfmpegOutputStartup
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "FFmpeg exited during startup (exit status: 8): Unrecognized option \
+             'allow_skip_frames'. | Error splitting the argument list: Option not found"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_bridge_error_stays_the_origin_when_ffmpeg_exits_with_it() {
+        let (mut process, progress) = capture_process_rejecting_an_argument();
+        // Reap first, so FFmpeg's exit and the bridge's error are both ready
+        // when the race is first polled.
+        process
+            .child
+            .as_mut()
+            .expect("capture child")
+            .wait()
+            .await
+            .expect("reap capture child");
+
+        let (origin, error) = process
+            .prime_bridges(&progress, async {
+                Err(anyhow::anyhow!(
+                    "Encoder bridge stopped before its first frame was ready"
+                ))
+            })
+            .await
+            .expect("a bridge error fails the start");
+
+        assert_eq!(origin, PublishedSessionStartFailureOrigin::EncoderBridge);
+        assert_eq!(
+            format!("{error:#}"),
+            "Encoder bridge stopped before its first frame was ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_priming_keeps_its_own_result_while_ffmpeg_runs() {
+        let mut command = long_running_capture_command();
+        command.kill_on_drop(true);
+        let child = spawn_owned_tokio(&mut command).expect("spawn capture child");
+        let mut process = UncommittedCaptureProcess::new(child, CaptureStartupResources::default());
+        let progress = FfmpegProgressBeacon::default();
+
+        assert!(
+            process
+                .prime_bridges(&progress, async { Ok(()) })
+                .await
+                .is_none()
+        );
+        let (origin, error) = process
+            .prime_bridges(&progress, async {
+                Err(anyhow::anyhow!(
+                    "Encoder bridge first-frame priming timed out"
+                ))
+            })
+            .await
+            .expect("a priming error fails the start");
+        assert_eq!(origin, PublishedSessionStartFailureOrigin::EncoderBridge);
+        assert_eq!(
+            format!("{error:#}"),
+            "Encoder bridge first-frame priming timed out"
+        );
+
+        process.terminate_and_reap_before_fifo_writer_join().await;
+    }
+
     #[tokio::test]
     async fn cancelled_post_spawn_start_publishes_terminal_only_after_reap_and_cleanup() {
         let state = test_state();
@@ -42770,6 +42985,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ffmpeg_stderr_relay_names_ffmpegs_reason_when_it_stops_before_output() {
+        let (event_sender, _events) = mpsc::channel(256);
+        let (ready_sender, ready) = oneshot::channel();
+        relay_ffmpeg_stderr(
+            BufReader::new(
+                &b"[error] Unrecognized option 'allow_skip_frames'.\n\
+                   [fatal] Error splitting the argument list: Option not found\n"[..],
+            ),
+            event_sender,
+            Some(ready_sender),
+            FfmpegProgressBeacon::default(),
+        )
+        .await;
+
+        assert_eq!(
+            ready.await.unwrap().unwrap_err(),
+            "FFmpeg stopped before confirming its first output media clock: Unrecognized \
+             option 'allow_skip_frames'. | Error splitting the argument list: Option not found"
+        );
+    }
+
+    #[tokio::test]
     async fn ffmpeg_stderr_relay_preserves_the_first_startup_fatal_category() {
         let (event_sender, mut events) = mpsc::channel(256);
         let (ready_sender, ready) = oneshot::channel();
@@ -42783,6 +43020,7 @@ mod tests {
 
         let error = ready.await.unwrap().unwrap_err();
         assert!(error.contains("output-open-failed"));
+        assert!(error.ends_with(": Could not write header for output file #0"));
         assert!(matches!(
             events.recv().await,
             Some(FfmpegStderrEvent::Line(line)) if line.contains("Could not write header")
@@ -51321,6 +51559,46 @@ mod low_end_windows_recording_tests {
                 .iter()
                 .all(|line| line.chars().count() <= FFMPEG_STDERR_TAIL_LINE_CHARS)
         );
+    }
+
+    #[test]
+    fn stderr_tail_failure_reason_names_the_cause_then_the_last_line() {
+        let mut tail = FfmpegStderrTail::default();
+        assert_eq!(tail.failure_reason(), None);
+        tail.observe("Unrecognized option 'allow_skip_frames'.");
+        assert_eq!(
+            tail.failure_reason().as_deref(),
+            Some("Unrecognized option 'allow_skip_frames'.")
+        );
+        tail.observe("Error splitting the argument list: Option not found");
+        assert_eq!(
+            tail.failure_reason().as_deref(),
+            Some(
+                "Unrecognized option 'allow_skip_frames'. | Error splitting the argument list: \
+                 Option not found"
+            )
+        );
+
+        // The first fatal line stays the cause after the ring drops it.
+        let mut tail = FfmpegStderrTail::default();
+        tail.observe("Error while opening encoder - maybe incorrect parameters");
+        for index in 0..FFMPEG_STDERR_TAIL_LINES {
+            tail.observe(&format!("unwinding {index}"));
+        }
+        assert_eq!(
+            tail.failure_reason(),
+            Some(format!(
+                "Error while opening encoder - maybe incorrect parameters | unwinding {}",
+                FFMPEG_STDERR_TAIL_LINES - 1
+            ))
+        );
+
+        // A stream key in FFmpeg's reason never reaches the start copy.
+        let mut tail = FfmpegStderrTail::default();
+        tail.observe("[flv @ 01] Failed to open rtmps://live.example/app/SECRET-STREAM-KEY now");
+        let reason = tail.failure_reason().unwrap();
+        assert!(!reason.contains("SECRET-STREAM-KEY"));
+        assert!(reason.contains("<url>"));
     }
 
     // Retest 154 A5: a full recordings folder ended the take with only
