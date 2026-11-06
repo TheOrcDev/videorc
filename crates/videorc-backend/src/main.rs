@@ -4345,6 +4345,9 @@ async fn end_x_native_live(state: &AppState, params: XEndParams) -> anyhow::Resu
             None,
         )
     };
+    // Stop the state watch BEFORE X sees the END, so the ENDED state Videorc
+    // causes is never reported as "X ended your broadcast".
+    x_watched_broadcasts().remove(&params.broadcast_id);
     let result = x_live::end_x_broadcast(
         XEndRequest {
             credentials,
@@ -4434,6 +4437,18 @@ fn clear_legacy_x_source_health(state: &AppState) {
 const X_BROADCAST_WATCH_INTERVAL_MS: u64 = 5_000;
 const X_BROADCAST_WATCH_MAX_ATTEMPTS: u32 = 72; // ~6 minutes, past X's 5-minute no-video timeout
 
+/// Broadcasts whose state watch is running. `end_x_native_live` removes an
+/// id before it sends END, and the watch stops as soon as its id is gone.
+static X_WATCHED_BROADCASTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn x_watched_broadcasts() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    X_WATCHED_BROADCASTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Post-Go-Live broadcast STATE watch. The new X routes expose no playback
 /// URL, so the only thing Videorc can still check is whether X keeps the
 /// broadcast RUNNING: X ends it as TIMED_OUT when no video reached it
@@ -4449,126 +4464,155 @@ fn spawn_x_broadcast_state_watch(
     announce: bool,
     initial_tweet_id: Option<String>,
 ) {
+    // Registered before the task starts, so an END that races the spawn
+    // still finds the id to remove.
+    x_watched_broadcasts().insert(broadcast_id.clone());
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        let base_url = x_live::api_base_url(None);
-        let published_at = std::time::Instant::now();
-        let mut tweet_seen = false;
-        let mut lookup_warned = false;
-        let note_tweet = |tweet_id: &str| {
-            log_x_lifecycle(
-                &state,
-                session_id.as_deref(),
-                protocol::HealthLevel::Info,
-                "x-announcement-posted",
-                &format!(
-                    "X created the announcement post for broadcast {broadcast_id} (post {tweet_id})."
-                ),
-            );
+        let watching = || x_watched_broadcasts().contains(&broadcast_id);
+        watch_x_broadcast_state(
+            &state,
+            session_id.as_deref(),
+            &credentials,
+            &broadcast_id,
+            &share_url,
+            announce,
+            initial_tweet_id.as_deref(),
+            &watching,
+        )
+        .await;
+        x_watched_broadcasts().remove(&broadcast_id);
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn watch_x_broadcast_state(
+    state: &AppState,
+    session_id: Option<&str>,
+    credentials: &x_live::XLivestreamCredentials,
+    broadcast_id: &str,
+    share_url: &str,
+    announce: bool,
+    initial_tweet_id: Option<&str>,
+    watching: &(dyn Fn() -> bool + Sync),
+) {
+    let client = reqwest::Client::new();
+    let base_url = x_live::api_base_url(None);
+    let published_at = std::time::Instant::now();
+    let mut tweet_seen = false;
+    let mut lookup_warned = false;
+    let note_tweet = |tweet_id: &str| {
+        log_x_lifecycle(
+            state,
+            session_id,
+            protocol::HealthLevel::Info,
+            "x-announcement-posted",
+            &format!(
+                "X created the announcement post for broadcast {broadcast_id} (post {tweet_id})."
+            ),
+        );
+    };
+    if announce && let Some(tweet_id) = initial_tweet_id {
+        tweet_seen = true;
+        note_tweet(tweet_id);
+    }
+
+    for _ in 0..X_BROADCAST_WATCH_MAX_ATTEMPTS {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            X_BROADCAST_WATCH_INTERVAL_MS,
+        ))
+        .await;
+        // A stopping session ENDs its own broadcast; only a session that is
+        // still streaming can be surprised by X ending it.
+        let session_active =
+            match session_id {
+                Some(session_id) => state.recording.lock().await.as_ref().is_some_and(|active| {
+                    active.session_id == session_id && !active.stop_requested
+                }),
+                None => true,
+            };
+        if !session_active || !watching() {
+            return;
+        }
+        let sample = match x_live::fetch_broadcast_state(
+            &client,
+            credentials,
+            &base_url,
+            broadcast_id,
+        )
+        .await
+        {
+            Ok(sample) => sample,
+            Err(error) => {
+                if !lookup_warned {
+                    lookup_warned = true;
+                    log_x_lifecycle(
+                        state,
+                        session_id,
+                        protocol::HealthLevel::Warn,
+                        "x-broadcast-state-unknown",
+                        &format!("Could not read the X broadcast state ({error}); still watching."),
+                    );
+                }
+                continue;
+            }
         };
-        if announce && let Some(tweet_id) = initial_tweet_id.as_deref() {
+        if announce
+            && !tweet_seen
+            && let Some(tweet_id) = sample.tweet_id.as_deref()
+        {
             tweet_seen = true;
             note_tweet(tweet_id);
         }
-
-        for _ in 0..X_BROADCAST_WATCH_MAX_ATTEMPTS {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                X_BROADCAST_WATCH_INTERVAL_MS,
-            ))
-            .await;
-            let session_active = match session_id.as_deref() {
-                Some(session_id) => state
-                    .recording
-                    .lock()
-                    .await
-                    .as_ref()
-                    .is_some_and(|active| active.session_id == session_id),
-                None => true,
-            };
-            if !session_active {
+        // Videorc may have sent END while the lookup was in flight: the
+        // watched set drops the id before END goes out, so re-check it.
+        match x_live::x_broadcast_watch_verdict(sample.state.as_deref(), watching()) {
+            x_live::XBroadcastWatchVerdict::KeepWatching => {}
+            x_live::XBroadcastWatchVerdict::SessionOver => return,
+            x_live::XBroadcastWatchVerdict::EndedByX {
+                state: broadcast_state,
+            } => {
+                let elapsed = published_at.elapsed().as_millis() as u64;
+                log_x_lifecycle(
+                    state,
+                    session_id,
+                    protocol::HealthLevel::Error,
+                    "x-broadcast-ended-by-x",
+                    &format!(
+                        "X ended broadcast {broadcast_id} ({broadcast_state}) {}s after Go Live while this session was still streaming{}. Your local recording is unaffected.",
+                        elapsed / 1_000,
+                        if broadcast_state == "TIMED_OUT" {
+                            "; X saw no video within its 5-minute window"
+                        } else {
+                            ""
+                        }
+                    ),
+                );
+                state.emit_event(
+                    "streamTargets.x.playback",
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "broadcastId": broadcast_id,
+                        "shareUrl": share_url,
+                        "status": "unavailable",
+                        "msAfterPublish": elapsed,
+                    }),
+                );
                 return;
             }
-            let sample = match x_live::fetch_broadcast_state(
-                &client,
-                &credentials,
-                &base_url,
-                &broadcast_id,
-            )
-            .await
-            {
-                Ok(sample) => sample,
-                Err(error) => {
-                    if !lookup_warned {
-                        lookup_warned = true;
-                        log_x_lifecycle(
-                            &state,
-                            session_id.as_deref(),
-                            protocol::HealthLevel::Warn,
-                            "x-broadcast-state-unknown",
-                            &format!(
-                                "Could not read the X broadcast state ({error}); still watching."
-                            ),
-                        );
-                    }
-                    continue;
-                }
-            };
-            if announce
-                && !tweet_seen
-                && let Some(tweet_id) = sample.tweet_id.as_deref()
-            {
-                tweet_seen = true;
-                note_tweet(tweet_id);
-            }
-            match x_live::x_broadcast_watch_verdict(sample.state.as_deref(), true) {
-                x_live::XBroadcastWatchVerdict::KeepWatching => {}
-                x_live::XBroadcastWatchVerdict::SessionOver => return,
-                x_live::XBroadcastWatchVerdict::EndedByX {
-                    state: broadcast_state,
-                } => {
-                    let elapsed = published_at.elapsed().as_millis() as u64;
-                    log_x_lifecycle(
-                        &state,
-                        session_id.as_deref(),
-                        protocol::HealthLevel::Error,
-                        "x-broadcast-ended-by-x",
-                        &format!(
-                            "X ended broadcast {broadcast_id} ({broadcast_state}) {}s after Go Live while this session was still streaming{}. Your local recording is unaffected.",
-                            elapsed / 1_000,
-                            if broadcast_state == "TIMED_OUT" {
-                                "; X saw no video within its 5-minute window"
-                            } else {
-                                ""
-                            }
-                        ),
-                    );
-                    state.emit_event(
-                        "streamTargets.x.playback",
-                        serde_json::json!({
-                            "sessionId": session_id,
-                            "broadcastId": broadcast_id,
-                            "shareUrl": share_url,
-                            "status": "unavailable",
-                            "msAfterPublish": elapsed,
-                        }),
-                    );
-                    return;
-                }
-            }
         }
+    }
 
-        if announce && !tweet_seen {
-            log_x_lifecycle(
-                &state,
-                session_id.as_deref(),
-                protocol::HealthLevel::Warn,
-                "x-announcement-missing",
-                &format!(
-                    "X did not create the announcement post for broadcast {broadcast_id}; share the link yourself: {share_url}"
-                ),
-            );
-        }
-    });
+    if announce && !tweet_seen {
+        log_x_lifecycle(
+            state,
+            session_id,
+            protocol::HealthLevel::Warn,
+            "x-announcement-missing",
+            &format!(
+                "X did not create the announcement post for broadcast {broadcast_id}; share the link yourself: {share_url}"
+            ),
+        );
+    }
 }
 
 fn upsert_validated_account(

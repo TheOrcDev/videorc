@@ -212,7 +212,8 @@ pub struct XPublishRequest {
     pub poll_attempts: usize,
     pub poll_interval_ms: u64,
     /// `POST /2/broadcasts` answers 409 while the source cannot take video
-    /// yet; retry that many times with this backoff before giving up.
+    /// yet (and may answer 5xx or lose its response); retry that many times
+    /// with this backoff before giving up.
     pub conflict_attempts: usize,
     pub conflict_backoff_ms: u64,
 }
@@ -327,6 +328,18 @@ impl std::error::Error for XApiError {}
 impl XApiError {
     pub fn is_conflict(&self) -> bool {
         self.status == 409
+    }
+}
+
+/// Whether a failed Go Live may be sent again. X documents `POST
+/// /2/broadcasts` as safe to retry: a source that already went live answers
+/// 200 with the same broadcast. So a 409 (encoder not connected yet), a 5xx
+/// (temporary failure) and a lost or unreadable response are retried; any
+/// other 4xx is final.
+fn go_live_error_is_retryable(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<XApiError>() {
+        Some(api_error) => api_error.is_conflict() || api_error.status >= 500,
+        None => true,
     }
 }
 
@@ -838,14 +851,11 @@ pub async fn publish_x_broadcast(
                 break;
             }
             // 409: the source cannot take video yet (retry once video flows)
-            // or another broadcast is live on it (`detail` names it). Both
-            // get the same bounded retry; the final error keeps X's detail.
-            Err(error)
-                if attempt + 1 < conflict_attempts
-                    && error
-                        .downcast_ref::<XApiError>()
-                        .is_some_and(XApiError::is_conflict) =>
-            {
+            // or another broadcast is live on it (`detail` names it). 5xx and
+            // a lost response are retried too: a retry of a call that did go
+            // live answers 200 with that broadcast. The final error keeps X's
+            // detail.
+            Err(error) if attempt + 1 < conflict_attempts && go_live_error_is_retryable(&error) => {
                 sleep(Duration::from_millis(request.conflict_backoff_ms)).await;
             }
             Err(error) => return Err(error),
@@ -857,10 +867,10 @@ pub async fn publish_x_broadcast(
         .clone()
         .or(broadcast.id.clone())
         .context("X Go Live response did not include a broadcast id.")?;
-    let media_key = broadcast
-        .media_key
-        .clone()
-        .context("X Go Live response did not include a media_key.")?;
+    // `media_key` is optional in the Go Live response, and by now the
+    // broadcast is already RUNNING on X with its Post out: a missing key must
+    // never turn a live broadcast into a reported failure.
+    let media_key = broadcast.media_key.clone().unwrap_or_default();
     let share_url = broadcast
         .share_url
         .clone()
@@ -2559,6 +2569,10 @@ mod tests {
         refuse_create: bool,
         source_active: bool,
         conflicts_before_live: usize,
+        /// Go Live answers this status (problem JSON) once per entry, in
+        /// order, before it succeeds.
+        go_live_failures: Vec<u16>,
+        omit_media_key: bool,
         already_live: bool,
         broadcast_state: String,
         tweet_id: Option<String>,
@@ -2687,6 +2701,10 @@ mod tests {
                     mock.conflicts_before_live -= 1;
                     return problem(409, "The source cannot take video yet.");
                 }
+                if !mock.go_live_failures.is_empty() {
+                    let status = mock.go_live_failures.remove(0);
+                    return problem(status, "Scripted Go Live failure.");
+                }
                 let allowed = [
                     "source_id",
                     "title",
@@ -2733,6 +2751,9 @@ mod tests {
                 });
                 if let Some(tweet_id) = tweet_id {
                     data["tweet_id"] = json!(tweet_id);
+                }
+                if mock.omit_media_key {
+                    data.as_object_mut().unwrap().remove("media_key");
                 }
                 let status = if mock.already_live {
                     StatusCode::OK
@@ -3097,6 +3118,96 @@ mod tests {
             .count();
         assert_eq!(posts, 3, "conflict_attempts bounds the retries");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_retries_a_503_and_never_retries_another_4xx() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.source_active = true;
+            mock.go_live_failures = vec![503];
+            mock.sources.push((
+                "9123456789012345001".to_string(),
+                "n".to_string(),
+                true,
+                "key".to_string(),
+            ));
+        }
+        let result = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.broadcast_id, "1AbCdEfGhIjKl");
+
+        // A 403 (account cannot go live) is final: one POST, X's status kept.
+        mock.lock().unwrap().go_live_failures = vec![403, 403, 403];
+        let before = seen_paths(&mock)
+            .into_iter()
+            .filter(|path| path == "POST /2/broadcasts")
+            .count();
+        let error = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<XApiError>().map(|error| error.status),
+            Some(403)
+        );
+        let after = seen_paths(&mock)
+            .into_iter()
+            .filter(|path| path == "POST /2/broadcasts")
+            .count();
+        assert_eq!(after - before, 1, "a 403 is never retried");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_without_a_media_key_is_still_live() {
+        let (base, mock, server) = mock_x().await;
+        {
+            let mut mock = mock.lock().unwrap();
+            mock.source_active = true;
+            mock.omit_media_key = true;
+            mock.sources.push((
+                "9123456789012345001".to_string(),
+                "n".to_string(),
+                true,
+                "key".to_string(),
+            ));
+        }
+        let result = publish_x_broadcast(
+            publish_request(&base, "9123456789012345001"),
+            &reqwest::Client::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.state, "RUNNING");
+        assert_eq!(result.media_key, "");
+        assert_eq!(result.media_id, None);
+        server.abort();
+    }
+
+    #[test]
+    fn go_live_retry_policy_follows_the_docs() {
+        let api = |status| {
+            anyhow::Error::from(XApiError {
+                status,
+                detail: String::new(),
+            })
+        };
+        assert!(go_live_error_is_retryable(&api(409)));
+        assert!(go_live_error_is_retryable(&api(503)));
+        assert!(go_live_error_is_retryable(&anyhow::anyhow!(
+            "connection reset"
+        )));
+        for status in [400, 401, 403, 404] {
+            assert!(!go_live_error_is_retryable(&api(status)), "{status}");
+        }
     }
 
     #[tokio::test]
