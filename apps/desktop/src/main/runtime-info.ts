@@ -47,6 +47,8 @@ export interface RuntimeInfoInput {
   /** The Preview watchdog's last decisions (see first-frame-decisions.ts). */
   firstFrameDecisions?: readonly FirstFrameDecisionRecord[]
   windowGlass?: RuntimeInfo['windowGlass']
+  /** Why this session can't hold a global shortcut (see global-shortcut-lifecycle.ts). */
+  globalShortcutsUnavailable?: string | null
   env: Partial<
     Pick<
       NodeJS.ProcessEnv,
@@ -121,6 +123,7 @@ export function buildRuntimeInfo({
   backendCrashes = [],
   firstFrameDecisions = [],
   windowGlass,
+  globalShortcutsUnavailable = null,
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
@@ -138,6 +141,7 @@ export function buildRuntimeInfo({
     backendCrashes: [...backendCrashes],
     firstFrameDecisions: [...firstFrameDecisions],
     ...(windowGlass ? { windowGlass } : {}),
+    ...(globalShortcutsUnavailable ? { globalShortcutsUnavailable } : {}),
     isPackaged,
     firstRunSuppressed: env.VIDEORC_SMOKE_SKIP_FIRST_RUN === '1',
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',

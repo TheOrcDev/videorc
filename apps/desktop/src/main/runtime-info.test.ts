@@ -298,6 +298,18 @@ describe('runtime info helpers', () => {
     expect(buildRuntimeInfo({ ...base, windowGlass }).windowGlass).toEqual(windowGlass)
   })
 
+  it('names why global shortcuts cannot work only when main found a reason', () => {
+    const base = { appVersion: '1.2.3', execPath: '/opt/Videorc/videorc', env: {} }
+    expect(buildRuntimeInfo(base)).not.toHaveProperty('globalShortcutsUnavailable')
+    expect(buildRuntimeInfo({ ...base, globalShortcutsUnavailable: null })).not.toHaveProperty(
+      'globalShortcutsUnavailable'
+    )
+    expect(
+      buildRuntimeInfo({ ...base, globalShortcutsUnavailable: 'No key grab here.' })
+        .globalShortcutsUnavailable
+    ).toBe('No key grab here.')
+  })
+
   it('surfaces graphics fallback evidence and recovery state', () => {
     const info = buildRuntimeInfo({
       appVersion: '1.2.3',
