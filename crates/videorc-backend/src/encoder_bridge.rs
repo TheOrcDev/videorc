@@ -1659,6 +1659,8 @@ struct StreamBitrateController {
 }
 
 impl StreamBitrateController {
+    // Only the macOS VideoToolbox stream encoder builds one (plan 218 S3a).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn new(chosen_kbps: u32, fps: u32, now: Instant) -> Self {
         Self {
             chosen_kbps,
