@@ -2069,18 +2069,18 @@ impl SessionAudio {
     pub fn status(&self) -> AudioBusStatus {
         self.handle.status()
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn has_selected_input(&self) -> bool {
         self.status().selected_input
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn captured_frames(&self) -> u64 {
         self.stats().captured_frames()
     }
     pub fn input_state(&self) -> NativeAudioInputState {
         self.stats().input_state()
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn source_loss_after_ms(&self) -> Option<u64> {
         self.stats().source_loss_after_ms()
     }
@@ -2093,7 +2093,7 @@ impl SessionAudio {
             .unwrap_or_else(|p| p.into_inner())
             .owner_present
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn claim_source_loss_event(&self) -> Option<SourceLoss> {
         self.handle
             .shared
