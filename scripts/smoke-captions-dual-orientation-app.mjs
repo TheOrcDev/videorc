@@ -90,6 +90,11 @@ let launched
 let backend
 const listeners = []
 let sessionActive = false
+// Linux's raw bridge cannot encode a separate vertical scene (plan 0016), so
+// the backend refuses the whole session rather than send the landscape program
+// to the vertical destination. There the refusal is what this smoke proves.
+const verticalRefusedOnLinux = process.platform === 'linux'
+class SkipSmoke extends Error {}
 
 try {
   launched = await launchDevApp({
@@ -132,12 +137,33 @@ try {
     kind: 'output-directory',
     path: outputDirectory
   })
-  const started = await request(
+  const start = request(
     backend,
     timeoutMs,
     'session.start',
     sessionParams(outputAuthorization.capabilityId)
   )
+  if (verticalRefusedOnLinux) {
+    const refusal = await start.then(
+      () => null,
+      (error) => error
+    )
+    if (!/can't encode a separate vertical stream/.test(refusal?.message ?? '')) {
+      sessionActive = refusal === null
+      throw new Error(
+        `Expected Linux to refuse the vertical leg, got ${refusal?.message ?? 'a started session'}`
+      )
+    }
+    const status = await request(backend, timeoutMs, 'recording.status', {})
+    if (status.state !== 'idle') {
+      throw new Error(`The refused vertical session left the backend ${status.state}.`)
+    }
+    console.log(
+      '[vertical] SKIP: Linux has no separate vertical encoder; the backend refused the session before any destination got the landscape video'
+    )
+    throw new SkipSmoke()
+  }
+  const started = await start
   if (started.state !== 'recording' || !started.sessionId) {
     throw new Error(`Dual captions smoke did not enter record+stream: ${JSON.stringify(started)}`)
   }
@@ -247,23 +273,25 @@ try {
       `Evidence: ${outputDirectory}`
   )
 } catch (error) {
-  writeFileSync(
-    reportPath,
-    JSON.stringify(
-      {
-        pass: false,
-        error: error instanceof Error ? error.message : String(error),
-        captionsStatus: backend ? await requestSafe(backend, 'captions.status.get', {}) : null,
-        recordingStatus: backend ? await requestSafe(backend, 'recording.status', {}) : null
-      },
-      null,
-      2
+  if (!(error instanceof SkipSmoke)) {
+    writeFileSync(
+      reportPath,
+      JSON.stringify(
+        {
+          pass: false,
+          error: error instanceof Error ? error.message : String(error),
+          captionsStatus: backend ? await requestSafe(backend, 'captions.status.get', {}) : null,
+          recordingStatus: backend ? await requestSafe(backend, 'recording.status', {}) : null
+        },
+        null,
+        2
+      )
     )
-  )
-  throw new Error(
-    `${error instanceof Error ? error.message : String(error)} Evidence: ${reportPath}`,
-    { cause: error }
-  )
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)} Evidence: ${reportPath}`,
+      { cause: error }
+    )
+  }
 } finally {
   try {
     if (backend) {
