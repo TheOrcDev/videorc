@@ -1675,7 +1675,8 @@ async fn relay_ffmpeg_stderr_teed<R>(
 /// fails the session: the pipeline is marked failed at the muxer stage and the
 /// FFmpeg child is terminated, so `monitor_session` publishes the exact-session
 /// `Failed` terminal status (which the renderer already surfaces as a
-/// persistent recovery error).
+/// persistent recovery error). A session whose Stop was already requested
+/// only logs the missing proof: the stop path ended FFmpeg on purpose.
 fn spawn_ffmpeg_output_startup_watchdog(
     state: AppState,
     session_id: String,
@@ -1701,19 +1702,36 @@ fn spawn_ffmpeg_output_startup_watchdog(
             }
             Err(error) => {
                 let message = format!("{error:#}");
-                let still_active = {
+                let stop_requested = {
                     let mut recording = state.recording.lock().await;
                     match recording.as_mut() {
                         Some(active) if active.session_id == session_id => {
-                            active
-                                .pipeline
-                                .mark_failed(RecordingPipelineStage::Muxer, &message);
-                            true
+                            if !active.stop_requested {
+                                active
+                                    .pipeline
+                                    .mark_failed(RecordingPipelineStage::Muxer, &message);
+                            }
+                            active.stop_requested
                         }
-                        _ => false,
+                        _ => return,
                     }
                 };
-                if !still_active {
+                if stop_requested {
+                    // A Stop that lands before FFmpeg proved its output (a
+                    // Record hand-over of the buffer-only Clips session, or a
+                    // quick Stop) ends FFmpeg before its first output
+                    // progress. That is the requested stop, not a muxer
+                    // failure, and the stop path owns FFmpeg's exit.
+                    let _ = emit_session_log(
+                        &state,
+                        &session_id,
+                        HealthLevel::Info,
+                        "ffmpeg-output-startup-stopped",
+                        &format!(
+                            "Stop was requested before FFmpeg confirmed output media progress: {message}"
+                        ),
+                        None,
+                    );
                     return;
                 }
                 let _ = emit_health_event(
@@ -11832,6 +11850,7 @@ async fn monitor_session(
                     dropped_frames: observation.dropped_frames,
                     capture_session_peak: observation.capture_session_peak,
                     received_capture_frames: observation.received_capture_frames,
+                    recording_window_opened: observation.elapsed_secs.is_some(),
                     input_state: observation.input_state,
                     source_loss_after_ms: observation.source_loss_after_ms,
                     unreported_source_loss_after_ms: observation.losses,
@@ -14714,6 +14733,10 @@ struct NativeAudioStats {
     dropped_frames: u64,
     capture_session_peak: f32,
     received_capture_frames: u64,
+    /// False when the session stopped before FFmpeg opened its audio input:
+    /// the bus never reached the recording window, so the microphone was
+    /// never asked for the take's audio.
+    recording_window_opened: bool,
     input_state: NativeAudioInputState,
     source_loss_after_ms: Option<u64>,
     unreported_source_loss_after_ms: Vec<crate::session_audio::SourceLoss>,
@@ -14729,7 +14752,10 @@ struct NativeAudioStats {
 
 impl NativeAudioStats {
     fn silence_verdict(&self) -> Option<SilentMicKind> {
-        if !self.selected_input || self.input_state == NativeAudioInputState::SourceLost {
+        if !self.selected_input
+            || !self.recording_window_opened
+            || self.input_state == NativeAudioInputState::SourceLost
+        {
             return None;
         }
         silent_mic_verdict(self.received_capture_frames, self.capture_session_peak)
@@ -28981,6 +29007,7 @@ mod tests {
             dropped_frames: 0,
             capture_session_peak: 0.0,
             received_capture_frames: 0,
+            recording_window_opened: true,
             input_state: NativeAudioInputState::Stopped,
             source_loss_after_ms: None,
             unreported_source_loss_after_ms: vec![],
@@ -28991,6 +29018,11 @@ mod tests {
         };
         assert_eq!(stats.silence_verdict(), None);
         stats.selected_input = true;
+        // A Stop before FFmpeg opened its audio input never asked the
+        // microphone for the take: no verdict on it.
+        stats.recording_window_opened = false;
+        assert_eq!(stats.silence_verdict(), None);
+        stats.recording_window_opened = true;
         assert_eq!(stats.silence_verdict(), Some(SilentMicKind::NoFrames));
         stats.received_capture_frames = 480;
         assert_eq!(stats.silence_verdict(), Some(SilentMicKind::AllSilence));
@@ -43551,6 +43583,120 @@ mod tests {
             )),
             "{error}"
         );
+    }
+
+    /// A Stop that lands before FFmpeg proves its output (a quick Stop, or the
+    /// Record hand-over of the buffer-only Clips session) ends FFmpeg on
+    /// purpose: the watchdog logs it and leaves the pipeline unfailed. Without
+    /// a Stop the same missing proof still fails the muxer stage.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ffmpeg_output_startup_watchdog_leaves_a_requested_stop_unfailed() {
+        for stop_requested in [true, false] {
+            let state = test_state();
+            let session_id = format!("output-startup-{stop_requested}-{}", Uuid::new_v4());
+            let params = base_params(true, false);
+            state
+                .database
+                .create_session(&NewSession {
+                    id: session_id.clone(),
+                    title: "Output startup".to_string(),
+                    started_at: Utc::now().to_rfc3339(),
+                    mode: "record".to_string(),
+                    output_path: None,
+                    container: Some("mkv".to_string()),
+                    stream_preset: None,
+                    sources: params.sources,
+                    layout: params.layout,
+                    output: params.output,
+                })
+                .expect("create running session row");
+            let mut active = test_active_recording_stub(&session_id);
+            active.stop_requested = stop_requested;
+            *state.recording.lock().await = Some(active);
+            let mut events = state.events.subscribe();
+            let (ready_sender, ready) = oneshot::channel();
+            ready_sender
+                .send(Err(
+                    "FFmpeg ended before its first output progress".to_string()
+                ))
+                .unwrap();
+
+            // The stub's pid 0 is never signalled: `send_process_signal`
+            // refuses it.
+            spawn_ffmpeg_output_startup_watchdog(
+                state.clone(),
+                session_id.clone(),
+                ready,
+                Instant::now(),
+                FFMPEG_OUTPUT_STARTUP_TIMEOUT,
+                0,
+            );
+
+            let expected = if stop_requested {
+                "ffmpeg-output-startup-stopped"
+            } else {
+                "ffmpeg-output-startup-failed"
+            };
+            let mut codes = timeout(Duration::from_secs(2), async {
+                let mut codes = Vec::new();
+                loop {
+                    let event = events.recv().await.expect("backend event stream");
+                    if matches!(event.event.as_str(), "session.log" | "health.event") {
+                        let code = event.payload["code"].as_str().unwrap_or_default();
+                        codes.push(code.to_string());
+                        if code == expected {
+                            return codes;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the watchdog reports the missing output proof");
+            sleep(Duration::from_millis(50)).await;
+            codes.extend(
+                std::iter::from_fn(|| events.try_recv().ok())
+                    .filter(|event| matches!(event.event.as_str(), "session.log" | "health.event"))
+                    .map(|event| {
+                        event.payload["code"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string()
+                    }),
+            );
+
+            let finalization = state
+                .recording
+                .lock()
+                .await
+                .take()
+                .expect("the session is still installed")
+                .pipeline
+                .status()
+                .finalization;
+            if stop_requested {
+                assert_ne!(
+                    finalization,
+                    crate::protocol::RecordingFinalizationState::Failed
+                );
+                assert!(
+                    !codes
+                        .iter()
+                        .any(|code| code == "ffmpeg-output-startup-failed"),
+                    "{codes:?}"
+                );
+            } else {
+                assert_eq!(
+                    finalization,
+                    crate::protocol::RecordingFinalizationState::Failed
+                );
+                assert!(
+                    !codes
+                        .iter()
+                        .any(|code| code == "ffmpeg-output-startup-stopped"),
+                    "{codes:?}"
+                );
+            }
+        }
     }
 
     #[test]
