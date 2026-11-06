@@ -133,6 +133,11 @@ second capture:
   second to the list; the ring never holds more than `ceil(N/2) + 3`
   segment files. It is deleted when the session ends, when the app quits,
   and swept at the next launch after a crash.
+- **Handover**: Record or Go Live ends the buffer-only session without its
+  FFmpeg flush when no save runs or waits, since the ring is deleted the
+  moment FFmpeg exits (the flush was 250 to 300 ms of a VAAPI Record press
+  on Linux). A save in flight keeps the flushed stop; a press after the
+  handover began is refused as starting.
 
 ### Wire
 
@@ -211,7 +216,7 @@ longShortcutLabel, off }`) the main window pushes.
 - `pnpm smoke:record-latency:gate`: with the ring on by default every
   Record hands over from a buffer-only session; `--no-replay-buffer` is the
   bare baseline. The budgets hold or the report says by how much they do
-  not.
+  not; the report also lists every Warn and Error event the run saw.
 - `pnpm smoke:remote-control`: `clipMark` admitted with the ring on, refused
   with its reason once the switch is off.
 - The whole smoke bundle (`pnpm smoke:recording-studio`, the matrix, the
