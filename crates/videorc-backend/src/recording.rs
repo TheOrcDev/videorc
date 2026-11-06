@@ -3141,7 +3141,7 @@ pub struct ActiveLivePreview {
 }
 
 impl ActiveRecording {
-    #[cfg(all(test, debug_assertions))]
+    #[cfg(all(test, unix, debug_assertions))]
     pub(crate) fn install_source_switch_timing_for_test(&mut self) {
         self.source_switch_output_audio_timing = Some(vec![SourceSwitchOutputAudioTiming {
             role: "stream",
@@ -7027,7 +7027,7 @@ async fn start_session_with_timeline(
         }
         _ => None,
     };
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     if let Some(iso) = source_iso_runtime.as_mut() {
         iso.test_pause("writers", pid).await;
     }
@@ -7498,7 +7498,7 @@ async fn start_session_with_timeline(
     let running_status =
         pending_active.status(running_state, Some(format!("Running {mode} session.")));
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     if let Some(iso) = source_iso_runtime.as_mut() {
         iso.test_pause("precommit", pid).await;
     }
@@ -18435,7 +18435,7 @@ enum MediaFoundationTopologyProbe {
     },
     #[cfg(any(test, target_os = "windows"))]
     Rejected { reason: String },
-    #[cfg(any(test, not(target_os = "windows")))]
+    #[cfg(not(target_os = "windows"))]
     Unsupported { reason: String },
 }
 
@@ -18924,7 +18924,7 @@ fn select_windows_encoded_bridge_decision(
             encoder_selection_fallback_reason: None,
             bitrate_overrides: WindowsEncodedBridgeBitrateOverrides::default(),
         },
-        #[cfg(any(test, not(target_os = "windows")))]
+        #[cfg(not(target_os = "windows"))]
         Some(MediaFoundationTopologyProbe::Unsupported { reason }) => {
             WindowsEncodedBridgeDecision {
                 capability_key,
@@ -50080,6 +50080,7 @@ mod tests {
         }
 
         const NO_SHIFT: &str = "aresample=async=1:first_pts=0,apad";
+        #[cfg(target_os = "macos")]
         const STREAM_ADVANCE_ONLY: &str =
             "atrim=start=0.130,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,apad";
 

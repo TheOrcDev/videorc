@@ -4349,7 +4349,7 @@ mod runtime {
                 ),
             ]
         );
-        assert!(
+        const _: () = assert!(
             CAPTION_Z_INDEX < CHAT_Z_INDEX
                 && CHAT_Z_INDEX < BUDDY_SPRITE_Z_INDEX
                 && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX

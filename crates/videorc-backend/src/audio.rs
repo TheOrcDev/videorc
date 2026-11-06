@@ -1,7 +1,7 @@
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs::File;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -809,7 +809,7 @@ pub(crate) fn trim_audio_frame_before_epoch(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn attach_fifo_writer_with_stall_timeout(
     source: NativeAudioSource,
     fifo_path: PathBuf,
@@ -1971,6 +1971,7 @@ mod tests {
         assert_eq!(session.input_state(), expected);
     }
 
+    #[cfg(unix)]
     fn frame(samples: usize) -> AudioFrame {
         static CLOCK: OnceLock<Instant> = OnceLock::new();
         let now = Instant::now();
@@ -1994,6 +1995,7 @@ mod tests {
         wait_for_input_state(session, NativeAudioInputState::Live);
     }
 
+    #[cfg(unix)]
     fn frame_at(captured_at: Instant, samples: usize) -> AudioFrame {
         AudioFrame {
             timestamp_micros: 0,

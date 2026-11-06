@@ -8631,7 +8631,7 @@ fn test_trace_source_iso_composition(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn test_take_source_iso_composition_trace() -> Vec<SourceIsoCompositionTiming> {
     std::mem::take(
         &mut *SOURCE_ISO_COMPOSITION_TRACE
@@ -16153,7 +16153,7 @@ mod tests {
         ));
         assert_eq!(circle[3], 0, "top-left corner must be transparent");
         assert_eq!(
-            circle[((1 * 4 + 1) * 4) + 3],
+            circle[((4 + 1) * 4) + 3],
             255,
             "circle center must remain opaque"
         );
@@ -24092,6 +24092,7 @@ mod buddy_sprite_tests {
     /// The S-B5 draw: cell 4 of the 3 x 2 fixture (neighbours on three
     /// sides), 150 px on canvas from 120 px cells, turned 30 degrees and
     /// scaled 1.1 x 0.9 about page-pet's pivot, nudged by (12, -7).
+    #[cfg(target_os = "macos")]
     fn parity_leg() -> BuddyLegFrame {
         let atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
         let buddy_box = [565.0, 285.0, 150.0, 150.0];
@@ -24114,6 +24115,7 @@ mod buddy_sprite_tests {
 
     /// Distance from a canvas point to the quad's outline, and whether the
     /// point is inside.
+    #[cfg(target_os = "macos")]
     fn edge_distance(corners: [[f32; 2]; 4], point: [f32; 2]) -> (f32, bool) {
         // Outline order: top-left, top-right, bottom-right, bottom-left.
         let outline = [corners[0], corners[1], corners[3], corners[2]];
@@ -25919,6 +25921,7 @@ mod program_leg_tests {
 
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 360;
+    #[cfg(target_os = "macos")]
     const PET: [u8; 3] = [230, 40, 40];
 
     fn state_with_scene() -> AppState {
@@ -25964,6 +25967,7 @@ mod program_leg_tests {
     }
 
     /// The pet's box on `canvas`, as an oracle rect around its centre.
+    #[cfg(target_os = "macos")]
     fn pet_rect() -> crate::preview_debug_sample::Rect {
         let [x, y, w, h] = crate::buddy_sprite::buddy_box(
             OverlayLayout::default().buddy.horizontal,
@@ -25978,6 +25982,7 @@ mod program_leg_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn sample(store: &CompositorFrameStore) -> [f64; 3] {
         let value = crate::preview_debug_sample::sample_frame_store(store, &[pet_rect()])
             .expect("the leg published a readable frame");
@@ -25989,6 +25994,7 @@ mod program_leg_tests {
         ]
     }
 
+    #[cfg(target_os = "macos")]
     fn is_pet(rgb: [f64; 3]) -> bool {
         rgb.iter()
             .zip(PET)
@@ -26362,6 +26368,7 @@ mod program_leg_tests {
 
     /// The idle run's configuration a Clips lease parks (a stream-only
     /// Buddy is in the idle program).
+    #[cfg(target_os = "macos")]
     fn idle_config() -> CompositorLoopConfig {
         CompositorLoopConfig {
             target_fps: 30,

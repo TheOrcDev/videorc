@@ -859,11 +859,6 @@ impl LiveBackgroundD3d11Renderer {
         (self.pixels.len() as u32, bytes)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn guard_level(&self) -> GuardLevel {
-        self.guard.level()
-    }
-
     /// Drop the passes' shaders and scratch, keeping what a still draws
     /// with (the present pass and its triangle, the live frame and the
     /// poster).
