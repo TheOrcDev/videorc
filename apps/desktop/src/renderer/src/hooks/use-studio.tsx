@@ -18303,7 +18303,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     config: captureConfig,
     previous: remoteOutputsRef.current
   })
-  remoteOutputsRef.current = isSessionActive ? remoteOutputs : null
+  useEffect(() => {
+    remoteOutputsRef.current = isSessionActive ? remoteOutputs : null
+  }, [isSessionActive, remoteOutputs])
   const remoteSurfaceValues: RemoteSurfaceValues = [
     recording.state,
     isSessionActive,
