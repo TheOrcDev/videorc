@@ -484,6 +484,7 @@ import type {
   PreviewSupervisorState,
   PreviewWindowMode,
   PreviewWindowState,
+  CameraLowLightState,
   EncoderPreferenceState,
   PerformanceCheckProgress,
   PerformanceCheckState,
@@ -1593,6 +1594,13 @@ export type StudioContextValue = {
   /** Windows raw-path encoder choice; null until the backend answers. */
   encoderPreference: EncoderPreferenceState | null
   setEncoderPreference: (preference: WindowsH264EncoderPreference) => Promise<void>
+  /**
+   * The selected camera's low-light compensation (issue #1066); null until the
+   * backend answers, and for no camera. Read it only when its `cameraId` is the
+   * selected camera's.
+   */
+  cameraLowLight: CameraLowLightState | null
+  setCameraLowLight: (compensation: boolean) => Promise<void>
   performanceCheckProgress: PerformanceCheckProgress | null
   runPerformanceCheck: () => Promise<void>
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
@@ -17640,6 +17648,46 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [client, commitPerformanceCheck, releasePerformanceCheckHold, wsStatus])
 
+  // Issue #1066: the selected camera's low-light compensation. Read whenever
+  // the camera or the connection changes; a backend without the method (or a
+  // camera without the control) leaves the switch hidden.
+  const selectedCameraIdForLowLight = captureConfig.sources.cameraId
+  const [cameraLowLight, setCameraLowLightState] = useState<CameraLowLightState | null>(null)
+  const cameraLowLightRevision = useRef(0)
+  useEffect(() => {
+    const revision = ++cameraLowLightRevision.current
+    if (!client || wsStatus !== 'connected' || !selectedCameraIdForLowLight) {
+      setCameraLowLightState(null)
+      return
+    }
+    void client
+      .requestTyped('camera.lowLight.get', { cameraId: selectedCameraIdForLowLight })
+      .then((state) => {
+        if (revision === cameraLowLightRevision.current) setCameraLowLightState(state)
+      })
+      .catch(() => {
+        if (revision === cameraLowLightRevision.current) setCameraLowLightState(null)
+      })
+  }, [client, wsStatus, selectedCameraIdForLowLight])
+
+  const setCameraLowLight = useCallback(
+    async (compensation: boolean) => {
+      const cameraId = selectedCameraIdForLowLight
+      if (!client || !cameraId) return
+      const revision = ++cameraLowLightRevision.current
+      try {
+        const state = await client.requestTyped('camera.lowLight.set', { cameraId, compensation })
+        if (revision === cameraLowLightRevision.current) setCameraLowLightState(state)
+      } catch (error) {
+        toastUserError(error, {
+          action: compensation ? 'turn on' : 'turn off',
+          object: 'low-light compensation'
+        })
+      }
+    },
+    [client, selectedCameraIdForLowLight]
+  )
+
   // Plan 090 C5: which encoder the Windows fallback path may use. A change
   // invalidates both things measured under the old choice: the output check
   // and this computer's performance result.
@@ -18950,6 +18998,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
+      cameraLowLight,
+      setCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,
@@ -19200,6 +19250,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
+      cameraLowLight,
+      setCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,

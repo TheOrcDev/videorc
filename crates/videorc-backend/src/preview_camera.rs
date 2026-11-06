@@ -1598,6 +1598,9 @@ async fn start_registered_preview_camera(
     let (stop_tx, stop_rx) = std_mpsc::channel();
     let (startup_tx, startup_rx) = std_mpsc::channel();
     let thread_shared = Arc::clone(&shared);
+    // Issue #1066: the camera keeps its frame rate in low light unless the
+    // user turned compensation on. Written beside the start, never before it.
+    crate::camera_low_light::apply_stored_on_open(&state.database, &camera_id);
     let thread_config = NativeCameraPreviewConfig {
         camera_id: camera_id.clone(),
         unique_id: unique_id.clone(),

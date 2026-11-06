@@ -31,6 +31,7 @@ mod buddy_pet;
 mod buddy_pet_store;
 mod buddy_sprite;
 mod camera_capture;
+mod camera_low_light;
 mod captions;
 mod capture_health;
 mod capture_input;
@@ -5818,7 +5819,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screen.hide"
         | "screen.show"
         | "virtualCamera.set"
-        | "virtualCamera.platform.report" => Some(DEFAULT_MUTATION_POLICY),
+        | "virtualCamera.platform.report"
+        | "camera.lowLight.set" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.source.switch" => Some(Mutation {
             max_execution_age: live_source_switch::SOURCE_SWITCH_EXECUTION_TIMEOUT,
@@ -13889,6 +13891,34 @@ async fn handle_text_message_with_role(
                         params.message,
                     ),
                 ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Issue #1066: a camera's low-light compensation, saved per camera.
+        "camera.lowLight.get" => {
+            match serde_json::from_value::<protocol::CameraLowLightParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    camera_low_light::get(state, params.camera_id).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "camera.lowLight.set" => {
+            match serde_json::from_value::<protocol::CameraLowLightSetParams>(command.params) {
+                Ok(params) => {
+                    match camera_low_light::set(state, params.camera_id, params.compensation).await
+                    {
+                        Ok(low_light) => ServerResponse::ok(command.id, low_light),
+                        Err(error) => {
+                            ServerResponse::error(command.id, "camera-low-light-failed", error)
+                        }
+                    }
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }

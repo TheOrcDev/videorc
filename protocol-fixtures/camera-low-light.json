@@ -1,0 +1,42 @@
+{
+  "$comment": "Camera low-light compensation wire shapes (issue #1066). Rust: cargo test -p videorc-backend camera_low_light_fixture. TypeScript: pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts",
+  "getParams": {
+    "cameraId": "camera:windows-dshow:48502048442043616d657261"
+  },
+  "setParams": {
+    "cameraId": "camera:windows-dshow:48502048442043616d657261",
+    "compensation": true
+  },
+  "keepsFrameRate": {
+    "cameraId": "camera:windows-dshow:48502048442043616d657261",
+    "supported": true,
+    "compensation": false
+  },
+  "compensating": {
+    "cameraId": "camera:windows-dshow:48502048442043616d657261",
+    "supported": true,
+    "compensation": true
+  },
+  "unsupported": {
+    "cameraId": "camera:avfoundation:0",
+    "supported": false,
+    "compensation": false
+  },
+  "rejectedParams": [
+    {},
+    { "cameraId": "" },
+    { "cameraId": null },
+    { "cameraId": "camera:windows-dshow:00", "extra": true }
+  ],
+  "rejectedSetParams": [
+    { "cameraId": "camera:windows-dshow:00" },
+    { "cameraId": "camera:windows-dshow:00", "compensation": "yes" },
+    { "cameraId": "camera:windows-dshow:00", "compensation": null },
+    { "compensation": true }
+  ],
+  "rejectedStates": [
+    { "cameraId": "camera:windows-dshow:00", "supported": true },
+    { "cameraId": "camera:windows-dshow:00", "supported": null, "compensation": false },
+    { "cameraId": "camera:windows-dshow:00", "supported": true, "compensation": false, "extra": 1 }
+  ]
+}
