@@ -36,6 +36,7 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Switch } from '@/components/ui/switch'
 import { TabsContent } from '@/components/ui/tabs'
 import { BUDDY_POSTS_PROMISE, buddyDisplayName } from '@/lib/buddy-auto-chat-view'
+import { buddyPictureUrl } from '@/lib/buddy-picture'
 import { lockAlertAction } from '@/lib/lock-view'
 import { useCleanCut } from '@/hooks/use-clean-cut'
 import { BuddyLookClientProvider } from '@/hooks/use-buddy-look'
@@ -290,7 +291,7 @@ function BuddyProfileStatus(): ReactElement {
       data-slot="buddy-profile-status"
     >
       <div className="flex flex-wrap items-center gap-3" data-slot="buddy-live-status-block">
-        <BuddyEmblem size="lg" />
+        <BuddyEmblem picture={buddyPictureUrl(cohostSettings?.persona)} size="lg" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span
             className="truncate text-sm font-medium text-foreground"
