@@ -239,6 +239,32 @@ describe('GlobalShortcutsRegistrar conflicts', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('says why set keys do nothing where the session cannot hold them, never "another app"', async () => {
+    const unavailable = "Global shortcuts can't work in this Wayland session."
+    const setGlobalShortcuts = vi.fn(async () => ({ registered: {}, unavailable }))
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { videorc: { setGlobalShortcuts } }))
+    vi.mocked(toast.error).mockClear()
+    vi.mocked(toast.warning).mockClear()
+    try {
+      const registrar = new GlobalShortcutsRegistrar()
+      // Only the default Hide screen key: nothing the person set, no toast.
+      registrar.sync({ recordToggle: '' })
+      await vi.waitFor(() => expect(setGlobalShortcuts).toHaveBeenCalledTimes(1))
+      await Promise.resolve()
+      expect(toast.warning).not.toHaveBeenCalled()
+
+      registrar.sync({ recordToggle: 'Control+Shift+R' })
+      await vi.waitFor(() => expect(toast.warning).toHaveBeenCalledTimes(1))
+      const [title, options] = vi.mocked(toast.warning).mock.calls[0] ?? []
+      expect(title).toBe("Global shortcuts don't work here")
+      expect(options?.description).toBe(unavailable)
+      expect((options?.action as { label: string }).label).toBe('Open Shortcuts')
+      expect(toast.error).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 it('dispatches saved-scene keys through the scene handler', () => {

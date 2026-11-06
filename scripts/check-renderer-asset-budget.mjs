@@ -125,9 +125,14 @@ const htmlPath = resolve(
 // Sources switch, the live-update confirm and rollback, the silenced toast)
 // adds 308 gzip bytes to main's 474,854, landing at 475,162. Raise gzip to
 // 476,000.
+// 2026-11-06 (release 0.20.2): post-0.20.1 product fixes on main (#1211
+// hidden-window pause, #1213 custom Buddy display, #1212 Clips ring share,
+// recording/folder and Linux OpenH264 wiring) measure 2,322,131 raw /
+// 476,319 gzip. Raise raw to 2,325,000 and gzip to 477,000; keep
+// re-splitting the answer for net-new UI.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_320_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 476_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_325_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 477_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

@@ -8,6 +8,7 @@ import {
   appQuitRecordingSessionParams,
   barrierNeverEngagedError,
   finalizationBarrierSessionFfmpegPath,
+  finalizationBarrierSessionStart,
   finalizationBarrierShimFiles,
   isMp4FinalizationExport,
   readFinalizationRecoveryRecords
@@ -154,6 +155,36 @@ test('the POSIX barrier shim stays one executable `ffmpeg` node script', () => {
     finalizationBarrierSessionFfmpegPath('/state/finalization-barrier-bin/ffmpeg', 'darwin'),
     undefined
   )
+})
+
+test('Linux names the POSIX shim as the session FFmpeg: dev main pins the vendored binary ahead of it', () => {
+  const shim = finalizationBarrierShimFiles({
+    platform: 'linux',
+    moduleUrl: 'file:///repo/scripts/smoke-app-quit-recording-finalization.mjs'
+  })
+  assert.equal(shim.entry, 'ffmpeg')
+  const shimPath = '/state/finalization-barrier-bin/ffmpeg'
+  const ffmpegPath = finalizationBarrierSessionFfmpegPath(shimPath, 'linux')
+  assert.equal(ffmpegPath, shimPath)
+  const params = appQuitRecordingSessionParams({ outputDirectoryCapability: 'c', ffmpegPath })
+  assert.equal(params.output.ffmpegPath, shimPath)
+})
+
+test('a session naming the shim starts through the admin bridge; the renderer socket strips ffmpegPath', () => {
+  const named = appQuitRecordingSessionParams({
+    outputDirectoryCapability: 'c',
+    ffmpegPath: '/state/finalization-barrier-bin/ffmpeg'
+  })
+  assert.deepEqual(finalizationBarrierSessionStart(named), {
+    route: 'backend-debug-rpc',
+    method: 'recording.start_test'
+  })
+  const unnamed = appQuitRecordingSessionParams({ outputDirectoryCapability: 'c' })
+  assert.equal('ffmpegPath' in unnamed.output, false)
+  assert.deepEqual(finalizationBarrierSessionStart(unnamed), {
+    route: 'renderer',
+    method: 'session.start'
+  })
 })
 
 test('the Windows barrier shim is ffmpeg.cmd running a sibling module, named as the session FFmpeg (#1081)', () => {

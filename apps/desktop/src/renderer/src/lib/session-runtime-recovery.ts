@@ -611,6 +611,20 @@ function showLiveOutputNews(event: HealthEvent): void {
       description: event.message,
       duration: 8_000
     })
+  } else if (event.code === 'screen-window-out-of-sight') {
+    // Plan 219 S1: the captured window is minimized, hidden or on another
+    // desktop. Nothing restarts; the picture holds until it is back.
+    toast.warning('Window out of sight', {
+      id: SCREEN_CAPTURE_TOAST_ID,
+      description: event.message,
+      duration: 20_000
+    })
+  } else if (event.code === 'screen-window-back') {
+    toast.success('The window is back', {
+      id: SCREEN_CAPTURE_TOAST_ID,
+      description: event.message,
+      duration: 8_000
+    })
   } else if (event.code === 'host-overloaded') {
     toast.warning('This computer is overloaded', {
       id: 'host-overloaded',

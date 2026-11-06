@@ -10,7 +10,6 @@ import {
   ImageIcon,
   LightModeIcon,
   LivestreamIcon,
-  BuddyIcon,
   CameraIcon,
   NoteIcon,
   PreviewIcon,
@@ -36,6 +35,7 @@ import {
   CommandSeparator,
   CommandShortcut
 } from '@/components/ui/command'
+import { OwnBuddyIcon } from '@/components/own-buddy-icon'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { LONG_CLIP_SECONDS } from '../../../shared/clip-marks'
 import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
@@ -367,6 +367,7 @@ export function CommandPalette({
         <CommandGroup heading="Pages">
           {PAGES.map((page) => {
             const digit = shortcutDigitFor(page.id)
+            const PageIcon = page.id === 'ai' ? OwnBuddyIcon : page.icon
             return (
               <Fragment key={page.id}>
                 <CommandItem
@@ -374,7 +375,7 @@ export function CommandPalette({
                   keywords={[...PAGE_KEYWORDS[page.id]]}
                   onSelect={() => run(() => openPage(page.id))}
                 >
-                  <page.icon className="size-4" />
+                  <PageIcon className="size-4" />
                   {page.label}
                   {shortcut(digit ? `CmdOrCtrl+${digit}` : undefined)}
                 </CommandItem>
@@ -602,7 +603,7 @@ export function CommandPalette({
               keywords={[...BUDDY_KEYWORDS[tab.id]]}
               onSelect={() => run(() => openBuddy(tab.id))}
             >
-              <BuddyIcon className="size-4" />
+              <OwnBuddyIcon className="size-4" />
               {tab.label}
               <Context>Buddy</Context>
             </CommandItem>
