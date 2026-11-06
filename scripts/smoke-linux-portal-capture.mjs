@@ -11,15 +11,19 @@
 //                                        truthful refusal (unattended runs).
 //   VIDEORC_PORTAL_WAIT_MS               how long to wait for consent (default 60000).
 //   VIDEORC_SMOKE_TIMEOUT_MS             dev-app launch timeout.
+//   VIDEORC_PACKAGED_APP_EXECUTABLE      run a packaged build (linux-unpacked/videorc
+//                                        or an AppImage) instead of the dev app.
 //
 // Safe GPU: the encoder is forced to OpenH264; no VAAPI probe runs.
 
+import { randomBytes } from 'node:crypto'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
+import { packagedSmokeLaunchOptions } from './lib/packaged-smoke-paths.mjs'
 import {
   PORTAL_MONITOR_SOURCE_ID,
   assessPortalDeviceList,
@@ -37,6 +41,11 @@ mkdirSync(outputDirectory, { recursive: true })
 const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
   join(resolve(import.meta.dirname, '..'), 'vendor', 'ffmpeg', 'linux-x64', 'bin', 'ffmpeg')
+const appExecutable = process.env.VIDEORC_PACKAGED_APP_EXECUTABLE || undefined
+const packagedLaunch = packagedSmokeLaunchOptions({
+  appExecutable,
+  capability: appExecutable ? randomBytes(32).toString('base64url') : undefined
+})
 
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 
@@ -59,8 +68,11 @@ try {
       // The smoke owns the portal source. The renderer's own screen preview
       // replaced the smoke's live session mid-check (ogre 2026-09-30).
       VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1',
-      VIDEORC_LINUX_H264_ENCODER: 'openh264'
+      VIDEORC_LINUX_H264_ENCODER: 'openh264',
+      ...packagedLaunch.env
     },
+    packagedSmokeCommandCapability: packagedLaunch.packagedSmokeCommandCapability,
+    spawnSpec: packagedLaunch.spawnSpec,
     timeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: (line) => {

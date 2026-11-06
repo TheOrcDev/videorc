@@ -13,6 +13,8 @@
 //   VIDEORC_LINUX_AV_RECORDING_MS    take length (default 6000)
 //   VIDEORC_LINUX_AV_STEP_TIMEOUT_MS every backend request (default 45000)
 //   VIDEORC_SMOKE_OUTPUT_DIR         evidence + recordings
+//   VIDEORC_PACKAGED_APP_EXECUTABLE  run a packaged build (linux-unpacked/videorc
+//                                    or an AppImage) instead of the dev app
 //   VIDEORC_LINUX_AV_TONE=1          play a 1 kHz tone on the default sink during the
 //                                    mic take and require the recording to carry it
 //                                    (peak above -40 dB), proving an acoustic path
@@ -20,6 +22,7 @@
 // Safe GPU: the encoder defaults to OpenH264.
 
 import { spawn, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -27,6 +30,7 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { packagedSmokeLaunchOptions } from './lib/packaged-smoke-paths.mjs'
 import {
   assessCameraPreview,
   assessLinuxDeviceList,
@@ -56,6 +60,11 @@ const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
   join(resolve(import.meta.dirname, '..'), 'vendor', 'ffmpeg', 'linux-x64', 'bin', 'ffmpeg')
 const ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
+const appExecutable = process.env.VIDEORC_PACKAGED_APP_EXECUTABLE || undefined
+const packagedLaunch = packagedSmokeLaunchOptions({
+  appExecutable,
+  capability: appExecutable ? randomBytes(32).toString('base64url') : undefined
+})
 
 const video = { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 6000 }
 const layoutFor = (layoutPreset) => ({
@@ -82,6 +91,7 @@ const evidence = {
   contract: 'linux-l2-l3-mic-camera',
   legs: [...legs],
   encoder,
+  appExecutable: appExecutable ?? null,
   steps: [],
   failures: []
 }
@@ -113,12 +123,18 @@ function audioLevels(path) {
 }
 
 async function record(ws, smoke, label, { sources, layoutPreset, playTone = false }) {
-  const { capabilityId } = await requestSmokeCommand(
-    smoke,
-    'authorize-smoke-resource',
-    { kind: 'output-directory', path: outputDirectory },
-    { timeoutMs: stepTimeoutMs }
-  )
+  // A packaged build refuses authorize-smoke-resource; its takes land in the
+  // isolated profile's recordings folder under the output directory instead.
+  const capabilityId = appExecutable
+    ? undefined
+    : (
+        await requestSmokeCommand(
+          smoke,
+          'authorize-smoke-resource',
+          { kind: 'output-directory', path: outputDirectory },
+          { timeoutMs: stepTimeoutMs }
+        )
+      ).capabilityId
   const startedAt = Date.now()
   const started = await request(ws, stepTimeoutMs, 'session.start', {
     sources,
@@ -126,7 +142,7 @@ async function record(ws, smoke, label, { sources, layoutPreset, playTone = fals
     output: {
       recordEnabled: true,
       streamEnabled: false,
-      outputDirectoryCapability: capabilityId,
+      ...(capabilityId ? { outputDirectoryCapability: capabilityId } : {}),
       video,
       rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
     }
@@ -207,8 +223,11 @@ try {
       // previews re-opened the camera and requested portal consent after
       // each take; the unanswered picker then held the next session.start
       // until it timed out (L3, ogre 2026-09-30).
-      VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1'
+      VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1',
+      ...packagedLaunch.env
     },
+    packagedSmokeCommandCapability: packagedLaunch.packagedSmokeCommandCapability,
+    spawnSpec: packagedLaunch.spawnSpec,
     timeoutMs: launchTimeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: (line) => {
@@ -253,17 +272,35 @@ try {
       // The live Pulse/PCM startup regression is timing-sensitive: a cold
       // closed-preview recording can pass while the next open-preview start
       // stalls in FFmpeg's shortest queue. Exercise both and a warm retry.
-      for (const [label, previewOpen] of [
-        ['mic-test-pattern', false],
-        ['mic-preview-open', true],
-        ['mic-preview-closed-again', false]
-      ]) {
-        await requestSmokeCommand(
+      // A packaged build refuses preview-window-close, so its first take keeps
+      // the Preview as launched and its warm retry keeps the Preview open.
+      const micTakes = appExecutable
+        ? [
+            ['mic-test-pattern', null],
+            ['mic-preview-open', true],
+            ['mic-preview-open-again', true]
+          ]
+        : [
+            ['mic-test-pattern', false],
+            ['mic-preview-open', true],
+            ['mic-preview-closed-again', false]
+          ]
+      for (const [label, previewOpen] of micTakes) {
+        if (previewOpen !== null) {
+          await requestSmokeCommand(
+            smoke,
+            previewOpen ? 'preview-window-open' : 'preview-window-close',
+            {},
+            { timeoutMs: stepTimeoutMs }
+          )
+        }
+        const preview = await requestSmokeCommand(
           smoke,
-          previewOpen ? 'preview-window-open' : 'preview-window-close',
+          'preview-window-state',
           {},
           { timeoutMs: stepTimeoutMs }
         )
+        step(`${label} preview`, { open: preview?.open ?? null, visible: preview?.visible ?? null })
         const { summary, metrics } = await record(ws, smoke, label, {
           sources: {
             screenId: null,
