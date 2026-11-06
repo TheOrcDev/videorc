@@ -6104,6 +6104,35 @@ mod tests {
         codes
     }
 
+    /// The committed recovery phases and the health codes, from one drain:
+    /// `recovery_event_phases` and `health_codes` each drop the other's
+    /// events.
+    fn recovery_phases_and_health_codes(
+        events: &mut broadcast::Receiver<crate::protocol::ServerEvent>,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut phases = Vec::new();
+        let mut codes = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(event) if event.event == "capture.recovery.status" => phases.push(
+                    event.payload["phase"]
+                        .as_str()
+                        .expect("recovery event phase")
+                        .to_string(),
+                ),
+                Ok(event) if event.event == "health.event" => codes.push(format!(
+                    "{}:{}",
+                    event.payload["level"].as_str().unwrap_or(""),
+                    event.payload["code"].as_str().unwrap_or("")
+                )),
+                Ok(_) => {}
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        (phases, codes)
+    }
+
     async fn install_test_window(
         state: &AppState,
         window_id: &str,
@@ -6126,7 +6155,10 @@ mod tests {
     /// off screen holds (no restart, no attempt, one warn per episode, cleared
     /// by the normal Recovered edge with no restart); gone restarts; on screen
     /// restarts; a held window back on screen whose stream stayed silent
-    /// restarts.
+    /// restarts. A restart is proven by the Restarting status the handler
+    /// commits, not by the status it returns: the scripted attempt is
+    /// immediate and runs on the process runtime, so it can be over, and the
+    /// coordinator Idle again, before the handler reads its status.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_window_out_of_sight_holds_the_generation_instead_of_restarting() {
         let state = test_state();
@@ -6200,13 +6232,12 @@ mod tests {
 
         // Gone: today's restart.
         set_test_window_presence(Some(WindowPresence::Gone));
-        let status = handle_capture_health_transition_with_driver(
+        handle_capture_health_transition_with_driver(
             state.clone(),
             screen_stall_event(4, &snapshot),
             dyn_driver.clone(),
         )
         .await;
-        assert_eq!(status.phase, CaptureRecoveryPhase::Restarting);
         // The attempt runs on the process runtime, not this test's: wait in
         // real time.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -6214,10 +6245,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(driver.restart_calls(), 1);
+        let (phases, codes) = recovery_phases_and_health_codes(&mut events);
+        assert_eq!(phases.first().map(String::as_str), Some("restarting"));
         assert!(
-            !health_codes(&mut events)
-                .iter()
-                .any(|code| code.contains("screen-window")),
+            !codes.iter().any(|code| code.contains("screen-window")),
             "a closed window is never reported as out of sight"
         );
 
@@ -6225,16 +6256,16 @@ mod tests {
         let state = test_state();
         install_test_compositor_run(&state, "run-a").await;
         let snapshot = install_test_window(&state, "window:screencapturekit:40697").await;
+        let mut events = state.events.subscribe();
         set_test_window_presence(Some(WindowPresence::OnScreen {
             name: "Fixture Alpha - Alpha".to_string(),
         }));
-        let status = handle_capture_health_transition_with_driver(
+        handle_capture_health_transition_with_driver(
             state.clone(),
             screen_stall_event(1, &snapshot),
             dyn_driver.clone(),
         )
         .await;
-        assert_eq!(status.phase, CaptureRecoveryPhase::Restarting);
         // The attempt runs on the process runtime, not this test's: wait in
         // real time.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -6242,6 +6273,12 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(driver.restart_calls(), 2);
+        let (phases, codes) = recovery_phases_and_health_codes(&mut events);
+        assert_eq!(phases.first().map(String::as_str), Some("restarting"));
+        assert!(
+            !codes.iter().any(|code| code.contains("screen-window")),
+            "a window on screen is never reported as out of sight"
+        );
 
         // Held, then back on screen with no Recovered edge: the stream did
         // not resume, so the watch hands the stall to the normal restart.
