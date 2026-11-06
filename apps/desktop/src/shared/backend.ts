@@ -4622,6 +4622,9 @@ export interface RuntimeInfo {
     style: 'clear' | 'material' | null
     styleRequested: 'clear' | 'material'
   }
+  /** Why global shortcuts can't work in this session (Linux on Wayland), in
+   * words Settings shows; absent where they can. */
+  globalShortcutsUnavailable?: string
   isPackaged: boolean
   /** Suppresses first-run setup without changing its persisted record (smokes). */
   firstRunSuppressed: boolean
@@ -5414,6 +5417,9 @@ export interface GlobalShortcutsResult {
   /** Main held the config because the shortcut recorder is armed; it
    * registers on disarm and this result says nothing about conflicts. */
   deferred?: true
+  /** This session can't hold a global shortcut (Linux on Wayland): nothing
+   * was registered, and this says why, as `RuntimeInfo` does. */
+  unavailable?: string
 }
 
 /** A key event main captured for the Settings shortcut recorder (plan 062).

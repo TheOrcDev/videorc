@@ -145,7 +145,11 @@ import {
 import { runBackendInterruptingAction } from './interruption-actions'
 import { AccountSignInTransactions } from './account-sign-in-transactions'
 import { ProviderOAuthCallbacks } from './provider-oauth-callbacks'
-import { GlobalShortcutGate, unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
+import {
+  GlobalShortcutGate,
+  globalShortcutsUnavailableReason,
+  unregisterGlobalShortcutsWhenReady
+} from './global-shortcut-lifecycle'
 import {
   createSafeStoragePersistenceCodec,
   type SecurePersistenceCodec
@@ -785,12 +789,23 @@ let mainWindow: BrowserWindow | null = null
 // record/stream/mic with the app unfocused. Off unless the user configures
 // accelerators in Settings; every set call replaces the previous set.
 // The gate also suspends them while the Settings shortcut recorder is armed.
-const globalShortcutGate = new GlobalShortcutGate(globalShortcut, (action) => {
-  const window = mainWindow
-  if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
-    sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
-  }
+// Linux on Wayland can't hold one at all: the gate registers nothing there and
+// every result, like runtime info, says why. Electron resolves the ozone
+// platform before this script runs.
+const globalShortcutsUnavailable = globalShortcutsUnavailableReason({
+  platform: process.platform,
+  ozonePlatform: app.commandLine.getSwitchValue('ozone-platform')
 })
+const globalShortcutGate = new GlobalShortcutGate(
+  globalShortcut,
+  (action) => {
+    const window = mainWindow
+    if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
+      sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
+    }
+  },
+  globalShortcutsUnavailable
+)
 
 function setGlobalShortcuts(shortcuts: GlobalShortcutsConfig): GlobalShortcutsResult {
   // One spelling per platform: a pre-062 hand-typed `Cmd+…` binds Ctrl off
@@ -15443,6 +15458,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
     backendCrashes: backendCrashRecords,
     firstFrameDecisions: firstFrameDecisions.snapshot(),
     windowGlass: mainWindowGlassInfo(),
+    globalShortcutsUnavailable,
     env: process.env
   })
 }
