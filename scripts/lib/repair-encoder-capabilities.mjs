@@ -16,15 +16,42 @@ import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
 
 /** Repair-encoder preference, mirroring RepairVideoEncoder in repair.rs:
  * quality-controllable software x264 first (dev/full builds), then the
- * platform hardware encoders the LGPL bundles ship. */
-export const REPAIR_ENCODER_PREFERENCE = ['libx264', 'h264_videotoolbox', 'h264_mf']
+ * platform hardware encoders the LGPL bundles ship, then OpenH264 (the only
+ * one the Linux bundle can run without a device). */
+export const REPAIR_ENCODER_PREFERENCE = ['libx264', 'h264_videotoolbox', 'h264_mf', 'libopenh264']
 
 /** The per-encoder quality args build_repair_args (repair.rs) emits, kept here
  * so the smoke exercises the exact command shape the app ships. */
 export const REPAIR_ENCODER_ARGS = {
   libx264: ['-c:v', 'libx264', '-crf', '18', '-preset', 'medium', '-threads', '1'],
   h264_videotoolbox: ['-c:v', 'h264_videotoolbox', '-q:v', '65', '-allow_sw', '1'],
-  h264_mf: ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '90']
+  h264_mf: ['-c:v', 'h264_mf', '-rate_control', 'quality', '-quality', '90'],
+  libopenh264: [
+    '-c:v',
+    'libopenh264',
+    '-rc_mode',
+    'bitrate',
+    '-allow_skip_frames',
+    '0',
+    '-profile:v',
+    'high',
+    '-threads',
+    '1'
+  ]
+}
+
+/** repair.rs' REPAIR_MIN_VIDEO_KBPS: the floor of a repair's bitrate target. */
+export const REPAIR_MIN_VIDEO_KBPS = 2000
+
+/** The encoder args for one repair. OpenH264 has no quality mode, so
+ * build_repair_args adds the source video's bitrate (never under the floor);
+ * the other encoders ignore it. */
+export function repairEncoderArgs(encoder, videoBitrateKbps = REPAIR_MIN_VIDEO_KBPS) {
+  const args = [...REPAIR_ENCODER_ARGS[encoder]]
+  if (encoder === 'libopenh264') {
+    args.push('-b:v', `${Math.max(REPAIR_MIN_VIDEO_KBPS, Math.round(videoBitrateKbps))}k`)
+  }
+  return args
 }
 
 /** Encoders every shipped macOS ffmpeg must expose: the repair/record H.264
