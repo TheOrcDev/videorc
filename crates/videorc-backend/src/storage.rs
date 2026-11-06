@@ -6674,6 +6674,13 @@ impl Database {
         Ok(())
     }
 
+    /// Removes one app setting; a missing key is not an error.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn import_screen_image(&self, image_path: &str, ffmpeg_path: &str) -> Result<StreamScreen> {
         self.import_screen_image_with_optimizer(image_path, |source, destination| {
             optimize_screen_image(source, destination, ffmpeg_path)

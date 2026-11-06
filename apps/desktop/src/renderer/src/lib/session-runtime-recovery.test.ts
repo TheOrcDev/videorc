@@ -144,6 +144,14 @@ describe('session runtime recovery', () => {
     expect(toastSpies.success).toHaveBeenCalledTimes(1)
     expect(toastSpies.warning).toHaveBeenCalledTimes(1)
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    // `unavailable` means X ended the broadcast: X's API gives no playback
+    // URL any more, so there is nothing else to "show".
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'X ended your broadcast',
+      expect.objectContaining({
+        description: expect.stringContaining('Your local recording is unaffected.')
+      })
+    )
   })
 
   it('preserves OAuth callback success and failure notifications in the lazy chunk', () => {

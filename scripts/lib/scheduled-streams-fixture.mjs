@@ -153,51 +153,97 @@ export async function startScheduledStreamsFixture({
     }
     send({}, 404)
   })
+  // The /2/sources + /2/broadcasts routes (X migration guide, 2026-11-05):
+  // `data` envelopes, problem-JSON errors, 19-digit source ids, and the
+  // stream key only in the create response and the stream_key route.
+  const isSourceId = (id) => /^\d+$/.test(id ?? '')
+  const problem = (send, status, detail) =>
+    send(
+      {
+        type:
+          status === 400
+            ? 'https://api.x.com/2/problems/invalid-request'
+            : status === 404
+              ? 'https://api.x.com/2/problems/resource-not-found'
+              : status === 409
+                ? 'https://api.x.com/2/problems/conflict'
+                : 'about:blank',
+        title: 'Problem',
+        detail,
+        status
+      },
+      status
+    )
+  const publicSource = (source) => {
+    // eslint-disable-next-line no-unused-vars
+    const { stream_key, ...rest } = source
+    return rest
+  }
   function handleX({ request, url, body, bytes, send, response }) {
     const { method } = request
     const path = url.pathname
-    const sourcePath = path.match(/^\/2\/users\/([^/]+)\/sources(?:\/([^/]+))?$/)
+    const sourcePath = path.match(/^\/2\/sources(?:\/([^/]+))?(\/stream_key)?$/)
     const schedulePath = path.match(/^\/2\/broadcasts\/scheduled(?:\/([^/]+))?(\/live)?$/)
-    const statePath = path.match(/^\/2\/users\/([^/]+)\/broadcasts\/([^/]+)\/state$/)
+    const statePath = path.match(/^\/2\/broadcasts\/([^/]+)\/state$/)
     const broadcastPath = path.match(/^\/2\/broadcasts\/([^/]+)$/)
     if (path === '/2/region') {
-      send({ region: 'fixture-region' })
+      send({ region: 'us-east-1' })
       return
     }
-    if (sourcePath && !sourcePath[2]) {
+    if (sourcePath && !sourcePath[1]) {
       if (method === 'POST') {
-        const id = `x-source-${++xCounter}`
+        const keys = Object.keys(body ?? {})
+        if (keys.length !== 2 || !keys.includes('name') || !keys.includes('region')) {
+          problem(send, 400, 'POST /2/sources accepts only name and region.')
+          return
+        }
+        const id = String(9123456789012345000n + BigInt(++xCounter))
         const source = {
           id,
-          name: body?.name ?? '',
-          rtmp_region: 'fixture-region',
+          name: body.name,
+          region: 'us-east-1',
+          rtmp_url: ingestUrl,
           rtmps_url: ingestUrl,
-          rtmp_stream_key: 'scheduled-smoke-x',
-          is_stream_active: false
+          stream_key: 'scheduled-smoke-x',
+          is_stream_active: false,
+          created_at_ms: String(Date.now())
         }
         xSources.set(id, source)
-        send({ source })
+        send({ data: source }, 201)
         return
       }
-      send({ sources: [...xSources.values()] })
+      const data = [...xSources.values()].map(publicSource)
+      send({ data, meta: { result_count: data.length } })
       return
     }
-    if (sourcePath && sourcePath[2]) {
-      const source = xSources.get(sourcePath[2])
+    if (sourcePath && sourcePath[1]) {
+      if (!isSourceId(sourcePath[1])) {
+        problem(send, 400, 'The `id` value is not a source id.')
+        return
+      }
+      const source = xSources.get(sourcePath[1])
       if (!source) {
-        send({ title: 'Not Found' }, 404)
+        problem(send, 404, 'Source not found.')
+        return
+      }
+      if (sourcePath[2]) {
+        send({ data: { id: source.id, stream_key: source.stream_key } })
         return
       }
       if (method === 'DELETE') {
-        xSources.delete(sourcePath[2])
-        send({})
+        xSources.delete(sourcePath[1])
+        send({ data: { deleted: true } })
         return
       }
-      send({ source: { ...source, is_stream_active: controls.xSourceActive } })
+      send({ data: { ...publicSource(source), is_stream_active: controls.xSourceActive } })
       return
     }
     if (schedulePath && !schedulePath[1]) {
       if (method === 'POST') {
+        if (!isSourceId(body?.source_id)) {
+          problem(send, 400, 'The `source_id` value is not a source id.')
+          return
+        }
         const broadcastId = `xsched${++xCounter}`
         const schedule = {
           ...body,
@@ -220,16 +266,16 @@ export async function startScheduledStreamsFixture({
     if (schedulePath && schedulePath[1]) {
       const schedule = xSchedules.get(schedulePath[1])
       if (!schedule) {
-        send({ title: 'Not Found' }, 404)
+        problem(send, 404, 'Scheduled broadcast not found.')
         return
       }
       if (schedulePath[2]) {
         if (!schedule.manual_publish) {
-          send({ title: 'manual publish required' }, 400)
+          problem(send, 400, 'manual publish required')
           return
         }
         if (!controls.xSourceActive) {
-          send({ title: 'source is not receiving video' }, 400)
+          problem(send, 400, 'source is not receiving video')
           return
         }
         schedule.state = 'Running'
@@ -238,7 +284,11 @@ export async function startScheduledStreamsFixture({
       }
       if (method === 'PUT') {
         if (!body?.scheduled_end_ms || !body?.scheduled_broadcast_id) {
-          send({ title: 'scheduled_end_ms and scheduled_broadcast_id are required' }, 400)
+          problem(send, 400, 'scheduled_end_ms and scheduled_broadcast_id are required')
+          return
+        }
+        if (!isSourceId(body.source_id)) {
+          problem(send, 400, 'The `source_id` value is not a source id.')
           return
         }
         // Full replacement: nothing survives that the body did not carry.
@@ -260,26 +310,59 @@ export async function startScheduledStreamsFixture({
       send({ data: schedule })
       return
     }
+    if (path === '/2/broadcasts' && method === 'POST') {
+      // Instant Go Live (never used by the scheduling smoke, which asserts
+      // it is not called): strict body, 201, RUNNING.
+      const allowed = ['source_id', 'title', 'locale', 'chat_option', 'should_not_tweet']
+      const unknown = Object.keys(body ?? {}).filter((key) => !allowed.includes(key))
+      if (unknown.length > 0) {
+        problem(send, 400, `unknown field: ${unknown.join(', ')}`)
+        return
+      }
+      if (!isSourceId(body?.source_id)) {
+        problem(send, 400, 'The `source_id` value is not a source id.')
+        return
+      }
+      const id = `xlive${++xCounter}`
+      send(
+        {
+          data: {
+            id,
+            broadcast_id: id,
+            state: 'RUNNING',
+            share_url: `https://x.com/i/broadcasts/${id}`,
+            media_key: `28_${String(2116610227978326016n + BigInt(xCounter))}`
+          }
+        },
+        201
+      )
+      return
+    }
     if (statePath) {
-      const schedule = xSchedules.get(statePath[2])
-      if (schedule && body?.state === 'END') schedule.state = 'Ended'
-      send({ broadcast: { id: statePath[2], state: body?.state === 'END' ? 'ENDED' : 'RUNNING' } })
+      if (body?.state !== 'END' || Object.keys(body).length !== 1) {
+        problem(send, 400, 'Send exactly {"state":"END"}.')
+        return
+      }
+      const schedule = xSchedules.get(statePath[1])
+      if (schedule) schedule.state = 'Ended'
+      send({ data: { id: statePath[1], state: 'ENDED' } })
       return
     }
     if (broadcastPath && method === 'GET') {
       const schedule = xSchedules.get(broadcastPath[1])
       if (!schedule) {
-        send({ title: 'Not Found' }, 404)
+        problem(send, 404, 'Broadcast not found.')
         return
       }
       send({
-        broadcast: {
+        data: {
           id: broadcastPath[1],
-          media_key: `28_${broadcastPath[1]}`,
+          broadcast_id: broadcastPath[1],
+          media_key: `28_${String(2116610227978326016n + BigInt(xCounter))}`,
           state: schedule.state === 'Running' ? 'RUNNING' : 'NOT_STARTED',
+          share_url: `https://x.com/i/broadcasts/${broadcastPath[1]}`,
           total_watching: '3'
-        },
-        share_url: `https://x.com/i/broadcasts/${broadcastPath[1]}`
+        }
       })
       return
     }
