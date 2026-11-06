@@ -229,6 +229,8 @@ import {
   parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatus,
   parseMainRecordingStatusEvent,
+  parseMainScene,
+  parseMainSceneChangedEvent,
   parseMainVirtualCameraChangedEvent
 } from './backend-event-message'
 import {
@@ -248,7 +250,8 @@ import {
   previewSurfaceBackgroundLayer,
   previewSurfaceLiveBackgroundLibraryScript,
   previewSurfaceLiveBackgroundLogLine,
-  previewSurfaceLiveBackgroundStatusFromConsoleLine
+  previewSurfaceLiveBackgroundStatusFromConsoleLine,
+  previewSurfaceStatusBackground
 } from './preview-surface-live-background'
 import { livePosterManifest } from '../shared/live-background-catalog'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
@@ -716,7 +719,9 @@ import type {
   VideorcAccountSnapshot,
   ViewerSample,
   RecordingStatus,
-  OverlayLayout
+  OverlayLayout,
+  EffectiveSceneBackground,
+  Scene
 } from '../shared/backend'
 import { previewProgramShape } from '../shared/preview-program'
 import {
@@ -1018,6 +1023,11 @@ let previewSurfaceBanners: readonly Banner[] = []
 // draws the Buddy's layer while the program carries it (its two switches).
 // Kept across reconnects; a new connection re-reads `overlays.layout.get`.
 let previewSurfaceOverlayLayout: OverlayLayout | null = null
+// The committed scene's background from the same socket (`scene.get`, then
+// `scene.changed`): the compositor status names the program's background but
+// not its look, so the proof surface draws this one while the status names
+// it. Undefined until main hears the scene; kept across reconnects.
+let previewSurfaceCommittedBackground: EffectiveSceneBackground | null | undefined
 let nativePreviewCommittedCompositorScene: PreviewSurfaceSceneState | null = null
 let nativePreviewCommittedCompositorRunId: string | undefined
 const nativePreviewCompositorRunAuthority = new NativePreviewRunAuthority()
@@ -5900,12 +5910,23 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
   }
   const suppressFramePolling =
     nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true
-  const backgroundLayer = existingPreviewBackgroundLayer()
-  const backgroundStageMargin = backgroundLayer
-    ? (nativePreviewSurfaceScene?.backgroundStageMargin ??
-      nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
-      0)
-    : 0
+  // The program's background, drawn and inset as the recording draws it. A
+  // background main has not heard of yet keeps the surface's layer and stage.
+  const statusBackground = previewSurfaceStatusBackground(
+    status.sceneSources ?? [],
+    previewSurfaceCommittedBackground
+  )
+  const backgroundLayer =
+    statusBackground === undefined
+      ? existingPreviewBackgroundLayer()
+      : previewSurfaceBackgroundLayer(statusBackground ?? undefined, fileUrlFromPath)
+  const backgroundStageMargin = !backgroundLayer
+    ? 0
+    : statusBackground === undefined
+      ? (nativePreviewSurfaceScene?.backgroundStageMargin ??
+        nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
+        0)
+      : previewProofBackgroundStageMargin(statusBackground)
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(status.sceneSources ?? []).filter(compositorSceneSourceIsPreviewLayer).map((source) => ({
@@ -7929,6 +7950,30 @@ function acceptPreviewSurfaceOverlayLayout(read: () => OverlayLayout, source: st
   void updateNativePreviewSurfaceBanners().catch((error) => {
     logBackend('warn', `Preview Buddy layer failed to update: ${errorMessageText(error)}`)
   })
+}
+
+// The committed scene's background (`scene.get` on connect, then
+// `scene.changed`): the proof surface draws it while the compositor status
+// names it. A new background forgets the committed compositor scene, because
+// a status already at the new revision may have committed without it; the
+// next status then commits the scene with its background.
+function acceptPreviewSurfaceSceneBackground(read: () => Scene, source: string): void {
+  let scene: Scene
+  try {
+    scene = read()
+  } catch (error) {
+    logBackend('warn', `Main dropped an invalid ${source} payload: ${errorMessageText(error)}`)
+    return
+  }
+  const background = scene.background ?? null
+  if (JSON.stringify(background) === JSON.stringify(previewSurfaceCommittedBackground ?? null)) {
+    if (previewSurfaceCommittedBackground === undefined) {
+      previewSurfaceCommittedBackground = background
+    }
+    return
+  }
+  previewSurfaceCommittedBackground = background
+  nativePreviewCommittedCompositorScene = null
 }
 
 async function updateNativePreviewSurfaceBanners(): Promise<PreviewSurfaceStatus> {
@@ -10933,14 +10978,21 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
   const bannersListRequestId = `main-banners-list-${Date.now()}`
   const overlayLayoutRequestId = `main-overlay-layout-${Date.now()}`
+  const sceneRequestId = `main-scene-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
     if (backendEventSocket === socket) {
       logBackend('info', 'Main process connected to backend events.')
       // Plan 186: the proof surface draws the showing banners; plan 205 S9:
-      // and the Buddy's layer while its switches put it in the program.
-      const includedEvents = ['recording.status', 'banners.changed', 'overlays.layout']
+      // and the Buddy's layer while its switches put it in the program; and
+      // the committed scene's background.
+      const includedEvents = [
+        'recording.status',
+        'banners.changed',
+        'overlays.layout',
+        'scene.changed'
+      ]
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
       }
@@ -10980,6 +11032,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             socket.send(
               JSON.stringify({ id: overlayLayoutRequestId, method: 'overlays.layout.get' })
             )
+            socket.send(JSON.stringify({ id: sceneRequestId, method: 'scene.get' }))
             if (process.platform === 'win32') {
               previewSurfaceStatusRequestGeneration = previewWindowSurfaceGeneration()
               socket.send(
@@ -11041,6 +11094,17 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        if (parsed.id === sceneRequestId) {
+          // Never fatal: the background is a drawing, not capture state.
+          if (parsed.ok === true) {
+            acceptPreviewSurfaceSceneBackground(() => parseMainScene(parsed.payload), 'scene.get')
+          } else {
+            logBackend(
+              'warn',
+              `Main could not read the committed scene: ${parsed.error?.message ?? 'unknown error'}`
+            )
+          }
+        }
         // Responses to fire-and-forget present reports are deliberately ignored.
         return
       }
@@ -11060,6 +11124,13 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         acceptPreviewSurfaceOverlayLayout(
           () => parseMainOverlayLayoutEvent(parsed.payload),
           'overlays.layout'
+        )
+        return
+      }
+      if (parsed.event === 'scene.changed') {
+        acceptPreviewSurfaceSceneBackground(
+          () => parseMainSceneChangedEvent(parsed.payload),
+          'scene.changed'
         )
         return
       }
@@ -14363,6 +14434,24 @@ function smokeCompositorStatusFromSceneParams(
               fileRevision: params.activeScreen.status === 'ready' ? 'smoke-revision' : undefined,
               width: params.activeScreen.status === 'ready' ? 1280 : undefined,
               height: params.activeScreen.status === 'ready' ? 720 : undefined
+            }
+          ]
+        : []),
+      // The compositor names the program's background the way the backend
+      // does; the proof surface keeps the smoke's layer for it.
+      ...(params.scene?.background
+        ? [
+            {
+              id: `background-image:${params.scene.background.assetId}`,
+              name: 'Background',
+              kind: 'background-image' as const,
+              state: 'live',
+              visible: true,
+              transform: fullFrameTransform(),
+              fit:
+                params.scene.background.fit === 'fit' ? ('contain' as const) : ('cover' as const),
+              mirror: false,
+              imagePath: params.scene.background.managedAssetPath
             }
           ]
         : [])
