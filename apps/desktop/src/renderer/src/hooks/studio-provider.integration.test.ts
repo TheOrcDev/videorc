@@ -5749,7 +5749,9 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest().recording.recording.state === 'idle')
 
     // recordStart records, even though the saved mode is Go Live (B-3): the
-    // dialog never opens, the file is written, the saved mode is untouched.
+    // dialog never opens, the file is written, the saved mode is untouched,
+    // and remotes see a Record take, not the saved Go Live.
+    await pushEvent('backend.ready', null)
     await pushEvent('remote.intent', { intentId: 'rec-1', intent: { kind: 'recordStart' } })
     await waitForObservation(() => acks().some((ack) => ack.intentId === 'rec-1'))
     expect(acks().find((ack) => ack.intentId === 'rec-1')).toEqual({ intentId: 'rec-1', ok: true })
@@ -5758,6 +5760,18 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().core.goLiveConfirmationOpen).toBe(false)
     expect(latest().core.captureConfig.streamEnabled).toBe(true)
     await waitForObservation(() => latest().recording.recording.state === 'recording')
+    type PublishedOutputs = {
+      state?: { sessionActive?: boolean; recordEnabled?: boolean; streamEnabled?: boolean }
+    }
+    const publishedDuringSession = (): PublishedOutputs['state'][] =>
+      backend.sentCommands
+        .filter((command) => command.method === 'remote.surface.publish')
+        .map((command) => (command.params as PublishedOutputs).state)
+        .filter((state) => state?.sessionActive === true)
+    await waitForObservation(() => publishedDuringSession().length > 0)
+    for (const state of publishedDuringSession()) {
+      expect(state).toMatchObject({ recordEnabled: true, streamEnabled: false })
+    }
     await act(async () => {
       await latest().core.stopSession()
     })
