@@ -4739,18 +4739,8 @@ async fn start_session_with_timeline(
     refuse_legacy_start_while_hidden(use_encoder_bridge, state.screen_privacy.view().hidden)?;
     if matches!(capture.video, VideoInput::TestPattern)
         && !linux_bridge_composes_native_sources(use_encoder_bridge, &params)
+        && let Some((code, message)) = test_pattern_fallback_warning(&params)
     {
-        let (code, message) = if matches!(params.layout.layout_preset, LayoutPreset::CameraOnly) {
-            (
-                "camera-capture-fallback",
-                "Using FFmpeg test pattern because the selected camera was not available for camera-only capture.",
-            )
-        } else {
-            (
-                "screen-capture-fallback",
-                "Using FFmpeg test pattern because a macOS screen/window source was not available.",
-            )
-        };
         emit_health_event(&state, Some(&session_id), HealthLevel::Warn, code, message)?;
     }
     emit_audio_track_health_events(&state, &session_id, &params, &audio_tracks)?;
@@ -14920,6 +14910,28 @@ fn resolve_microphone_input(microphone_id: Option<&str>) -> Option<MicrophoneInp
             crate::linux_pulse_audio::parse_linux_pulse_microphone_id(microphone_id)
                 .map(|source_name| MicrophoneInput::LinuxPulse { source_name })
         })
+}
+
+/// The health warning for a session whose video fell back to the FFmpeg test
+/// pattern, or none when the session chose Test pattern itself. Every Linux
+/// Test pattern take warned that a macOS screen source was not available and
+/// pointed at the Screen Recording pane (ogre, 2026-11-05).
+fn test_pattern_fallback_warning(
+    params: &StartSessionParams,
+) -> Option<(&'static str, &'static str)> {
+    if matches!(params.layout.layout_preset, LayoutPreset::CameraOnly) {
+        return Some((
+            "camera-capture-fallback",
+            "Using FFmpeg test pattern because the selected camera was not available for camera-only capture.",
+        ));
+    }
+    let chose_test_pattern = params.sources.test_pattern
+        && params.sources.screen_id.is_none()
+        && params.sources.window_id.is_none();
+    (!chose_test_pattern).then_some((
+        "screen-capture-fallback",
+        "Using FFmpeg test pattern because no screen or window source was available.",
+    ))
 }
 
 /// Linux has no FFmpeg device `VideoInput` for portal screens or V4L2
@@ -35327,6 +35339,40 @@ mod tests {
         }));
         drop(state);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_chosen_test_pattern_is_not_a_capture_fallback() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::ScreenOnly;
+        params.sources.screen_id = None;
+        params.sources.camera_id = None;
+        params.sources.test_pattern = true;
+        assert_eq!(test_pattern_fallback_warning(&params), None);
+        // A screen that was selected and could not be opened still warns,
+        // in copy that names no platform.
+        params.sources.screen_id = Some("screen:avfoundation:3".to_string());
+        let (code, message) =
+            test_pattern_fallback_warning(&params).expect("a missing screen warns");
+        assert_eq!(code, "screen-capture-fallback");
+        assert!(!message.contains("macOS"), "{message}");
+        params.sources.screen_id = None;
+        params.sources.window_id = Some("window:screencapturekit:7".to_string());
+        assert_eq!(
+            test_pattern_fallback_warning(&params).map(|(code, _)| code),
+            Some("screen-capture-fallback")
+        );
+        params.sources.window_id = None;
+        params.sources.test_pattern = false;
+        assert_eq!(
+            test_pattern_fallback_warning(&params).map(|(code, _)| code),
+            Some("screen-capture-fallback")
+        );
+        params.layout.layout_preset = LayoutPreset::CameraOnly;
+        assert_eq!(
+            test_pattern_fallback_warning(&params).map(|(code, _)| code),
+            Some("camera-capture-fallback")
+        );
     }
 
     #[test]
