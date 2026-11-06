@@ -951,8 +951,41 @@ try {
     // Plan 219 S1: Alpha on the canvas, then minimized by the fixture itself
     // for ~15 s. The stall must be held (one notice, no recovery restart,
     // no source-missing), and frames must resume on the same generation.
-    await renderer.goTo(targets.alpha)
-    const liveBefore = await waitForScreenLive(alpha.windowId)
+    // Step 6 removed both app scenes, so the window goes on through the
+    // Studio's own picker path (the working picture, no saved scene on).
+    const pickWindow = async (fixture) => {
+      await requestSmokeCommand(
+        smoke,
+        'select-screen-device',
+        { sourceId: fixture.windowId, settleMs: 0 },
+        { timeoutMs }
+      )
+      return waitForScreenLive(fixture.windowId)
+    }
+    const privacy = await request(ws, timeoutMs, 'screen.privacy.get')
+    if (privacy.hidden) {
+      await renderer.togglePrivacy()
+      await waitForBackendState(
+        'screen.privacy.get',
+        (current) => current.hidden === false,
+        'Show screen before the out-of-sight step',
+        5000
+      )
+    }
+    await pickWindow(alpha)
+    // Capture health needs a flowing producer before it can call a stall:
+    // a window minimized in the first second of a fresh generation has no
+    // producer evidence yet and is never held. Three seconds of frames first.
+    const liveBefore = await waitForBackendState(
+      'preview.screen.status',
+      (status) =>
+        status?.state === 'live' &&
+        status.sourceId === alpha.windowId &&
+        (status.framesCaptured ?? 0) > 90 &&
+        (status.frameAgeMs ?? Infinity) < 500,
+      'Alpha flowing for three seconds before the minimize',
+      15_000
+    )
     const framesBefore = liveBefore.framesCaptured ?? 0
     const eventsFrom = events.length
     const minimizedAtMs = await minimizeFixtureApp(alpha)
@@ -1028,9 +1061,12 @@ try {
         .catch(() => false)
     }
     log(`  start on restored Beta: ${acceptedStatus.state}; live ${liveAfterRestore}`)
-    // Leave Alpha on the canvas for whatever follows.
-    await renderer.goTo(targets.alpha)
-    await waitForScreenLive(alpha.windowId)
+    // The direct start moved the capture to Beta behind the renderer's
+    // back (its pick is still Alpha): pick the display, then Alpha again,
+    // so the renderer and the capture agree on Alpha.
+    await renderer.selectDisplay(display)
+    await waitForScreenLive(display.id)
+    await pickWindow(alpha)
 
     const result = {
       noticed: Boolean(noticed),
@@ -1042,6 +1078,7 @@ try {
       framesWhileHidden: whileHidden.framesCaptured ?? 0,
       framesAfter: resumed.framesCaptured ?? 0,
       stateWhileHidden: whileHidden.state,
+      sourceWhileHidden: whileHidden.sourceId ?? null,
       recoveryPhases,
       screenStates: [...new Set(screenStatuses.map((status) => status.state))],
       sourceMissingSeen: screenStatuses.some((status) => status.state === 'source-missing'),
