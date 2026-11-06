@@ -102,6 +102,18 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 - Do not commit secrets, local tokens, app data, recordings, or generated media evidence unless a doc explicitly asks for a tiny fixture.
 - The worktree may contain user changes. Stage only files you intentionally changed for the current slice.
 
+## Cleanup After Merge
+
+Every agent checkout is a git worktree (`~/.t3/worktrees/videorc/*`, `~/projects/videorc-*`, `.claude/worktrees/*`) with its own `target/` and `node_modules`, 2 to 9 GB each. Once the work is on main they are dead weight: by 2026-11-06, 144 of them held over 200 GB on the owner's Mac. Clean up after yourself.
+
+- When a PR merges while you are still working (you merged it, or the owner did), run `pnpm clean:worktrees --apply` before you hand off. Orchestrators run it after merging a batch of delegate PRs.
+- Also run it before a Rust build, smoke run, release build, or parallel delegate dispatch when `df -h ~` shows under 50 GB free.
+- It removes only finished worktrees: the local HEAD is a merged PR's head (or behind it), or a detached checkout already on `origin/main`. It keeps anything with uncommitted or untracked files, commits that are not on main, a process running inside it, a `git worktree lock`, or activity in the last 12 hours, and prints why. Without `--apply` it is a dry run.
+- The worktree the command runs in is always kept, so your own goes in a later sweep. Never delete the worktree you are standing in.
+- Remove test, release-record, and A/B base worktrees you created as soon as the run is reported: `git worktree remove <path>`. Lock one you still need across sessions with `git worktree lock --reason "<why>" <path>`, and unlock it when you are done.
+- Never `rm -rf` a worktree or pass `--force` to `git worktree remove`. If git refuses, the worktree holds work: report it instead of forcing it.
+- Ignored files go with the worktree: builds, copied `.env` files, and `docs/acceptance/artifacts/`. Copy out any evidence you still need first.
+
 ## Style
 
 - Match existing TypeScript and Rust style. Prefer small pure helpers for behavior that needs tests.
