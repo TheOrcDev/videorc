@@ -290,7 +290,11 @@ import {
   type ResourceCapabilityKind,
   type ResourceSelection
 } from './resource-capabilities'
-import { PersistentDirectoryAuthority } from './persistent-directory-authority'
+import {
+  DirectoryUnavailableError,
+  outputDirectoryUnavailableMessage,
+  PersistentDirectoryAuthority
+} from './persistent-directory-authority'
 import {
   buildAllowsPackagedTestHooks,
   ignoreInspectorSignal,
@@ -9950,6 +9954,20 @@ function protectedOAuthPersistenceCodec(): SecurePersistenceCodec {
   return oauthPersistenceCodec
 }
 
+// A removable drive that was unplugged takes the chosen folder with it: say so
+// by name instead of passing Node's ENOENT through to the Record toast.
+function resolveOutputDirectoryHandle(directoryHandleId: unknown): string {
+  try {
+    return outputDirectoryAuthority().resolve(directoryHandleId)
+  } catch (error) {
+    if (error instanceof DirectoryUnavailableError) {
+      console.warn('[output-directory] the chosen recordings folder is unavailable', error.cause)
+      throw new Error(outputDirectoryUnavailableMessage(error.displayName), { cause: error })
+    }
+    throw error
+  }
+}
+
 function outputDirectoryAuthority(): PersistentDirectoryAuthority {
   if (!persistentDirectoryAuthority) {
     persistentDirectoryAuthority = new PersistentDirectoryAuthority(
@@ -15471,7 +15489,7 @@ async function revealSelectedResource(
   if (kind !== 'output-directory') {
     throw new Error('Only output-directory handles can be revealed by this operation.')
   }
-  const path = outputDirectoryAuthority().resolve(directoryHandleId)
+  const path = resolveOutputDirectoryHandle(directoryHandleId)
   shell.showItemInFolder(path)
 }
 
@@ -15815,7 +15833,7 @@ async function checkDirectoryFactsForCapability(
 }
 
 async function authorizeOutputDirectory(directoryHandleId: unknown): Promise<ResourceSelection> {
-  const path = outputDirectoryAuthority().resolve(directoryHandleId)
+  const path = resolveOutputDirectoryHandle(directoryHandleId)
   const handle = {
     directoryHandleId: String(directoryHandleId),
     displayName: basename(path) || path
