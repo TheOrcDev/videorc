@@ -76,6 +76,7 @@ import {
   snapshotBackground,
   resolveSavedBackground,
   sameSceneAudio,
+  sameSceneBackground,
   sameSceneVisual,
   sceneAudio,
   sceneMicrophone,
@@ -196,7 +197,10 @@ import {
   COMMENTS_HIGHLIGHT_TIMING_CONTRACT,
   COMMENTS_SEND_TIMING_CONTRACT
 } from '../../../shared/comments-command-timing'
-import { nativePreviewStatusProvesSceneRevision } from '../../../shared/native-preview-scene-authority'
+import {
+  nativePreviewSceneProofWaitSettled,
+  nativePreviewStatusProvesSceneRevision
+} from '../../../shared/native-preview-scene-authority'
 import { compositorStatusFromFrameReady } from '../../../shared/compositor-frame-ready'
 import { rendererCompositorUpdateWasAccepted } from '../../../shared/native-preview-present-ownership'
 import type {
@@ -1143,7 +1147,7 @@ async function waitForNativePreviewSurfaceSceneRevision(
     } catch {
       return lastStatus
     }
-    if (nativePreviewStatusProvesSceneRevision(lastStatus, sceneRevision, platform)) {
+    if (nativePreviewSceneProofWaitSettled(lastStatus, sceneRevision, platform)) {
       return lastStatus
     }
     await sleep(NATIVE_PREVIEW_SCENE_FRAME_WAIT_INTERVAL_MS)
@@ -10050,11 +10054,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               (slot) =>
                 slot.assetId === background.assetId &&
                 slot.status === 'ready' &&
-                JSON.stringify(
-                  snapshotBackground(
-                    effectiveSceneBackground({ ...registry, activeSlotId: slot.id })
-                  )
-                ) === JSON.stringify(snapshotBackground(background))
+                // The backend's scene writes its keys in another order.
+                sameSceneBackground(
+                  effectiveSceneBackground({ ...registry, activeSlotId: slot.id }),
+                  background
+                )
             )?.id ?? null)
           : null
       // Plan 190: a committed live background is the registry's truth; a
