@@ -1,4 +1,4 @@
-// Plan 190 S9: live backgrounds end to end through the dev app (macOS).
+// Plan 190 S9: live backgrounds end to end through the dev app (macOS, Linux).
 //
 // For each case (Silk at 1080p30, Plasma Wave at 4K30, Liquid Chrome at
 // 1080p60) the smoke puts the live background on the preview, checks the
@@ -20,6 +20,14 @@
 // fall to the poster fails, so run it on a quiet host (it is load-sensitive). With VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1 (debug
 // builds) every case must draw the still poster instead: status `still` with
 // reason `forced` and a static ring.
+//
+// On Linux the Preview is Electron's proof surface, which draws the scene
+// background itself, and the backend composes pixels only while a take
+// records or streams (plan 190 S5). The GLES renderer starts with the take, so
+// the checks made before Record on macOS are made on the take's first status.
+// Linux has no encoded split output, so a record-and-stream case records at
+// the stream's profile, as the Studio does there: one encode feeds both. Its
+// microphone is an owned Pulse source playing 440 Hz into a null sink.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
@@ -27,6 +35,7 @@ import { loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { startLinuxPulseFixtures } from './lib/linux-pulse-fixture.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
@@ -43,9 +52,17 @@ const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const forced = process.env.VIDEORC_LIVE_BACKGROUND_FORCE_STILL === '1'
+const linux = process.platform === 'linux'
 
 /** Plan 190 "Performance budget": the background's own p95 on an M-series Mac. */
 const BUDGET_MS = { 1080: 1.5, 2160: 3.0 }
+/**
+ * Linux runs on anything from a UHD 620-class iGPU, where plan 190 lets the
+ * guard decide, to a discrete card. Its p95 (render and readback, at the
+ * size the guard holds) must stay under the guard's own line, a fifth of the
+ * frame interval (`GUARD_SHARE_OF_FRAME` in `live_background/guard.rs`).
+ */
+const LINUX_GUARD_SHARE_OF_FRAME = 0.2
 const CASES = (
   process.env.VIDEORC_LIVE_BACKGROUND_SMOKE_CASES ??
   [
@@ -75,8 +92,13 @@ const CASES = (
     const [id, profiles] = entry.split(':')
     const match = /^(\d+)p(\d+)(?:\+stream(\d+)p(\d+))?$/.exec(profiles ?? '')
     assert(match, `bad case ${entry}`)
-    const height = Number(match[1])
     const streamHeight = match[3] ? Number(match[3]) : null
+    // Linux has no encoded split-output role: a recording and a stream share
+    // one encode, so the Studio records at the stream's profile (the
+    // strictest shared one, `capture.ts`). The smoke sends that shape there.
+    const shared = linux && streamHeight !== null
+    const height = shared ? streamHeight : Number(match[1])
+    const fps = Number(match[shared ? 4 : 2])
     return {
       id,
       look:
@@ -93,7 +115,8 @@ const CASES = (
         }[id] ?? null,
       width: widthFor(height),
       height,
-      fps: Number(match[2]),
+      fps,
+      shared,
       stream: streamHeight
         ? { width: widthFor(streamHeight), height: streamHeight, fps: Number(match[4]) }
         : null,
@@ -111,6 +134,7 @@ const STAGE = { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }
 const RING_SQUARE = { x: 0.015, y: 0.4, w: 0.06, h: 0.1067 }
 const RTMP_BASE_PORT = Number(process.env.VIDEORC_LIVE_BACKGROUND_RTMP_PORT ?? 19841)
 const RTMP_BIND_MS = 1500
+const STREAM_BITRATE_KBPS = 6000
 
 const LAYOUT = {
   layoutPreset: 'screen-only',
@@ -132,7 +156,13 @@ const LAYOUT = {
 mkdirSync(outputDirectory, { recursive: true })
 
 let stopApp = async () => {}
+let pulseFixtures = null
+let microphoneId = 'microphone:coreaudio:4294967295'
 try {
+  if (linux) {
+    pulseFixtures = await startLinuxPulseFixtures({ ffmpegPath })
+    microphoneId = pulseFixtures.sources[0].deviceId
+  }
   const launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -199,20 +229,31 @@ try {
     ws.close()
   }
 
-  async function runCase(testCase, index) {
-    const label = caseLabel(testCase)
-    const background = liveBackground(testCase)
-    await applyPreview(background, testCase)
+  /**
+   * The Preview takes this case's background; macOS draws it there before
+   * any take. On Linux nothing composes until the take, so the compositor's
+   * scene must name the background and keep it for 2 s: the take records
+   * that scene, and the app's own scene holds a camera the smoke never opens.
+   */
+  async function waitForPreviewBackground(testCase, background) {
     let appliedAt = Date.now()
+    let heldSince = null
     const expected = forced ? 'still' : 'shader'
+    const sourceId = `background-image:${background.assetId}`
     let seen
     let reapplied = 0
     await waitFor(
       async () => {
         seen = await status()
-        // The previous case's background can still be reporting for a moment
-        // (plan 194's cases run back to back): wait for this one's id too.
-        if (
+        if (linux) {
+          if (seen.sceneSources?.some((source) => source.id === sourceId)) {
+            heldSince ??= Date.now()
+            return Date.now() - heldSince >= 2000
+          }
+          heldSince = null
+        } else if (
+          // The previous case's background can still be reporting for a
+          // moment (plan 194's cases run back to back): wait for this one's id.
           seen.liveBackground?.rendering === expected &&
           seen.liveBackground?.id === testCase.id
         ) {
@@ -222,7 +263,8 @@ try {
         // first-frame watchdog re-commits that scene over this smoke's
         // (`resync-scene`), and the compositor loses the live background.
         // Put it back (the recording below passes its scene explicitly).
-        if (!seen.liveBackground && Date.now() - appliedAt > 1500 && reapplied < 5) {
+        const displaced = linux || !seen.liveBackground
+        if (displaced && Date.now() - appliedAt > 1500 && reapplied < 5) {
           reapplied += 1
           console.log(`${testCase.id}: the app displaced the preview scene; applying again`)
           await applyPreview(background, testCase)
@@ -231,19 +273,33 @@ try {
         return false
       },
       () =>
-        `${testCase.id} to render as ${expected}; last ${JSON.stringify({
-          liveBackground: seen?.liveBackground,
-          programs: seen?.framePipeline?.liveBackgroundPrograms,
-          scratchBytes: seen?.framePipeline?.liveBackgroundScratchBytes,
-          backend: seen?.backend,
-          framesRendered: seen?.framesRendered,
-          sceneRevision: seen?.sceneRevision,
-          sceneSources: seen?.sceneSources?.map((source) => [source.kind, source.id, source.state])
-        })}`
+        `${testCase.id} to ${linux ? 'stay in the scene' : `render as ${expected}`}; last ${JSON.stringify(
+          {
+            liveBackground: seen?.liveBackground,
+            programs: seen?.framePipeline?.liveBackgroundPrograms,
+            scratchBytes: seen?.framePipeline?.liveBackgroundScratchBytes,
+            backend: seen?.backend,
+            framesRendered: seen?.framesRendered,
+            sceneRevision: seen?.sceneRevision,
+            sceneSources: seen?.sceneSources?.map((source) => [
+              source.kind,
+              source.id,
+              source.state
+            ])
+          }
+        )}`
     )
+    if (linux) return
     const live = (await status()).liveBackground
     assert.equal(live.id, testCase.id)
     if (forced) assert.equal(live.reason, 'forced', 'a forced still names its reason')
+  }
+
+  async function runCase(testCase, index) {
+    const label = caseLabel(testCase)
+    const background = liveBackground(testCase)
+    await applyPreview(background, testCase)
+    await waitForPreviewBackground(testCase, background)
 
     const scene = await request(ws, timeoutMs, 'scene.get')
     const capability = await requestSmokeCommand(
@@ -318,10 +374,18 @@ try {
         `${label}: ${firstReported}/${samples.length} samples came before the new run's first status`
       )
     }
+    // The guard's steps, 0.5 s apart, for a failure: `half 4.6` is the level
+    // and the p95 of its last finished window.
+    const timeline = samples
+      .map(
+        (sample) =>
+          `${sample.liveBackground?.rendering} ${sample.liveBackground?.p95Ms?.toFixed(1)}`
+      )
+      .join(', ')
     for (const sample of samples.slice(firstReported)) {
       assert(
         allowed.includes(sample.liveBackground?.rendering),
-        `${label}: the live background left ${allowed.join('/')} mid-recording: ${JSON.stringify(sample.liveBackground)}`
+        `${label}: the live background left ${allowed.join('/')} mid-recording: ${JSON.stringify(sample.liveBackground)} (${timeline})`
       )
     }
     const halved = samples.filter((sample) => sample.liveBackground?.rendering === 'half').length
@@ -330,6 +394,13 @@ try {
     }
     // The uploads baseline is the first status the session's run published.
     const early = samples[firstReported]
+    if (linux) {
+      // The checks macOS makes on the Preview before Record.
+      assert.equal(early.liveBackground.id, testCase.id)
+      if (forced) {
+        assert.equal(early.liveBackground.reason, 'forced', 'a forced still names its reason')
+      }
+    }
     assert.equal(
       late.framePipeline.immutableTextureUploads,
       early.framePipeline.immutableTextureUploads,
@@ -338,9 +409,11 @@ try {
     if (!forced) {
       assert(late.framePipeline.liveBackgroundPrograms > 0, 'the live programs are counted')
       const p95 = late.liveBackground?.p95Ms
-      const budget = BUDGET_MS[testCase.height]
+      const budget = linux
+        ? (1000 / testCase.fps) * LINUX_GUARD_SHARE_OF_FRAME
+        : BUDGET_MS[testCase.height]
       console.log(
-        `${label}: p95 ${p95?.toFixed?.(2) ?? 'n/a'} ms (budget ${budget}), load ${loadavg()[0].toFixed(1)}`
+        `${label}: p95 ${p95?.toFixed?.(2) ?? 'n/a'} ms (budget ${budget.toFixed(2)}), load ${loadavg()[0].toFixed(1)}`
       )
       if (process.env.VIDEORC_LIVE_BACKGROUND_SMOKE_SKIP_BUDGET !== '1') {
         assert(
@@ -458,6 +531,7 @@ try {
   }
 } finally {
   await stopApp()
+  await pulseFixtures?.stop()
 }
 
 function liveBackground({ id, look }) {
@@ -479,7 +553,7 @@ function liveBackground({ id, look }) {
 
 function sessionParams(outputDirectoryCapability, testCase, target) {
   const params = {
-    sources: { testPattern: true, microphoneId: 'microphone:coreaudio:4294967295' },
+    sources: { testPattern: true, microphoneId },
     layout: LAYOUT,
     output: {
       recordEnabled: true,
@@ -490,7 +564,7 @@ function sessionParams(outputDirectoryCapability, testCase, target) {
         width: testCase.width,
         height: testCase.height,
         fps: testCase.fps,
-        bitrateKbps: testCase.height > 1080 ? 20000 : 8000
+        bitrateKbps: testCase.shared ? STREAM_BITRATE_KBPS : testCase.height > 1080 ? 20000 : 8000
       },
       rtmp: target
         ? { preset: 'custom', serverUrl: target.serverUrl, streamKey: target.streamKey }
@@ -519,14 +593,14 @@ function sessionParams(outputDirectoryCapability, testCase, target) {
           streamKeyPresent: true,
           authMode: 'manual-rtmp',
           outputPreset: preset,
-          outputBitrateKbps: 6000,
+          outputBitrateKbps: STREAM_BITRATE_KBPS,
           createdAt: timestamp,
           updatedAt: timestamp
         }
       ],
       selectedTargetId: target.id,
       defaultOutputPreset: preset,
-      defaultBitrateKbps: 6000,
+      defaultBitrateKbps: STREAM_BITRATE_KBPS,
       enabledTargetIds: [target.id]
     },
     captions: { burnTarget: 'off', position: 'bottom', textSize: 'm' }
@@ -537,8 +611,11 @@ function widthFor(height) {
   return Math.round((height * 16) / 9)
 }
 
-function caseLabel({ id, height, fps, stream }) {
-  return `${id} ${height}p${fps}${stream ? ` + stream ${stream.height}p${stream.fps}` : ''}`
+function caseLabel({ id, height, fps, stream, shared }) {
+  const leg = stream
+    ? ` + stream ${stream.height}p${stream.fps}${shared ? ' (one encode)' : ''}`
+    : ''
+  return `${id} ${height}p${fps}${leg}`
 }
 
 function rtmpTarget(testCase, index) {

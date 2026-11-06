@@ -3742,6 +3742,9 @@ latency and storage smokes. Every fix below is merged on main:
   4.3 s per click on Linux, because every idle scene commit waited out the
   3 s proof budget for a presented revision the proof surface never reports.
   It now flips 141 to 444 ms after the click.
+- #1226: #930's Windows CI at `a98ec90c` failed
+  `bridge_waits_for_fresh_compositor_sequence_before_repeating`; the fresh
+  sequence tests now outlast a starved publisher.
 
 Passing on Ogre without a change: the packaged av-devices smoke (microphone,
 camera at 31.8 fps), the packaged portal smokes, agent-mcp, remote-control,
@@ -3757,14 +3760,17 @@ Still open:
   p95 334 to 368 ms against 300) and the VAAPI hard content session decay
   fails. The time is the recording's own `h264_vaapi` flush
   (`i915_request_wait_timeout`). A second Intel box would show whether it is
-  this host. The iGPU cap is the owner's decision.
+  this host. The iGPU cap is the owner's decision. During takes the package
+  reaches 100 °C with thermald and t2fanrd running, and the same cap sends
+  every shader live background to its still (below).
 - Global shortcuts stay off on Wayland until Chromium registers an app id
   with the portal.
 - Videorc Camera stays hidden on Linux (owner decision, 2026-11-03).
   v4l2loopback is not installed on Ogre.
-- `smoke-live-background-app.mjs` is macOS-only. Live backgrounds on Linux
-  were checked by hand: GLES renders, then the gpu-budget guard drops to the
-  still after about 4 s.
+- Live backgrounds on Linux render only during takes (the idle Preview is the
+  proof surface, plan 190 S5), and on Ogre the shader cases fall to the
+  still under the iGPU cap. The live-background smoke now runs on Linux; see
+  below.
 
 Main merges: `d4add1cf` takes main through `050485dc` (#1222), `a5ca49e1`
 through `a424fe73` (#1223). The one conflict, in
@@ -3838,3 +3844,40 @@ On Ogre all seven cases pass:
 
 The other Linux smokes that set the disable switch (record-latency and
 others) still record the default microphone; that is an owner decision.
+
+#### Live backgrounds on Linux
+
+`smoke-live-background-app.mjs` was macOS-only. Its Linux arm follows what
+Linux does: the idle Preview is the proof surface, so nothing composes the
+live background until a take, and the checks macOS makes before Record are
+made on the take's first status. The smoke holds the background in the
+compositor's scene for 2 s before Record (the app's own scene names a camera
+the smoke never opens, and a session on it was refused). Its microphone is an
+owned Pulse source playing 440 Hz into a null sink; the first runs recorded
+digital silence. A record-and-stream case records at the stream's profile,
+because Linux shares one encode. The p95 budget is the guard's own line, a
+fifth of the frame interval. A failure prints the guard's steps.
+
+The GLES golden grids pass on Ogre (`gles_matches_the_golden_grids_or_skips`).
+With the iGPU unthrottled for a moment, Silk 1080p30 passed at half, p95
+4.63 ms against 6.67. Under the 100 MHz cap every shader case falls to the
+still mid-take: full p95 73.6 ms, then half 26.9 ms, then the still with
+`gpu-budget`. That is the guard doing its job on this host, not a renderer
+fault.
+
+With `VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1` the smoke found a backend bug.
+Two takes in a row on one background (Ghost Fibers after Ghost Fibers
+1080p60) and the second reported no live background at all. A still holds
+no GL thread, so `release_cpu_live_background` skipped it, but the still had
+reported. When the live background left, the compositor cleared the board,
+and the renderer's remembered status matched the next take's still, so it
+never reported again. A user who removes and re-adds a background that fell
+to the still would see the same. The release now runs whenever the renderer
+holds resources or remembers a status (`needs_release`, GLES and Metal, the
+macOS gate too). A Linux test and a Metal test cover it; the Linux test
+fails against the old gate.
+
+After the fix the forced run passes all 13 cases on Ogre, the five record
+and stream cases included, each with ring motion in both the file and the
+RTMP leg. The Metal test runs in the macOS CI job; it was not run on a Mac
+here.
