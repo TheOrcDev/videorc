@@ -664,7 +664,7 @@ try {
     assert.equal(fixture.xSources.size, 0, 'completed schedule releases its source')
     assert.equal(
       fixture.calls.filter(
-        (call) => call.method === 'POST' && /^\/2\/users\/[^/]+\/broadcasts$/.test(call.path)
+        (call) => call.method === 'POST' && call.path === '/2/broadcasts'
       ).length,
       0,
       'no instant X broadcast was created'
