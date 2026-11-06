@@ -339,7 +339,7 @@ describe('outOfSightGate', () => {
   it('knows the refusal copy', () => {
     assert.ok(
       outOfSightRefusalCopyOk(
-        'Fixture Alpha - Fixture Alpha is minimized, hidden or on another desktop. Bring it back, then press Record.'
+        'Fixture Alpha - Fixture Alpha is minimized, hidden or on another desktop. Bring it back, then try again.'
       )
     )
     assert.ok(

@@ -455,8 +455,18 @@ pub(crate) const SCREEN_WINDOW_BACK_CODE: &str = "screen-window-back";
 /// How often a held window is checked for having been closed while out of
 /// sight: one window-server lookup each, so cheap, and a closed window then
 /// takes the normal restart (which ends in SourceMissing) within this delay.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(all(target_os = "macos", not(test)))]
 const SCREEN_OUT_OF_SIGHT_REPOLL_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const SCREEN_OUT_OF_SIGHT_REPOLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Polls a held window may sit back on screen while the episode stays open
+/// before its stall takes the normal restart. Frames that resume clear the
+/// episode through the Recovered edge, which needs
+/// `capture_health::RECOVERED_WINDOW_THRESHOLD` healthy 2 s windows (6-8 s);
+/// a window back for 12 s with no Recovered edge has a stream that did not
+/// resume, and only a restart brings that picture back.
+#[cfg(any(target_os = "macos", test))]
+const SCREEN_BACK_WITHOUT_FRAMES_POLLS: u32 = 6;
 
 /// Plan 219 S1: what a screen-delivery stall on a window source gets.
 #[cfg(any(target_os = "macos", test))]
@@ -616,13 +626,15 @@ async fn hold_out_of_sight_window(
         );
         // A window closed while out of sight never resumes: watch for that
         // and hand the stall to the normal restart, which ends in
-        // SourceMissing with the "closed" copy. The watch ends with the
-        // episode (frames back, or the generation replaced).
+        // SourceMissing with the "closed" copy. A window back on screen
+        // whose stream stayed silent gets the same restart. The watch ends
+        // with the episode (frames back, or the generation replaced).
         let state = state.clone();
         let scope = scope.clone();
         let event = event.clone();
         let driver = Arc::clone(driver);
         state.clone().spawn_process_task(async move {
+            let mut back_on_screen_polls = 0_u32;
             loop {
                 tokio::time::sleep(SCREEN_OUT_OF_SIGHT_REPOLL_INTERVAL).await;
                 if state.process_shutdown_requested() || !out_of_sight_episode_is(&scope) {
@@ -639,19 +651,28 @@ async fn hold_out_of_sight_window(
                     take_out_of_sight_episode(&scope);
                     return;
                 }
-                if matches!(
-                    window_presence_for_scope(&scope),
-                    Some(WindowPresence::Gone)
-                ) {
-                    tracing::warn!(
-                        source_id = %scope.source_key.id,
-                        generation = scope.generation,
-                        "the held window was closed; handing the stall to the normal restart"
-                    );
-                    take_out_of_sight_episode(&scope);
-                    redispatch_health_event(state.clone(), event.clone(), driver).await;
-                    return;
-                }
+                let reason = match window_presence_for_scope(&scope) {
+                    Some(WindowPresence::Gone) => "the held window was closed",
+                    Some(WindowPresence::OnScreen { .. }) => {
+                        back_on_screen_polls += 1;
+                        if back_on_screen_polls < SCREEN_BACK_WITHOUT_FRAMES_POLLS {
+                            continue;
+                        }
+                        "the held window is back on screen but its stream stayed silent"
+                    }
+                    Some(WindowPresence::OffScreen { .. }) | None => {
+                        back_on_screen_polls = 0;
+                        continue;
+                    }
+                };
+                tracing::warn!(
+                    source_id = %scope.source_key.id,
+                    generation = scope.generation,
+                    "{reason}; handing the stall to the normal restart"
+                );
+                take_out_of_sight_episode(&scope);
+                redispatch_health_event(state.clone(), event.clone(), driver).await;
+                return;
             }
         });
     }
@@ -6104,6 +6125,7 @@ mod tests {
     /// Plan 219 S1, one test so the shared presence override stays ordered:
     /// off screen holds (no restart, no attempt, one warn per episode, cleared
     /// by the normal Recovered edge with no restart); gone restarts; on screen
+    /// restarts; a held window back on screen whose stream stayed silent
     /// restarts.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_window_out_of_sight_holds_the_generation_instead_of_restarting() {
@@ -6113,6 +6135,7 @@ mod tests {
         let mut events = state.events.subscribe();
         let driver = Arc::new(ScriptedRecoveryDriver::new(
             [
+                CaptureRecoveryRestartOutcome::Superseded,
                 CaptureRecoveryRestartOutcome::Superseded,
                 CaptureRecoveryRestartOutcome::Superseded,
             ],
@@ -6219,6 +6242,33 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(driver.restart_calls(), 2);
+
+        // Held, then back on screen with no Recovered edge: the stream did
+        // not resume, so the watch hands the stall to the normal restart.
+        let state = test_state();
+        install_test_compositor_run(&state, "run-a").await;
+        let snapshot = install_test_window(&state, "window:screencapturekit:40698").await;
+        let scope = CaptureRecoveryScope::screen(snapshot.source_key.clone(), snapshot.generation);
+        set_test_window_presence(Some(WindowPresence::OffScreen {
+            name: "Fixture Alpha - Alpha".to_string(),
+        }));
+        let status = handle_capture_health_transition_with_driver(
+            state.clone(),
+            screen_stall_event(1, &snapshot),
+            dyn_driver.clone(),
+        )
+        .await;
+        assert_eq!(status.phase, CaptureRecoveryPhase::Idle);
+        assert!(out_of_sight_episode_is(&scope));
+        set_test_window_presence(Some(WindowPresence::OnScreen {
+            name: "Fixture Alpha - Alpha".to_string(),
+        }));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while driver.restart_calls() < 3 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(driver.restart_calls(), 3);
+        assert!(!out_of_sight_episode_is(&scope));
         set_test_window_presence(None);
     }
 

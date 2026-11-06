@@ -7537,7 +7537,7 @@ mod macos {
             WindowPresence::OffScreen { name } | WindowPresence::OnScreen { name } => {
                 // OnScreen here is a race (listed by the window server, not
                 // yet by ScreenCaptureKit): the same fix applies.
-                WindowPresence::out_of_sight_record_message(name)
+                WindowPresence::out_of_sight_start_message(name)
             }
             WindowPresence::Gone => WindowPresence::closed_message(),
         }

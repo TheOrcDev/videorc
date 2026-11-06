@@ -114,7 +114,7 @@ reopened.
 - `select_content` (`preview_screen.rs`): a window missing from the
   on-screen list is classified with the presence check:
   - out of sight: "<window> is minimized, hidden or on another desktop.
-    Bring it back, then press Record."
+    Bring it back, then try again."
   - gone: "The window you picked was closed. Pick it again in Sources."
     The state stays `SourceMissing`; the source id and the presence go to
     the log (`tracing::warn!`), as does every source-missing start.

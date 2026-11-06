@@ -41960,10 +41960,10 @@ mod tests {
     #[test]
     fn separate_source_refusal_reads_as_a_sentence_and_never_names_internals() {
         use crate::screen_capture::WindowPresence;
-        let out_of_sight = WindowPresence::out_of_sight_record_message("Fixture Alpha - Alpha");
+        let out_of_sight = WindowPresence::out_of_sight_start_message("Fixture Alpha - Alpha");
         assert_eq!(
             source_iso_capture_refusal(SourceIsoRefusalRole::Screen, Some(&out_of_sight)),
-            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. Bring it back, then press Record."
+            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. Bring it back, then try again."
         );
         let closed = WindowPresence::closed_message();
         assert_eq!(

@@ -394,7 +394,7 @@ export function outOfSightGate(result) {
 export function outOfSightRefusalCopyOk(message) {
   if (typeof message !== 'string') return false
   return (
-    / is minimized, hidden or on another desktop\. Bring it back, then press Record\.$/.test(
+    / is minimized, hidden or on another desktop\. Bring it back, then try again\.$/.test(
       message
     ) && !/screencapturekit|SourceMissing|ScreenCaptureKit/.test(message)
   )

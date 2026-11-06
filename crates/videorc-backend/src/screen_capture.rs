@@ -52,12 +52,11 @@ pub(crate) enum WindowPresence {
 
 #[cfg(any(target_os = "macos", test))]
 impl WindowPresence {
-    /// What the streamer sees when the picked window is only out of sight.
+    /// What the streamer sees when a start (Record, Go Live, a scene) finds
+    /// the picked window only out of sight.
     /// The name is the window's app and title, the way Sources lists it.
-    pub(crate) fn out_of_sight_record_message(name: &str) -> String {
-        format!(
-            "{name} is minimized, hidden or on another desktop. Bring it back, then press Record."
-        )
+    pub(crate) fn out_of_sight_start_message(name: &str) -> String {
+        format!("{name} is minimized, hidden or on another desktop. Bring it back, then try again.")
     }
 
     /// What the streamer sees when the picked window was closed.
@@ -1568,10 +1567,10 @@ mod tests {
         assert_eq!(window_presence_name(Some(" Notes "), None), "Notes");
         assert_eq!(window_presence_name(None, Some("Untitled")), "Untitled");
         assert_eq!(window_presence_name(None, Some("  ")), "The window");
-        let record = WindowPresence::out_of_sight_record_message(&name);
+        let record = WindowPresence::out_of_sight_start_message(&name);
         assert_eq!(
             record,
-            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. Bring it back, then press Record."
+            "Fixture Alpha - Alpha is minimized, hidden or on another desktop. Bring it back, then try again."
         );
         assert_eq!(
             WindowPresence::closed_message(),
