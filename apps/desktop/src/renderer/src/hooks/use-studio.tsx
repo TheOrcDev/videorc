@@ -17456,19 +17456,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // A source change while only the buffer-only session runs is an idle
   // change: stop the ring (it restarts empty) and re-arm with the new
   // sources, including the microphone Linux cannot swap mid-session.
-  const replaySources = [
+  const replayVisualSources = [
     captureConfig.sources.screenId,
     captureConfig.sources.windowId,
     captureConfig.sources.cameraId,
-    captureConfig.sources.microphoneId,
     captureConfig.sources.cameraOff === true ? 'camera-off' : '',
-    captureConfig.sources.captureOff === true ? 'capture-off' : '',
+    captureConfig.sources.captureOff === true ? 'capture-off' : ''
+  ].join('|')
+  const replaySources = [
+    replayVisualSources,
+    captureConfig.sources.microphoneId,
     captureConfig.sources.microphoneOff === true ? 'microphone-off' : ''
   ].join('|')
   const replaySourcesRef = useRef(replaySources)
+  const replayVisualSourcesRef = useRef(replayVisualSources)
+  const reloadSceneFromCaptureConfigRef = useRef(reloadSceneFromCaptureConfig)
+  reloadSceneFromCaptureConfigRef.current = reloadSceneFromCaptureConfig
   useEffect(() => {
     if (replaySourcesRef.current === replaySources) return
     replaySourcesRef.current = replaySources
+    const visualChanged = replayVisualSourcesRef.current !== replayVisualSources
+    replayVisualSourcesRef.current = replayVisualSources
     replayFailedStartsRef.current = 0
     replayWaitingForCameraRef.current = false
     rearmReplayAfterErrorRef.current()
@@ -17479,12 +17487,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           recordingState: recordingRef.current.state
         })
       ) {
-        void stopReplayBuffer().then(() => scheduleReplayReconcile())
+        // The ring held the session, so the idle scene reload skipped a
+        // screen or camera change, and the re-armed ring (150 ms) would
+        // overtake that reload (250 ms) and start on the old scene: the look
+        // never confirms and Save stays off. Load the scene first.
+        void stopReplayBuffer()
+          .then(async () => {
+            if (!visualChanged || isActiveRecordingState(recordingRef.current.state)) return
+            await reloadSceneFromCaptureConfigRef.current()
+          })
+          .catch((error) => {
+            if (!isActiveRecordingState(recordingRef.current.state)) reportError(error)
+          })
+          .finally(() => scheduleReplayReconcile())
         return
       }
       scheduleReplayReconcile()
     })
-  }, [replaySources, scheduleReplayReconcile, stopReplayBuffer])
+  }, [replaySources, replayVisualSources, reportError, scheduleReplayReconcile, stopReplayBuffer])
   // Settings that shape the session restart a buffer-only ring: the Output
   // quality, the canvas orientation and a smoke's shorter ring (plan 199:
   // otherwise the ring is always the minute). A recording or livestream
