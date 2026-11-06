@@ -23790,7 +23790,8 @@ mod tests {
         assert!(
             older["error"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("superseded"))
+                .is_some_and(|message| message.contains("superseded")),
+            "older warm-up must fail as superseded: {older}"
         );
         assert!(started.elapsed() < Duration::from_millis(1_500));
 
@@ -24007,7 +24008,10 @@ mod tests {
         assert!(
             stale
                 .error
-                .is_some_and(|error| error.message.contains("superseded"))
+                .as_ref()
+                .is_some_and(|error| error.message.contains("superseded")),
+            "the stale warm-up must fail as superseded: {:?}",
+            stale.error
         );
         let final_scene = request_for_test(&state, "final-scene", "scene.get", json!({})).await;
         let final_scene = final_scene.payload.expect("final scene");
