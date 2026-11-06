@@ -2706,6 +2706,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [replayBlockedReason, setReplayBlockedReasonState] = useState<string | null>(null)
   const replayBlockedReasonRef = useRef<string | null>(null)
   const replayStartInFlightRef = useRef(false)
+  // A source picked while the ring's own start was in flight: that start
+  // carried the old sources, so the ring restarts once it answers.
+  const replaySourcesMovedDuringStartRef = useRef<'visual' | 'audio' | null>(null)
+  const restartReplayForSourcesRef = useRef<(visualChanged: boolean) => void>(() => {})
+  // Scene loads for a screen or camera picked while the ring was armed: the
+  // ring waits for them, or its start would carry the old scene.
+  const replaySceneReloadsRef = useRef(0)
   const replayFailedStartsRef = useRef(0)
   // The backend refused the default ring because the scene's camera has no
   // frame yet; it starts again once the camera preview goes live.
@@ -17161,6 +17168,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     replayStartInFlightRef.current = true
+    replaySourcesMovedDuringStartRef.current = null
+    let started = false
     try {
       const replay = await import('@/lib/replay-buffer')
       const status = await replay.startBufferOnlySession({
@@ -17174,6 +17183,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       replayBlockedReasonRef.current = null
       setReplayBlockedReasonState(null)
       applyRecordingStatus(status)
+      started = true
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if ((error as { code?: unknown } | null)?.code === REPLAY_SOFTWARE_ENCODER_REFUSAL) {
@@ -17224,6 +17234,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     } finally {
       replayStartInFlightRef.current = false
+      const moved = replaySourcesMovedDuringStartRef.current
+      replaySourcesMovedDuringStartRef.current = null
+      if (started && moved !== null) restartReplayForSourcesRef.current(moved === 'visual')
     }
   }, [
     applyRecordingStatus,
@@ -17265,6 +17278,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         replayStartInFlight:
           replayStartInFlightRef.current ||
           replayReconcileHoldRef.current ||
+          replaySceneReloadsRef.current > 0 ||
           performanceCheckHoldRef.current,
         failedStarts: replayFailedStartsRef.current,
         waitingForCamera: replayWaitingForCameraRef.current
@@ -17304,6 +17318,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const replayVisualSourcesRef = useRef(replayVisualSources)
   const reloadSceneFromCaptureConfigRef = useRef(reloadSceneFromCaptureConfig)
   reloadSceneFromCaptureConfigRef.current = reloadSceneFromCaptureConfig
+  // The ring held the session, so the idle scene reload skipped a screen or
+  // camera change, and the re-armed ring (150 ms) would overtake that reload
+  // (250 ms) and start on the old scene: the look never confirms and Save
+  // stays off. Stop the ring and load the scene first; the ring waits for
+  // the load. Between two sessions (stopRing false) there is no ring to stop,
+  // but its pending re-arm would overtake the reload the same way, and its
+  // session would cancel it.
+  const restartReplayForSources = useCallback(
+    (visualChanged: boolean, stopRing = true): void => {
+      if (visualChanged) replaySceneReloadsRef.current += 1
+      void (stopRing ? stopReplayBuffer() : Promise.resolve())
+        .then(async () => {
+          if (!visualChanged || isActiveRecordingState(recordingRef.current.state)) return
+          await reloadSceneFromCaptureConfigRef.current()
+        })
+        .catch((error) => {
+          if (!isActiveRecordingState(recordingRef.current.state)) reportError(error)
+        })
+        .finally(() => {
+          if (visualChanged) replaySceneReloadsRef.current -= 1
+          scheduleReplayReconcile()
+        })
+    },
+    [reportError, scheduleReplayReconcile, stopReplayBuffer]
+  )
+  restartReplayForSourcesRef.current = restartReplayForSources
   useEffect(() => {
     if (replaySourcesRef.current === replaySources) return
     replaySourcesRef.current = replaySources
@@ -17319,24 +17359,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           recordingState: recordingRef.current.state
         })
       ) {
-        // The ring held the session, so the idle scene reload skipped a
-        // screen or camera change, and the re-armed ring (150 ms) would
-        // overtake that reload (250 ms) and start on the old scene: the look
-        // never confirms and Save stays off. Load the scene first.
-        void stopReplayBuffer()
-          .then(async () => {
-            if (!visualChanged || isActiveRecordingState(recordingRef.current.state)) return
-            await reloadSceneFromCaptureConfigRef.current()
-          })
-          .catch((error) => {
-            if (!isActiveRecordingState(recordingRef.current.state)) reportError(error)
-          })
-          .finally(() => scheduleReplayReconcile())
+        restartReplayForSources(visualChanged)
+        return
+      }
+      if (replayStartInFlightRef.current) {
+        // The ring's own start is in flight with the old sources (and its
+        // idle reload skips the ring it starts): restart when it answers.
+        replaySourcesMovedDuringStartRef.current =
+          visualChanged || replaySourcesMovedDuringStartRef.current === 'visual'
+            ? 'visual'
+            : 'audio'
+      } else if (
+        visualChanged &&
+        replayArmedRef.current &&
+        !isActiveRecordingState(recordingRef.current.state)
+      ) {
+        restartReplayForSources(true, false)
         return
       }
       scheduleReplayReconcile()
     })
-  }, [replaySources, replayVisualSources, reportError, scheduleReplayReconcile, stopReplayBuffer])
+  }, [replaySources, replayVisualSources, restartReplayForSources, scheduleReplayReconcile])
   // Settings that shape the session restart a buffer-only ring: the Output
   // quality, the canvas orientation and a smoke's shorter ring (plan 199:
   // otherwise the ring is always the minute). A recording or livestream
