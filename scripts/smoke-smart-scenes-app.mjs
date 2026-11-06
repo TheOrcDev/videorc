@@ -973,6 +973,16 @@ try {
       )
     }
     await pickWindow(alpha)
+    // The streamer's case is a session: capture health samples the screen
+    // for a consumer, and the Clips ring is the lightest one (the probe that
+    // held correctly ran with it on; step 6 turned it off).
+    await renderer.setClips(true)
+    await waitForBackendState(
+      'replay.status',
+      (ring) => ring?.state === 'on',
+      'the Clips ring on for the out-of-sight hold',
+      30_000
+    )
     // Capture health needs a flowing producer before it can call a stall:
     // a window minimized in the first second of a fresh generation has no
     // producer evidence yet and is never held. Three seconds of frames first.
@@ -1063,10 +1073,16 @@ try {
     log(`  start on restored Beta: ${acceptedStatus.state}; live ${liveAfterRestore}`)
     // The direct start moved the capture to Beta behind the renderer's
     // back (its pick is still Alpha): pick the display, then Alpha again,
-    // so the renderer and the capture agree on Alpha.
-    await renderer.selectDisplay(display)
-    await waitForScreenLive(display.id)
-    await pickWindow(alpha)
+    // so the renderer and the capture agree on Alpha. This is tidy-up for
+    // whatever follows, never the step's evidence.
+    try {
+      await renderer.setClips(false)
+      await renderer.selectDisplay(display)
+      await waitForScreenLive(display.id)
+      await pickWindow(alpha)
+    } catch (error) {
+      log(`  tidy-up after the step did not settle: ${error?.message?.split('\n')[0]}`)
+    }
 
     const result = {
       noticed: Boolean(noticed),
