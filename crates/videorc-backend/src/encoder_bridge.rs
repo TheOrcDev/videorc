@@ -114,7 +114,8 @@ const STREAM_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(150);
 /// 087). Waiting loses nothing: a skipped tick never reaches the encoder and
 /// every encoded access unit is kept and written in order, so viewers see a
 /// freeze and the file keeps a truthful gap.
-const OUTPUT_WEDGED_TIMEOUT: Duration = Duration::from_secs(30);
+/// The session audio writer waits as long (`session_audio.rs`).
+pub(crate) const OUTPUT_WEDGED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Recording output pressure is recoverable while either VideoToolbox or the
 /// FIFO writer is still advancing. Queue depth/age are pressure signals, not a
 /// liveness verdict; only a complete lack of pipeline progress for this window
@@ -136,7 +137,7 @@ const STREAM_OUTPUT_STALL_NOTICE_THRESHOLD: Duration = Duration::from_secs(2);
 // same integrity contract as encoded output: preserve admitted frames in order
 // inside the role's bounded queue, then stop on bounded no-progress instead of
 // silently replacing content.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long one encoded access unit may wait on a FIFO that accepts no bytes
 /// before the output counts as wedged. Both roles wait out a starved FFmpeg:
@@ -157,11 +158,18 @@ const VIDEORC_TEST_VT_FIFO_PAUSE_REPEAT_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_
 // timing it out truncates a plane, kills FFmpeg, strands the recovery MKV, and
 // loses the remainder of the user's recording. Keep a bounded shutdown escape
 // hatch, but give a progressing Windows recording enough time to recover.
-#[cfg(target_os = "windows")]
+//
+// Linux has the same raw pipe with a slower reader: FFmpeg encoding through
+// VAAPI on a throttled iGPU falls below realtime and pauses its reads for 4-6 s
+// (ogre, 2026-11-06). The two-second budget cut the recording's frame partway,
+// FFmpeg read a short last packet ("packet size 65536 < expected frame_size")
+// and exited, and the take ended at the first such pause
+// (`smoke:multistream-endurance` session B).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "windows")]
 const MEDIA_FOUNDATION_FIFO_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
 // The raw writer's NO-PROGRESS tolerance is a PLATFORM contract, decoupled
 // from the output queue's age budget. Issue #149 (real Windows device): the
@@ -171,10 +179,11 @@ const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = FIFO_FRAME_WRITE_HARD_
 // waited in the output queue was dead before its first byte) and as the sliding
 // no-progress window — making the 30s Windows hard timeout unreachable and
 // killing healthy recordings ~1s in. Late is fine for a file; only a truly
-// wedged pipe (no bytes for this long) is fatal.
-#[cfg(target_os = "windows")]
+// wedged pipe (no bytes for this long) is fatal. Linux's VAAPI pauses need the
+// same window.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE: Duration = Duration::from_secs(10);
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
 const RAW_VIDEO_FIFO_STARTUP_PRIME_TIMEOUT: Duration = Duration::from_millis(2500);
 #[cfg(target_os = "windows")]
@@ -6907,7 +6916,7 @@ struct RawVideoFifoWriteBudget {
 /// stream. The two-second raw budget cut frames mid-plane whenever FFmpeg fell
 /// below realtime and paused its reads for 4-6 s (ogre live lab, 2026-11-03);
 /// the short packet ended the stream leg. Recording and shared raw output keep
-/// their platform contract.
+/// their platform contract (ten seconds without progress on Windows and Linux).
 fn raw_video_fifo_write_budget(role: EncoderBridgeOutputRole) -> RawVideoFifoWriteBudget {
     match role {
         EncoderBridgeOutputRole::Stream => RawVideoFifoWriteBudget {
@@ -11168,7 +11177,7 @@ mod tests {
                 RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
             ),
             RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
-            "macOS/Linux raw fallback keeps its existing two-second contract",
+            "macOS raw fallback keeps its existing two-second contract",
         );
         assert_eq!(
             encoder_bridge_recording_no_progress_timeout(
@@ -12891,7 +12900,7 @@ mod tests {
         // 250ms recording queue budget that killed real recordings in #149.
         assert!(RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE > RECORDING_OUTPUT_QUEUE_MAX_AGE);
         assert!(RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE <= RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         assert_eq!(
             RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
             Duration::from_secs(10)
@@ -12900,16 +12909,45 @@ mod tests {
 
     #[test]
     fn raw_fifo_writer_uses_a_windows_safe_complete_frame_timeout() {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         assert_eq!(
             RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
             Duration::from_secs(30)
         );
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         assert_eq!(
             RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT,
             FIFO_FRAME_WRITE_HARD_TIMEOUT
         );
+    }
+
+    /// Ogre, 2026-11-06: FFmpeg encoding through VAAPI on a throttled iGPU
+    /// paused its reads for 4-6 s, and the two-second budget ended the take.
+    /// A recording or shared frame now waits the pause out; only a reader
+    /// silent past the platform tolerance still fails it.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn a_raw_recording_frame_survives_ffmpeg_pausing_its_reads_mid_frame() {
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let budget = raw_video_fifo_write_budget(role);
+            let (result, written, frame_len) =
+                write_full_hd_frame_through_a_starved_reader(budget, Duration::from_secs(6));
+            result.unwrap_or_else(|error| {
+                panic!("a {role:?} frame must wait for FFmpeg to read again: {error}")
+            });
+            assert_eq!(written, frame_len);
+
+            let (result, written, frame_len) = write_full_hd_frame_through_a_starved_reader(
+                budget,
+                budget.stall_tolerance + Duration::from_secs(1),
+            );
+            let error = result.expect_err("a reader silent past the tolerance still fails");
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert!(written < frame_len);
+        }
     }
 
     #[test]
@@ -13321,7 +13359,7 @@ mod tests {
     #[test]
     fn raw_stream_writer_loop_finishes_a_frame_across_a_reader_stall() {
         let stall = Duration::from_millis(2_400);
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         assert!(
             stall > raw_video_fifo_write_budget(EncoderBridgeOutputRole::Recording).stall_tolerance
         );
