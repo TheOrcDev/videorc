@@ -101,6 +101,79 @@ export async function startLinuxPulseFixtures({
   }
 }
 
+// One owned null sink for an app smoke's playback. The smoke plays its tones
+// there and runs the app with PULSE_SINK set to it, so neither reaches the
+// speakers. Only the module ID this load returned is unloaded.
+export async function startOwnedNullSink({
+  command = pulse,
+  prefix = `videorc_beta_${randomUUID().replaceAll('-', '')}`
+} = {}) {
+  if (!/^videorc_beta_[a-z0-9_]+$/.test(prefix)) throw new Error('Invalid fixture prefix.')
+  const id = await command([
+    'load-module',
+    'module-null-sink',
+    `sink_name=${prefix}`,
+    'rate=48000',
+    'channels=2'
+  ])
+  if (!/^\d+$/.test(id) || !Number.isSafeInteger(Number(id)))
+    throw new Error('Pulse did not return an owned module ID.')
+  let stopped = false
+  return {
+    sink: prefix,
+    stop: async () => {
+      if (stopped) return
+      stopped = true
+      await command(['unload-module', id])
+    }
+  }
+}
+
+// The environment that sends an app's playback to an owned sink. PULSE_SINK
+// names the sink, but the session's routing can still move the stream: a
+// default-metadata target outranks the stream's own in WirePlumber, and a
+// desktop that once moved "Chromium" keeps moving it. node.dont-move, after
+// whatever PULSE_PROP the run already had, makes WirePlumber leave the stream
+// on the sink it named, the way the backend pins its microphone streams.
+export function ownedSinkPlaybackEnv(sink, existingProp) {
+  const kept = (existingProp ?? '').trim()
+  return {
+    PULSE_SINK: sink,
+    PULSE_PROP: kept ? `${kept} node.dont-move=true` : 'node.dont-move=true'
+  }
+}
+
+// The playback streams, sinks and clients as `pactl -f json` lists them.
+export async function readPulsePlayback(command = pulse) {
+  const list = async (kind) => JSON.parse(await command(['-f', 'json', 'list', kind]))
+  return {
+    sinkInputs: await list('sink-inputs'),
+    clients: await list('clients'),
+    sinks: await list('sinks')
+  }
+}
+
+/**
+ * The playback streams not in `before` that carry `property`, on the stream or
+ * on its client, each with the name of the sink it plays to (null when that
+ * sink is not listed).
+ */
+export function newPlaybackWithProperty({ before, sinkInputs, clients, sinks, property }) {
+  const known = new Set(before.map((input) => String(input.index)))
+  const clientProperties = new Map(
+    clients.map((client) => [String(client.index), client.properties ?? {}])
+  )
+  const sinkNames = new Map(sinks.map((sink) => [String(sink.index), sink.name]))
+  return sinkInputs
+    .filter((input) => !known.has(String(input.index)))
+    .filter(
+      (input) =>
+        Object.hasOwn(input.properties ?? {}, property) ||
+        Object.hasOwn(clientProperties.get(String(input.client)) ?? {}, property)
+    )
+    .map((input) => ({ index: input.index, sink: sinkNames.get(String(input.sink)) ?? null }))
+}
+
 async function startTone({ ffmpegPath, sink, frequency }) {
   const child = spawn(
     ffmpegPath,

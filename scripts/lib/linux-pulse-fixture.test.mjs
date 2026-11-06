@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { startLinuxPulseFixtures } from './linux-pulse-fixture.mjs'
+import {
+  newPlaybackWithProperty,
+  ownedSinkPlaybackEnv,
+  startLinuxPulseFixtures,
+  startOwnedNullSink
+} from './linux-pulse-fixture.mjs'
 
 function harness({ failLoad = null, failTone = null, failUnload = null, otherFrequency } = {}) {
   const actions = []
@@ -209,5 +214,117 @@ describe('owned Linux Pulse fixtures', () => {
     )
     assert.equal(actions.length, 1)
     assert.equal(actions[0][0], 'load-module')
+  })
+})
+
+describe('owned null sink for app smokes', () => {
+  it('loads one null sink and unloads only its own module, once', async () => {
+    const actions = []
+    const owned = await startOwnedNullSink({
+      prefix: 'videorc_beta_sysaudio',
+      command: async (args) => {
+        actions.push(args)
+        return args[0] === 'load-module' ? '77' : ''
+      }
+    })
+    assert.equal(owned.sink, 'videorc_beta_sysaudio')
+    await owned.stop()
+    await owned.stop()
+    assert.deepEqual(actions, [
+      [
+        'load-module',
+        'module-null-sink',
+        'sink_name=videorc_beta_sysaudio',
+        'rate=48000',
+        'channels=2'
+      ],
+      ['unload-module', '77']
+    ])
+  })
+
+  it('refuses a foreign sink name or an unparseable receipt', async () => {
+    const actions = []
+    const command = async (args) => {
+      actions.push(args)
+      return 'not-an-id'
+    }
+    await assert.rejects(startOwnedNullSink({ prefix: 'speakers', command }), /prefix/)
+    assert.equal(actions.length, 0)
+    await assert.rejects(
+      startOwnedNullSink({ prefix: 'videorc_beta_x', command }),
+      /owned module ID/
+    )
+    assert.equal(actions.length, 1)
+  })
+})
+
+describe('app playback pinned to an owned sink', () => {
+  it('names the sink and pins the stream there', () => {
+    assert.deepEqual(ownedSinkPlaybackEnv('videorc_beta_owned', undefined), {
+      PULSE_SINK: 'videorc_beta_owned',
+      PULSE_PROP: 'node.dont-move=true'
+    })
+    assert.deepEqual(ownedSinkPlaybackEnv('videorc_beta_owned', '  '), {
+      PULSE_SINK: 'videorc_beta_owned',
+      PULSE_PROP: 'node.dont-move=true'
+    })
+  })
+
+  it('keeps the PULSE_PROP the run already had, with the pin last', () => {
+    assert.deepEqual(ownedSinkPlaybackEnv('videorc_beta_owned', 'media.role=test '), {
+      PULSE_SINK: 'videorc_beta_owned',
+      PULSE_PROP: 'media.role=test node.dont-move=true'
+    })
+  })
+})
+
+describe('new playback carrying a property', () => {
+  const sinks = [
+    { index: 58, name: 'speakers' },
+    { index: 900, name: 'videorc_beta_owned' }
+  ]
+  const clients = [
+    { index: 5, properties: { 'videorc.app-instance': '1234' } },
+    { index: 6, properties: { 'application.name': 'music' } }
+  ]
+
+  it('names the sink of each new marked stream, marked on the stream or its client', () => {
+    const sinkInputs = [
+      { index: 1, client: 6, sink: 58, properties: {} },
+      { index: 2, client: 5, sink: 900, properties: {} },
+      { index: 3, client: 6, sink: 58, properties: { 'videorc.app-instance': '1234' } },
+      { index: 4, client: 6, sink: 77, properties: { 'videorc.app-instance': '1234' } }
+    ]
+    assert.deepEqual(
+      newPlaybackWithProperty({
+        before: [],
+        sinkInputs,
+        clients,
+        sinks,
+        property: 'videorc.app-instance'
+      }),
+      [
+        { index: 2, sink: 'videorc_beta_owned' },
+        { index: 3, sink: 'speakers' },
+        { index: 4, sink: null }
+      ]
+    )
+  })
+
+  it('leaves out streams that were already playing, whatever their marker', () => {
+    const sinkInputs = [
+      { index: 2, client: 5, sink: 58, properties: {} },
+      { index: 8, client: '5', sink: '900', properties: {} }
+    ]
+    assert.deepEqual(
+      newPlaybackWithProperty({
+        before: [{ index: 2 }],
+        sinkInputs,
+        clients,
+        sinks,
+        property: 'videorc.app-instance'
+      }),
+      [{ index: 8, sink: 'videorc_beta_owned' }]
+    )
   })
 })

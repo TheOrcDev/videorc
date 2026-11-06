@@ -1,11 +1,23 @@
 // System audio smoke (plan 069 S7): the computer's sound in recordings and
 // streams, through the REAL dev app and its ScreenCaptureKit capture.
 //
-// macOS only. It needs the dev app's Screen Recording grant (System Settings >
-// Privacy & Security > Screen & System Audio Recording), the same grant the
-// real SCK screen smoke needs. Without it the smoke FAILS with the reason;
+// macOS and Linux. On macOS it needs the dev app's Screen Recording grant
+// (System Settings > Privacy & Security > Screen & System Audio Recording),
+// the same grant the real SCK screen smoke needs. On Linux it needs a
+// PipeWire desktop. Without either the smoke FAILS with the reason;
 // VIDEORC_SYSTEM_AUDIO_SMOKE_ALLOW_MISSING_GRANT=1 turns that into an explicit
 // SKIP (exit 0, "SKIPPED" in the output), never a silent pass.
+//
+// Linux (plan 212): nothing plays through the speakers. The smoke loads its
+// own null sink, plays the tones into it with `paplay` and runs the app with
+// PULSE_SINK set to it and its streams pinned there (node.dont-move, so the
+// desktop's saved routing cannot move them), so the renderer's own tone in
+// `self` lands there too.
+// Before any case it plays silence from the renderer and fails unless that
+// stream, the one carrying Videorc's audio marker, is on the owned sink. The
+// capture links every application playback stream, a null sink's included,
+// so the tones are captured like any app's. The sink is unloaded by the
+// module ID its load returned.
 //
 // Run it in a quiet state: it plays a 1 kHz tone through the speakers with
 // `afplay` (the owner's volume, mute and output device are never touched;
@@ -22,7 +34,9 @@
 //
 // Sessions: a screen-only scene on the renderer's synthetic source, no
 // microphone (VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE=1, so the bus writes
-// paced silence for the mic slot), like smoke:record-latency. Cases a-d and
+// paced silence for the mic slot), like smoke:record-latency. That switch
+// only skips macOS's CoreAudio microphone; on Linux the seed selects None,
+// or the Studio records the first microphone it lists. Cases a-d and
 // the mid-session On case drive Record/Stop and the System audio switch
 // through remote-control intents (recordStart/recordStop,
 // systemAudioOn/systemAudioOff), the same renderer path a Stream Deck key or
@@ -99,12 +113,19 @@ import {
   parseRecordingEpochLine,
   mixSourcesIncludeSystemAudio,
   startedSessionStatus,
+  sessionLeftRunning,
   parseSystemAudioMixCutover,
   reportDbfs,
   toneWavArgs,
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
 import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
+import {
+  newPlaybackWithProperty,
+  ownedSinkPlaybackEnv,
+  readPulsePlayback,
+  startOwnedNullSink
+} from './lib/linux-pulse-fixture.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
@@ -156,6 +177,9 @@ const ffmpegPath =
 const ffprobePath =
   process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? resolveExistingSiblingFfprobe(ffmpegPath) ?? 'ffprobe'
 const rtmpPort = Number(process.env.VIDEORC_SYSTEM_AUDIO_SMOKE_RTMP_PORT ?? 19853)
+const linux = process.platform === 'linux'
+/** Linux: the owned null sink every tone and the app's own playback go to. */
+let ownedSink = null
 
 function fail(message) {
   throw new Error(`system-audio smoke FAIL: ${message}`)
@@ -218,7 +242,14 @@ class BackendEventRecorder {
     })
   }
 
-  waitFor(label, predicate, waitTimeoutMs = timeoutMs) {
+  // `since` (a performance.now() time) also accepts a record that arrived
+  // before the waiter did. On Linux, system audio joins a new session's mix
+  // within milliseconds, often before the Record's ack has returned.
+  waitFor(label, predicate, waitTimeoutMs = timeoutMs, { since } = {}) {
+    if (since !== undefined) {
+      const seen = this.events.find((record) => record.at >= since && predicate(record))
+      if (seen) return Promise.resolve(seen)
+    }
     return new Promise((resolveWait, rejectWait) => {
       const waiter = { predicate, resolve: null }
       const timer = setTimeout(() => {
@@ -300,7 +331,11 @@ function onAppLine(line) {
   if (dropped) audioSummaries.push({ at: performance.now(), aheadCapDrops: Number(dropped[1]) })
   const cutover = parseSystemAudioMixCutover(line)
   if (cutover) cutovers.push({ ...cutover, at: performance.now() })
-  if (/could not find the Videorc app to exclude|without excluding the Electron main/.test(line)) {
+  if (
+    /could not (?:find|name) the Videorc app to exclude|without excluding the Electron main/.test(
+      line
+    )
+  ) {
     exclusionWarnings.push(line.trim())
   }
   if (debug) console.log('[app]', line)
@@ -315,7 +350,8 @@ let keepAlive = null
  * starts it within a few hundred ms. Silence adds nothing to the capture.
  */
 function startKeepAlive(wavPath) {
-  if (keepAlive?.stopped) return
+  // A null sink has no device to wake.
+  if (linux || keepAlive?.stopped) return
   const child = spawn('afplay', [wavPath], { stdio: 'ignore' })
   keepAlive = { child, wavPath, stopped: false }
   child.on('exit', () => {
@@ -330,13 +366,19 @@ function stopKeepAlive() {
   keepAlive.child.kill('SIGTERM')
 }
 
-/** Plays a WAV with afplay and returns the wall time of the spawn. */
+/**
+ * Plays a WAV with afplay (Linux: paplay into the owned sink) and returns the
+ * wall time of the spawn.
+ */
 function playTone(wavPath) {
   const at = performance.now()
-  const child = spawn('afplay', [wavPath], { stdio: 'ignore' })
+  const [player, playerArgs] = linux
+    ? ['paplay', [`--device=${ownedSink.sink}`, wavPath]]
+    : ['afplay', [wavPath]]
+  const child = spawn(player, playerArgs, { stdio: 'ignore' })
   players.add(child)
   child.on('exit', () => players.delete(child))
-  child.on('error', (error) => log(`afplay failed: ${error.message}`))
+  child.on('error', (error) => log(`${player} failed: ${error.message}`))
   return at
 }
 
@@ -408,13 +450,17 @@ function healthEvent(sessionId, codes) {
     (record.payload?.sessionId === undefined || record.payload?.sessionId === sessionId)
 }
 
-/** Waits for the session's mix to (not) include system audio; health failures fail fast. */
-async function waitForMix(recorder, sessionId, wantSystemAudio, label) {
+/**
+ * Waits for the session's mix to (not) include system audio; health failures
+ * fail fast. `since` also counts what arrived before the wait began.
+ */
+async function waitForMix(recorder, sessionId, wantSystemAudio, label, since) {
   const unavailable = recorder
     .waitFor(
       `${label} health`,
       healthEvent(sessionId, ['system-audio-unavailable', 'system-audio-lost']),
-      15000
+      15000,
+      { since }
     )
     .then((record) => {
       fail(`${label}: ${record.payload.code}: ${record.payload.message ?? ''}`)
@@ -424,7 +470,7 @@ async function waitForMix(recorder, sessionId, wantSystemAudio, label) {
       return new Promise(() => {})
     })
   return Promise.race([
-    recorder.waitFor(label, mixEvent(sessionId, wantSystemAudio), 15000),
+    recorder.waitFor(label, mixEvent(sessionId, wantSystemAudio), 15000, { since }),
     unavailable
   ])
 }
@@ -489,11 +535,17 @@ async function seedRenderer(smoke, sources) {
         // grant), with Clips on. The idle case starts with System audio On.
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const audio = { ...(current.audio ?? {}), systemAudioEnabled: params.systemAudioEnabled, systemAudioGainDb: -6 };
-        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources: params.sources ?? current.sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
+        // An explicit None: without it the Studio picks the first microphone.
+        const sources = params.microphoneOff
+          ? { ...(params.sources ?? current.sources ?? {}), microphoneId: undefined, microphoneName: undefined, microphoneOff: true }
+          : (params.sources ?? current.sources);
+        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
       sources,
+      // VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE covers macOS only.
+      microphoneOff: linux && !args.microphone,
       systemAudioEnabled: selectedCases[0] === 'clips-idle',
       video: { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
     },
@@ -508,6 +560,88 @@ async function seedRenderer(smoke, sources) {
     },
     { timeoutMs }
   )
+}
+
+/**
+ * Linux: proves Videorc's own playback goes to the owned sink before any case
+ * plays audible audio from the renderer. A silent renderer tone makes sure
+ * Chromium's stream is open; every stream that carries Videorc's audio marker
+ * and was not playing before launch must be on the owned sink, never the
+ * speakers. The baseline is taken before launch because the Studio's shared
+ * AudioContext can open the app's stream during startup, and the silent tone
+ * then plays through that same stream.
+ */
+async function checkOwnPlaybackSink(smoke, before) {
+  await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    {
+      code: `
+        const context = new AudioContext();
+        await context.resume();
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        gain.gain.value = 0;
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start();
+        window.__videorcSystemAudioSmokeSilence = context;
+        return context.state;
+      `
+    },
+    { timeoutMs }
+  )
+  try {
+    const deadline = performance.now() + 5000
+    let unlinked = []
+    while (performance.now() < deadline) {
+      const streams = newPlaybackWithProperty({
+        before,
+        ...(await readPulsePlayback()),
+        property: 'videorc.app-instance'
+      })
+      const elsewhere = streams.filter(
+        (stream) => stream.sink !== null && stream.sink !== ownedSink.sink
+      )
+      if (elsewhere.length)
+        fail(
+          `Videorc's own playback went to ${elsewhere.map((stream) => stream.sink).join(', ')}, not the owned sink ${ownedSink.sink}`
+        )
+      // A stream the server has not linked yet names no sink; wait for its link.
+      unlinked = streams.filter((stream) => stream.sink === null)
+      if (streams.length && !unlinked.length) return streams
+      await sleep(100)
+    }
+    if (unlinked.length)
+      fail(
+        `Videorc's own playback stream ${unlinked.map((stream) => stream.index).join(', ')} never linked to a listed sink; cannot prove it stays off the speakers`
+      )
+    const { sinkInputs, sinks } = await readPulsePlayback()
+    const marked = sinkInputs
+      .filter((input) => Object.hasOwn(input.properties ?? {}, 'videorc.app-instance'))
+      .map((input) => ({
+        index: input.index,
+        sink: sinks.find((sink) => String(sink.index) === String(input.sink))?.name ?? null,
+        instance: input.properties['videorc.app-instance'],
+        before: before.some((known) => String(known.index) === String(input.index))
+      }))
+    fail(
+      `Videorc's own playback stream never appeared; cannot prove it stays off the speakers (streams with the marker: ${JSON.stringify(marked)})`
+    )
+  } finally {
+    await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: `
+          await window.__videorcSystemAudioSmokeSilence?.close();
+          delete window.__videorcSystemAudioSmokeSilence;
+          return true;
+        `
+      },
+      { timeoutMs }
+    )
+  }
 }
 
 /**
@@ -571,6 +705,32 @@ async function describeRendererFailure(smoke) {
     return Array.isArray(texts) && texts.length > 0 ? ` Renderer says: ${texts.join(' | ')}` : ''
   } catch {
     return ''
+  }
+}
+
+/**
+ * Stops the session a failed case left running. Without it the next case's
+ * Record is refused ("You're already recording or live") and one failure
+ * fails every case after it.
+ */
+async function endSessionLeftRunning(ctx, name) {
+  const checkedAt = performance.now()
+  const sessionId = sessionLeftRunning(ctx.recorder.events)
+  if (!sessionId) return
+  log(`${name} left session ${sessionId} running; stopping it before the next case`)
+  const terminal = ctx.recorder.waitFor(
+    `${name} leftover session terminal status`,
+    (record) =>
+      record.event === 'recording.status' &&
+      record.payload?.sessionId === sessionId &&
+      (record.payload?.state === 'idle' || record.payload?.state === 'failed'),
+    30000,
+    { since: checkedAt }
+  )
+  try {
+    await Promise.all([request(ctx.renderer, timeoutMs, 'session.stop', {}), terminal])
+  } catch (error) {
+    log(`could not stop session ${sessionId}: ${error.message}`)
   }
 }
 
@@ -642,7 +802,7 @@ async function recordRendererSession(ctx, { name, systemAudioAtStart, timeline }
   const at = (seconds) => sleep(epochAt + seconds * 1000 - performance.now())
   const marks = {}
   if (systemAudioAtStart) {
-    const attached = await waitForMix(recorder, sessionId, true, `${name} attach at start`)
+    const attached = await waitForMix(recorder, sessionId, true, `${name} attach at start`, epochAt)
     marks.attachConfirmedAt = attached.at
   }
   await timeline({ at, marks, sessionId })
@@ -869,6 +1029,12 @@ const cases = {
       )
     )
       result.failures.push('on: expected native microphone did not deliver usable captured audio')
+    // The silent mic slot reports as "No microphone" with no frames captured.
+    const recordedMicrophones = window.microphones.filter((entry) => entry.capturedFrames > 0)
+    if (!ctx.microphone && recordedMicrophones.length > 0)
+      result.failures.push(
+        `on: a run without a microphone recorded ${recordedMicrophones.map((entry) => entry.device).join(', ')}`
+      )
     window.aheadCapDrops = summaries.reduce((sum, entry) => sum + entry.aheadCapDrops, 0)
     if (staticScreenId && !args.moving && !args.camera) {
       const epochResult = evaluateStaticScreenEpoch({
@@ -1102,7 +1268,7 @@ const cases = {
       })
       if (!started?.sessionId) fail(`stream: session.start returned ${JSON.stringify(started)}`)
       const epochAt = performance.now()
-      await waitForMix(recorder, started.sessionId, true, 'stream attach')
+      await waitForMix(recorder, started.sessionId, true, 'stream attach', clickAt)
       await sleep(epochAt + 3000 - performance.now())
       playAt = playTone(ctx.tones[3])
       await sleep(epochAt + 10000 - performance.now())
@@ -1255,12 +1421,18 @@ let stopApp = async () => {}
 let staticStimulus
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-system-audio-user-data-'))
 try {
-  if (process.platform !== 'darwin') {
-    log('SKIPPED: the system-audio smoke is macOS only (Windows is plan 069 S8).')
+  if (process.platform !== 'darwin' && !linux) {
+    log('SKIPPED: the system-audio smoke is macOS and Linux only (Windows is plan 069 S8).')
   } else {
     mkdirSync(outputDirectory, { recursive: true })
     const tones = await generateTones(join(outputDirectory, 'tones'))
     startKeepAlive(tones.silence)
+    let playbackBeforeLaunch = []
+    if (linux) {
+      ownedSink = await startOwnedNullSink()
+      log(`tones and the app's own playback go to the owned sink ${ownedSink.sink}`)
+      playbackBeforeLaunch = (await readPulsePlayback()).sinkInputs
+    }
     const launch = await launchDevApp({
       env: {
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -1270,6 +1442,7 @@ try {
         // No microphone: the bus writes paced silence for the mic slot, so
         // the file carries only what System audio mixes in.
         VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE: args.microphone ? '0' : '1',
+        ...(ownedSink ? ownedSinkPlaybackEnv(ownedSink.sink, process.env.PULSE_PROP) : {}),
         ...(appExecutable
           ? {
               VIDEORC_SMOKE_PACKAGED_APP: '1',
@@ -1296,7 +1469,7 @@ try {
     const devices = await request(renderer, timeoutMs, 'devices.list', {})
     const device = (devices?.devices ?? []).find((entry) => entry.id === 'system-audio:default')
     if (device?.status !== 'available') {
-      const reason = `System audio device is ${device?.status ?? 'missing'}; the dev app needs the Screen Recording grant (System Settings > Privacy & Security > Screen & System Audio Recording).`
+      const reason = `System audio device is ${device?.status ?? 'missing'}; ${linux ? 'Linux system audio needs a PipeWire socket' : 'the dev app needs the Screen Recording grant (System Settings > Privacy & Security > Screen & System Audio Recording)'}.`
       if (allowMissingGrant) {
         log(`SKIPPED (VIDEORC_SYSTEM_AUDIO_SMOKE_ALLOW_MISSING_GRANT=1): ${reason}`)
         process.exitCode = 0
@@ -1424,6 +1597,10 @@ try {
     if (described.state?.systemAudioAvailable !== true) {
       fail(`remote.state says System audio is not available: ${JSON.stringify(described.state)}`)
     }
+    if (linux) {
+      const own = await checkOwnPlaybackSink(smoke, playbackBeforeLaunch)
+      log(`Videorc's own playback is on the owned sink (${own.length} stream(s))`)
+    }
     log(`app ready; running ${selectedCases.join(', ')} (ffmpeg ${ffmpegPath})`)
 
     const ctx = { renderer, smoke, recorder, remote, acks, tones, realSources, microphone }
@@ -1435,6 +1612,7 @@ try {
         results[caseKey] = await cases[name](ctx)
       } catch (error) {
         results[caseKey] = { pass: false, failures: [error.message], evidence: {} }
+        await endSessionLeftRunning(ctx, name)
       } finally {
         stopPlayers()
       }
@@ -1475,6 +1653,10 @@ try {
   try {
     await stopApp()
   } finally {
-    await removeProfileDir(userDataDir, { label: 'system-audio smoke' })
+    try {
+      await ownedSink?.stop()
+    } finally {
+      await removeProfileDir(userDataDir, { label: 'system-audio smoke' })
+    }
   }
 }

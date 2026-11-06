@@ -3678,10 +3678,10 @@ Validation on Ogre (PipeWire 1.6.8):
   next to it. Hann windows and tone fades fixed the measurement, not the
   capture.
 
-Not yet proven: the real app with Electron's own playback excluded and
-another app's playback included, the toggles and the stream leg
-(`smoke:system-audio` is macOS-only), WirePlumber over long runs, and stream
-volume restore. Known limits, in the module header: playback into null or
+Not yet proven: WirePlumber over long runs and stream volume restore. The
+real app with Electron's own playback excluded and another app's playback
+included, the toggles and the stream leg passed on Ogre on 2026-11-06 (see
+"`smoke:system-audio` on Linux" below). Known limits, in the module header: playback into null or
 virtual sinks is captured too; link-group streams (filter chains, loopbacks)
 are skipped; 5.1 sides and rears are summed at full gain; a link the user
 removes is not recreated while its stream lives. Also, any process launched
@@ -3733,6 +3733,15 @@ latency and storage smokes. Every fix below is merged on main:
   (a 6,553 ms cold Record, once in about 22 runs).
 - #1223: the Clips handover threw away a 250 to 300 ms ring flush on every
   warm Record. VAAPI warm click to recording p95 went from 537 to 266 ms.
+- #1224: after a full-disk stop, an extra `interrupted-take-recovery-failed`
+  event read like a crash. A take that fails mid-recording is no longer
+  recovered as if Videorc had stopped.
+- #1225: an applied picture background never showed as applied on its tile,
+  so a second click applied it again. The backend writes a background's keys
+  alphabetically, so the JSON match never held. The tile also took 3.2 to
+  4.3 s per click on Linux, because every idle scene commit waited out the
+  3 s proof budget for a presented revision the proof surface never reports.
+  It now flips 141 to 444 ms after the click.
 
 Passing on Ogre without a change: the packaged av-devices smoke (microphone,
 camera at 31.8 fps), the packaged portal smokes, agent-mcp, remote-control,
@@ -3756,9 +3765,6 @@ Still open:
 - `smoke-live-background-app.mjs` is macOS-only. Live backgrounds on Linux
   were checked by hand: GLES renders, then the gpu-budget guard drops to the
   still after about 4 s.
-- Copy: after a full-disk stop an extra `interrupted-take-recovery-failed`
-  event reads like a crash. Clicking the selected Picture tile again does
-  not turn the background off.
 
 Main merges: `d4add1cf` takes main through `050485dc` (#1222), `a5ca49e1`
 through `a424fe73` (#1223). The one conflict, in
@@ -3791,3 +3797,44 @@ Gates on Ogre:
   tests (4,534 passed, 0 failed, 23 ignored) pass. The direct 1080p30
   matrix passes on both backends: OpenH264 level 4.0, BT.709 TV range,
   10 ms tail; VAAPI on renderD128 level 4.0, BT.709 TV range, 2 ms tail.
+
+#### `smoke:system-audio` on Linux
+
+The smoke had a Linux arm that had never passed on a desktop session. On
+Ogre it failed for four harness reasons, none in the product:
+
+- Preflight routing. Ogre's WirePlumber moves new Chromium streams to a
+  sink a desktop rule once picked (`videorc_monitor_sink`), and a
+  default-metadata target outranks PULSE_SINK. The app now runs with
+  PULSE_SINK on the owned sink plus `node.dont-move=true`
+  (`ownedSinkPlaybackEnv`), the way the backend pins its microphone streams.
+  The check compares against a baseline taken before launch, because the
+  Studio's shared AudioContext opens its stream during startup. A stream the
+  server has not linked yet names no sink; the check waits for its link
+  instead of failing it.
+- The attach race. On Linux the PipeWire attach lands about 12 ms after
+  `recording`, before the Record's ack returns, so the start waits missed
+  it. They now count what arrived since the click.
+- The cascade. A failed case left its session running, and every later
+  Record was refused ("You're already recording or live"). The case loop
+  stops the leftover session (`sessionLeftRunning`).
+- The real microphone. `VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE` only skips
+  macOS's CoreAudio microphone, and the Studio picks the first microphone it
+  lists unless the sources carry an explicit None. On, toggle-off and off
+  recorded Ogre's built-in microphone (room sound with a 1 kHz band at -27.9
+  dBFS outside the tone). The Linux seed now selects None, and the On case
+  fails if a run without a microphone captured one.
+
+On Ogre all seven cases pass:
+
+- clips-idle: 141 of 141 readings, -15.0 to -27.0 dBFS, a 12 dB drop, floor
+  -120.
+- on: tone 3.055 to 6.056 s at -12 dBFS.
+- toggle-off: stop 3 ms from the cutover.
+- toggle-on: start 193 ms from the cutover.
+- off: no tone, broadband peak -200 dBFS.
+- self: the renderer's own tone at -200 dBFS, the control tone present.
+- stream: the tone in both the file and the RTMP leg.
+
+The other Linux smokes that set the disable switch (record-latency and
+others) still record the default microphone; that is an owner decision.
