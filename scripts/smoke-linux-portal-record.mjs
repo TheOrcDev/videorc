@@ -15,10 +15,13 @@
 //   VIDEORC_PORTAL_RECORD_MOTION      '0' records the desktop as it is and
 //                                     keeps freeze/repeat findings advisory
 //   VIDEORC_SMOKE_OUTPUT_DIR          evidence + recording directory
+//   VIDEORC_PACKAGED_APP_EXECUTABLE   run a packaged build (linux-unpacked/videorc
+//                                     or an AppImage) instead of the dev app
 //
 // Safe GPU: the encoder defaults to OpenH264. Set VIDEORC_LINUX_H264_ENCODER
 // yourself to exercise VAAPI on a render node the box allows.
 
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -33,6 +36,7 @@ import {
 } from './lib/linux-portal-capture-gates.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
 import { startLinuxMotionWindow } from './lib/linux-motion-window.mjs'
+import { packagedSmokeLaunchOptions } from './lib/packaged-smoke-paths.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -54,6 +58,11 @@ const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
   join(resolve(import.meta.dirname, '..'), 'vendor', 'ffmpeg', 'linux-x64', 'bin', 'ffmpeg')
 const ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
+const appExecutable = process.env.VIDEORC_PACKAGED_APP_EXECUTABLE || undefined
+const packagedLaunch = packagedSmokeLaunchOptions({
+  appExecutable,
+  capability: appExecutable ? randomBytes(32).toString('base64url') : undefined
+})
 
 const video = { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbps: 8000 }
 const sources = {
@@ -165,8 +174,11 @@ try {
       // The smoke owns the portal source. The renderer's own screen preview
       // replaced the smoke's live session mid-check (ogre 2026-09-30).
       VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1',
-      VIDEORC_LINUX_H264_ENCODER: encoder
+      VIDEORC_LINUX_H264_ENCODER: encoder,
+      ...packagedLaunch.env
     },
+    packagedSmokeCommandCapability: packagedLaunch.packagedSmokeCommandCapability,
+    spawnSpec: packagedLaunch.spawnSpec,
     timeoutMs: launchTimeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: (line) => {
@@ -203,12 +215,18 @@ try {
     // Let the compositor map and paint it before the take starts.
     await sleep(1000)
   }
-  const { capabilityId } = await requestSmokeCommand(
-    smoke,
-    'authorize-smoke-resource',
-    { kind: 'output-directory', path: outputDirectory },
-    { timeoutMs: stepTimeoutMs }
-  )
+  // A packaged build refuses authorize-smoke-resource; its take lands in the
+  // isolated profile's recordings folder under the output directory instead.
+  const capabilityId = appExecutable
+    ? undefined
+    : (
+        await requestSmokeCommand(
+          smoke,
+          'authorize-smoke-resource',
+          { kind: 'output-directory', path: outputDirectory },
+          { timeoutMs: stepTimeoutMs }
+        )
+      ).capabilityId
   const startRequestedAt = Date.now()
   const started = await request(ws, stepTimeoutMs, 'session.start', {
     sources,
@@ -216,7 +234,7 @@ try {
     output: {
       recordEnabled: true,
       streamEnabled: false,
-      outputDirectoryCapability: capabilityId,
+      ...(capabilityId ? { outputDirectoryCapability: capabilityId } : {}),
       video,
       rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
     }
