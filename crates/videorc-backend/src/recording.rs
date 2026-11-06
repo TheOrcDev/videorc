@@ -132,7 +132,7 @@ use crate::state::{AppState, PreviewFrame};
 use crate::storage::cleanup_session_mp4_staging_directory;
 use crate::storage::{
     Database, NewSession, PlatformAccountCredentials, SessionFileBoundIdentity,
-    SessionFileIdentity, SessionFileObjectIdentity, SessionFinalization,
+    SessionFileIdentity, SessionFileObjectIdentity, SessionFinalization, SessionMediaPathState,
     capture_session_directory_object_identity, capture_session_file_bound_identity,
     capture_session_file_identity, capture_session_file_object_identity, default_preview_dir,
 };
@@ -12219,7 +12219,59 @@ async fn monitor_session(
             monitored_recording.keep_original_media,
         );
     }
+    // FFmpeg has exited: a take whose file left its path is lost here, whatever
+    // the exit, and nothing below may call it saved or export it.
+    let mut recording_file_gone =
+        recording_file_gone_failure(monitored_recording.records_file, output_path.as_deref());
     let terminal_status = match status {
+        Ok(_) if recording_file_gone.is_some() => {
+            let (failed_stage, health_code, mut message) = recording_file_gone
+                .take()
+                .expect("the guard saw the missing recording file");
+            monitored_recording
+                .pipeline
+                .mark_failed(failed_stage, &message);
+            state.emit_log("error", &message);
+            if let Err(persistence_error) = persist_terminal_session_or_recovery(
+                &state,
+                &session_id,
+                "failed",
+                &ended_at,
+                None,
+                duration_ms,
+                &final_diagnostics,
+            ) {
+                message = format!("{message}. {persistence_error}");
+            }
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Error,
+                health_code,
+                &message,
+            );
+            let terminal_status = RecordingStatus {
+                state: RecordingState::Failed,
+                session_id: Some(session_id),
+                output_path: output_path.as_ref().map(|path| path.display().to_string()),
+                stream_url: None,
+                started_at: None,
+                audio_tracks: Vec::new(),
+                pipeline: Some(monitored_recording.pipeline.status()),
+                duration_ms,
+                message: Some(message),
+                replay_only: monitored_recording.replay_only,
+                accepts_live_scene_edits: None,
+            };
+            let discarded = crate::captions::discard_failed_caption_capture(&state).await;
+            if discarded > 0 {
+                state.emit_log(
+                    "info",
+                    format!("Discarded {discarded} caption cue(s) owned by the failed capture."),
+                );
+            }
+            terminal_status
+        }
         Ok(exit_status)
             if should_finalize_recording_session(
                 exit_status.success(),
@@ -14689,6 +14741,33 @@ fn ffmpeg_disk_full_failure(
         "recording-disk-full",
         format!(
             "The recordings folder ran out of space, so recording stopped. The recording up to that point is kept. Free some space before you record again. (FFmpeg exit: {exit_status})"
+        ),
+    ))
+}
+
+/// A take whose MKV is no longer at its path once FFmpeg exits: its folder, or
+/// the file itself, was deleted or moved during the recording. FFmpeg keeps
+/// writing to the open file and exits cleanly, so Stop used to say "Recording
+/// saved" and the background MP4 export then failed on a folder that was gone,
+/// leaving a completed row with no file. An unreadable path (a volume that is
+/// offline, a permission change) is not proof of loss and keeps the old path.
+fn recording_file_gone_failure(
+    records_file: bool,
+    output_path: Option<&Path>,
+) -> Option<(RecordingPipelineStage, &'static str, String)> {
+    let path = output_path.filter(|_| records_file)?;
+    if crate::storage::session_media_path_state(path) != SessionMediaPathState::Missing {
+        return None;
+    }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    Some((
+        RecordingPipelineStage::Muxer,
+        "recording-file-missing",
+        format!(
+            "The recording file {name} was deleted or moved while recording, so Videorc couldn't finish it. If its folder was moved or put in the Trash, the file may still be there."
         ),
     ))
 }
@@ -34024,6 +34103,108 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn stop_fails_a_take_whose_folder_was_deleted_instead_of_calling_it_saved() {
+        let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
+        let state = test_state();
+        let directory =
+            std::env::temp_dir().join(format!("videorc-lost-take-stop-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create recordings folder");
+        let output_path = directory.join("videorc-session-lost.mkv");
+        std::fs::write(&output_path, b"partial mkv").expect("write the take");
+        let session_id = format!("lost-take-{}", Uuid::new_v4());
+        let params = base_params(true, false);
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.clone(),
+                title: "Lost take".to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                mode: "record".to_string(),
+                output_path: Some(output_path.display().to_string()),
+                container: Some("mkv".to_string()),
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .expect("create running session row");
+        let (child, stdin) = spawn_test_stdin_sink().await;
+        let pid = child.id().expect("owned stdin-sink pid");
+        let (stop_intent_sender, stop_intent_receiver) = oneshot::channel();
+        let mut active = test_active_recording_stub(&session_id);
+        active.pid = pid;
+        active.stdin = Some(stdin);
+        active.output_path = Some(output_path.clone());
+        active.stop_intent_sender = Some(stop_intent_sender);
+        active._capture_permit = Some(state.ffmpeg_work.begin_capture_when_available().await);
+        *state.recording.lock().await = Some(active);
+        let monitor = tokio::spawn(monitor_session(
+            state.clone(),
+            child,
+            stop_intent_receiver,
+            session_id.clone(),
+            SessionMonitorContext {
+                ffmpeg_live_audio_session: None,
+                ffmpeg_stderr_monitor: None,
+                output_path: Some(output_path.clone()),
+                post_recording_gate: PostRecordingGate {
+                    intended_fps: None,
+                    expect_audio: false,
+                },
+            },
+        ));
+
+        // The folder goes away mid-take. FFmpeg's open file never notices,
+        // and the process exits cleanly on Stop.
+        std::fs::remove_dir_all(&directory).expect("delete the recordings folder");
+        let stopped = timeout(Duration::from_secs(5), stop_recording(state.clone()))
+            .await
+            .expect("stop settles")
+            .expect("stop status");
+        timeout(Duration::from_secs(1), monitor)
+            .await
+            .expect("monitor completes")
+            .expect("monitor task");
+
+        assert!(matches!(stopped.state, RecordingState::Failed));
+        let message = stopped.message.expect("failed stop says why");
+        assert!(
+            message.contains("videorc-session-lost.mkv was deleted or moved while recording"),
+            "{message}"
+        );
+        assert!(!message.contains("Recording saved"), "{message}");
+        assert!(
+            state
+                .recording_finalization
+                .active_for_session(&session_id)
+                .is_none(),
+            "a lost take never starts an MP4 export"
+        );
+        let row = state
+            .database
+            .session_finalization_snapshot(&session_id)
+            .expect("read the session row");
+        assert_eq!(row.status, "failed");
+        assert!(row.mp4_path.is_none());
+        let health = state
+            .database
+            .list_health_events(&session_id)
+            .expect("read health");
+        assert!(
+            health
+                .iter()
+                .any(|event| event.code == "recording-file-missing"),
+            "{health:?}"
+        );
+        assert!(
+            health
+                .iter()
+                .all(|event| event.code != "recording-finalized"),
+            "{health:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn published_recording_shutdown_finalizes_without_waiting_for_wedged_recovery_fence() {
         let directory = std::env::temp_dir().join(format!(
             "videorc-shutdown-finalization-test-{}",
@@ -51192,6 +51373,52 @@ mod low_end_windows_recording_tests {
         );
         assert!(ffmpeg_disk_full_failure(None, "exit status: 228", true).is_none());
         assert!(ffmpeg_disk_full_failure(Some("disk-full"), "exit status: 228", false).is_none());
+    }
+
+    #[test]
+    fn a_take_whose_file_left_its_path_is_lost_not_saved() {
+        let directory = std::env::temp_dir().join(format!("videorc-lost-take-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create recordings folder");
+        let path = directory.join("videorc-session-test.mkv");
+        std::fs::write(&path, b"mkv").expect("write the take");
+        assert!(recording_file_gone_failure(true, Some(&path)).is_none());
+
+        std::fs::remove_dir_all(&directory).expect("delete the recordings folder");
+        let (stage, code, message) =
+            recording_file_gone_failure(true, Some(&path)).expect("the take is lost");
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-file-missing");
+        assert!(
+            message.contains("videorc-session-test.mkv was deleted or moved while recording"),
+            "{message}"
+        );
+        assert!(message.contains("may still be there"), "{message}");
+        assert!(!message.contains("os error"), "{message}");
+
+        // A stream-only session has no file to lose.
+        assert!(recording_file_gone_failure(false, Some(&path)).is_none());
+        assert!(recording_file_gone_failure(true, None).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_take_is_not_called_lost() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("videorc-locked-take-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create recordings folder");
+        let path = directory.join("videorc-session-test.mkv");
+        std::fs::write(&path, b"mkv").expect("write the take");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the folder");
+        // Root reads through a locked folder; the case only exists without it.
+        if File::open(&path).is_err() {
+            assert!(recording_file_gone_failure(true, Some(&path)).is_none());
+        }
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock the folder");
+        std::fs::remove_dir_all(&directory).expect("remove the folder");
     }
 
     #[test]
