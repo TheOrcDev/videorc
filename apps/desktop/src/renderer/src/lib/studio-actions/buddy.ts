@@ -10,7 +10,8 @@
 import { BUDDY_TALK_LABELS, BUDDY_TALK_MODES, buddyTalkLabel } from '@/lib/buddy-auto-chat-view'
 import { BUDDY_CONSENT_OFF_REASON } from '@/lib/buddy-tab-view'
 import { cohostEnableRelayPatch, mergeAutoChatRelayPatch } from '@/lib/cohost-state'
-import type { AgentToolExecutor } from './agent'
+import type { AgentIntentOutcome, AgentToolExecutor } from './agent'
+import type { StudioActionContext, StudioActionExecutor, StudioActionFields } from './context'
 
 export const BUDDY_TOOL_COPY = {
   empty: 'Say what to change: on, talk or onStream.',
@@ -25,7 +26,19 @@ export const BUDDY_TOOL_COPY = {
   chatMode: 'chatMode is now talk: off, bubble or suggest.'
 } as const
 
-export const setBuddy: AgentToolExecutor = async (context, args) => {
+export const setBuddy: AgentToolExecutor = (context, args) => saveBuddy(context, args)
+
+// The Stream Deck's Buddy key (docs/remote-control.md): Buddy Live through
+// the same save and gates as `set_buddy`.
+export const buddyLiveOn: StudioActionExecutor = (context) => saveBuddy(context, { on: true })
+export const buddyLiveOff: StudioActionExecutor = (context) => saveBuddy(context, { on: false })
+export const buddyLiveToggle: StudioActionExecutor = (context) =>
+  saveBuddy(context, { on: context.buddy?.settings?.enabled !== true })
+
+async function saveBuddy(
+  context: StudioActionContext,
+  args: StudioActionFields
+): Promise<AgentIntentOutcome> {
   const on = typeof args.on === 'boolean' ? args.on : undefined
   if ('chatMode' in args) {
     return {

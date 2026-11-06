@@ -1034,3 +1034,47 @@ it('projects saved scenes with only ids and names', async () => {
     vi.useRealTimers()
   }
 })
+
+it('projects Buddy Live as one boolean, off until the Studio says', async () => {
+  vi.useFakeTimers()
+  try {
+    const requests: unknown[] = []
+    const publisher = new RemoteSurfacePublisher()
+    publisher.attach({
+      request: async (_method, params) => {
+        requests.push(params)
+        return undefined as never
+      }
+    })
+    publisher.markConnected()
+    const base: RemoteSurfaceValues = [
+      'idle',
+      false,
+      true,
+      false,
+      false,
+      'screen-only',
+      null,
+      false,
+      false,
+      false,
+      [],
+      [],
+      undefined,
+      false,
+      [],
+      [],
+      null,
+      false
+    ]
+    publisher.syncValues(base)
+    await vi.runAllTimersAsync()
+    expect(requests.at(-1)).toMatchObject({ state: { buddyLive: false } })
+    publisher.syncValues([...base.slice(0, 18), true] as unknown as RemoteSurfaceValues)
+    await vi.runAllTimersAsync()
+    expect(requests.at(-1)).toMatchObject({ state: { buddyLive: true } })
+    publisher.detach()
+  } finally {
+    vi.useRealTimers()
+  }
+})

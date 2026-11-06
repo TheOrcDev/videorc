@@ -18322,7 +18322,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     bannerList ?? NO_BANNERS,
     sceneLibrary.scenes,
     activeSavedSceneId,
-    privacy.screenPrivacy.hidden
+    privacy.screenPrivacy.hidden,
+    cohostSettings?.enabled === true
   ]
   // Latest-value hand-off (same render-body pattern as the ref mirrors
   // above): the publisher dedupes, debounces past the commit, republishes on

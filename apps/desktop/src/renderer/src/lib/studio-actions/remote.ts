@@ -9,6 +9,7 @@ import { commentHighlight, commentHighlightClear } from './comments'
 import type { StudioActionContext, StudioActionExecutor } from './context'
 import { REMOTE_INTENT_COPY } from './copy'
 import { bannerHide, bannerShow, bannerToggle } from './banners'
+import { buddyLiveOff, buddyLiveOn, buddyLiveToggle } from './buddy'
 import {
   micMute,
   micToggle,
@@ -41,6 +42,9 @@ export const REMOTE_INTENT_EXECUTORS: Readonly<Record<string, StudioActionExecut
   systemAudioOn,
   systemAudioOff,
   systemAudioToggle,
+  buddyLiveOn,
+  buddyLiveOff,
+  buddyLiveToggle,
   sceneApply,
   takeoverShow,
   takeoverHide,
