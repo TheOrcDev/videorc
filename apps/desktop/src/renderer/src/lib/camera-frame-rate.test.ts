@@ -136,7 +136,9 @@ describe('cameraLowFrameRateLine', () => {
         { fps: 11.4, expectedFps: 30 },
         { lowLightCompensation: true }
       )
-    ).toBe('HP HD Camera is sending 11 of 30 fps. Turn off Low-light compensation to keep 30 fps.')
+    ).toBe(
+      'HP HD Camera is sending 11 of 30 fps. Turning off Low-light compensation can bring it back to 30 fps.'
+    )
     expect(
       cameraLowFrameRateLine(
         'HP HD Camera',

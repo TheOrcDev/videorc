@@ -17,11 +17,16 @@
 //! entry has compensation off.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::protocol::CameraLowLightState;
 use crate::storage::Database;
 
 pub const CAMERA_LOW_LIGHT_SETTINGS_KEY: &str = "camera.lowLightCompensation";
+
+/// The longest camera id `camera.lowLight.set` saves; the renderer's wire
+/// schema holds it to the same length.
+pub const CAMERA_LOW_LIGHT_CAMERA_ID_MAX_LEN: usize = 1024;
 
 /// Camera id → compensation on. Only `true` entries are kept: off is the
 /// default, so turning it off removes the camera's entry.
@@ -86,11 +91,16 @@ fn with_compensation(
     prefs
 }
 
+/// Saves run one at a time: each reads, changes and writes the whole map,
+/// so two cameras switched at once never drop each other's choice.
+static PREF_SAVES: Mutex<()> = Mutex::new(());
+
 pub fn save_compensation(
     database: &Database,
     camera_id: &str,
     compensation: bool,
 ) -> anyhow::Result<()> {
+    let _serialized = PREF_SAVES.lock().unwrap_or_else(PoisonError::into_inner);
     let prefs = with_compensation(load_prefs(database), camera_id, compensation);
     database.save_setting(CAMERA_LOW_LIGHT_SETTINGS_KEY, &prefs)
 }
@@ -119,16 +129,61 @@ pub fn write_device(camera_id: &str, compensation: bool) -> DeviceLowLight {
     device_control(camera_id, Some(compensation))
 }
 
-/// Device writes run one at a time, and each reads the saved choice inside
-/// the lock: a switch flipped while a camera opens can never be overwritten
-/// by the value the open read before it.
-static DEVICE_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// One lock per camera. Writes to a camera run one at a time and each reads
+/// the saved choice inside its lock, so a switch flipped while the camera
+/// opens is never overwritten by the value the open read before it. A driver
+/// that stalls holds only its own camera's lock.
+static DEVICE_LOCKS: Mutex<BTreeMap<String, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+/// Cameras with an open's write running. `true` means another open came in
+/// meanwhile and the running thread writes once more, so opens never pile
+/// up threads behind a stalled camera.
+static OPEN_WRITES: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
+
+fn device_lock(camera_id: &str) -> Arc<Mutex<()>> {
+    DEVICE_LOCKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(camera_id.to_string())
+        .or_default()
+        .clone()
+}
 
 fn write_stored(database: &Database, camera_id: &str) -> DeviceLowLight {
-    let _serialized = DEVICE_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = device_lock(camera_id);
+    let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
     write_device(camera_id, stored_compensation(database, camera_id))
+}
+
+/// Claims the open write for `camera_id`: true when this caller should start
+/// it, false when one is running (it is told to write once more).
+fn claim_open_write(camera_id: &str) -> bool {
+    let mut running = OPEN_WRITES.lock().unwrap_or_else(PoisonError::into_inner);
+    match running.get_mut(camera_id) {
+        Some(again) => {
+            *again = true;
+            false
+        }
+        None => {
+            running.insert(camera_id.to_string(), false);
+            true
+        }
+    }
+}
+
+/// After a write: true when another open asked for one more.
+fn finish_open_write(camera_id: &str) -> bool {
+    let mut running = OPEN_WRITES.lock().unwrap_or_else(PoisonError::into_inner);
+    match running.get_mut(camera_id) {
+        Some(again) if *again => {
+            *again = false;
+            true
+        }
+        _ => {
+            running.remove(camera_id);
+            false
+        }
+    }
 }
 
 /// `camera.lowLight.get`: the stored choice, and whether the camera has the
@@ -151,6 +206,11 @@ pub async fn set(
 ) -> Result<CameraLowLightState, String> {
     if camera_id.trim().is_empty() {
         return Err("cameraId must name a camera.".to_string());
+    }
+    if camera_id.len() > CAMERA_LOW_LIGHT_CAMERA_ID_MAX_LEN {
+        return Err(format!(
+            "cameraId is longer than {CAMERA_LOW_LIGHT_CAMERA_ID_MAX_LEN} bytes."
+        ));
     }
     save_compensation(&state.database, &camera_id, compensation)
         .map_err(|error| format!("Low-light compensation was not saved: {error}"))?;
@@ -184,26 +244,42 @@ pub fn apply_stored_on_open(database: &Database, camera_id: &str) {
     if cfg!(test) || crate::camera_capture::parse_windows_dshow_camera_id(camera_id).is_none() {
         return;
     }
+    if !claim_open_write(camera_id) {
+        return;
+    }
     let database = database.clone();
     let camera_id = camera_id.to_string();
+    let thread_camera_id = camera_id.clone();
     let spawned = std::thread::Builder::new()
         .name("videorc-camera-low-light".to_string())
-        .spawn(move || match write_stored(&database, &camera_id) {
-            DeviceLowLight::Holds {
-                compensation,
-                changed,
-            } => tracing::info!(
-                camera = %camera_id,
-                compensation,
-                changed,
-                "Camera low-light compensation applied"
-            ),
-            DeviceLowLight::Unsupported(reason) => tracing::info!(
-                camera = %camera_id,
-                "Camera low-light compensation not available: {reason}"
-            ),
+        .spawn(move || {
+            let camera_id = thread_camera_id;
+            loop {
+                match write_stored(&database, &camera_id) {
+                    DeviceLowLight::Holds {
+                        compensation,
+                        changed,
+                    } => tracing::info!(
+                        camera = %camera_id,
+                        compensation,
+                        changed,
+                        "Camera low-light compensation applied"
+                    ),
+                    DeviceLowLight::Unsupported(reason) => tracing::info!(
+                        camera = %camera_id,
+                        "Camera low-light compensation not available: {reason}"
+                    ),
+                }
+                if !finish_open_write(&camera_id) {
+                    break;
+                }
+            }
         });
     if let Err(error) = spawned {
+        OPEN_WRITES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&camera_id);
         tracing::warn!("Camera low-light compensation thread did not start: {error}");
     }
 }
@@ -495,6 +571,53 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(prefs.is_empty(), "{prefs:?}");
+    }
+
+    #[test]
+    fn saves_for_two_cameras_at_once_keep_both_choices() {
+        let database = Database::open_in_memory_for_tests();
+        let ids: Vec<String> = (0..8)
+            .map(|n| format!("camera:windows-dshow:{n:02x}"))
+            .collect();
+        std::thread::scope(|scope| {
+            for id in &ids {
+                let database = database.clone();
+                scope.spawn(move || save_compensation(&database, id, true).unwrap());
+            }
+        });
+        for id in &ids {
+            assert!(stored_compensation(&database, id), "{id} lost its choice");
+        }
+    }
+
+    #[test]
+    fn an_open_while_a_write_runs_asks_for_one_more_write_not_another_thread() {
+        let id = "camera:windows-dshow:test-open-coalescing";
+        assert!(claim_open_write(id), "the first open starts the write");
+        assert!(
+            !claim_open_write(id),
+            "a second open joins the running write"
+        );
+        assert!(!claim_open_write(id), "a third open joins it too");
+        assert!(finish_open_write(id), "the running thread writes once more");
+        assert!(!finish_open_write(id), "and then stops");
+        assert!(claim_open_write(id), "a later open starts a new write");
+        assert!(!finish_open_write(id));
+    }
+
+    #[test]
+    fn each_camera_has_its_own_device_lock() {
+        let a = device_lock("camera:windows-dshow:test-lock-a");
+        let b = device_lock("camera:windows-dshow:test-lock-b");
+        assert!(Arc::ptr_eq(
+            &a,
+            &device_lock("camera:windows-dshow:test-lock-a")
+        ));
+        let _held = a.lock().unwrap();
+        assert!(
+            b.try_lock().is_ok(),
+            "a stalled camera must not hold another camera's lock"
+        );
     }
 
     #[test]

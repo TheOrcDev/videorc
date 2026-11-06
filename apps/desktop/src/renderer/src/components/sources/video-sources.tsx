@@ -250,6 +250,7 @@ export function VideoSources(): ReactElement {
     systemAccessContext,
     wsStatus,
     cameraLowLight,
+    cameraLowLightPending,
     setCameraLowLight
   } = useStudioCore()
   const { previewCameraStatus, previewCameraLowFrameRate, previewScreenStatus } = useStudioPreview()
@@ -317,7 +318,7 @@ export function VideoSources(): ReactElement {
         lowLight: lowLight
           ? {
               checked: lowLight.compensation,
-              disabled: wsStatus !== 'connected',
+              disabled: wsStatus !== 'connected' || cameraLowLightPending,
               onChange: (on) => void setCameraLowLight(on)
             }
           : null

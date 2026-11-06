@@ -6020,6 +6020,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "recording.status"
         | "screen.privacy.get"
         | "virtualCamera.status"
+        // Issue #1066: reads the camera control; never waits behind a set.
+        | "camera.lowLight.get"
         | "stream.targets.snapshot" => Some(Observation),
 
         "screens.active" => Some(DEFAULT_MUTATION_POLICY),

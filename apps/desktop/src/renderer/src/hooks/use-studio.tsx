@@ -1600,6 +1600,8 @@ export type StudioContextValue = {
    * selected camera's.
    */
   cameraLowLight: CameraLowLightState | null
+  /** True while a `camera.lowLight.set` is in flight; the switch waits for it. */
+  cameraLowLightPending: boolean
   setCameraLowLight: (compensation: boolean) => Promise<void>
   performanceCheckProgress: PerformanceCheckProgress | null
   runPerformanceCheck: () => Promise<void>
@@ -17653,28 +17655,38 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // camera without the control) leaves the switch hidden.
   const selectedCameraIdForLowLight = captureConfig.sources.cameraId
   const [cameraLowLight, setCameraLowLightState] = useState<CameraLowLightState | null>(null)
+  const [cameraLowLightPending, setCameraLowLightPending] = useState(false)
   const cameraLowLightRevision = useRef(0)
+  // Reads the camera's state; an answer for an older camera or request is dropped.
+  const readCameraLowLight = useCallback(
+    (cameraId: string, revision: number) => {
+      if (!client) return
+      void client
+        .requestTyped('camera.lowLight.get', { cameraId })
+        .then((state) => {
+          if (revision === cameraLowLightRevision.current) setCameraLowLightState(state)
+        })
+        .catch(() => {
+          if (revision === cameraLowLightRevision.current) setCameraLowLightState(null)
+        })
+    },
+    [client]
+  )
   useEffect(() => {
     const revision = ++cameraLowLightRevision.current
     if (!client || wsStatus !== 'connected' || !selectedCameraIdForLowLight) {
       setCameraLowLightState(null)
       return
     }
-    void client
-      .requestTyped('camera.lowLight.get', { cameraId: selectedCameraIdForLowLight })
-      .then((state) => {
-        if (revision === cameraLowLightRevision.current) setCameraLowLightState(state)
-      })
-      .catch(() => {
-        if (revision === cameraLowLightRevision.current) setCameraLowLightState(null)
-      })
-  }, [client, wsStatus, selectedCameraIdForLowLight])
+    readCameraLowLight(selectedCameraIdForLowLight, revision)
+  }, [client, wsStatus, selectedCameraIdForLowLight, readCameraLowLight])
 
   const setCameraLowLight = useCallback(
     async (compensation: boolean) => {
       const cameraId = selectedCameraIdForLowLight
       if (!client || !cameraId) return
       const revision = ++cameraLowLightRevision.current
+      setCameraLowLightPending(true)
       try {
         const state = await client.requestTyped('camera.lowLight.set', { cameraId, compensation })
         if (revision === cameraLowLightRevision.current) setCameraLowLightState(state)
@@ -17683,9 +17695,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           action: compensation ? 'turn on' : 'turn off',
           object: 'low-light compensation'
         })
+        // The save may have landed before the failure: show what is stored.
+        readCameraLowLight(cameraId, revision)
+      } finally {
+        setCameraLowLightPending(false)
       }
     },
-    [client, selectedCameraIdForLowLight]
+    [client, selectedCameraIdForLowLight, readCameraLowLight]
   )
 
   // Plan 090 C5: which encoder the Windows fallback path may use. A change
@@ -18999,6 +19015,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       encoderPreference,
       setEncoderPreference,
       cameraLowLight,
+      cameraLowLightPending,
       setCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
@@ -19251,6 +19268,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       encoderPreference,
       setEncoderPreference,
       cameraLowLight,
+      cameraLowLightPending,
       setCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
