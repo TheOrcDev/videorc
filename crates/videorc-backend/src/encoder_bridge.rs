@@ -13796,6 +13796,12 @@ mod tests {
         assert_eq!(fed.frame.bytes, expected);
     }
 
+    // The wait returns the moment the fresh sequence lands, so a passing run
+    // never spends this budget. It only has to outlast a loaded runner that
+    // starves the publisher thread: a full Windows suite once missed 50 ms.
+    // The tests after the wait budget prove the wait stays bounded.
+    const FRESH_SEQUENCE_TEST_WAIT: Duration = Duration::from_secs(10);
+
     #[test]
     fn bridge_waits_for_fresh_compositor_sequence_before_repeating() {
         let width = 8;
@@ -13819,7 +13825,7 @@ mod tests {
         let fed = next_raw_compositor_frame(
             Some(&frame_store),
             Some(11),
-            Duration::from_millis(50),
+            FRESH_SEQUENCE_TEST_WAIT,
             first.len(),
         )
         .expect("fresh compositor frame");
@@ -13882,7 +13888,7 @@ mod tests {
                 );
             })
         };
-        let fed = next_compositor_frame(Some(&frame_store), Some(21), Duration::from_millis(50))
+        let fed = next_compositor_frame(Some(&frame_store), Some(21), FRESH_SEQUENCE_TEST_WAIT)
             .expect("fresh compositor frame");
         publisher.join().expect("publisher");
 
