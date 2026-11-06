@@ -4144,13 +4144,13 @@ async fn prepare_x_native_live(
     x_live::ensure_x_native_live_available(&capability)?;
     let credentials = x_live::x_livestream_credentials()?
         .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    clear_legacy_x_source_health(state);
     let prepared = match x_live::prepare_x_stream_source(
         XPrepareSourceRequest {
             credentials: credentials.clone(),
             account: account.cloned(),
             source_name: x_live::default_source_name(),
             api_base_url: None,
-            retired_source_ids: retired_x_source_ids(state),
         },
         &reqwest::Client::new(),
         secrets::put_secret,
@@ -4246,23 +4246,21 @@ async fn publish_x_native_live(
     let metadata = state.database.stream_metadata_draft()?;
     let credentials = x_live::x_livestream_credentials()?
         .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
-    let source_id = params.source_id.clone();
+    let announce = !x_live::x_should_not_tweet(&metadata);
     let result = x_live::publish_x_broadcast(
         XPublishRequest {
-            credentials,
+            credentials: credentials.clone(),
             source_id: params.source_id,
-            region: params.region,
             metadata,
-            is_low_latency: params.is_low_latency,
             locale: x_live::default_publish_locale(),
             chat_option: x_live::default_chat_option(),
             api_base_url: None,
             poll_attempts: 10,
             poll_interval_ms: 2_000,
-            // Bounded pre-publish playback gate: up to 45s for X to bring up
-            // the transcode BEFORE the announcement post goes out.
-            pre_publish_probe_attempts: 9,
-            pre_publish_probe_interval_ms: 5_000,
+            // A 409 means the source cannot take video yet (or another
+            // broadcast is live on it): five tries, two seconds apart.
+            conflict_attempts: 5,
+            conflict_backoff_ms: 2_000,
         },
         &reqwest::Client::new(),
     )
@@ -4276,43 +4274,37 @@ async fn publish_x_native_live(
                 protocol::HealthLevel::Info,
                 "x-broadcast-published",
                 &format!(
-                    "X broadcast {} is live: {}{}{}",
+                    "X broadcast {} is live: {}{}",
                     published.broadcast_id,
                     published.share_url,
-                    match published.playable_before_publish {
-                        Some(true) => " (playback verified before the announcement post)",
-                        Some(false) =>
-                            " (playback was NOT ready before the announcement post; watching)",
-                        None => "",
-                    },
-                    published
-                        .tweet_error
-                        .as_deref()
-                        .map(|error| format!("; announcement post failed: {error}"))
-                        .unwrap_or_default()
+                    if published.already_live {
+                        " (X answered 200: this source already had a live broadcast, returned unchanged; the title and announcement settings of this session were ignored)"
+                    } else {
+                        ""
+                    }
                 ),
             );
-            if let Some(compatibility) = published
-                .compatibility_info
-                .as_ref()
-                .filter(|info| x_compatibility_notable(info))
-            {
-                log_x_lifecycle(
-                    state,
-                    session_id.as_deref(),
-                    protocol::HealthLevel::Warn,
-                    "x-source-compatibility",
-                    &format!("X ingest compatibility report: {compatibility}"),
-                );
-            }
-            spawn_x_playback_watch(
+            // The /2/broadcasts routes expose no playback URL (no HLS, no
+            // `video_access`), so Videorc can no longer check what viewers
+            // see. Say so once, then watch the broadcast's STATE instead.
+            log_x_lifecycle(
+                state,
+                session_id.as_deref(),
+                protocol::HealthLevel::Info,
+                "x-playback-unverifiable",
+                &format!(
+                    "X's API gives no playback URL, so Videorc cannot verify that viewers see video. Open {} yourself to check; Videorc watches the broadcast state and reports if X ends it.",
+                    published.share_url
+                ),
+            );
+            spawn_x_broadcast_state_watch(
                 state.clone(),
                 session_id.clone(),
-                source_id,
+                credentials,
                 published.broadcast_id.clone(),
                 published.share_url.clone(),
-                published.hls_url.clone(),
-                published.playable_before_publish,
+                announce,
+                published.tweet_id.clone(),
             );
         }
         Err(error) => {
@@ -4321,7 +4313,7 @@ async fn publish_x_native_live(
                 session_id.as_deref(),
                 protocol::HealthLevel::Error,
                 "x-publish-failed",
-                &format!("X broadcast publish failed: {error}"),
+                &format!("X Go Live failed: {error}"),
             );
         }
     }
@@ -4406,183 +4398,176 @@ fn log_x_lifecycle(
     }
 }
 
-fn x_compatibility_notable(info: &serde_json::Value) -> bool {
-    ["errors", "warnings"].iter().any(|key| {
-        info.get(key)
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|entries| !entries.is_empty())
-    })
-}
-
-fn retired_x_source_ids(state: &AppState) -> Vec<String> {
-    x_source_health_map(state)
-        .into_iter()
-        .filter(|(_, health)| health.retired)
-        .map(|(source_id, _)| source_id)
-        .collect()
-}
-
-fn x_source_health_map(
-    state: &AppState,
-) -> std::collections::HashMap<String, x_live::XSourceHealth> {
-    state
+/// The retired per-source playback health map (`xSourceHealth`) keyed its
+/// records by the deprecated routes' source id, which was the stream key.
+/// Those keys sit in plain app_settings and can never match a new source
+/// id, so the map is cleared the first time a prepare finds it. Best effort:
+/// Go Live never fails over it.
+fn clear_legacy_x_source_health(state: &AppState) {
+    match state
         .database
-        .load_setting(x_live::X_SOURCE_HEALTH_SETTING)
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-}
-
-fn record_x_playback_outcome(state: &AppState, source_id: &str, verified: bool) {
-    let mut map = x_source_health_map(state);
-    let health = map.remove(source_id).unwrap_or_default();
-    let updated =
-        x_live::apply_x_playback_outcome(health, verified, &chrono::Utc::now().to_rfc3339());
-    let retired = updated.retired;
-    map.insert(source_id.to_string(), updated);
-    if let Err(error) = state
-        .database
-        .save_setting(x_live::X_SOURCE_HEALTH_SETTING, &map)
+        .load_setting::<serde_json::Value>(x_live::LEGACY_X_SOURCE_HEALTH_SETTING)
     {
-        state.emit_log(
+        Ok(Some(_)) => {
+            match state
+                .database
+                .delete_setting(x_live::LEGACY_X_SOURCE_HEALTH_SETTING)
+            {
+                Ok(()) => state.emit_log(
+                    "info",
+                    "Cleared the legacy X source health record: its keys were old stream keys from the deprecated /2/users/:user_id/sources routes.",
+                ),
+                Err(error) => state.emit_log(
+                    "warn",
+                    format!("Could not clear the legacy X source health record: {error}"),
+                ),
+            }
+        }
+        Ok(None) => {}
+        Err(error) => state.emit_log(
             "warn",
-            format!("Could not persist X source health for {source_id}: {error}"),
-        );
-    }
-    if retired && !verified {
-        state.emit_log(
-            "warn",
-            format!(
-                "X source {source_id} retired after {} consecutive sessions without playback; the next Go Live will replace it.",
-                x_live::X_SOURCE_RETIRE_FAILURES
-            ),
-        );
+            format!("Could not read the legacy X source health record: {error}"),
+        ),
     }
 }
 
-const X_PLAYBACK_WATCH_INTERVAL_MS: u64 = 5_000;
-const X_PLAYBACK_WATCH_MAX_ATTEMPTS: u32 = 60; // ~5 minutes
-const X_PLAYBACK_PENDING_WARN_AFTER_MS: u128 = 90_000;
+const X_BROADCAST_WATCH_INTERVAL_MS: u64 = 5_000;
+const X_BROADCAST_WATCH_MAX_ATTEMPTS: u32 = 72; // ~6 minutes, past X's 5-minute no-video timeout
 
-/// Post-publish playback watch: keeps probing the broadcast's HLS playlist
-/// so the broadcaster learns within seconds whether viewers can actually
-/// watch — the 2026-07-08 incident streamed 108s to a spinner in silence.
-#[allow(clippy::too_many_arguments)]
-fn spawn_x_playback_watch(
+/// Post-Go-Live broadcast STATE watch. The new X routes expose no playback
+/// URL, so the only thing Videorc can still check is whether X keeps the
+/// broadcast RUNNING: X ends it as TIMED_OUT when no video reached it
+/// within 5 minutes, and a streamer would otherwise keep streaming to a
+/// dead broadcast in silence. Also reports once whether the announcing Post
+/// appeared, since the new route never returns a `tweet_error`.
+fn spawn_x_broadcast_state_watch(
     state: AppState,
     session_id: Option<String>,
-    source_id: String,
+    credentials: x_live::XLivestreamCredentials,
     broadcast_id: String,
     share_url: String,
-    hls_url: Option<String>,
-    playable_before_publish: Option<bool>,
+    announce: bool,
+    initial_tweet_id: Option<String>,
 ) {
-    let Some(hls_url) = hls_url else {
-        log_x_lifecycle(
-            &state,
-            session_id.as_deref(),
-            protocol::HealthLevel::Warn,
-            "x-playback-unknown",
-            "X did not return a playback URL for this broadcast; watchability cannot be verified.",
-        );
-        return;
-    };
-
     tokio::spawn(async move {
         let client = reqwest::Client::new();
+        let base_url = x_live::api_base_url(None);
         let published_at = std::time::Instant::now();
-        let emit_status = |status: &str, ms_after_publish: Option<u64>| {
-            state.emit_event(
-                "streamTargets.x.playback",
-                serde_json::json!({
-                    "sessionId": session_id,
-                    "broadcastId": broadcast_id,
-                    "shareUrl": share_url,
-                    "status": status,
-                    "msAfterPublish": ms_after_publish,
-                }),
-            );
-        };
-
-        if playable_before_publish == Some(true) {
+        let mut tweet_seen = false;
+        let mut lookup_warned = false;
+        let note_tweet = |tweet_id: &str| {
             log_x_lifecycle(
                 &state,
                 session_id.as_deref(),
                 protocol::HealthLevel::Info,
-                "x-playback-verified",
+                "x-announcement-posted",
                 &format!(
-                    "Viewers can watch your X broadcast (verified before publish): {share_url}"
+                    "X created the announcement post for broadcast {broadcast_id} (post {tweet_id})."
                 ),
             );
-            emit_status("verified", Some(0));
-            record_x_playback_outcome(&state, &source_id, true);
-            return;
+        };
+        if announce && let Some(tweet_id) = initial_tweet_id.as_deref() {
+            tweet_seen = true;
+            note_tweet(tweet_id);
         }
 
-        let mut warned_pending = false;
-        for _ in 0..X_PLAYBACK_WATCH_MAX_ATTEMPTS {
-            if x_live::x_playlist_playable(&client, &hls_url)
-                .await
-                .unwrap_or(false)
-            {
-                let elapsed = published_at.elapsed().as_millis() as u64;
-                log_x_lifecycle(
-                    &state,
-                    session_id.as_deref(),
-                    protocol::HealthLevel::Info,
-                    "x-playback-verified",
-                    &format!(
-                        "Viewers can watch your X broadcast ({}s after publish): {share_url}",
-                        elapsed / 1_000
-                    ),
-                );
-                emit_status("verified", Some(elapsed));
-                record_x_playback_outcome(&state, &source_id, true);
-                return;
-            }
-            if !warned_pending
-                && published_at.elapsed().as_millis() >= X_PLAYBACK_PENDING_WARN_AFTER_MS
-            {
-                warned_pending = true;
-                log_x_lifecycle(
-                    &state,
-                    session_id.as_deref(),
-                    protocol::HealthLevel::Warn,
-                    "x-playback-pending",
-                    "X is still provisioning playback. Viewers may see a loading spinner. Keep streaming; this can take a few minutes.",
-                );
-                emit_status("pending", Some(published_at.elapsed().as_millis() as u64));
-            }
-            // Stop probing once this session is no longer the active one.
-            if let Some(session_id) = session_id.as_deref() {
-                let active = state
+        for _ in 0..X_BROADCAST_WATCH_MAX_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                X_BROADCAST_WATCH_INTERVAL_MS,
+            ))
+            .await;
+            let session_active = match session_id.as_deref() {
+                Some(session_id) => state
                     .recording
                     .lock()
                     .await
                     .as_ref()
-                    .map(|active| active.session_id.clone());
-                if active.as_deref() != Some(session_id) {
+                    .is_some_and(|active| active.session_id == session_id),
+                None => true,
+            };
+            if !session_active {
+                return;
+            }
+            let sample = match x_live::fetch_broadcast_state(
+                &client,
+                &credentials,
+                &base_url,
+                &broadcast_id,
+            )
+            .await
+            {
+                Ok(sample) => sample,
+                Err(error) => {
+                    if !lookup_warned {
+                        lookup_warned = true;
+                        log_x_lifecycle(
+                            &state,
+                            session_id.as_deref(),
+                            protocol::HealthLevel::Warn,
+                            "x-broadcast-state-unknown",
+                            &format!(
+                                "Could not read the X broadcast state ({error}); still watching."
+                            ),
+                        );
+                    }
+                    continue;
+                }
+            };
+            if announce
+                && !tweet_seen
+                && let Some(tweet_id) = sample.tweet_id.as_deref()
+            {
+                tweet_seen = true;
+                note_tweet(tweet_id);
+            }
+            match x_live::x_broadcast_watch_verdict(sample.state.as_deref(), true) {
+                x_live::XBroadcastWatchVerdict::KeepWatching => {}
+                x_live::XBroadcastWatchVerdict::SessionOver => return,
+                x_live::XBroadcastWatchVerdict::EndedByX {
+                    state: broadcast_state,
+                } => {
+                    let elapsed = published_at.elapsed().as_millis() as u64;
+                    log_x_lifecycle(
+                        &state,
+                        session_id.as_deref(),
+                        protocol::HealthLevel::Error,
+                        "x-broadcast-ended-by-x",
+                        &format!(
+                            "X ended broadcast {broadcast_id} ({broadcast_state}) {}s after Go Live while this session was still streaming{}. Your local recording is unaffected.",
+                            elapsed / 1_000,
+                            if broadcast_state == "TIMED_OUT" {
+                                "; X saw no video within its 5-minute window"
+                            } else {
+                                ""
+                            }
+                        ),
+                    );
+                    state.emit_event(
+                        "streamTargets.x.playback",
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "broadcastId": broadcast_id,
+                            "shareUrl": share_url,
+                            "status": "unavailable",
+                            "msAfterPublish": elapsed,
+                        }),
+                    );
                     return;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(
-                X_PLAYBACK_WATCH_INTERVAL_MS,
-            ))
-            .await;
         }
 
-        log_x_lifecycle(
-            &state,
-            session_id.as_deref(),
-            protocol::HealthLevel::Error,
-            "x-playback-unavailable",
-            "X never produced playback for this broadcast. Viewers saw a loading spinner. Your local recording is unaffected.",
-        );
-        emit_status(
-            "unavailable",
-            Some(published_at.elapsed().as_millis() as u64),
-        );
-        record_x_playback_outcome(&state, &source_id, false);
+        if announce && !tweet_seen {
+            log_x_lifecycle(
+                &state,
+                session_id.as_deref(),
+                protocol::HealthLevel::Warn,
+                "x-announcement-missing",
+                &format!(
+                    "X did not create the announcement post for broadcast {broadcast_id}; share the link yourself: {share_url}"
+                ),
+            );
+        }
     });
 }
 
