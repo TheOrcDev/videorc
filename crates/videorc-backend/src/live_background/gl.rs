@@ -338,6 +338,14 @@ impl LiveBackgroundGlRenderer {
         self.shared.is_some()
     }
 
+    /// Whether `release` has anything to undo. A still (forced, gpu-budget,
+    /// a failure) holds no worker but has reported; the board is cleared when
+    /// the live background leaves, so that status must be forgotten too, or
+    /// the same background coming back reports nothing.
+    pub fn needs_release(&self) -> bool {
+        self.holds_resources() || self.reported_status.is_some()
+    }
+
     /// The live background left (or composition stopped): stop the worker and
     /// clear what this renderer reported.
     pub fn release(&mut self) {

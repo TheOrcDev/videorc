@@ -2320,6 +2320,14 @@ impl LiveBackgroundMetalRenderer {
         self.library.is_some() || !self.pipelines.is_empty() || self.targets.is_some()
     }
 
+    /// Whether `release` has anything to undo. A forced still holds nothing
+    /// but has reported; the board is cleared when the live background
+    /// leaves, so that status must be forgotten too, or the same background
+    /// coming back reports nothing.
+    pub fn needs_release(&self) -> bool {
+        self.holds_resources() || self.reported_status.is_some()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn guard_level(&self) -> GuardLevel {
         self.guard.level()
@@ -3128,6 +3136,31 @@ mod tests {
             Some(Some(LiveBackgroundStillReason::Forced))
         );
         assert_eq!((programs, scratch), (0, 0));
+    }
+
+    /// A forced still holds nothing but has reported. When the live
+    /// background leaves, the compositor clears the board and the renderer
+    /// still needs its release; after it, the same still reports again.
+    #[test]
+    fn a_forced_still_reports_again_after_a_release() {
+        let Some((mut renderer, board)) = renderer() else {
+            return;
+        };
+        let spec = spec(LiveBackgroundId::LineWaves, "gold");
+        let input = frame_input(
+            &spec,
+            &board,
+            LiveBackgroundTick::unmeasured(Instant::now()),
+        );
+        let forced = Some(LiveBackgroundStillReason::Forced);
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        let reported = board.snapshot().0.expect("the forced still reports");
+        board.clear();
+        assert!(renderer.needs_release());
+        renderer.release();
+        assert!(!renderer.needs_release());
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert_eq!(board.snapshot().0, Some(reported));
     }
 
     /// Switching backgrounds drops the old scratch; releasing drops all.

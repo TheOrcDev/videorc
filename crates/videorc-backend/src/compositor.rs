@@ -7980,11 +7980,12 @@ fn cpu_live_background_source(
 }
 
 /// Plan 190 S5: stop the Linux live background thread when composition stops
-/// (the idle preview composes no pixels) or the live background leaves.
+/// (the idle preview composes no pixels) or the live background leaves, and
+/// forget the status it reported, so the next take reports again.
 fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>) {
     #[cfg(target_os = "linux")]
     if let Some(renderer) = slot.as_mut()
-        && renderer.holds_resources()
+        && renderer.needs_release()
     {
         renderer.release();
     }
@@ -8812,10 +8813,11 @@ fn try_gpu_compose_with_chrome(
     let layout = &snapshot.layout;
     let mut prepared_sources = Vec::new();
     // Plan 190: with no live background this tick, the renderer holds
-    // nothing (one `Option` check; it frees its textures when one goes away).
+    // nothing and remembers no status (one `Option` check; it frees its
+    // textures when one goes away).
     if inputs.live_background.is_none()
         && let Some(renderer) = live_renderer.as_mut()
-        && renderer.holds_resources()
+        && renderer.needs_release()
     {
         renderer.release();
     }
@@ -27810,6 +27812,37 @@ mod live_background_cpu_tests {
         assert!(slot.is_none());
         release_cpu_live_background(&mut slot);
         assert!(slot.is_none());
+    }
+
+    /// A still holds no GL thread but has reported. When the live background
+    /// leaves, the compositor clears the board; when the same one comes back
+    /// (two takes in a row on one background), it must report again.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_still_reports_again_when_its_background_comes_back() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let now = Instant::now();
+        let mut runtime = None;
+        sync_live_background(&mut runtime, Some(&spec()), now);
+        let input = runtime.unwrap().frame_input(
+            &background(),
+            &board,
+            LiveBackgroundTick::unmeasured(now),
+        );
+        let forced = Some(crate::protocol::LiveBackgroundStillReason::Forced);
+        let mut slot = Some(Box::new(LiveBackgroundGpuRenderer::new(Arc::clone(&board))));
+        let renderer = slot.as_mut().unwrap();
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert!(!renderer.holds_resources());
+        let reported = board.snapshot().0.expect("the still reports");
+        // It leaves: the board is cleared and the leg gets no input.
+        board.clear();
+        assert!(cpu_live_background_source(&mut slot, None, (640, 360)).is_none());
+        let renderer = slot.as_mut().unwrap();
+        assert!(!renderer.needs_release());
+        // It comes back with the same still.
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert_eq!(board.snapshot().0, Some(reported));
     }
 
     #[cfg(not(target_os = "linux"))]
