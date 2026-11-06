@@ -6290,12 +6290,17 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             const parsed = new URL(profiled);
             // A new width needs the current frame resent even when the source
             // has not advanced (a still screen sends no PipeWire frames), so a
-            // resized Preview never keeps the old size's pixels.
+            // resized Preview never keeps the old size's pixels. The old
+            // size's cursor is dropped, not skipped once: if the first request
+            // at the new width fails, its retry must still ask for a frame
+            // instead of getting a 204 for the frame drawn at the old size.
             const maxWidth = parsed.searchParams.get('maxWidth');
-            const widthChanged = poller.requestedMaxWidth !== maxWidth;
+            if (poller.requestedMaxWidth !== maxWidth) {
+              poller.generation = null;
+              poller.sequence = null;
+            }
             poller.requestedMaxWidth = maxWidth;
             if (
-              !widthChanged &&
               typeof poller.generation === 'string' &&
               poller.generation.length > 0 &&
               Number.isSafeInteger(poller.sequence) &&
