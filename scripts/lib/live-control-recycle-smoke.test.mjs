@@ -7,6 +7,8 @@ import {
   lsofShowsOwnedTcpListener,
   netstatShowsOwnedTcpListener,
   ownedTcpListenerIsReady,
+  procFdLinksHoldSocket,
+  procTcpListenerInodes,
   waitForOwnedTcpListener
 } from './live-control-recycle-smoke.mjs'
 
@@ -162,6 +164,91 @@ test('RTMP readiness treats an empty lsof query as not ready and rejects probe e
         spawnSyncImpl: () => ({ error: new Error('lsof missing') })
       }),
     /Could not inspect the local RTMP listener socket/
+  )
+})
+
+const PROC_TCP_HEADER =
+  '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
+// 19629 is 0x4CAD.
+const PROC_TCP = [
+  PROC_TCP_HEADER,
+  '   0: 0100007F:4CAD 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 5551 1 0000 100 0 0 10 0',
+  '   1: 0100007F:4CAD 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 5552 1 0000 20 4 30 10 -1',
+  '   2: 0100007F:4CAE 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 5553 1 0000 100 0 0 10 0'
+].join('\n')
+const PROC_TCP6 = [
+  PROC_TCP_HEADER,
+  '   0: 00000000000000000000000000000000:4CAD 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 6661 1 0000 100 0 0 10 0'
+].join('\n')
+
+function fakeProc({ tables = { tcp: PROC_TCP, tcp6: PROC_TCP6 }, fds = {} } = {}) {
+  const missing = (path) => Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
+  return {
+    readFile(path) {
+      const table = tables[path.replace('/proc/net/', '')]
+      if (table instanceof Error) throw table
+      if (table === undefined) throw missing(path)
+      return table
+    },
+    readdir(path) {
+      const pid = /^\/proc\/(\d+)\/fd$/.exec(path)?.[1]
+      if (!fds[pid]) throw missing(path)
+      return Object.keys(fds[pid])
+    },
+    readlink(path) {
+      const [, pid, fd] = /^\/proc\/(\d+)\/fd\/(\d+)$/.exec(path)
+      const link = fds[pid]?.[fd]
+      if (link === undefined) throw missing(path)
+      return link
+    }
+  }
+}
+
+test('Linux RTMP readiness reads the listening inodes from /proc/net', () => {
+  assert.deepEqual([...procTcpListenerInodes([PROC_TCP, PROC_TCP6], 19629)], ['5551', '6661'])
+  assert.deepEqual([...procTcpListenerInodes([PROC_TCP], 19631)], [])
+  assert.equal(procFdLinksHoldSocket(['/dev/null', 'socket:[5551]'], new Set(['5551'])), true)
+  assert.equal(procFdLinksHoldSocket(['socket:[5552]', 'pipe:[5551]'], new Set(['5551'])), false)
+})
+
+test('Linux RTMP readiness requires the exact child PID to hold the listening socket', () => {
+  const proc = fakeProc({
+    fds: {
+      421: { 0: '/dev/null', 3: 'socket:[6661]' },
+      422: { 3: 'socket:[5551]' },
+      423: { 3: 'socket:[5552]' }
+    }
+  })
+  const ready = (pid, extra = {}) =>
+    ownedTcpListenerIsReady({
+      pid,
+      port: 19629,
+      platform: 'linux',
+      spawnSyncImpl: () => assert.fail('Linux must not run lsof'),
+      procImpl: proc,
+      ...extra
+    })
+  assert.equal(ready(421), true)
+  assert.equal(ready(422), true)
+  // An accepted connection on the port is not the listener.
+  assert.equal(ready(423), false)
+  // Gone, or not bound yet: not ready, and the caller reports the exit.
+  assert.equal(ready(424), false)
+  assert.equal(ready(421, { port: 19631 }), false)
+})
+
+test('Linux RTMP readiness tolerates a host without IPv6 and rejects unreadable tables', () => {
+  const ipv4Only = fakeProc({ tables: { tcp: PROC_TCP }, fds: { 422: { 3: 'socket:[5551]' } } })
+  assert.equal(
+    ownedTcpListenerIsReady({ pid: 422, port: 19629, platform: 'linux', procImpl: ipv4Only }),
+    true
+  )
+  const denied = fakeProc({
+    tables: { tcp: Object.assign(new Error('EACCES: /proc/net/tcp'), { code: 'EACCES' }) }
+  })
+  assert.throws(
+    () => ownedTcpListenerIsReady({ pid: 422, port: 19629, platform: 'linux', procImpl: denied }),
+    /Could not inspect the local RTMP listener socket: EACCES/
   )
 })
 
