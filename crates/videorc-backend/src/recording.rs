@@ -21315,12 +21315,16 @@ enum ReplayVideoCodec {
 
 /// Appends the ring as one more output: the same audio mix the file gets,
 /// encoded to AAC, and a `-f segment` MPEG-TS ring (plan 181 S2).
+/// `session_codec` and `video_source` are the session's primary output's,
+/// so the ring takes the same `-shortest` bound decision as that output.
 fn append_replay_segment_output(
     args: &mut Vec<String>,
     input_layout: &InputLayout,
     audio: &AudioSettings,
     video: ReplayVideoCodec,
     replay: &ReplayOutput,
+    session_codec: OutputAudioCodec,
+    video_source: OutputVideoSource,
 ) {
     match video {
         ReplayVideoCodec::Copy { video_output, fps } => {
@@ -21354,6 +21358,7 @@ fn append_replay_segment_output(
     ));
     // The ring ends with the video, like every bridge output.
     args.push("-shortest".to_string());
+    append_live_pcm_shortest_bound(args, input_layout, session_codec, video_source);
     args.extend(crate::replay_buffer::segment_muxer_args(
         &replay.dir,
         replay.seconds,
@@ -21809,7 +21814,15 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 }
             }
         };
-        append_replay_segment_output(&mut args, &input_layout, &params.audio, video, replay);
+        append_replay_segment_output(
+            &mut args,
+            &input_layout,
+            &params.audio,
+            video,
+            replay,
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
+            OutputVideoSource::for_bridge(video_output),
+        );
     }
 
     Ok(args)
@@ -21957,6 +21970,8 @@ fn bridge_compositor_split_output_ffmpeg_args_with_replay(
                 fps: params.output.video.fps,
             },
             replay,
+            OutputAudioCodec::StreamAac,
+            OutputVideoSource::EncodedBridge,
         );
     }
 
@@ -22683,6 +22698,8 @@ fn ffmpeg_args_with_encoder_and_replay(
                 encoder_args,
             },
             replay,
+            OutputAudioCodec::for_session(params, !stream_targets.is_empty()),
+            OutputVideoSource::Legacy,
         );
     }
 
@@ -23228,38 +23245,56 @@ fn append_audio_encoding_with_video_clock(
     video_source: OutputVideoSource,
 ) {
     append_audio_encoding_args(args, input_layout, audio, codec);
-    let microphone_is_padded = input_layout
+    if video_source.is_bridge() || microphone_is_padded(input_layout) {
+        args.push("-shortest".to_string());
+        append_live_pcm_shortest_bound(args, input_layout, codec, video_source);
+    }
+}
+
+fn microphone_is_padded(input_layout: &InputLayout) -> bool {
+    input_layout
         .audio_inputs
         .iter()
-        .any(|input| input.track.source == AudioTrackSource::Microphone);
-    if video_source.is_bridge() || microphone_is_padded {
-        args.push("-shortest".to_string());
-        // Live PCM can stall FFmpeg's pre-encode sync queue after the first
-        // audio packets: both Pulse/raw bridge inputs and legacy capture with
-        // padded microphone audio reproduce it. The default 10-second window
-        // can retain an entire short recording. Bound these dense live A/V
-        // queues to 250 ms so the overflow heartbeat advances the lagging
-        // stream, retaining PCM, apad and video-owned EOF. A record-only take
-        // keeps the bound whether it writes PCM or AAC.
-        let bounded_record = !codec.is_streaming()
-            && (input_layout.microphone_is_linux_pulse
-                || (microphone_is_padded && video_source == OutputVideoSource::Legacy));
-        // The raw bridge needs it on stream outputs too (#1166). When its first
-        // encoded video packet reaches the muxer before audio's first AAC
-        // packet (AAC needs two frames), FFmpeg's scheduler chokes every input
-        // whose output already has a packet: video stops, while the sync queue
-        // holds audio until video advances. Nothing moves until the queue
-        // overflows, so the first output froze for the whole 10 s window
-        // (CI run 41878076547, pass 3). Encoded bridges keep their existing
-        // synchronization: FFmpeg encodes no video there.
-        let raw_bridge_live_audio =
-            microphone_is_padded && video_source == OutputVideoSource::RawBridge;
-        if bounded_record || raw_bridge_live_audio {
-            args.extend([
-                "-shortest_buf_duration".to_string(),
-                LIVE_PCM_SHORTEST_BUF_DURATION.to_string(),
-            ]);
-        }
+        .any(|input| input.track.source == AudioTrackSource::Microphone)
+}
+
+/// Appends `-shortest_buf_duration` after an output's `-shortest` when its
+/// live A/V needs the bound. FFmpeg applies the option per output, so every
+/// `-shortest` output of a session (its file or stream, and its replay ring)
+/// takes this one decision; one unbounded output can still stall them all,
+/// because the scheduler chokes inputs for every output at once.
+fn append_live_pcm_shortest_bound(
+    args: &mut Vec<String>,
+    input_layout: &InputLayout,
+    codec: OutputAudioCodec,
+    video_source: OutputVideoSource,
+) {
+    let microphone_is_padded = microphone_is_padded(input_layout);
+    // Live PCM can stall FFmpeg's pre-encode sync queue after the first
+    // audio packets: both Pulse/raw bridge inputs and legacy capture with
+    // padded microphone audio reproduce it. The default 10-second window
+    // can retain an entire short recording. Bound these dense live A/V
+    // queues to 250 ms so the overflow heartbeat advances the lagging
+    // stream, retaining PCM, apad and video-owned EOF. A record-only take
+    // keeps the bound whether it writes PCM or AAC.
+    let bounded_record = !codec.is_streaming()
+        && (input_layout.microphone_is_linux_pulse
+            || (microphone_is_padded && video_source == OutputVideoSource::Legacy));
+    // The raw bridge needs it on stream outputs too (#1166). When its first
+    // encoded video packet reaches the muxer before audio's first AAC
+    // packet (AAC needs two frames), FFmpeg's scheduler chokes every input
+    // whose output already has a packet: video stops, while the sync queue
+    // holds audio until video advances. Nothing moves until the queue
+    // overflows, so the first output froze for the whole 10 s window
+    // (CI run 41878076547, pass 3). Encoded bridges keep their existing
+    // synchronization: FFmpeg encodes no video there.
+    let raw_bridge_live_audio =
+        microphone_is_padded && video_source == OutputVideoSource::RawBridge;
+    if bounded_record || raw_bridge_live_audio {
+        args.extend([
+            "-shortest_buf_duration".to_string(),
+            LIVE_PCM_SHORTEST_BUF_DURATION.to_string(),
+        ]);
     }
 }
 
@@ -38561,6 +38596,72 @@ mod tests {
             assert_eq!(all_values(&args, "-c:v").len(), 2, "two encodes: {args:?}");
             assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
             assert_ring_output(&args);
+        }
+
+        /// #1166: FFmpeg bounds `-shortest` per output, and one unbounded
+        /// output can stall the whole session, so the ring takes the primary
+        /// output's decision: bounded on the raw bridge with a live
+        /// microphone, recorded or streamed; FFmpeg's default when it copies
+        /// an encoded bridge.
+        #[test]
+        fn every_shortest_output_takes_the_sessions_bound() {
+            for (video_output, bounded) in [
+                (EncoderBridgeVideoOutput::RawYuv420p, true),
+                (EncoderBridgeVideoOutput::VideoToolboxH264MpegTs, false),
+            ] {
+                for streaming in [false, true] {
+                    let mut params = base_params(true, streaming);
+                    params.replay = Some(ReplayParams {
+                        seconds: 30,
+                        auto: false,
+                    });
+                    let targets = if streaming {
+                        let streaming = streaming_for(&[(
+                            StreamPlatform::Twitch,
+                            "rtmp://live.twitch.tv/app",
+                            "tw",
+                        )]);
+                        params.streaming = Some(streaming.clone());
+                        stream_targets_from_streaming(&streaming).unwrap()
+                    } else {
+                        Vec::new()
+                    };
+                    let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                        &capture(),
+                        &params,
+                        Some(Path::new("/tmp/videorc-replay-bound.mkv")),
+                        &targets,
+                        Path::new("/tmp/videorc-ring-bound.fifo"),
+                        video_output,
+                        &encoder(),
+                        Some(&ring()),
+                    )
+                    .unwrap();
+                    assert_ring_output(&args);
+                    let shortest = args
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, arg)| *arg == "-shortest")
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>();
+                    // The primary output and the ring; an encoded bridge that
+                    // streams adds one output per target.
+                    assert!(
+                        shortest.len() >= 2,
+                        "primary and ring outputs, {video_output:?} streaming={streaming}: {args:?}"
+                    );
+                    for index in shortest {
+                        let bound = (args.get(index + 1).map(String::as_str)
+                            == Some("-shortest_buf_duration"))
+                        .then(|| args[index + 2].as_str());
+                        assert_eq!(
+                            bound,
+                            bounded.then_some(LIVE_PCM_SHORTEST_BUF_DURATION),
+                            "-shortest at {index}, {video_output:?} streaming={streaming}: {args:?}"
+                        );
+                    }
+                }
+            }
         }
 
         #[test]
