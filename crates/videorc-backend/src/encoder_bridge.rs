@@ -1187,6 +1187,31 @@ impl EncoderBridgeOutputQueuePolicy {
         }
         self
     }
+
+    /// Plan 218 S3b: the stream's twin of `with_iso_audio_advance`. FFmpeg's
+    /// scheduler keeps every output stream within 100 ms of the slowest, and
+    /// the session audio reaches it a playout delay late (plus the split
+    /// stream's audio advance and any negative microphone offset), so it
+    /// deliberately holds each stream frame for that long before reading
+    /// it. Shift the stream's coalesce and hard limits by that wait, so they
+    /// measure our backlog instead of FFmpeg's interleave hold. The wedge
+    /// bound is unchanged: an output that stops making progress still fails
+    /// through `encoder_bridge_over_budget_escalation`.
+    fn with_stream_interleave_allowance(mut self, fps: u32, allowance_ms: u32) -> Self {
+        if self.role != EncoderBridgeOutputRole::Stream || allowance_ms == 0 {
+            return self;
+        }
+        let allowance = Duration::from_millis(u64::from(allowance_ms.min(1000)));
+        let allowance_frames =
+            (u64::from(fps) * u64::from(allowance_ms.min(1000))).div_ceil(1000) as usize;
+        self.coalesce_at_frames = self
+            .coalesce_at_frames
+            .map(|depth| depth + allowance_frames);
+        self.coalesce_at_age = self.coalesce_at_age.map(|age| age + allowance);
+        self.max_frames += allowance_frames;
+        self.max_age += allowance;
+        self
+    }
 }
 
 fn encoder_bridge_pre_encode_admission(
@@ -1515,6 +1540,264 @@ struct EncoderBridgeRuntimeStats {
     deadline_lag_max_ms: Option<f64>,
     late_deadline_ticks: u64,
     schedule_skipped_ms: u64,
+    /// Plan 218 S2: the encoded bytes of this diagnostics window as a bitrate.
+    encoded_output_window_kbps: Option<f64>,
+    /// Plan 218 S2: p95 age of the queue's oldest frame, sampled every tick.
+    output_queue_age_p95_ms: Option<f64>,
+    /// Plan 218 S2: stream coalesce trips, by the limit that tripped.
+    output_queue_depth_trips: u64,
+    output_queue_age_trips: u64,
+    output_queue_last_trip: Option<StreamQueueTrip>,
+    /// Plan 218 S3a: the stream encoder's bitrate right now and as chosen;
+    /// `None` for a writer without an adaptive stream encoder.
+    stream_bitrate_kbps: Option<u32>,
+    stream_bitrate_chosen_kbps: Option<u32>,
+    /// Plan 218 S3a: fifo overflows FFmpeg reported on this session's legs.
+    stream_uplink_overflows: u64,
+}
+
+/// Which stream limit a coalesced tick hit (plan 218 S2). Depth wins when
+/// both hold, as in `encoder_bridge_pre_encode_admission`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamQueueTrip {
+    Depth,
+    Age,
+}
+
+impl StreamQueueTrip {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Depth => "depth",
+            Self::Age => "age",
+        }
+    }
+}
+
+fn stream_queue_trip(
+    policy: EncoderBridgeOutputQueuePolicy,
+    queue_depth: u64,
+    oldest_frame_age: Option<Duration>,
+) -> Option<StreamQueueTrip> {
+    if policy.role != EncoderBridgeOutputRole::Stream {
+        return None;
+    }
+    if policy
+        .coalesce_at_frames
+        .is_some_and(|depth| queue_depth >= depth as u64)
+    {
+        return Some(StreamQueueTrip::Depth);
+    }
+    if policy
+        .coalesce_at_age
+        .is_some_and(|limit| oldest_frame_age.is_some_and(|age| age >= limit))
+    {
+        return Some(StreamQueueTrip::Age);
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Plan 218 S3a: adaptive stream bitrate.
+//
+// One stream encode feeds every destination (owner decision D1), so the
+// slowest connection sets the bitrate for all of them. The signal is FFmpeg's
+// own word that a leg's fifo overflowed (the connection could not carry the
+// stream; viewers there lost seconds of video), or sustained pressure in the
+// bridge's stream queue. Each step lowers the encoder's AverageBitRate by
+// 20 % of the chosen bitrate, down to a floor of 50 % (D2), where it holds
+// and warns. Every clean 30 s gives 10 % back. The recording encoder is
+// never touched.
+// ---------------------------------------------------------------------------
+
+/// A step down or up is this share of the chosen bitrate.
+const STREAM_BITRATE_STEP_DOWN_SHARE: f64 = 0.20;
+const STREAM_BITRATE_STEP_UP_SHARE: f64 = 0.10;
+const STREAM_BITRATE_FLOOR_SHARE: f64 = 0.50;
+/// After a step down, let the new rate show before stepping again: the leg's
+/// fifo flushes on overflow, so the next overflow needs a fresh backlog.
+const STREAM_BITRATE_STEP_DOWN_HOLD: Duration = Duration::from_secs(10);
+/// A clean stretch this long earns a step back up.
+const STREAM_BITRATE_RECOVER_AFTER: Duration = Duration::from_secs(30);
+/// A rate that overflowed is a ceiling: recovery climbs to one step under
+/// it and no further, or the stream saws between a rate the uplink carries
+/// and one it does not (each tooth costs viewers seconds of video). After
+/// this long without an overflow the ceiling lifts by one step, so a
+/// congestion that passed does not pin the stream low for the session.
+const STREAM_BITRATE_CEILING_RELAX_AFTER: Duration = Duration::from_secs(5 * 60);
+/// The controller judges once per check interval, from session totals.
+const STREAM_BITRATE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// Bridge pressure counts as a signal when at least this share of the
+/// interval's frames were coalesced (a start-up blip of two frames is not).
+const STREAM_BITRATE_PRESSURE_SHARE: f64 = 0.10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamBitrateAction {
+    Hold,
+    StepDown(u32),
+    StepUp(u32),
+    /// A signal arrived while already at the floor.
+    AtFloor,
+}
+
+#[derive(Debug)]
+struct StreamBitrateController {
+    chosen_kbps: u32,
+    floor_kbps: u32,
+    current_kbps: u32,
+    fps: u32,
+    last_overflows: u64,
+    last_dropped: u64,
+    last_check_at: Instant,
+    last_step_down_at: Option<Instant>,
+    last_step_up_at: Option<Instant>,
+    clean_since: Instant,
+    /// The lowest rate a leg overflowed at, and when the overflow signal
+    /// last arrived; `None` once nothing overflowed or the ceiling relaxed
+    /// up to the chosen rate.
+    ceiling_kbps: Option<u32>,
+    last_overflow_signal_at: Option<Instant>,
+}
+
+impl StreamBitrateController {
+    /// Only a VideoToolbox stream encoder adapts today, so off macOS the
+    /// controller is built by the tests alone.
+    #[cfg(any(target_os = "macos", test))]
+    fn new(chosen_kbps: u32, fps: u32, now: Instant) -> Self {
+        Self {
+            chosen_kbps,
+            floor_kbps: ((f64::from(chosen_kbps) * STREAM_BITRATE_FLOOR_SHARE).round() as u32)
+                .max(1),
+            current_kbps: chosen_kbps,
+            fps: fps.max(1),
+            last_overflows: 0,
+            last_dropped: 0,
+            last_check_at: now,
+            last_step_down_at: None,
+            last_step_up_at: None,
+            clean_since: now,
+            ceiling_kbps: None,
+            last_overflow_signal_at: None,
+        }
+    }
+
+    fn step_up_kbps(&self) -> u32 {
+        (f64::from(self.chosen_kbps) * STREAM_BITRATE_STEP_UP_SHARE).round() as u32
+    }
+
+    fn current_kbps(&self) -> u32 {
+        self.current_kbps
+    }
+
+    fn at_floor(&self) -> bool {
+        self.current_kbps <= self.floor_kbps
+    }
+
+    /// Feed the session totals of leg overflows and coalesced stream frames.
+    fn observe(&mut self, now: Instant, overflows: u64, dropped: u64) -> StreamBitrateAction {
+        let elapsed = now.saturating_duration_since(self.last_check_at);
+        if elapsed < STREAM_BITRATE_CHECK_INTERVAL {
+            return StreamBitrateAction::Hold;
+        }
+        let overflowed = overflows > self.last_overflows;
+        let dropped_now = dropped.saturating_sub(self.last_dropped);
+        let expected = f64::from(self.fps) * elapsed.as_secs_f64();
+        let pressured =
+            dropped_now >= 2 && dropped_now as f64 >= expected * STREAM_BITRATE_PRESSURE_SHARE;
+        self.last_overflows = overflows;
+        self.last_dropped = dropped;
+        self.last_check_at = now;
+        if overflowed || pressured {
+            self.clean_since = now;
+            if overflowed {
+                self.last_overflow_signal_at = Some(now);
+            }
+            if self
+                .last_step_down_at
+                .is_some_and(|at| now.saturating_duration_since(at) < STREAM_BITRATE_STEP_DOWN_HOLD)
+            {
+                return StreamBitrateAction::Hold;
+            }
+            if overflowed {
+                // The fifo was flushed at the last step, so an overflow now
+                // is this rate's own: the uplink does not carry it.
+                self.ceiling_kbps = Some(
+                    self.ceiling_kbps
+                        .map_or(self.current_kbps, |ceiling| ceiling.min(self.current_kbps)),
+                );
+            }
+            if self.at_floor() {
+                return StreamBitrateAction::AtFloor;
+            }
+            let step =
+                (f64::from(self.chosen_kbps) * STREAM_BITRATE_STEP_DOWN_SHARE).round() as u32;
+            self.current_kbps = self.current_kbps.saturating_sub(step).max(self.floor_kbps);
+            self.last_step_down_at = Some(now);
+            return StreamBitrateAction::StepDown(self.current_kbps);
+        }
+        if let (Some(ceiling), Some(at)) = (self.ceiling_kbps, self.last_overflow_signal_at)
+            && now.saturating_duration_since(at) >= STREAM_BITRATE_CEILING_RELAX_AFTER
+        {
+            let lifted = ceiling.saturating_add(self.step_up_kbps());
+            self.ceiling_kbps = (lifted < self.chosen_kbps).then_some(lifted);
+            self.last_overflow_signal_at = Some(now);
+        }
+        if self.current_kbps < self.chosen_kbps
+            && now.saturating_duration_since(self.clean_since) >= STREAM_BITRATE_RECOVER_AFTER
+            && self
+                .last_step_up_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= STREAM_BITRATE_RECOVER_AFTER)
+        {
+            let next = self
+                .current_kbps
+                .saturating_add(self.step_up_kbps())
+                .min(self.chosen_kbps);
+            if self.ceiling_kbps.is_some_and(|ceiling| next >= ceiling) {
+                return StreamBitrateAction::Hold;
+            }
+            self.current_kbps = next;
+            self.last_step_up_at = Some(now);
+            return StreamBitrateAction::StepUp(self.current_kbps);
+        }
+        StreamBitrateAction::Hold
+    }
+}
+
+/// The session's leg-overflow count, shared between the FFmpeg stderr
+/// monitor (which counts) and the stream writer (which reads it every
+/// tick). Keyed by session: a new session starts a new counter.
+static STREAM_UPLINK_OVERFLOWS: StdMutex<Option<(String, Arc<AtomicU64>)>> = StdMutex::new(None);
+
+pub(crate) fn stream_uplink_overflow_counter(session_id: &str) -> Arc<AtomicU64> {
+    let mut guard = STREAM_UPLINK_OVERFLOWS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.as_ref() {
+        Some((owner, counter)) if owner == session_id => counter.clone(),
+        _ => {
+            let counter = Arc::new(AtomicU64::new(0));
+            *guard = Some((session_id.to_string(), counter.clone()));
+            counter
+        }
+    }
+}
+
+/// Counts one fifo overflow on the session and returns the new total.
+pub(crate) fn record_stream_uplink_overflow(session_id: &str) -> u64 {
+    stream_uplink_overflow_counter(session_id).fetch_add(1, Ordering::AcqRel) + 1
+}
+
+/// The bytes written since the window opened, as kbps; `None` until the
+/// window is long enough to mean anything.
+fn encoded_window_kbps(
+    total_bytes: u64,
+    window_started_bytes: u64,
+    window_started_at: Instant,
+) -> Option<f64> {
+    let elapsed = window_started_at.elapsed().as_secs_f64();
+    if elapsed < 0.25 {
+        return None;
+    }
+    Some(total_bytes.saturating_sub(window_started_bytes) as f64 * 8.0 / 1000.0 / elapsed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3214,6 +3497,10 @@ pub fn start_synthetic_recording_bridge(
     // audio FIFO writer aligns to (Studio Shell And Live Control Plan, slice A2).
     video_epoch: Arc<OnceLock<Instant>>,
     start_barrier: Option<Arc<RecordingStartBarrier>>,
+    // Plan 218 S3b: how long FFmpeg deliberately holds each stream frame to
+    // interleave it with the later audio (`stream_queue_allowance_ms` in
+    // recording.rs). Applied only when this writer runs the stream policy.
+    stream_queue_allowance_ms: u32,
 ) -> Result<EncoderBridgeRecordingSession> {
     let byte_len = raw_yuv420p_len(width, height)?;
     #[cfg(unix)]
@@ -3309,6 +3596,7 @@ pub fn start_synthetic_recording_bridge(
                 diagnostics_tx,
                 video_epoch,
                 start_barrier,
+                stream_queue_allowance_ms,
                 lifecycle: writer_lifecycle,
             };
             write_synthetic_recording_frames(params);
@@ -3410,7 +3698,7 @@ fn encoder_bridge_ffmpeg_args(settings: &EncoderBridgeSettings) -> Vec<String> {
         format!("{}k", settings.bitrate_kbps),
         "-movflags".to_string(),
         "+faststart".to_string(),
-        settings.output_path.display().to_string(),
+        crate::ffmpeg::ffmpeg_file_path(&settings.output_path),
     ]
 }
 
@@ -3532,6 +3820,9 @@ struct SyntheticRecordingWriterParams {
     diagnostics_context: EncoderBridgeDiagnosticsContext,
     video_epoch: Arc<OnceLock<Instant>>,
     start_barrier: Option<Arc<RecordingStartBarrier>>,
+    /// Plan 218 S3b: FFmpeg's deliberate interleave hold on this stream's
+    /// frames; zero for a recording.
+    stream_queue_allowance_ms: u32,
     lifecycle: EncoderBridgeWriterLifecycle,
 }
 
@@ -3577,6 +3868,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         diagnostics_context,
         video_epoch,
         start_barrier,
+        stream_queue_allowance_ms,
         lifecycle,
     } = params;
     let _iso_membership_guard = IsoBatchWriterGuard(iso_member.clone());
@@ -3597,6 +3889,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     {
         output_queue_policy =
             output_queue_policy.with_iso_audio_advance(target_fps, barrier.audio_advance_ms);
+    }
+    output_queue_policy =
+        output_queue_policy.with_stream_interleave_allowance(target_fps, stream_queue_allowance_ms);
+    if output_queue_policy.role == EncoderBridgeOutputRole::Stream {
+        tracing::info!(
+            allowance_ms = stream_queue_allowance_ms,
+            coalesce_frames = ?output_queue_policy.coalesce_at_frames,
+            coalesce_age_ms = ?output_queue_policy.coalesce_at_age.map(|age| age.as_millis()),
+            max_frames = output_queue_policy.max_frames,
+            max_age_ms = output_queue_policy.max_age.as_millis(),
+            "stream output queue policy"
+        );
     }
     // Only the recording leg (or the shared leg) feeds the session's frame
     // accounting; a dedicated stream writer must not double-count it.
@@ -3775,6 +4079,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut frames_in_window = 0_u64;
     let mut raw_frames_delivered_in_window = 0_u64;
     let mut queue_depth = 0_u64;
+    // Plan 218 S2: the queue's oldest-frame age, sampled every tick.
+    let mut output_queue_age_times_ms = Vec::with_capacity(128);
     let mut repeated_fed_frames = 0_u64;
     let mut repeated_frame_bursts = 0_u64;
     let mut max_repeated_frame_run = 0_u64;
@@ -3876,6 +4182,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     output_queue_oldest_frame_age_high_water_ms
                         .map_or(age_ms, |current| current.max(age_ms)),
                 );
+                output_queue_age_times_ms.push(age_ms as f64);
             }
         }};
     }
@@ -3899,6 +4206,13 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut max_deadline_lag_ms: Option<f64> = None;
     let mut late_deadline_ticks = 0_u64;
     let mut schedule_skipped_ms = 0_u64;
+    // Plan 218 S2: the window's encoded bytes and which limit tripped, so
+    // the stream writer's own figures reach the diagnostics (the queue age
+    // samples are declared with the queue above).
+    let mut window_started_bytes = 0_u64;
+    let mut output_queue_depth_trips = 0_u64;
+    let mut output_queue_age_trips = 0_u64;
+    let mut output_queue_last_trip = None::<StreamQueueTrip>;
     #[cfg(target_os = "macos")]
     let mut video_toolbox_probe = EncoderBridgeVideoToolboxProbe::new(
         video_output.uses_video_toolbox() || encoder_bridge_video_toolbox_probe_enabled(),
@@ -3908,6 +4222,19 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         bitrate_kbps,
         low_latency,
     );
+    // Plan 218 S3a: only a dedicated stream encoder adapts its bitrate. A
+    // shared record+stream encoder would move the recording's too.
+    #[cfg(target_os = "macos")]
+    let mut stream_bitrate = (output_queue_policy.role == EncoderBridgeOutputRole::Stream
+        && video_output.uses_video_toolbox())
+    .then(|| {
+        bitrate_kbps.map(|kbps| StreamBitrateController::new(kbps, target_fps, Instant::now()))
+    })
+    .flatten();
+    #[cfg(not(target_os = "macos"))]
+    let mut stream_bitrate: Option<StreamBitrateController> = None;
+    let stream_uplink_overflows = (output_queue_policy.role == EncoderBridgeOutputRole::Stream)
+        .then(|| stream_uplink_overflow_counter(&session_id));
     #[cfg(target_os = "macos")]
     if video_output.uses_video_toolbox()
         && let Err(error) = video_toolbox_probe.prepare_session()
@@ -4055,6 +4382,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 deadline_lag_max_ms: max_deadline_lag_ms,
                 late_deadline_ticks,
                 schedule_skipped_ms,
+                encoded_output_window_kbps: encoded_window_kbps(
+                    video_toolbox_output_bytes,
+                    window_started_bytes,
+                    window_started_at,
+                ),
+                output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                output_queue_depth_trips,
+                output_queue_age_trips,
+                output_queue_last_trip,
+                stream_bitrate_kbps: stream_bitrate
+                    .as_ref()
+                    .map(StreamBitrateController::current_kbps),
+                stream_bitrate_chosen_kbps: stream_bitrate
+                    .as_ref()
+                    .map(|controller| controller.chosen_kbps),
+                stream_uplink_overflows: stream_uplink_overflows
+                    .as_ref()
+                    .map_or(0, |counter| counter.load(Ordering::Acquire)),
             }
         };
     }
@@ -4062,6 +4407,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // Plan 191: both window resets share this list; deadline lag was the one sample never reset.
     macro_rules! clear_window_samples {
         () => {{
+            window_started_bytes = video_toolbox_output_bytes;
+            output_queue_age_times_ms.clear();
             compositor_wait_times_ms.clear();
             video_toolbox_submit_times_ms.clear();
             video_toolbox_fifo_write_times_ms.clear();
@@ -4208,6 +4555,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         sequence = 1;
         frames_in_window = 1;
         window_started_at = Instant::now();
+        window_started_bytes = video_toolbox_output_bytes;
         next_frame_at = window_started_at + frame_interval;
         first_frame_wait_sequence = None;
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
@@ -4397,6 +4745,34 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         #[cfg(not(target_os = "macos"))]
         let mut pipeline_error = raw_fifo_drain_error;
 
+        // Plan 218 S3a: a leg that overflowed or a pressured stream queue
+        // lowers the stream encoder's bitrate; a clean stretch raises it.
+        if let Some(controller) = stream_bitrate.as_mut() {
+            let overflows = stream_uplink_overflows
+                .as_ref()
+                .map_or(0, |counter| counter.load(Ordering::Acquire));
+            match controller.observe(Instant::now(), overflows, output_queue_dropped_frames) {
+                StreamBitrateAction::Hold | StreamBitrateAction::AtFloor => {}
+                StreamBitrateAction::StepDown(kbps) | StreamBitrateAction::StepUp(kbps) => {
+                    #[cfg(target_os = "macos")]
+                    match video_toolbox_probe.set_stream_bit_rate(kbps) {
+                        Ok(()) => tracing::info!(
+                            bitrate_kbps = kbps,
+                            chosen_kbps = controller.chosen_kbps,
+                            overflows,
+                            "stream encoder bitrate retuned"
+                        ),
+                        Err(error) => tracing::warn!(
+                            bitrate_kbps = kbps,
+                            "stream encoder bitrate change refused: {error:#}"
+                        ),
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = kbps;
+                }
+            }
+        }
+
         queue_depth = if video_output.uses_media_foundation() {
             #[cfg(target_os = "windows")]
             {
@@ -4490,6 +4866,22 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                         output_pre_encode_skipped_frames.saturating_add(1);
                 } else {
                     output_queue_dropped_frames = output_queue_dropped_frames.saturating_add(1);
+                    if let Some(trip) = stream_queue_trip(
+                        output_queue_policy,
+                        queue_depth,
+                        oldest_output_queue_age!(),
+                    ) {
+                        match trip {
+                            StreamQueueTrip::Depth => {
+                                output_queue_depth_trips =
+                                    output_queue_depth_trips.saturating_add(1)
+                            }
+                            StreamQueueTrip::Age => {
+                                output_queue_age_trips = output_queue_age_trips.saturating_add(1)
+                            }
+                        }
+                        output_queue_last_trip = Some(trip);
+                    }
                 }
                 writer_active_times_ms.push(active_started_at.elapsed().as_secs_f64() * 1000.0);
                 writer_loop_times_ms.push(loop_started_at.elapsed().as_secs_f64() * 1000.0);
@@ -4803,6 +5195,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                             deadline_lag_max_ms: max_deadline_lag_ms,
                             late_deadline_ticks,
                             schedule_skipped_ms,
+                            encoded_output_window_kbps: encoded_window_kbps(
+                                video_toolbox_output_bytes,
+                                window_started_bytes,
+                                window_started_at,
+                            ),
+                            output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                            output_queue_depth_trips,
+                            output_queue_age_trips,
+                            output_queue_last_trip,
+                            stream_bitrate_kbps: stream_bitrate
+                                .as_ref()
+                                .map(StreamBitrateController::current_kbps),
+                            stream_bitrate_chosen_kbps: stream_bitrate
+                                .as_ref()
+                                .map(|controller| controller.chosen_kbps),
+                            stream_uplink_overflows: stream_uplink_overflows
+                                .as_ref()
+                                .map_or(0, |counter| counter.load(Ordering::Acquire)),
                         },
                         diagnostics_context,
                         Some(
@@ -5254,6 +5664,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
                     schedule_skipped_ms,
+                    encoded_output_window_kbps: encoded_window_kbps(
+                        video_toolbox_output_bytes,
+                        window_started_bytes,
+                        window_started_at,
+                    ),
+                    output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                    output_queue_depth_trips,
+                    output_queue_age_trips,
+                    output_queue_last_trip,
+                    stream_bitrate_kbps: stream_bitrate
+                        .as_ref()
+                        .map(StreamBitrateController::current_kbps),
+                    stream_bitrate_chosen_kbps: stream_bitrate
+                        .as_ref()
+                        .map(|controller| controller.chosen_kbps),
+                    stream_uplink_overflows: stream_uplink_overflows
+                        .as_ref()
+                        .map_or(0, |counter| counter.load(Ordering::Acquire)),
                 },
                 diagnostics_context,
                 Some(error),
@@ -5361,6 +5789,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
                     schedule_skipped_ms,
+                    encoded_output_window_kbps: encoded_window_kbps(
+                        video_toolbox_output_bytes,
+                        window_started_bytes,
+                        window_started_at,
+                    ),
+                    output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                    output_queue_depth_trips,
+                    output_queue_age_trips,
+                    output_queue_last_trip,
+                    stream_bitrate_kbps: stream_bitrate
+                        .as_ref()
+                        .map(StreamBitrateController::current_kbps),
+                    stream_bitrate_chosen_kbps: stream_bitrate
+                        .as_ref()
+                        .map(|controller| controller.chosen_kbps),
+                    stream_uplink_overflows: stream_uplink_overflows
+                        .as_ref()
+                        .map_or(0, |counter| counter.load(Ordering::Acquire)),
                 },
                 diagnostics_context,
                 Some(error),
@@ -5493,6 +5939,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     deadline_lag_max_ms: max_deadline_lag_ms,
                     late_deadline_ticks,
                     schedule_skipped_ms,
+                    encoded_output_window_kbps: encoded_window_kbps(
+                        video_toolbox_output_bytes,
+                        window_started_bytes,
+                        window_started_at,
+                    ),
+                    output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+                    output_queue_depth_trips,
+                    output_queue_age_trips,
+                    output_queue_last_trip,
+                    stream_bitrate_kbps: stream_bitrate
+                        .as_ref()
+                        .map(StreamBitrateController::current_kbps),
+                    stream_bitrate_chosen_kbps: stream_bitrate
+                        .as_ref()
+                        .map(|controller| controller.chosen_kbps),
+                    stream_uplink_overflows: stream_uplink_overflows
+                        .as_ref()
+                        .map_or(0, |counter| counter.load(Ordering::Acquire)),
                 },
                 diagnostics_context,
                 None,
@@ -5748,6 +6212,24 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             deadline_lag_max_ms: max_deadline_lag_ms,
             late_deadline_ticks,
             schedule_skipped_ms,
+            encoded_output_window_kbps: encoded_window_kbps(
+                video_toolbox_output_bytes,
+                window_started_bytes,
+                window_started_at,
+            ),
+            output_queue_age_p95_ms: p95_ms(&output_queue_age_times_ms),
+            output_queue_depth_trips,
+            output_queue_age_trips,
+            output_queue_last_trip,
+            stream_bitrate_kbps: stream_bitrate
+                .as_ref()
+                .map(StreamBitrateController::current_kbps),
+            stream_bitrate_chosen_kbps: stream_bitrate
+                .as_ref()
+                .map(|controller| controller.chosen_kbps),
+            stream_uplink_overflows: stream_uplink_overflows
+                .as_ref()
+                .map_or(0, |counter| counter.load(Ordering::Acquire)),
         }),
         diagnostics_context,
         terminal_writer_error,
@@ -5962,6 +6444,17 @@ impl EncoderBridgeVideoToolboxProbe {
         session.prepare()?;
         self.session = Some(session);
         Ok(())
+    }
+
+    /// Plan 218 S3a: retune the running stream session's target bitrate.
+    /// The config follows so a session prepared later starts at the new rate.
+    fn set_stream_bit_rate(&mut self, bitrate_kbps: u32) -> Result<()> {
+        let bps = i64::from(bitrate_kbps).saturating_mul(1_000);
+        self.config.average_bit_rate_bps = Some(bps);
+        match self.session.as_ref() {
+            Some(session) => session.set_average_bit_rate(bps),
+            None => Ok(()),
+        }
     }
 }
 
@@ -8364,11 +8857,233 @@ fn recording_queue_drop_watch_update(
 static RECORDING_QUEUE_DROP_WATCH: std::sync::Mutex<Option<RecordingQueueDropWatch>> =
     std::sync::Mutex::new(None);
 
-// The stream twin: pressure on the STREAM output was previously counted in
-// diagnostics but never surfaced — the 2026-07-15 incident sessions logged 11
-// silent pressure events and then died with no prior warning. Fires once per
-// session so a jittery platform cannot spam the session log.
-static STREAM_QUEUE_PRESSURE_WATCH: std::sync::Mutex<Option<RecordingQueueDropWatch>> =
+// Plan 218 S2: the stream's delivery over a rolling 30 s window. This
+// replaces the once-per-session `stream-output-pressure` notice, which fired
+// 2 s into a session that then ran at 70 % of its frame rate for an hour
+// without another word: a live state is news while it lasts.
+pub(crate) const STREAM_DELIVERY_DEGRADED_CODE: &str = "stream-delivery-degraded";
+pub(crate) const STREAM_DELIVERY_RECOVERED_CODE: &str = "stream-delivery-recovered";
+const STREAM_DELIVERY_WINDOW: Duration = Duration::from_secs(30);
+/// The window judges only once it covers this much; the first verdict comes
+/// about 30 s into a stream.
+const STREAM_DELIVERY_MIN_WINDOW: Duration = Duration::from_secs(28);
+const STREAM_DELIVERY_DEGRADED_PERCENT: f64 = 10.0;
+/// Hysteresis: a degraded stream must come back under this to clear.
+const STREAM_DELIVERY_RECOVERED_PERCENT: f64 = 5.0;
+
+#[derive(Debug, Clone, Copy)]
+struct StreamDeliverySample {
+    at: Instant,
+    dropped: u64,
+    encoded: u64,
+}
+
+#[derive(Debug, Default)]
+struct StreamDeliveryWatch {
+    session_id: String,
+    samples: VecDeque<StreamDeliverySample>,
+    degraded_since: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamDeliveryTransition {
+    Unchanged,
+    Degraded,
+    Recovered,
+}
+
+/// Feed one stream-role diagnostics sample: the session totals of frames
+/// coalesced before encode and frames encoded. Returns the window's state
+/// and whether it just crossed the degraded threshold either way.
+fn stream_delivery_watch_update(
+    watch: &mut StreamDeliveryWatch,
+    session_id: &str,
+    now: Instant,
+    now_rfc3339: &str,
+    target_fps: u32,
+    dropped: u64,
+    encoded: u64,
+) -> (
+    crate::protocol::StreamDeliveryState,
+    StreamDeliveryTransition,
+) {
+    if watch.session_id != session_id {
+        *watch = StreamDeliveryWatch {
+            session_id: session_id.to_string(),
+            ..StreamDeliveryWatch::default()
+        };
+    }
+    watch.samples.push_back(StreamDeliverySample {
+        at: now,
+        dropped,
+        encoded,
+    });
+    // Keep one sample at or before the window's left edge so the deltas
+    // cover the whole window, never less.
+    while watch.samples.len() >= 2
+        && watch.samples[1].at <= now.checked_sub(STREAM_DELIVERY_WINDOW).unwrap_or(now)
+    {
+        watch.samples.pop_front();
+    }
+    let oldest = watch
+        .samples
+        .front()
+        .copied()
+        .unwrap_or(StreamDeliverySample {
+            at: now,
+            dropped,
+            encoded,
+        });
+    let span = now.saturating_duration_since(oldest.at);
+    let dropped_in_window = dropped.saturating_sub(oldest.dropped);
+    let encoded_in_window = encoded.saturating_sub(oldest.encoded);
+    let total = dropped_in_window.saturating_add(encoded_in_window);
+    let drop_percent = if total == 0 {
+        0.0
+    } else {
+        dropped_in_window as f64 * 100.0 / total as f64
+    };
+    let delivered_fps = if span.is_zero() {
+        0.0
+    } else {
+        encoded_in_window as f64 / span.as_secs_f64()
+    };
+    let transition = if span < STREAM_DELIVERY_MIN_WINDOW {
+        StreamDeliveryTransition::Unchanged
+    } else if watch.degraded_since.is_none() && drop_percent > STREAM_DELIVERY_DEGRADED_PERCENT {
+        watch.degraded_since = Some(now_rfc3339.to_string());
+        StreamDeliveryTransition::Degraded
+    } else if watch.degraded_since.is_some() && drop_percent < STREAM_DELIVERY_RECOVERED_PERCENT {
+        watch.degraded_since = None;
+        StreamDeliveryTransition::Recovered
+    } else {
+        StreamDeliveryTransition::Unchanged
+    };
+    (
+        crate::protocol::StreamDeliveryState {
+            target_fps,
+            delivered_fps,
+            drop_percent,
+            window_seconds: span.as_secs_f64(),
+            degraded: watch.degraded_since.is_some(),
+            degraded_since: watch.degraded_since.clone(),
+            bitrate_kbps: None,
+            chosen_bitrate_kbps: None,
+            at_floor: false,
+            uplink_overflows: 0,
+        },
+        transition,
+    )
+}
+
+// Plan 218 S3a: the bitrate steps are news as they happen, and the floor is
+// a warning that repeats (once a minute) while legs keep overflowing there.
+pub(crate) const STREAM_BITRATE_LOWERED_CODE: &str = "stream-bitrate-lowered";
+pub(crate) const STREAM_BITRATE_RESTORED_CODE: &str = "stream-bitrate-restored";
+pub(crate) const STREAM_BITRATE_FLOOR_CODE: &str = "stream-bitrate-floor";
+const STREAM_BITRATE_FLOOR_WARN_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+struct StreamBitrateWatch {
+    session_id: String,
+    last_kbps: Option<u32>,
+    last_overflows: u64,
+    last_floor_warned_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamBitrateTransition {
+    Unchanged,
+    Lowered {
+        from_kbps: u32,
+        to_kbps: u32,
+    },
+    Restored {
+        to_kbps: u32,
+    },
+    /// Another overflow arrived at the floor and the minute is up.
+    StillOverflowingAtFloor {
+        kbps: u32,
+    },
+}
+
+fn stream_bitrate_watch_update(
+    watch: &mut StreamBitrateWatch,
+    session_id: &str,
+    now: Instant,
+    bitrate_kbps: Option<u32>,
+    chosen_kbps: Option<u32>,
+    at_floor: bool,
+    overflows: u64,
+) -> StreamBitrateTransition {
+    if watch.session_id != session_id {
+        *watch = StreamBitrateWatch {
+            session_id: session_id.to_string(),
+            ..StreamBitrateWatch::default()
+        };
+    }
+    let Some(kbps) = bitrate_kbps else {
+        return StreamBitrateTransition::Unchanged;
+    };
+    let previous = watch.last_kbps.replace(kbps);
+    let overflowed_since = overflows > watch.last_overflows;
+    watch.last_overflows = overflows;
+    match previous {
+        Some(from_kbps) if kbps < from_kbps => {
+            return StreamBitrateTransition::Lowered {
+                from_kbps,
+                to_kbps: kbps,
+            };
+        }
+        Some(from_kbps) if kbps > from_kbps && Some(kbps) == chosen_kbps => {
+            return StreamBitrateTransition::Restored { to_kbps: kbps };
+        }
+        _ => {}
+    }
+    if at_floor
+        && overflowed_since
+        && watch
+            .last_floor_warned_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= STREAM_BITRATE_FLOOR_WARN_WINDOW)
+    {
+        watch.last_floor_warned_at = Some(now);
+        return StreamBitrateTransition::StillOverflowingAtFloor { kbps };
+    }
+    StreamBitrateTransition::Unchanged
+}
+
+/// "6 Mbps", "4.8 Mbps".
+fn format_stream_bitrate_mbps(kbps: u32) -> String {
+    if kbps.is_multiple_of(1000) {
+        format!("{} Mbps", kbps / 1000)
+    } else {
+        format!("{:.1} Mbps", f64::from(kbps) / 1000.0)
+    }
+}
+
+static STREAM_BITRATE_WATCH: std::sync::Mutex<Option<StreamBitrateWatch>> =
+    std::sync::Mutex::new(None);
+
+fn stream_delivery_degraded_message(state: &crate::protocol::StreamDeliveryState) -> String {
+    format!(
+        "Your stream is running at {} of {} fps: {:.0} % of its frames were skipped in the last {:.0} s because they could not be sent in time. Viewers see a stutter; the recording is unaffected.",
+        state.delivered_fps.round() as u64,
+        state.target_fps,
+        state.drop_percent,
+        state.window_seconds
+    )
+}
+
+fn stream_delivery_recovered_message(state: &crate::protocol::StreamDeliveryState) -> String {
+    format!(
+        "Your stream is back at its frame rate: {} of {} fps over the last {:.0} s.",
+        state.delivered_fps.round() as u64,
+        state.target_fps,
+        state.window_seconds
+    )
+}
+
+static STREAM_DELIVERY_WATCH: std::sync::Mutex<Option<StreamDeliveryWatch>> =
     std::sync::Mutex::new(None);
 
 pub(crate) const STREAM_OUTPUT_STALLED_CODE: &str = "stream-output-stalled";
@@ -8486,32 +9201,132 @@ async fn emit_encoder_bridge_diagnostics(
         );
     }
 
-    // Stream pressure must be audible BEFORE any failure: the watchdog now
-    // degrades (drops to latest-wins) instead of dying on one over-age
-    // sample, and this is the user's signal that a platform connection is
-    // struggling while the stream still runs.
+    // Plan 218 S2: the stream's delivery is a live state while the stream
+    // runs, judged over the last 30 s, and it is news when it crosses the
+    // line either way. (The watchdog degrades to latest-wins instead of
+    // dying on one over-age sample, so this is the streamer's signal that
+    // frames are being skipped while the stream still runs.)
+    let mut stream_delivery = None;
     if effective_encoder_bridge_output_role(diagnostics_context) == EncoderBridgeOutputRole::Stream
     {
-        let fire = {
-            let mut guard = STREAM_QUEUE_PRESSURE_WATCH
+        let (mut delivery, transition) = {
+            let mut guard = STREAM_DELIVERY_WATCH
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let watch = guard.get_or_insert_with(RecordingQueueDropWatch::default);
-            recording_queue_drop_watch_update(
+            let watch = guard.get_or_insert_with(StreamDeliveryWatch::default);
+            stream_delivery_watch_update(
                 watch,
                 session_id,
-                runtime.output_queue_capacity_pressure_events,
+                Instant::now(),
+                &chrono::Utc::now().to_rfc3339(),
+                target_fps,
+                runtime.output_queue_dropped_frames,
+                runtime
+                    .video_toolbox_output_frames
+                    .max(runtime.raw_video_copied_frames),
             )
         };
-        if fire {
-            let _ = crate::recording::emit_health_event(
-                state,
-                Some(session_id),
-                crate::protocol::HealthLevel::Warn,
-                "stream-output-pressure",
-                "Stream output is under pressure: the stream is being produced faster than it can be sent, because this computer is busy or a destination is slow. Frames are being dropped from the live stream to keep latency; the recording is unaffected.",
-            );
+        // Plan 218 S3a: the adaptive bitrate rides the same live state.
+        delivery.bitrate_kbps = runtime.stream_bitrate_kbps;
+        delivery.chosen_bitrate_kbps = runtime.stream_bitrate_chosen_kbps;
+        delivery.at_floor = matches!(
+            (runtime.stream_bitrate_kbps, runtime.stream_bitrate_chosen_kbps),
+            (Some(kbps), Some(chosen))
+                if u64::from(kbps) * 100 <= u64::from(chosen) * (STREAM_BITRATE_FLOOR_SHARE * 100.0) as u64
+        );
+        delivery.uplink_overflows = runtime.stream_uplink_overflows;
+        let bitrate_transition = {
+            let mut guard = STREAM_BITRATE_WATCH
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let watch = guard.get_or_insert_with(StreamBitrateWatch::default);
+            stream_bitrate_watch_update(
+                watch,
+                session_id,
+                Instant::now(),
+                runtime.stream_bitrate_kbps,
+                runtime.stream_bitrate_chosen_kbps,
+                delivery.at_floor,
+                runtime.stream_uplink_overflows,
+            )
+        };
+        // The leg(s) FFmpeg attributed, when it could; "a destination" otherwise.
+        let slow_legs = {
+            let diagnostics = state.diagnostics.lock().await;
+            diagnostics
+                .stream_leg_overflows
+                .as_ref()
+                .map(|legs| {
+                    legs.iter()
+                        .map(|leg| leg.label.clone())
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                })
+                .filter(|labels| !labels.is_empty())
+                .unwrap_or_else(|| "a destination".to_string())
+        };
+        match bitrate_transition {
+            StreamBitrateTransition::Unchanged => {}
+            StreamBitrateTransition::Lowered { from_kbps, to_kbps } => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    STREAM_BITRATE_LOWERED_CODE,
+                    &format!(
+                        "Your stream bitrate was lowered to {} (from {}) because {slow_legs} could not keep up with it from this connection. Viewers keep the full frame rate at a softer picture.",
+                        format_stream_bitrate_mbps(to_kbps),
+                        format_stream_bitrate_mbps(from_kbps)
+                    ),
+                );
+            }
+            StreamBitrateTransition::Restored { to_kbps } => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Info,
+                    STREAM_BITRATE_RESTORED_CODE,
+                    &format!(
+                        "Your stream is back at its chosen bitrate of {}.",
+                        format_stream_bitrate_mbps(to_kbps)
+                    ),
+                );
+            }
+            StreamBitrateTransition::StillOverflowingAtFloor { kbps } => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    STREAM_BITRATE_FLOOR_CODE,
+                    &format!(
+                        "Your stream is at its lowest bitrate ({}) and {slow_legs} still cannot keep up with it from this connection; viewers there keep losing seconds of video. Stream to fewer destinations, or pick a lower stream quality before going live.",
+                        format_stream_bitrate_mbps(kbps)
+                    ),
+                );
+            }
         }
+        match transition {
+            StreamDeliveryTransition::Unchanged => {}
+            StreamDeliveryTransition::Degraded => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    STREAM_DELIVERY_DEGRADED_CODE,
+                    &stream_delivery_degraded_message(&delivery),
+                );
+            }
+            StreamDeliveryTransition::Recovered => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Info,
+                    STREAM_DELIVERY_RECOVERED_CODE,
+                    &stream_delivery_recovered_message(&delivery),
+                );
+            }
+        }
+        stream_delivery = Some(delivery);
 
         // Plan 087: a stalled stream is news while it lasts, not at stop.
         let stall = {
@@ -8629,6 +9444,12 @@ async fn emit_encoder_bridge_diagnostics(
         };
         let recording_output = diagnostics_context.recording_output;
         let stream_output = diagnostics_context.stream_output;
+        // Plan 218 S2: this writer's bytes are the stream's when it feeds
+        // the stream: the dedicated stream writer, or the one shared encoder
+        // of a record+stream session. A recording-role writer's are not.
+        let feeds_stream = stream_output.is_some()
+            && effective_encoder_bridge_output_role(diagnostics_context)
+                != EncoderBridgeOutputRole::Recording;
         let role_process_diagnostics =
             merge_encoder_bridge_role_process_diagnostics(&base, runtime, diagnostics_context);
         let recording_artifact_diagnostics = merge_encoder_bridge_recording_artifact_diagnostics(
@@ -8904,6 +9725,24 @@ async fn emit_encoder_bridge_diagnostics(
                 stream_video_toolbox_fifo_enqueue_p95_ms,
                 recording_video_toolbox_fifo_enqueue_max_ms,
                 stream_video_toolbox_fifo_enqueue_max_ms,
+                stream_measured_bitrate_kbps: feeds_stream
+                    .then_some(runtime.encoded_output_window_kbps)
+                    .flatten(),
+                stream_output_total_bytes: feeds_stream
+                    .then_some(runtime.video_toolbox_output_bytes),
+                stream_video_toolbox_fifo_write_p95_ms: feeds_stream
+                    .then_some(runtime.video_toolbox_fifo_write_p95_ms)
+                    .flatten(),
+                stream_queue_age_p95_ms: feeds_stream
+                    .then_some(runtime.output_queue_age_p95_ms)
+                    .flatten(),
+                stream_queue_depth_trips: feeds_stream.then_some(runtime.output_queue_depth_trips),
+                stream_queue_age_trips: feeds_stream.then_some(runtime.output_queue_age_trips),
+                stream_queue_last_trip: feeds_stream
+                    .then_some(runtime.output_queue_last_trip)
+                    .flatten()
+                    .map(|trip| trip.label().to_string()),
+                stream_delivery,
                 error,
             },
             recording_diagnostics_target_fps,
@@ -9793,6 +10632,312 @@ mod tests {
             encoder_bridge_pre_encode_admission(policy, 2, Some(Duration::from_millis(150))),
             EncoderBridgePreEncodeAdmission::FailOutput
         );
+    }
+
+    // Plan 218 S2: the stream writer names the limit it tripped on.
+    #[test]
+    fn stream_queue_trip_names_the_limit_that_coalesced() {
+        let stream = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Stream,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        assert_eq!(
+            stream_queue_trip(stream, 3, Some(Duration::from_millis(99))),
+            None
+        );
+        assert_eq!(
+            stream_queue_trip(stream, 4, Some(Duration::from_millis(120))),
+            Some(StreamQueueTrip::Depth),
+            "depth wins when both hold, as in admission"
+        );
+        assert_eq!(
+            stream_queue_trip(stream, 2, Some(Duration::from_millis(100))),
+            Some(StreamQueueTrip::Age)
+        );
+        assert_eq!(StreamQueueTrip::Age.label(), "age");
+        let recording = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        assert_eq!(
+            stream_queue_trip(recording, 16, Some(Duration::from_millis(500))),
+            None,
+            "a recording never coalesces"
+        );
+    }
+
+    // Plan 218 S3b: FFmpeg's interleave hold shifts the stream's limits only.
+    #[test]
+    fn stream_interleave_allowance_shifts_only_the_stream_policy() {
+        let stream = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Stream,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        assert_eq!(stream.with_stream_interleave_allowance(30, 0), stream);
+        let shifted = stream.with_stream_interleave_allowance(30, 50);
+        assert_eq!(shifted.coalesce_at_frames, Some(4 + 2));
+        assert_eq!(shifted.coalesce_at_age, Some(Duration::from_millis(150)));
+        assert_eq!(shifted.max_frames, 8 + 2);
+        assert_eq!(shifted.max_age, Duration::from_millis(200));
+        assert_eq!(
+            encoder_bridge_pre_encode_admission(shifted, 4, Some(Duration::from_millis(149))),
+            EncoderBridgePreEncodeAdmission::Submit,
+            "the structural wait no longer coalesces"
+        );
+        assert_eq!(
+            encoder_bridge_pre_encode_admission(shifted, 6, Some(Duration::from_millis(20))),
+            EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame,
+            "a real backlog still does"
+        );
+        let split = stream.with_stream_interleave_allowance(30, 180);
+        assert_eq!(split.coalesce_at_frames, Some(4 + 6));
+        assert_eq!(split.max_age, Duration::from_millis(330));
+        let recording = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        assert_eq!(
+            recording.with_stream_interleave_allowance(30, 180),
+            recording,
+            "the recording policy never moves"
+        );
+    }
+
+    #[test]
+    fn encoded_window_kbps_needs_a_quarter_second() {
+        let started = Instant::now();
+        assert_eq!(encoded_window_kbps(1_000_000, 0, started), None);
+        let old = started - Duration::from_secs(2);
+        let kbps = encoded_window_kbps(1_500_000, 0, old).expect("a window");
+        assert!(
+            (kbps - 6_000.0).abs() < 60.0,
+            "{kbps} kbps for 1.5 MB in 2 s"
+        );
+        assert_eq!(
+            encoded_window_kbps(10, 20, old),
+            Some(0.0),
+            "a counter that moved backwards reads as nothing"
+        );
+    }
+
+    // Plan 218 S2: the live delivery state judges a full 30 s window.
+    #[test]
+    fn stream_delivery_watch_judges_a_full_window_with_hysteresis() {
+        let mut watch = StreamDeliveryWatch::default();
+        let start = Instant::now();
+        let mut feed = |secs: u64, dropped: u64, encoded: u64| {
+            stream_delivery_watch_update(
+                &mut watch,
+                "session",
+                start + Duration::from_secs(secs),
+                "2026-11-05T18:00:00Z",
+                30,
+                dropped,
+                encoded,
+            )
+        };
+        let (state, transition) = feed(0, 0, 0);
+        assert_eq!(transition, StreamDeliveryTransition::Unchanged);
+        assert!(!state.degraded);
+        // 30 % dropped from the start, but the window is not full yet.
+        let (state, transition) = feed(10, 90, 210);
+        assert_eq!(transition, StreamDeliveryTransition::Unchanged);
+        assert!((state.drop_percent - 30.0).abs() < 0.01);
+        assert!(!state.degraded, "no verdict before the window covers 28 s");
+        let (state, transition) = feed(30, 270, 630);
+        assert_eq!(transition, StreamDeliveryTransition::Degraded);
+        assert!(state.degraded);
+        assert_eq!(
+            state.degraded_since.as_deref(),
+            Some("2026-11-05T18:00:00Z")
+        );
+        assert!((state.delivered_fps - 21.0).abs() < 0.01);
+        assert!((state.window_seconds - 30.0).abs() < 0.01);
+        // 7 % over the next 30 s: under the entry line, over the exit line.
+        let (state, transition) = feed(60, 270 + 63, 630 + 837);
+        assert_eq!(transition, StreamDeliveryTransition::Unchanged);
+        assert!(state.degraded, "7 % keeps a degraded stream degraded");
+        // Clean: the window now holds only the clean stretch.
+        let (state, transition) = feed(90, 333, 1467 + 900);
+        assert_eq!(transition, StreamDeliveryTransition::Recovered);
+        assert!(!state.degraded);
+        assert_eq!(state.drop_percent, 0.0);
+        assert!((state.delivered_fps - 30.0).abs() < 0.01);
+        // A new session starts a new window.
+        let (state, _) = stream_delivery_watch_update(
+            &mut watch,
+            "next",
+            start + Duration::from_secs(120),
+            "t",
+            60,
+            0,
+            0,
+        );
+        assert_eq!(state.target_fps, 60);
+        assert_eq!(state.window_seconds, 0.0);
+    }
+
+    // Plan 218 S3a: the bitrate steps down 20 % of the chosen rate per
+    // signal, holds at half, and climbs 10 % per clean 30 s.
+    #[test]
+    fn stream_bitrate_controller_steps_down_holds_at_the_floor_and_recovers() {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut controller = StreamBitrateController::new(6_000, 30, start);
+        assert_eq!(controller.floor_kbps, 3_000);
+        assert_eq!(
+            controller.observe(at(1), 0, 0),
+            StreamBitrateAction::Hold,
+            "nothing before the check interval"
+        );
+        assert_eq!(controller.observe(at(2), 0, 0), StreamBitrateAction::Hold);
+        // A start-up blip of two coalesced frames is not pressure.
+        assert_eq!(controller.observe(at(4), 0, 2), StreamBitrateAction::Hold);
+        // One leg overflow steps down 20 % of the chosen bitrate.
+        assert_eq!(
+            controller.observe(at(6), 1, 2),
+            StreamBitrateAction::StepDown(4_800)
+        );
+        // Another overflow inside the hold waits.
+        assert_eq!(controller.observe(at(8), 2, 2), StreamBitrateAction::Hold);
+        assert_eq!(
+            controller.observe(at(16), 3, 2),
+            StreamBitrateAction::StepDown(3_600)
+        );
+        // Sustained bridge pressure is a signal too (10 % of the interval's
+        // frames), but inside the hold it waits; then it steps.
+        assert_eq!(
+            controller.observe(at(18), 3, 2 + 30),
+            StreamBitrateAction::Hold
+        );
+        assert_eq!(
+            controller.observe(at(28), 3, 32 + 30),
+            StreamBitrateAction::StepDown(3_000)
+        );
+        assert!(controller.at_floor());
+        assert_eq!(
+            controller.observe(at(40), 4, 62),
+            StreamBitrateAction::AtFloor,
+            "the floor holds and says so"
+        );
+        // The floor overflowed too, so the ceiling sits on it: 30 clean
+        // seconds earn nothing to climb to.
+        assert_eq!(controller.ceiling_kbps, Some(3_000));
+        assert_eq!(controller.observe(at(70), 4, 62), StreamBitrateAction::Hold);
+        assert_eq!(
+            controller.observe(at(100), 4, 62),
+            StreamBitrateAction::Hold
+        );
+        assert_eq!(controller.current_kbps(), 3_000);
+        // Five clean minutes lift the ceiling one step; the climb may go to
+        // one step under it, so the first lift still holds.
+        assert_eq!(
+            controller.observe(at(40 + 300), 4, 62),
+            StreamBitrateAction::Hold
+        );
+        assert_eq!(controller.ceiling_kbps, Some(3_600));
+        assert_eq!(
+            controller.observe(at(40 + 600), 4, 62),
+            StreamBitrateAction::StepUp(3_600)
+        );
+        assert_eq!(controller.ceiling_kbps, Some(4_200));
+        // An overflow during recovery steps straight back down and lowers
+        // the ceiling to the rate that overflowed.
+        assert_eq!(
+            controller.observe(at(642), 5, 62),
+            StreamBitrateAction::StepDown(3_000)
+        );
+        assert_eq!(controller.ceiling_kbps, Some(3_600));
+        assert_eq!(
+            controller.observe(at(680), 5, 62),
+            StreamBitrateAction::Hold
+        );
+        // Pressure without an overflow steps down but sets no ceiling.
+        let mut pressured = StreamBitrateController::new(6_000, 30, start);
+        assert_eq!(
+            pressured.observe(at(2), 0, 30),
+            StreamBitrateAction::StepDown(4_800)
+        );
+        assert_eq!(pressured.ceiling_kbps, None);
+        // Back to the chosen rate, never above it.
+        let mut quiet = StreamBitrateController::new(6_000, 30, start);
+        quiet.current_kbps = 5_700;
+        quiet.clean_since = start;
+        assert_eq!(
+            quiet.observe(at(30), 0, 0),
+            StreamBitrateAction::StepUp(6_000)
+        );
+        assert_eq!(quiet.observe(at(60), 0, 0), StreamBitrateAction::Hold);
+    }
+
+    #[test]
+    fn stream_bitrate_watch_reports_steps_and_the_floor_once_a_minute() {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut watch = StreamBitrateWatch::default();
+        let feed = |watch: &mut StreamBitrateWatch, secs, kbps, floor, overflows| {
+            stream_bitrate_watch_update(
+                watch,
+                "s",
+                at(secs),
+                Some(kbps),
+                Some(6_000),
+                floor,
+                overflows,
+            )
+        };
+        assert_eq!(
+            feed(&mut watch, 0, 6_000, false, 0),
+            StreamBitrateTransition::Unchanged
+        );
+        assert_eq!(
+            feed(&mut watch, 2, 4_800, false, 1),
+            StreamBitrateTransition::Lowered {
+                from_kbps: 6_000,
+                to_kbps: 4_800
+            }
+        );
+        assert_eq!(
+            feed(&mut watch, 4, 3_000, true, 2),
+            StreamBitrateTransition::Lowered {
+                from_kbps: 4_800,
+                to_kbps: 3_000
+            }
+        );
+        assert_eq!(
+            feed(&mut watch, 6, 3_000, true, 2),
+            StreamBitrateTransition::Unchanged,
+            "no new overflow at the floor"
+        );
+        assert_eq!(
+            feed(&mut watch, 8, 3_000, true, 3),
+            StreamBitrateTransition::StillOverflowingAtFloor { kbps: 3_000 }
+        );
+        assert_eq!(
+            feed(&mut watch, 20, 3_000, true, 4),
+            StreamBitrateTransition::Unchanged,
+            "the floor warning repeats once a minute"
+        );
+        assert_eq!(
+            feed(&mut watch, 70, 3_000, true, 5),
+            StreamBitrateTransition::StillOverflowingAtFloor { kbps: 3_000 }
+        );
+        assert_eq!(
+            feed(&mut watch, 100, 3_600, false, 5),
+            StreamBitrateTransition::Unchanged,
+            "a partial climb is not news"
+        );
+        assert_eq!(
+            feed(&mut watch, 130, 6_000, false, 5),
+            StreamBitrateTransition::Restored { to_kbps: 6_000 }
+        );
+        assert_eq!(
+            stream_bitrate_watch_update(&mut watch, "s", at(131), None, None, false, 5),
+            StreamBitrateTransition::Unchanged,
+            "a writer without an adaptive encoder says nothing"
+        );
+        assert_eq!(format_stream_bitrate_mbps(4_800), "4.8 Mbps");
+        assert_eq!(format_stream_bitrate_mbps(6_000), "6 Mbps");
     }
 
     #[test]

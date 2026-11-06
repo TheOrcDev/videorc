@@ -94,6 +94,7 @@ mod live_source_switch;
 mod marker_voice;
 mod metal_compositor;
 mod metrics_journal;
+mod microphone_denoise;
 mod moments;
 mod mpeg_ts;
 mod native_preview_host;

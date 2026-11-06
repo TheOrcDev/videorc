@@ -18,7 +18,7 @@ const MATRIX_LIKE_GATES = Object.freeze({
   maxTailMismatchMs: 100
 })
 
-// A 12 s 1080p60 noise take as OpenH264 writes it with -allow_skip_frames 1:
+// A 12 s 1080p60 noise take as OpenH264 wrote it with -allow_skip_frames 1:
 // 35 of 720 frames encoded, every forced 2 s keyframe present (measured on
 // the Linux box, 2026-11-03).
 const skippingTake = {
@@ -56,18 +56,36 @@ const skippingTake = {
 
 test('a declared stress combo stays under the stress contract on any backend', () => {
   for (const encodeBackend of ['videotoolbox', OPENH264_ENCODE_BACKEND]) {
-    assert.equal(hardContentContract({ stress: true, hardContent: true, encodeBackend }), 'stress')
+    for (const platform of ['darwin', 'win32', 'linux']) {
+      assert.equal(
+        hardContentContract({ stress: true, hardContent: true, encodeBackend, platform }),
+        'stress'
+      )
+    }
   }
 })
 
-test('hard content on OpenH264 runs under the software-skip contract', () => {
+test('hard content on OpenH264 runs under the software-skip contract outside Linux', () => {
   assert.equal(
     hardContentContract({
       stress: false,
       hardContent: true,
-      encodeBackend: OPENH264_ENCODE_BACKEND
+      encodeBackend: OPENH264_ENCODE_BACKEND,
+      platform: 'win32'
     }),
     'software-skip'
+  )
+})
+
+test('hard content on Linux OpenH264 keeps full cadence: record-only takes never skip', () => {
+  assert.equal(
+    hardContentContract({
+      stress: false,
+      hardContent: true,
+      encodeBackend: OPENH264_ENCODE_BACKEND,
+      platform: 'linux'
+    }),
+    'full'
   )
 })
 
@@ -76,12 +94,16 @@ test('easy content on OpenH264 and hard content on a hardware encoder keep full 
     hardContentContract({
       stress: false,
       hardContent: false,
-      encodeBackend: OPENH264_ENCODE_BACKEND
+      encodeBackend: OPENH264_ENCODE_BACKEND,
+      platform: 'win32'
     }),
     'full'
   )
   for (const encodeBackend of ['videotoolbox', 'vaapi', 'media-foundation', undefined]) {
-    assert.equal(hardContentContract({ stress: false, hardContent: true, encodeBackend }), 'full')
+    assert.equal(
+      hardContentContract({ stress: false, hardContent: true, encodeBackend, platform: 'win32' }),
+      'full'
+    )
   }
 })
 

@@ -770,6 +770,8 @@ mod tests {
                     state: StreamTargetState::Connecting,
                     message: None,
                     redacted_url: Some("rtmp://example.invalid/live/••••".to_string()),
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
                 })
                 .collect(),
         };

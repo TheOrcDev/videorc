@@ -100,6 +100,11 @@ pnpm smoke:recording-native-preview -- --d3d11 --require-d3d11
 pnpm smoke:windows-live-audio-controls
 ```
 
+Add `--background` to the first command to record a screen scene over the
+packaged app's bundled background (#1067). The session must still take the
+D3D11 path, and the recording's border must match the background from its
+first frame.
+
 On supported hardware, the first two commands require D3D11 capture/composition,
 Media Foundation GPU input, the canonical DirectComposition preview triple, and
 zero production readbacks/raw copies/system-memory encoder samples/BMP work.

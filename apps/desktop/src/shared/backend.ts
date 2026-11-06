@@ -1767,6 +1767,14 @@ export interface StreamTargetRuntime {
   state: StreamTargetState
   message?: string
   redactedUrl?: string
+  /** Plan 218: times this session the leg's FFmpeg fifo overflowed because
+   * the connection could not carry the stream to this destination (each one
+   * skipped seconds of video for its viewers). Additive to `state`: the leg
+   * stays `live`; `warning` keeps meaning "the platform is not receiving".
+   * Absent until the first overflow. */
+  uplinkOverflows?: number
+  /** RFC 3339 time of the latest overflow; absent until the first. */
+  uplinkOverflowAt?: string
 }
 
 export interface StreamTargetsSnapshot {
@@ -1954,7 +1962,11 @@ export interface CaptionsSessionParams {
   textSize?: 's' | 'm' | 'l'
 }
 
+export type MicrophoneNoiseSuppression = 'off' | 'rnnoise'
+
 export interface AudioSettings {
+  /** Older saved settings default to Off. */
+  microphoneNoiseSuppression?: MicrophoneNoiseSuppression
   microphoneGainDb: number
   microphoneMuted: boolean
   microphoneSyncOffsetMs: number
@@ -1975,6 +1987,8 @@ export const SYSTEM_AUDIO_GAIN_DB_MAX = 12
 export const SYSTEM_AUDIO_GAIN_DB_DEFAULT = -6
 
 export interface AudioProcessingUpdateParams {
+  /** Omitted means unchanged, including requests from older clients. */
+  microphoneNoiseSuppression?: MicrophoneNoiseSuppression
   sessionId: string
   microphoneGainDb: number
   microphoneMuted: boolean
@@ -1992,6 +2006,7 @@ export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams
     | 'no-active-session'
     | 'stale-session'
     | 'native-audio-unavailable'
+    | 'microphone-noise-suppression-unavailable'
     | 'live-audio-control-unavailable'
     | 'live-audio-control-state-unknown'
     | 'session-ended'
@@ -1999,6 +2014,7 @@ export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams
   confirmedMicrophoneGainDb?: number
   /** Present when the backend can conclusively report settings remaining after rejection. */
   confirmedMicrophoneMuted?: boolean
+  confirmedMicrophoneNoiseSuppression?: MicrophoneNoiseSuppression
 }
 
 export interface RemuxSessionParams {
@@ -3163,6 +3179,41 @@ export interface AudioMeterDeviceProbeResult {
   probes: AudioMeterDeviceProbe[]
 }
 
+/** Plan 218 S2: the live stream's delivery over a rolling 30 s window,
+ * carried on `DiagnosticStats.streamDelivery` while a stream runs. `degraded`
+ * holds while more than 10 % of the stream's frames were skipped before
+ * encode over the window, and clears once it is back under 5 %. */
+export interface StreamDeliveryState {
+  targetFps: number
+  /** Frames the stream encoder produced per second over the window. */
+  deliveredFps: number
+  /** Share of the window's frames skipped before encode, 0 to 100. */
+  dropPercent: number
+  /** How much history the figures cover; 30 once the window is full. */
+  windowSeconds: number
+  degraded: boolean
+  /** RFC 3339 time the current degraded span started. */
+  degradedSince?: string
+  /** Plan 218 S3a: the stream encoder's bitrate right now and as chosen,
+   * when a dedicated stream encoder adapts it (macOS VideoToolbox). */
+  bitrateKbps?: number
+  chosenBitrateKbps?: number
+  /** True while the bitrate sits at its floor (half the chosen bitrate): the
+   * stream will not go lower; fewer destinations is the next step. */
+  atFloor: boolean
+  /** Fifo overflows FFmpeg reported on the session's legs so far; each one
+   * skipped seconds of video for that destination's viewers. */
+  uplinkOverflows: number
+}
+
+/** Plan 218 S2: one destination's fifo overflow count (no URL or key). */
+export interface StreamLegOverflowCount {
+  targetId: string
+  platform: StreamPlatform
+  label: string
+  overflows: number
+}
+
 export interface StreamHealth {
   sessionId: string
   fps?: number
@@ -3396,16 +3447,44 @@ export interface DiagnosticStats {
   streamOutputHeight?: number
   streamOutputFps?: number
   streamOutputBitrateKbps?: number
-  /** Latest measured FFmpeg output bitrate for the active stream. */
+  /** The stream's measured video bitrate over the last encoder window (plan
+   * 218 S2): what the stream encoder produced, audio excluded, comparable to
+   * the chosen stream bitrate. FFmpeg's own progress figure describes its
+   * first output (the recording file; see `recordingMeasuredBitrateKbps`). */
   streamMeasuredBitrateKbps?: number
-  /** Lowest non-zero measured output bitrate observed in this stream session. */
+  /** Lowest non-zero measured stream video bitrate observed this session. */
   streamMeasuredBitrateMinKbps?: number
-  /** Highest non-zero measured output bitrate observed in this stream session. */
+  /** Highest non-zero measured stream video bitrate observed this session. */
   streamMeasuredBitrateMaxKbps?: number
-  /** Cumulative bytes emitted by FFmpeg for this stream process generation. */
+  /** Cumulative encoded video bytes the stream encoder handed to FFmpeg. */
   streamOutputTotalBytes?: number
+  /** FFmpeg's progress bitrate for the recording file, when one is written. */
+  recordingMeasuredBitrateKbps?: number
+  /** FFmpeg's progress `total_size` for the recording file. */
+  recordingOutputTotalBytes?: number
   /** Cumulative frames FFmpeg reports duplicating for this stream process generation. */
   streamDuplicatedFrames?: number
+  /** Plan 218 S2: how the live stream is delivering over a rolling 30 s
+   * window; absent without a stream. Show "Your stream is running at
+   * {deliveredFps} of {targetFps} fps" while `degraded` holds. */
+  streamDelivery?: StreamDeliveryState
+  /** Plan 218 S2: per-destination fifo overflow counts; absent until a leg
+   * overflows. No URLs or keys. */
+  streamLegOverflows?: StreamLegOverflowCount[]
+  /** Plan 218 S2: the session's destinations, for the support bundle. */
+  streamDestinationCount?: number
+  streamDestinationPlatforms?: StreamPlatform[]
+  /** Plan 218 S2: the microphone sync offset the session started with. */
+  microphoneSyncOffsetMs?: number
+  /** Plan 218 S2: the stream writer's own FIFO-write p95 (ms). */
+  encoderBridgeStreamVideoToolboxFifoWriteP95Ms?: number
+  /** Plan 218 S2: p95 age of the stream queue's oldest frame (ms). */
+  encoderBridgeStreamQueueAgeP95Ms?: number
+  /** Plan 218 S2: stream ticks coalesced on the depth / age limit, and which
+   * limit tripped last. */
+  encoderBridgeStreamQueueDepthTrips?: number
+  encoderBridgeStreamQueueAgeTrips?: number
+  encoderBridgeStreamQueueLastTrip?: 'depth' | 'age'
   /** Number of distinct production VideoToolbox output encoders active for the session. */
   encoderBridgeActiveVideoToolboxOutputEncoders: number
   /** Frames/bytes produced by the local-recording VideoToolbox output encoder. */
@@ -4543,6 +4622,9 @@ export interface RuntimeInfo {
     style: 'clear' | 'material' | null
     styleRequested: 'clear' | 'material'
   }
+  /** Why global shortcuts can't work in this session (Linux on Wayland), in
+   * words Settings shows; absent where they can. */
+  globalShortcutsUnavailable?: string
   isPackaged: boolean
   /** Suppresses first-run setup without changing its persisted record (smokes). */
   firstRunSuppressed: boolean
@@ -5335,6 +5417,9 @@ export interface GlobalShortcutsResult {
   /** Main held the config because the shortcut recorder is armed; it
    * registers on disarm and this result says nothing about conflicts. */
   deferred?: true
+  /** This session can't hold a global shortcut (Linux on Wayland): nothing
+   * was registered, and this says why, as `RuntimeInfo` does. */
+  unavailable?: string
 }
 
 /** A key event main captured for the Settings shortcut recorder (plan 062).

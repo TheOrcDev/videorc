@@ -118,18 +118,23 @@ pub fn restore_token_refused(outcome: &PortalStart) -> bool {
 /// Bounds a portal call made before any restore token is offered (the proxy,
 /// `CreateSession`). Its failure is [`PortalStart::Unavailable`]: a wedged
 /// xdg-desktop-portal-hyprland timed out `CreateSession` and the saved token
-/// was forgotten as refused (ogre, 2026-11-01).
+/// was forgotten as refused (ogre, 2026-11-01). A call that fails names a
+/// missing portal; one that never answers names a busy one.
 async fn before_restore_token<T, E: std::fmt::Display>(
     call: impl std::future::Future<Output = Result<T, E>>,
     failed: &str,
     unanswered: &str,
 ) -> Result<T, PortalStart> {
-    let unavailable =
-        |reason: String| PortalStart::Unavailable(PortalCaptureState::MissingSource { reason });
     match tokio::time::timeout(PORTAL_CALL_TIMEOUT, call).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(unavailable(format!("{failed}: {error}"))),
-        Err(_) => Err(unavailable(unanswered.to_string())),
+        Ok(Err(error)) => Err(PortalStart::Unavailable(
+            PortalCaptureState::MissingSource {
+                reason: format!("{failed}: {error}"),
+            },
+        )),
+        Err(_) => Err(PortalStart::Unavailable(PortalCaptureState::Unanswered {
+            reason: unanswered.to_string(),
+        })),
     }
 }
 
@@ -464,7 +469,7 @@ mod tests {
         assert!(!restore_token_refused(&unanswered));
         assert!(matches!(
             &unanswered,
-            PortalStart::Unavailable(PortalCaptureState::MissingSource { reason })
+            PortalStart::Unavailable(PortalCaptureState::Unanswered { reason })
                 if reason == "CreateSession did not answer within 10s"
         ));
         let unreachable = before_restore_token(
@@ -475,6 +480,12 @@ mod tests {
         .await
         .expect_err("a failed call fails");
         assert!(!restore_token_refused(&unreachable));
+        // A portal that is not there is still a missing source.
+        assert!(matches!(
+            &unreachable,
+            PortalStart::Unavailable(PortalCaptureState::MissingSource { reason })
+                if reason.starts_with("ScreenCast portal unreachable")
+        ));
         // The portal saw the token and refused it: forget it.
         let other = ashpd::Error::Response(ashpd::desktop::ResponseError::Other);
         assert!(restore_token_refused(&picker_step_failed(

@@ -9,6 +9,7 @@ import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { SectionLabel } from '@/components/section-label'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { FieldGroup, FieldLegend, FieldSet } from '@/components/ui/field'
 import { KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
@@ -66,6 +67,8 @@ export function globalShortcutRows(input: {
  */
 export function ShortcutsSettings(): ReactElement {
   const { settings, setSettings, runtimeInfo, deviceList, savedScenes } = useStudioCore()
+  // Linux on Wayland: main registers nothing and says why.
+  const unavailable = runtimeInfo?.globalShortcutsUnavailable
   const systemAudio = systemAudioDevice(deviceList)
   const actionRows = globalShortcutRows({
     systemAudioAvailable: Boolean(systemAudio && systemAudio.status !== 'unavailable'),
@@ -98,9 +101,18 @@ export function ShortcutsSettings(): ReactElement {
   return (
     <>
       <PanelSection
-        description="Work system-wide, even when Videorc is in the background. Click a field and press the keys. Stream Deck hotkeys and F13 to F24 work too."
+        description={
+          unavailable
+            ? 'Kept for sessions that allow them, such as X11. Click a field and press the keys.'
+            : 'Work system-wide, even when Videorc is in the background. Click a field and press the keys. Stream Deck hotkeys and F13 to F24 work too.'
+        }
         title="Global shortcuts"
       >
+        {unavailable ? (
+          <Alert data-testid="global-shortcuts-unavailable" variant="warning">
+            <AlertTitle>{unavailable}</AlertTitle>
+          </Alert>
+        ) : null}
         <FieldGroup variant="grouped">
           {actionRows.map((action) => (
             <ShortcutRecorderField

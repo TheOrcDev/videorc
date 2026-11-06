@@ -423,10 +423,11 @@ pub(crate) struct WindowsD3d11SessionRequest {
     pub(crate) supported_layout: bool,
     pub(crate) camera_required: bool,
     pub(crate) camera_source_available: bool,
-    pub(crate) explicit_scene: bool,
     /// Shipping scene semantics that do not yet have a D3D11 layer/input
     /// mapping. Keeping this explicit makes each future bounded `BgraUpload`
     /// source a selector capability change rather than a silent omission.
+    /// An explicit scene adds what `windows_d3d11_unmapped_scene_features`
+    /// names; its background, takeover, screen and camera layers are mapped.
     pub(crate) unsupported_scene_features: Vec<String>,
     pub(crate) media_foundation_selected: bool,
     pub(crate) record_enabled: bool,
@@ -469,6 +470,31 @@ pub(crate) enum WindowsD3d11SessionSelection {
     Disabled,
     Candidate(WindowsD3d11SessionPlan),
     NaturalFallback(WindowsD3d11NaturalFallback),
+}
+
+/// The visible layers of a requested scene the D3D11 scene plan cannot draw
+/// (#1067). The plan maps the background (picture or live), the image
+/// takeover, and screen and camera sources; a visible test pattern would be
+/// skipped and a window source would be drawn from the display, so either
+/// keeps the session on the compositor that draws them.
+pub(crate) fn windows_d3d11_unmapped_scene_features(
+    scene: &crate::protocol::Scene,
+) -> Vec<&'static str> {
+    use crate::protocol::SceneSourceKind;
+    let visible = |kind: SceneSourceKind| {
+        scene
+            .sources
+            .iter()
+            .any(|source| source.visible && source.kind == kind)
+    };
+    let mut features = Vec::new();
+    if visible(SceneSourceKind::TestPattern) {
+        features.push("test-pattern");
+    }
+    if visible(SceneSourceKind::Window) {
+        features.push("window-source");
+    }
+    features
 }
 
 fn fallback_or_required(
@@ -522,13 +548,6 @@ pub(crate) fn select_windows_d3d11_session(
             mode,
             "windows-d3d11-media-layout-unsupported",
             "the selected layout needs sources that are not yet mapped into the D3D11 scene plan",
-        );
-    }
-    if request.explicit_scene {
-        return fallback_or_required(
-            mode,
-            "windows-d3d11-media-explicit-scene-unsupported",
-            "explicit scene layers are not yet mapped into the D3D11 scene plan",
         );
     }
     if !request.unsupported_scene_features.is_empty() {
@@ -902,6 +921,10 @@ mod runtime {
         generation: u64,
         authority: Option<crate::compositor::NativeSourceOutputLease>,
         bootstrap: Option<WindowsLiveSnapshot>,
+        /// #1067: the session's committed startup scene, drawn until the
+        /// source coordinator lists the session. Unlike `bootstrap` it is not
+        /// a recovery and never publishes a source binding.
+        startup: Option<WindowsLiveSnapshot>,
         events: tokio::sync::broadcast::Sender<crate::protocol::ServerEvent>,
         /// For the live background's budget notice (plan 190 S4).
         state: crate::state::AppState,
@@ -936,6 +959,7 @@ mod runtime {
                 generation: 0,
                 authority: None,
                 bootstrap: None,
+                startup: None,
                 events: state.events.clone(),
                 state: state.clone(),
             }
@@ -981,21 +1005,35 @@ mod runtime {
             }) {
                 return None;
             }
+            Self::snapshot_locked(
+                &camera,
+                &capture,
+                &mut compositor,
+                confirmed.confirmed,
+                confirmed.source_revision,
+            )
+        }
+        fn snapshot_locked(
+            camera: &crate::preview_camera::PreviewCameraRuntime,
+            capture: &crate::preview_screen::PreviewScreenRuntime,
+            compositor: &mut crate::compositor::CompositorRuntime,
+            confirmed: crate::protocol::SourceSelection,
+            source_revision: u64,
+        ) -> Option<WindowsLiveSnapshot> {
             let camera =
-                crate::preview_camera::available_frame_source_locked(&camera).filter(|source| {
+                crate::preview_camera::available_frame_source_locked(camera).filter(|source| {
                     source
                         .source_key()
-                        .is_some_and(|key| Some(&key.id) == confirmed.confirmed.camera_id.as_ref())
+                        .is_some_and(|key| Some(&key.id) == confirmed.camera_id.as_ref())
                 });
             let capture =
-                crate::preview_screen::available_frame_source_locked(&capture).filter(|source| {
+                crate::preview_screen::available_frame_source_locked(capture).filter(|source| {
                     source.source_key().is_some_and(|key| {
                         Some(&key.id)
                             == confirmed
-                                .confirmed
                                 .window_id
                                 .as_ref()
-                                .or(confirmed.confirmed.screen_id.as_ref())
+                                .or(confirmed.screen_id.as_ref())
                     })
                 });
             let edit = compositor.source_edit_snapshot()?;
@@ -1013,9 +1051,27 @@ mod runtime {
                 live_background_budget_notice,
                 camera,
                 capture,
-                confirmed: confirmed.confirmed,
-                source_revision: confirmed.source_revision,
+                confirmed,
+                source_revision,
             })
+        }
+        /// #1067: hold the scene the session just committed, so the pump's
+        /// ticks before the source coordinator lists the session (it starts
+        /// after the muxer runs) already draw its background and stage
+        /// instead of the bare layout. Locks in the publication order.
+        pub(crate) async fn with_startup_scene(
+            mut self,
+            requested: crate::protocol::SourceSelection,
+        ) -> Self {
+            let camera = self.camera.lock().await;
+            let capture = self.capture.lock().await;
+            let mut compositor = self.compositor.lock().await;
+            let startup = Self::snapshot_locked(&camera, &capture, &mut compositor, requested, 0);
+            drop(compositor);
+            drop(capture);
+            drop(camera);
+            self.startup = startup;
+            self
         }
         /// Plan 190 S4: the guard fell back to the poster (once per fall).
         fn notify_live_background_budget(&self) {
@@ -2456,6 +2512,14 @@ mod runtime {
             None;
         let resuming = live_sources.bootstrap.is_some();
         let mut committed = live_sources.bootstrap.take();
+        // #1067: before the coordinator lists the session, draw the scene
+        // the session committed. It only shapes the picture: the first fresh
+        // snapshot replaces it, and it is never observed as a publication.
+        let mut committed_is_startup = false;
+        if committed.is_none() {
+            committed = live_sources.startup.take();
+            committed_is_startup = committed.is_some();
+        }
         let mut camera = camera;
         let mut camera_identity = camera.as_ref().and_then(|input| {
             input
@@ -2585,6 +2649,7 @@ mod runtime {
                     current.source_revision = next.source_revision
                 });
                 committed = Some(next);
+                committed_is_startup = false;
             }
             if native_retire_required && native_retirement.is_none() {
                 match client.begin_stop_capture() {
@@ -3100,7 +3165,7 @@ mod runtime {
                     break;
                 }
             };
-            if let Some(committed) = committed.as_ref() {
+            if let Some(committed) = committed.as_ref().filter(|_| !committed_is_startup) {
                 live_sources.observe(
                     committed,
                     camera_frame.is_some(),
@@ -4284,7 +4349,7 @@ mod runtime {
                 ),
             ]
         );
-        assert!(
+        const _: () = assert!(
             CAPTION_Z_INDEX < CHAT_Z_INDEX
                 && CHAT_Z_INDEX < BUDDY_SPRITE_Z_INDEX
                 && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
@@ -4826,6 +4891,109 @@ mod runtime {
         crate::preview_camera::stop_preview_camera(&state).await;
     }
 
+    /// #1067: the coordinator lists a session only after its muxer runs, so
+    /// the pump's first ticks have no committed snapshot. The startup scene
+    /// carries the scene the session committed (its background) and the
+    /// requested sources instead.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn windows_live_startup_scene_holds_the_committed_scene_before_the_coordinator() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = crate::state::AppState::new(
+            "fixture".into(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let layout = crate::protocol::default_layout_settings();
+        let video = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Tutorial720p30,
+            width: 64,
+            height: 36,
+            fps: 30,
+            bitrate_kbps: 1000,
+        };
+        let mut scene = crate::scene::default_scene();
+        scene.background = Some(crate::protocol::EffectiveSceneBackground {
+            asset_id: "background-asset".into(),
+            managed_asset_path: String::new(),
+            fit: crate::protocol::BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: None,
+        });
+        crate::compositor::update_compositor_scene(
+            &state,
+            crate::protocol::CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(scene),
+                layout: layout.clone(),
+                active_screen: None,
+                transition_ms: None,
+            },
+        )
+        .await;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state, "camera:A", &layout, &video,
+        )
+        .await;
+        let requested = crate::protocol::SourceSelection {
+            camera_id: Some("camera:A".into()),
+            screen_id: None,
+            window_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
+
+        let plain = WindowsLiveSources::new(&state, "session");
+        assert!(
+            plain.snapshot().is_none(),
+            "the coordinator has not listed the session yet"
+        );
+        assert!(
+            plain.startup.is_none(),
+            "a session without a scene has none"
+        );
+
+        let sources = WindowsLiveSources::new(&state, "session")
+            .with_startup_scene(requested.clone())
+            .await;
+        let startup = sources.startup.as_ref().expect("startup scene");
+        assert!(
+            startup
+                .render_edit
+                .scenes()
+                .next()
+                .and_then(|scene| scene.background.as_ref())
+                .is_some_and(|background| background.asset_id == "background-asset"),
+            "the startup ticks draw the committed background"
+        );
+        assert_eq!(startup.confirmed, requested);
+        assert_eq!(startup.source_revision, 0);
+        assert!(
+            startup.camera.is_some(),
+            "the requested camera is the startup camera"
+        );
+
+        let other = WindowsLiveSources::new(&state, "session")
+            .with_startup_scene(crate::protocol::SourceSelection {
+                camera_id: Some("camera:B".into()),
+                ..requested
+            })
+            .await;
+        assert!(
+            other.startup.as_ref().unwrap().camera.is_none(),
+            "a source the session did not request is never drawn"
+        );
+        crate::preview_camera::stop_preview_camera(&state).await;
+    }
+
     fn publish_composition(
         textures: Vec<WindowsD3d11TicketedTexture>,
         primary_role: WindowsD3d11MediaRole,
@@ -5301,7 +5469,6 @@ mod tests {
             supported_layout: true,
             camera_required: false,
             camera_source_available: false,
-            explicit_scene: false,
             unsupported_scene_features: Vec::new(),
             media_foundation_selected: true,
             record_enabled: true,
@@ -5659,6 +5826,96 @@ mod tests {
     }
 
     #[test]
+    fn windows_d3d11_scene_with_a_background_stays_on_d3d11() {
+        use crate::protocol::{
+            BackgroundFit, EffectiveSceneBackground, SceneSource, SceneSourceKind, SceneTransform,
+        };
+        let full = SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        let source = |kind: SceneSourceKind, visible: bool| SceneSource {
+            id: format!("{kind:?}"),
+            name: format!("{kind:?}"),
+            kind,
+            device_id: Some("device".to_string()),
+            transform: full.clone(),
+            default_transform: full.clone(),
+            visible,
+            locked: false,
+        };
+        let mut scene = crate::scene::default_scene();
+        scene.sources = vec![
+            source(SceneSourceKind::Screen, true),
+            source(SceneSourceKind::Camera, true),
+        ];
+        scene.background = Some(EffectiveSceneBackground {
+            asset_id: "background-asset".to_string(),
+            managed_asset_path: "C:\\assets\\background.webp".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent: 0.0,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: None,
+        });
+        // The issue's case: a screen + camera scene with a picture
+        // background is fully mapped, so it is a D3D11 candidate.
+        assert!(windows_d3d11_unmapped_scene_features(&scene).is_empty());
+        let mut mapped = request();
+        mapped.unsupported_scene_features = windows_d3d11_unmapped_scene_features(&scene)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert!(matches!(
+            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, mapped).unwrap(),
+            WindowsD3d11SessionSelection::Candidate(_)
+        ));
+
+        // Hidden layers draw nothing, so they never cost the session D3D11.
+        scene
+            .sources
+            .push(source(SceneSourceKind::TestPattern, false));
+        scene.sources.push(source(SceneSourceKind::Window, false));
+        assert!(windows_d3d11_unmapped_scene_features(&scene).is_empty());
+
+        // A visible layer the plan cannot draw is named, never dropped.
+        scene
+            .sources
+            .push(source(SceneSourceKind::TestPattern, true));
+        scene.sources.push(source(SceneSourceKind::Window, true));
+        assert_eq!(
+            windows_d3d11_unmapped_scene_features(&scene),
+            vec!["test-pattern", "window-source"]
+        );
+        let mut unmapped = request();
+        unmapped.unsupported_scene_features = windows_d3d11_unmapped_scene_features(&scene)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let WindowsD3d11SessionSelection::NaturalFallback(fallback) =
+            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, unmapped).unwrap()
+        else {
+            panic!("an unmapped visible layer should use a named fallback");
+        };
+        assert_eq!(
+            fallback.code,
+            "windows-d3d11-media-scene-features-unsupported"
+        );
+        assert!(fallback.detail.contains("test-pattern, window-source"));
+    }
+
+    #[test]
     fn windows_d3d11_auto_names_layout_and_window_fallbacks() {
         let mut window = request();
         window.window_selected = true;
@@ -5670,18 +5927,6 @@ mod tests {
         assert_eq!(
             fallback.code,
             "windows-d3d11-media-window-capture-unsupported"
-        );
-
-        let mut scene = request();
-        scene.explicit_scene = true;
-        let WindowsD3d11SessionSelection::NaturalFallback(fallback) =
-            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, scene).unwrap()
-        else {
-            panic!("explicit scene should use a named fallback");
-        };
-        assert_eq!(
-            fallback.code,
-            "windows-d3d11-media-explicit-scene-unsupported"
         );
 
         let mut overlay = request();

@@ -1669,9 +1669,19 @@ impl CaptionsSessionParams {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MicrophoneNoiseSuppression {
+    #[default]
+    Off,
+    Rnnoise,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
+    #[serde(default)]
+    pub microphone_noise_suppression: MicrophoneNoiseSuppression,
     #[serde(default)]
     pub microphone_gain_db: f32,
     #[serde(default)]
@@ -1694,6 +1704,7 @@ pub struct AudioSettings {
 impl Default for AudioSettings {
     fn default() -> Self {
         Self {
+            microphone_noise_suppression: Default::default(),
             microphone_gain_db: 0.0,
             microphone_muted: false,
             microphone_sync_offset_ms: default_microphone_sync_offset_ms(),
@@ -1732,6 +1743,8 @@ pub fn clamp_system_audio_gain_db(gain_db: f32) -> f32 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProcessingUpdateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_noise_suppression: Option<MicrophoneNoiseSuppression>,
     pub session_id: String,
     pub microphone_gain_db: f32,
     pub microphone_muted: bool,
@@ -1746,9 +1759,12 @@ pub struct AudioProcessingUpdateParams {
     pub system_audio_echo_guard: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioProcessingUpdateResult {
+    pub microphone_noise_suppression: MicrophoneNoiseSuppression,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_noise_suppression: Option<MicrophoneNoiseSuppression>,
     pub applied: bool,
     pub session_id: String,
     pub microphone_gain_db: f32,
@@ -2078,6 +2094,53 @@ pub struct StreamHealth {
     #[serde(default)]
     pub duplicated_frames: Option<u64>,
     pub created_at: String,
+}
+
+/// Plan 218 S2: the live stream's delivery over a rolling window, emitted
+/// with `diagnostics.stats` while a stream runs. `degraded` is true while
+/// more than 10 % of the stream's frames were skipped before encode over the
+/// last 30 s, and clears once the window is back under 5 %; `degraded_since`
+/// is the RFC 3339 time the current degraded span started. The renderer
+/// shows "Your stream is running at {delivered} of {target} fps" while
+/// `degraded` holds and stays quiet otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDeliveryState {
+    pub target_fps: u32,
+    /// Frames the stream encoder produced per second over the window.
+    pub delivered_fps: f64,
+    /// Share of the window's frames skipped before encode, 0 to 100.
+    pub drop_percent: f64,
+    /// How much history the figures cover; 30 once the window is full.
+    pub window_seconds: f64,
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_since: Option<String>,
+    /// Plan 218 S3a: the stream encoder's bitrate right now and as chosen,
+    /// when a dedicated stream encoder adapts it (macOS VideoToolbox).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_bitrate_kbps: Option<u32>,
+    /// True while the bitrate sits at its floor (half the chosen bitrate):
+    /// the stream will not go lower; fewer destinations is the next step.
+    #[serde(default)]
+    pub at_floor: bool,
+    /// Fifo overflows FFmpeg reported on the session's legs so far: each one
+    /// skipped seconds of video for that destination's viewers.
+    #[serde(default)]
+    pub uplink_overflows: u64,
+}
+
+/// Plan 218 S2: one destination's fifo overflow count for the support
+/// bundle. Carries the platform and label only; never a URL or a key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamLegOverflowCount {
+    pub target_id: String,
+    pub platform: String,
+    pub label: String,
+    pub overflows: u64,
 }
 
 /// The encoder a recording session actually requested. Hardware encoders may still fall
@@ -2895,21 +2958,52 @@ pub struct DiagnosticStats {
     pub stream_output_fps: Option<u32>,
     #[serde(default)]
     pub stream_output_bitrate_kbps: Option<u32>,
-    /// Latest measured FFmpeg output bitrate for the active stream.
+    /// The stream's measured video bitrate over the last encoder window
+    /// (plan 218 S2): the bytes the stream encoder produced, not FFmpeg's
+    /// progress figure. FFmpeg reports its first output only: the recording
+    /// file when one is written (see `recording_measured_bitrate_kbps`), and
+    /// nothing at all when that output is an RTMP leg. Audio is not included;
+    /// the chosen stream bitrate it compares against is the video's too.
     #[serde(default)]
     pub stream_measured_bitrate_kbps: Option<f64>,
-    /// Lowest non-zero measured output bitrate observed in this stream session.
+    /// Lowest non-zero measured stream video bitrate observed this session.
     #[serde(default)]
     pub stream_measured_bitrate_min_kbps: Option<f64>,
-    /// Highest non-zero measured output bitrate observed in this stream session.
+    /// Highest non-zero measured stream video bitrate observed this session.
     #[serde(default)]
     pub stream_measured_bitrate_max_kbps: Option<f64>,
-    /// Cumulative bytes emitted by FFmpeg for this stream process generation.
+    /// Cumulative encoded video bytes the stream encoder handed to FFmpeg.
     #[serde(default)]
     pub stream_output_total_bytes: u64,
+    /// FFmpeg's progress bitrate for the recording file, when one is written
+    /// (plan 218 S2). Video plus audio, as the container sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_measured_bitrate_kbps: Option<f64>,
+    /// FFmpeg's progress `total_size` for the recording file.
+    #[serde(default)]
+    pub recording_output_total_bytes: u64,
     /// Cumulative frames FFmpeg reports duplicating for this stream process generation.
     #[serde(default)]
     pub stream_duplicated_frames: u64,
+    /// Plan 218 S2: how the live stream is delivering, over a rolling 30 s
+    /// window, while a stream runs. Replaces the once-per-session
+    /// `stream-output-pressure` notice. Absent without a stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_delivery: Option<StreamDeliveryState>,
+    /// Plan 218 S2: per-destination fifo overflow counts (no URLs or keys),
+    /// so a support bundle names the leg whose connection fell short.
+    /// Absent until a leg overflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_leg_overflows: Option<Vec<StreamLegOverflowCount>>,
+    /// Plan 218 S2: the session's destinations, for the support bundle. The
+    /// count of legs FFmpeg streams to, and their platforms in leg order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_destination_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_destination_platforms: Option<Vec<String>>,
+    /// Plan 218 S2: the microphone sync offset the session started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_sync_offset_ms: Option<i32>,
     /// Number of distinct production VideoToolbox output encoders active for the session.
     #[serde(default)]
     pub encoder_bridge_active_video_toolbox_output_encoders: u64,
@@ -3023,6 +3117,23 @@ pub struct DiagnosticStats {
     /// Stream-leg FIFO enqueue max wait for split-output sessions.
     #[serde(default)]
     pub encoder_bridge_stream_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// Plan 218 S2: the stream writer's own figures, kept apart from the
+    /// recording writer's (the generic fields keep whichever writer reported
+    /// last). P95 time to write one encoded stream access unit into FFmpeg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_video_toolbox_fifo_write_p95_ms: Option<f64>,
+    /// P95 age of the stream queue's oldest frame, sampled every writer tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_queue_age_p95_ms: Option<f64>,
+    /// Stream ticks coalesced because the queue reached its depth limit.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_depth_trips: u64,
+    /// Stream ticks coalesced because the oldest frame reached the age limit.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_age_trips: u64,
+    /// Which limit tripped last: `depth` or `age`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_queue_last_trip: Option<String>,
     pub encoder_bridge_error: Option<String>,
     /// Which encoder the active session actually requested — proves hardware vs software
     /// encode (previously unrecorded).
@@ -7822,6 +7933,55 @@ mod tests {
             .pointer(pointer)
             .unwrap_or_else(|| panic!("shared protocol fixture is missing {pointer}"))
             .clone()
+    }
+
+    #[test]
+    fn shared_microphone_noise_suppression_contract_and_defaults() {
+        let fixture = shared_high_risk_contract_fixture_value("/microphoneNoiseSuppression");
+        let settings: AudioSettings =
+            serde_json::from_value(fixture["audioSettings"].clone()).unwrap();
+        assert_eq!(
+            settings.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Rnnoise
+        );
+        let legacy: AudioSettings =
+            serde_json::from_value(fixture["legacyAudioSettings"].clone()).unwrap();
+        assert_eq!(
+            legacy.microphone_noise_suppression,
+            MicrophoneNoiseSuppression::Off
+        );
+        let update: AudioProcessingUpdateParams =
+            serde_json::from_value(fixture["update"].clone()).unwrap();
+        assert_eq!(
+            update.microphone_noise_suppression,
+            Some(MicrophoneNoiseSuppression::Rnnoise)
+        );
+        let legacy: AudioProcessingUpdateParams =
+            serde_json::from_value(fixture["legacyUpdate"].clone()).unwrap();
+        assert_eq!(legacy.microphone_noise_suppression, None);
+        assert!(
+            serde_json::from_value::<AudioSettings>(
+                serde_json::json!({"microphoneNoiseSuppression":"unknown"})
+            )
+            .is_err()
+        );
+        for key in ["applied", "unavailable"] {
+            let result: AudioProcessingUpdateResult =
+                serde_json::from_value(fixture[key].clone()).unwrap();
+            let wire = serde_json::to_value(&result).unwrap();
+            assert_eq!(
+                wire["microphoneNoiseSuppression"],
+                fixture[key]["microphoneNoiseSuppression"]
+            );
+            assert_eq!(
+                wire["confirmedMicrophoneNoiseSuppression"],
+                fixture[key]["confirmedMicrophoneNoiseSuppression"]
+            );
+            assert_eq!(
+                serde_json::from_value::<AudioProcessingUpdateResult>(wire).unwrap(),
+                result
+            );
+        }
     }
 
     #[test]

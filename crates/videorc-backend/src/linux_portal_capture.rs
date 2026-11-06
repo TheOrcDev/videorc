@@ -70,6 +70,11 @@ pub enum PortalCaptureState {
     Revoked,
     /// The portal (or the compositor's backend) is not available at all.
     MissingSource { reason: String },
+    /// The portal is there but did not answer in time: a share dialog it
+    /// already shows (for Videorc or another app), or a wedged backend. An
+    /// orphaned picker held xdg-desktop-portal-hyprland for every app and the
+    /// copy said to install a portal (ogre, 2026-11-05).
+    Unanswered { reason: String },
     /// The portal service went away (crashed or restarted) while its share
     /// dialog was open, so its answer will never come.
     PortalLost,
@@ -88,9 +93,9 @@ impl PortalCaptureState {
             PortalCaptureState::Cancelled | PortalCaptureState::PortalLost => {
                 SourceLifecycleStatus::PermissionNeeded
             }
-            PortalCaptureState::Revoked | PortalCaptureState::MissingSource { .. } => {
-                SourceLifecycleStatus::SourceMissing
-            }
+            PortalCaptureState::Revoked
+            | PortalCaptureState::MissingSource { .. }
+            | PortalCaptureState::Unanswered { .. } => SourceLifecycleStatus::SourceMissing,
         }
     }
 
@@ -114,6 +119,9 @@ impl PortalCaptureState {
             }
             PortalCaptureState::MissingSource { reason } => format!(
                 "Portal screen capture is unavailable: {reason} (needs xdg-desktop-portal with a compositor backend such as xdg-desktop-portal-hyprland, -wlr, -gnome or -kde, and PipeWire)."
+            ),
+            PortalCaptureState::Unanswered { reason } => format!(
+                "The desktop's screen sharing service did not answer ({reason}). Close any open share dialog, then choose your screen again. If it keeps happening, restart xdg-desktop-portal or sign out and back in."
             ),
             PortalCaptureState::Reconnecting => {
                 "Reconnecting the portal screen share with its saved token.".to_string()
@@ -390,6 +398,19 @@ mod tests {
         );
         assert!(missing.message().contains("xdg-desktop-portal"));
         assert!(missing.message().contains("no portal"));
+        // A portal that is there but busy must not tell the person to
+        // install one.
+        let unanswered = PortalCaptureState::Unanswered {
+            reason: "CreateSession did not answer within 10s".to_string(),
+        };
+        assert_eq!(
+            unanswered.lifecycle_status(),
+            SourceLifecycleStatus::SourceMissing
+        );
+        assert!(unanswered.message().contains("did not answer"));
+        assert!(unanswered.message().contains("Close any open share dialog"));
+        assert!(!unanswered.message().contains("needs xdg-desktop-portal"));
+        assert!(!unanswered.message().contains('\u{2014}'));
         assert!(
             PortalCaptureState::Cancelled
                 .message()

@@ -297,7 +297,7 @@ export async function recordScenario({
     // The test-pattern session selects no microphone, so its audio is the
     // paced-silence bus (hosted runners have no input device at all). The
     // silent-microphone gate re-arms if a scenario ever selects one.
-    microphoneAvailable: Boolean(params.sources.microphone),
+    microphoneAvailable: sessionSelectsMicrophone(params.sources),
     gates: TEST_PATTERN_GATES
   })
   const reportPaths = writeReports(quality)
@@ -507,6 +507,15 @@ export function request(ws, timeoutMs, method, params) {
   })
 }
 
+/**
+ * Whether a session's sources select a microphone, read from the protocol's
+ * `microphoneId` (`SourceSelection`). Arms the analyzer's silent-microphone
+ * gate.
+ */
+export function sessionSelectsMicrophone(sources) {
+  return typeof sources?.microphoneId === 'string' && sources.microphoneId !== ''
+}
+
 function sessionParams({ outputDirectoryCapability, preset = 'screen-camera', background, video }) {
   return {
     sources: {
@@ -664,7 +673,13 @@ function assertAssetBackgroundFrame({ outputPath, outputDirectory, ffmpegPath })
   }
 }
 
-function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath, sourcePath }) {
+export function assertBundledBackgroundFrame({
+  outputPath,
+  outputDirectory,
+  ffmpegPath,
+  sourcePath,
+  seekSeconds = 0.5
+}) {
   const width = 640
   const height = 360
   const recordedRawPath = join(outputDirectory, `bundled-background-recording-${Date.now()}.rgb`)
@@ -675,7 +690,7 @@ function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath,
     ffmpegPath,
     width,
     height,
-    seekSeconds: 0.5,
+    seekSeconds,
     label: 'extract bundled background recording frame'
   })
   extractRgbFrame({
@@ -708,9 +723,10 @@ function assertBundledBackgroundFrame({ outputPath, outputDirectory, ffmpegPath,
   }
   if (meanDifference > 48) {
     throw new Error(
-      `Packaged bundled background pixels do not match the decoded source asset: mean RGB difference ${meanDifference.toFixed(1)} exceeded 48.`
+      `Packaged bundled background pixels do not match the decoded source asset at ${seekSeconds}s: mean RGB difference ${meanDifference.toFixed(1)} exceeded 48.`
     )
   }
+  return { seekSeconds, meanDifference }
 }
 
 function extractRgbFrame({ inputPath, outputPath, ffmpegPath, width, height, seekSeconds, label }) {

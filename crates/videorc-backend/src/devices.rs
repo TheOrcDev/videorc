@@ -734,6 +734,7 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
         return sample_native_audio_meter(
             device_id,
             AudioProcessingSettings {
+                noise_suppression: Default::default(),
                 gain_db: params.microphone_gain_db,
                 muted: params.microphone_muted,
             },
@@ -871,6 +872,7 @@ pub async fn sample_native_audio_meters(
     params: AudioMeterProbeParams,
 ) -> AudioMeterDeviceProbeResult {
     let settings = AudioProcessingSettings {
+        noise_suppression: Default::default(),
         gain_db: params.microphone_gain_db,
         muted: params.microphone_muted,
     };

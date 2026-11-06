@@ -7,6 +7,7 @@ import {
   REQUIRED_MACOS_FFMPEG_FILTERS,
   assessMacosFfmpegCapabilities,
   parseEncoderNames,
+  repairEncoderArgs,
   selectRepairEncoder
 } from './repair-encoder-capabilities.mjs'
 
@@ -28,6 +29,16 @@ const ENCODERS_FULL_GPL = [
   ' V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)',
   ' A....D aac                  AAC (Advanced Audio Coding)',
   ' A....D pcm_s16le            PCM signed 16-bit little-endian'
+].join('\n')
+
+// The bundled Linux build (vendor/ffmpeg/linux-x64): no x264, and VAAPI
+// needs a device the repair never opens.
+const ENCODERS_LGPL_LINUX = [
+  'Encoders:',
+  ' ------',
+  ' V....D libopenh264          OpenH264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)',
+  ' V....D h264_vaapi           H.264/AVC (VAAPI) (codec h264)',
+  ' A....D aac                  AAC (Advanced Audio Coding)'
 ].join('\n')
 
 const PROTOCOLS_WITH_TLS = ['Input:', '  file', '  rtmp', '  rtmps', '  tls'].join('\n')
@@ -65,8 +76,24 @@ test('parses encoder names out of -encoders output', () => {
 test('prefers libx264, then the platform hardware encoders', () => {
   assert.equal(selectRepairEncoder(parseEncoderNames(ENCODERS_FULL_GPL)), 'libx264')
   assert.equal(selectRepairEncoder(parseEncoderNames(ENCODERS_LGPL_MACOS)), 'h264_videotoolbox')
-  assert.equal(selectRepairEncoder(['aac', 'h264_mf']), 'h264_mf')
+  assert.equal(selectRepairEncoder(['aac', 'h264_mf', 'libopenh264']), 'h264_mf')
+  assert.equal(selectRepairEncoder(parseEncoderNames(ENCODERS_LGPL_LINUX)), 'libopenh264')
+  assert.equal(selectRepairEncoder(['aac', 'h264_vaapi']), null)
   assert.equal(selectRepairEncoder(['aac']), null)
+})
+
+test('OpenH264 repairs never skip a frame and always carry a bitrate', () => {
+  const args = repairEncoderArgs('libopenh264', 6175)
+  const value = (flag) => args[args.indexOf(flag) + 1]
+  assert.equal(value('-c:v'), 'libopenh264')
+  assert.equal(value('-rc_mode'), 'bitrate')
+  assert.equal(value('-allow_skip_frames'), '0')
+  assert.equal(value('-b:v'), '6175k')
+  assert.deepEqual(repairEncoderArgs('libopenh264', 300).slice(-2), ['-b:v', '2000k'])
+  assert.deepEqual(repairEncoderArgs('libopenh264').slice(-2), ['-b:v', '2000k'])
+  for (const name of ['libx264', 'h264_videotoolbox', 'h264_mf']) {
+    assert.deepEqual(repairEncoderArgs(name, 6175), REPAIR_ENCODER_ARGS[name])
+  }
 })
 
 test('every preferred encoder has a matching quality-args recipe', () => {

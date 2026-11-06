@@ -306,6 +306,10 @@ import { isRetryableBackgroundSurfaceSyncError } from '@/lib/surface-sync-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import { buildStartSessionParams } from '@/lib/session-params'
 import {
+  rebindRememberedWindow,
+  shouldRefreshWindowListBeforeStart
+} from '@/lib/window-source-rebind'
+import {
   applyFinalizationEvent,
   finalizationEventNeedsRefresh,
   finalizationNoticesForRows,
@@ -4366,7 +4370,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setLiveAudioProcessingApplied((current) =>
         current?.sessionId === next.sessionId &&
         current.microphoneGainDb === next.microphoneGainDb &&
-        current.microphoneMuted === next.microphoneMuted
+        current.microphoneMuted === next.microphoneMuted &&
+        current.microphoneNoiseSuppression === next.microphoneNoiseSuppression
           ? current
           : next
       )
@@ -13205,6 +13210,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const params = activeAudioProcessingUpdateParams(
       { state: recording.state, sessionId: recording.sessionId },
       {
+        microphoneNoiseSuppression: captureConfig.audio.microphoneNoiseSuppression ?? 'off',
         microphoneGainDb: captureConfig.audio.microphoneGainDb,
         microphoneMuted: captureConfig.audio.microphoneMuted
       }
@@ -13283,6 +13289,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : undefined
           if (validResult?.applied) {
             latest.lastApplied = {
+              microphoneNoiseSuppression:
+                validResult.microphoneNoiseSuppression ??
+                latest.lastApplied.microphoneNoiseSuppression ??
+                'off',
               microphoneGainDb: validResult.microphoneGainDb,
               microphoneMuted: validResult.microphoneMuted
             }
@@ -13407,7 +13417,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (sync.disabled) {
       if (
         params.microphoneGainDb !== sync.lastApplied.microphoneGainDb ||
-        params.microphoneMuted !== sync.lastApplied.microphoneMuted
+        params.microphoneMuted !== sync.lastApplied.microphoneMuted ||
+        params.microphoneNoiseSuppression !== sync.lastApplied.microphoneNoiseSuppression
       ) {
         const rollback = sync.lastApplied
         setCaptureConfig((current) => ({
@@ -13428,7 +13439,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const systemAudioChanged = Object.keys(systemAudioDelta).length > 0
     const desiredMatchesLastApplied =
       params.microphoneGainDb === sync.lastApplied.microphoneGainDb &&
-      params.microphoneMuted === sync.lastApplied.microphoneMuted
+      params.microphoneMuted === sync.lastApplied.microphoneMuted &&
+      params.microphoneNoiseSuppression === sync.lastApplied.microphoneNoiseSuppression
     if (
       !enqueueDesiredForNewSync &&
       !sync.queue.hasOutstandingWork &&
@@ -13448,6 +13460,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     recording.state,
     captureConfig.audio.microphoneGainDb,
     captureConfig.audio.microphoneMuted,
+    captureConfig.audio.microphoneNoiseSuppression,
     captureConfig.audio.systemAudioEnabled,
     captureConfig.audio.systemAudioGainDb,
     captureConfig.audio.systemAudioEchoGuard,
@@ -15582,6 +15595,45 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               'The recordings folder you chose isn’t available. Choose it again in Output → Where recordings go.'
             )
           }
+          // Plan 219 S3: a picked window that is not already live may have
+          // been closed and reopened under a new id. One window-list read,
+          // only then; no match leaves the pick alone (never a display or
+          // another window), and the backend names the refusal.
+          if (
+            shouldRefreshWindowListBeforeStart(
+              sessionCaptureConfig.sources,
+              previewScreenStatusRef.current
+            )
+          ) {
+            try {
+              const deviceRead = ++deviceListReadsRef.current.issued
+              const freshDevices = await client.request<DeviceList>('devices.list')
+              const rebound = rebindRememberedWindow(
+                sessionCaptureConfig.sources,
+                freshDevices.devices
+              )
+              if (rebound) {
+                sessionCaptureConfig = { ...sessionCaptureConfig, sources: rebound }
+                const patch = { windowId: rebound.windowId, windowName: rebound.windowName }
+                setCaptureConfig((current) => ({
+                  ...current,
+                  sources: { ...current.sources, ...patch }
+                }))
+                captureConfigRef.current = {
+                  ...captureConfigRef.current,
+                  sources: { ...captureConfigRef.current.sources, ...patch }
+                }
+                if (deviceRead > deviceListReadsRef.current.committed) {
+                  deviceListReadsRef.current.committed = deviceRead
+                  setDeviceList(freshDevices)
+                }
+              }
+            } catch (error) {
+              // The start goes on with the saved id; S2's copy says what
+              // happened to the window if it is gone.
+              console.warn('[session-start] window list read before start failed', error)
+            }
+          }
           const sessionParams = buildStartSessionParams({
             captureConfig: sessionCaptureConfig,
             scene: sceneWithBackground,
@@ -15609,6 +15661,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               }
           const startAudioSnapshot = nextSessionParams.audio
             ? {
+                microphoneNoiseSuppression:
+                  nextSessionParams.audio.microphoneNoiseSuppression ?? 'off',
                 microphoneGainDb: nextSessionParams.audio.microphoneGainDb,
                 microphoneMuted: nextSessionParams.audio.microphoneMuted,
                 systemAudio: {

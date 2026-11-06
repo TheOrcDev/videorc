@@ -105,6 +105,17 @@ pnpm smoke:dev
 
 The development smoke test opens the Electron app through `electron-vite`, waits for the Electron main process to launch the Rust backend, records a short test-pattern MKV, stops the session, and verifies the output file. It intentionally avoids camera, microphone, and screen sources so it can validate app boot and recording control flow even before macOS permissions are granted.
 
+## Bundled microphone denoiser
+
+The Rust backend links the pinned `rnnoise-rs` implementation and its embedded
+float model. Cargo fetches the pinned source during the build; the running app
+does not download a model or load a C RNNoise library. Shared Electron resources
+include `licenses/rnnoise-rs/LICENSE.txt`, `UPSTREAM-NOTICES.txt` and `SOURCE.txt` on
+every platform.
+Keep these notices with the backend binary when distributing it separately.
+See [RNNoise](rnnoise.md) for the source pin, model digest and capture-path
+restrictions.
+
 ## Current macOS Beta Target
 
 - Packaging tool: Electron Builder

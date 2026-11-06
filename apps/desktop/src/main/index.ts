@@ -101,7 +101,7 @@ import {
   type ServerResponse as HttpResponse
 } from 'node:http'
 import { createRequire } from 'node:module'
-import { homedir, release } from 'node:os'
+import { constants as osConstants, homedir, release } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -145,7 +145,11 @@ import {
 import { runBackendInterruptingAction } from './interruption-actions'
 import { AccountSignInTransactions } from './account-sign-in-transactions'
 import { ProviderOAuthCallbacks } from './provider-oauth-callbacks'
-import { GlobalShortcutGate, unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
+import {
+  GlobalShortcutGate,
+  globalShortcutsUnavailableReason,
+  unregisterGlobalShortcutsWhenReady
+} from './global-shortcut-lifecycle'
 import {
   createSafeStoragePersistenceCodec,
   type SecurePersistenceCodec
@@ -229,6 +233,8 @@ import {
   parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatus,
   parseMainRecordingStatusEvent,
+  parseMainScene,
+  parseMainSceneChangedEvent,
   parseMainVirtualCameraChangedEvent
 } from './backend-event-message'
 import {
@@ -248,7 +254,8 @@ import {
   previewSurfaceBackgroundLayer,
   previewSurfaceLiveBackgroundLibraryScript,
   previewSurfaceLiveBackgroundLogLine,
-  previewSurfaceLiveBackgroundStatusFromConsoleLine
+  previewSurfaceLiveBackgroundStatusFromConsoleLine,
+  previewSurfaceStatusBackground
 } from './preview-surface-live-background'
 import { livePosterManifest } from '../shared/live-background-catalog'
 import { BANNER_ASSET_HOST, BANNERS_FOLDER } from '../shared/banner-assets'
@@ -287,7 +294,11 @@ import {
   type ResourceCapabilityKind,
   type ResourceSelection
 } from './resource-capabilities'
-import { PersistentDirectoryAuthority } from './persistent-directory-authority'
+import {
+  DirectoryUnavailableError,
+  outputDirectoryUnavailableMessage,
+  PersistentDirectoryAuthority
+} from './persistent-directory-authority'
 import {
   buildAllowsPackagedTestHooks,
   ignoreInspectorSignal,
@@ -362,6 +373,11 @@ import {
   shouldPersistGpuFallback,
   writeGpuFallbackState
 } from './gpu-fallback'
+import {
+  installLinuxTerminationSignalTakeover,
+  type LinuxTerminationSignal,
+  type LinuxTerminationSignalTakeover
+} from './linux-termination-signals'
 import {
   backgroundThrottlingFor,
   electronBackgroundPolicyFromEnv,
@@ -712,7 +728,9 @@ import type {
   VideorcAccountSnapshot,
   ViewerSample,
   RecordingStatus,
-  OverlayLayout
+  OverlayLayout,
+  EffectiveSceneBackground,
+  Scene
 } from '../shared/backend'
 import { previewProgramShape } from '../shared/preview-program'
 import {
@@ -772,12 +790,23 @@ let mainWindow: BrowserWindow | null = null
 // record/stream/mic with the app unfocused. Off unless the user configures
 // accelerators in Settings; every set call replaces the previous set.
 // The gate also suspends them while the Settings shortcut recorder is armed.
-const globalShortcutGate = new GlobalShortcutGate(globalShortcut, (action) => {
-  const window = mainWindow
-  if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
-    sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
-  }
+// Linux on Wayland can't hold one at all: the gate registers nothing there and
+// every result, like runtime info, says why. Electron resolves the ozone
+// platform before this script runs.
+const globalShortcutsUnavailable = globalShortcutsUnavailableReason({
+  platform: process.platform,
+  ozonePlatform: app.commandLine.getSwitchValue('ozone-platform')
 })
+const globalShortcutGate = new GlobalShortcutGate(
+  globalShortcut,
+  (action) => {
+    const window = mainWindow
+    if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
+      sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
+    }
+  },
+  globalShortcutsUnavailable
+)
 
 function setGlobalShortcuts(shortcuts: GlobalShortcutsConfig): GlobalShortcutsResult {
   // One spelling per platform: a pre-062 hand-typed `Cmd+…` binds Ctrl off
@@ -1014,6 +1043,11 @@ let previewSurfaceBanners: readonly Banner[] = []
 // draws the Buddy's layer while the program carries it (its two switches).
 // Kept across reconnects; a new connection re-reads `overlays.layout.get`.
 let previewSurfaceOverlayLayout: OverlayLayout | null = null
+// The committed scene's background from the same socket (`scene.get`, then
+// `scene.changed`): the compositor status names the program's background but
+// not its look, so the proof surface draws this one while the status names
+// it. Undefined until main hears the scene; kept across reconnects.
+let previewSurfaceCommittedBackground: EffectiveSceneBackground | null | undefined
 let nativePreviewCommittedCompositorScene: PreviewSurfaceSceneState | null = null
 let nativePreviewCommittedCompositorRunId: string | undefined
 const nativePreviewCompositorRunAuthority = new NativePreviewRunAuthority()
@@ -1283,6 +1317,7 @@ const glassStyle: GlassStyle = resolveGlassStyle(process.env.VIDEORC_GLASS_STYLE
 let clearGlassFailureLogged = false
 let gpuProcessCrashCount = 0
 let gpuFallbackPersistedThisLaunch = false
+let linuxTerminationSignals: LinuxTerminationSignalTakeover | null = null
 // A dead renderer leaves its window empty, and child-process-gone never fires
 // for renderers: without this line a support bundle says nothing (plan 082).
 app.on('render-process-gone', (_event, contents, details) => {
@@ -1301,6 +1336,7 @@ app.on('render-process-gone', (_event, contents, details) => {
   )
 })
 app.on('child-process-gone', (_event, details) => {
+  linuxTerminationSignals?.childProcessGone(details)
   // Every abnormal child exit is worth a support-bundle line; GPU crashes
   // additionally drive the persisted software-rendering fallback.
   if (details.type !== 'GPU' || !isGpuCrashReason(details.reason)) {
@@ -5901,12 +5937,23 @@ function buildPreviewSurfaceSceneFromCompositorStatus(
   }
   const suppressFramePolling =
     nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true
-  const backgroundLayer = existingPreviewBackgroundLayer()
-  const backgroundStageMargin = backgroundLayer
-    ? (nativePreviewSurfaceScene?.backgroundStageMargin ??
-      nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
-      0)
-    : 0
+  // The program's background, drawn and inset as the recording draws it. A
+  // background main has not heard of yet keeps the surface's layer and stage.
+  const statusBackground = previewSurfaceStatusBackground(
+    status.sceneSources ?? [],
+    previewSurfaceCommittedBackground
+  )
+  const backgroundLayer =
+    statusBackground === undefined
+      ? existingPreviewBackgroundLayer()
+      : previewSurfaceBackgroundLayer(statusBackground ?? undefined, fileUrlFromPath)
+  const backgroundStageMargin = !backgroundLayer
+    ? 0
+    : statusBackground === undefined
+      ? (nativePreviewSurfaceScene?.backgroundStageMargin ??
+        nativePreviewCommittedCompositorScene?.backgroundStageMargin ??
+        0)
+      : previewProofBackgroundStageMargin(statusBackground)
   const layers: PreviewSurfaceSceneLayer[] = [
     ...(backgroundLayer ? [backgroundLayer] : []),
     ...(status.sceneSources ?? []).filter(compositorSceneSourceIsPreviewLayer).map((source) => ({
@@ -6251,12 +6298,17 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             const parsed = new URL(profiled);
             // A new width needs the current frame resent even when the source
             // has not advanced (a still screen sends no PipeWire frames), so a
-            // resized Preview never keeps the old size's pixels.
+            // resized Preview never keeps the old size's pixels. The old
+            // size's cursor is dropped, not skipped once: if the first request
+            // at the new width fails, its retry must still ask for a frame
+            // instead of getting a 204 for the frame drawn at the old size.
             const maxWidth = parsed.searchParams.get('maxWidth');
-            const widthChanged = poller.requestedMaxWidth !== maxWidth;
+            if (poller.requestedMaxWidth !== maxWidth) {
+              poller.generation = null;
+              poller.sequence = null;
+            }
             poller.requestedMaxWidth = maxWidth;
             if (
-              !widthChanged &&
               typeof poller.generation === 'string' &&
               poller.generation.length > 0 &&
               Number.isSafeInteger(poller.sequence) &&
@@ -7930,6 +7982,30 @@ function acceptPreviewSurfaceOverlayLayout(read: () => OverlayLayout, source: st
   void updateNativePreviewSurfaceBanners().catch((error) => {
     logBackend('warn', `Preview Buddy layer failed to update: ${errorMessageText(error)}`)
   })
+}
+
+// The committed scene's background (`scene.get` on connect, then
+// `scene.changed`): the proof surface draws it while the compositor status
+// names it. A new background forgets the committed compositor scene, because
+// a status already at the new revision may have committed without it; the
+// next status then commits the scene with its background.
+function acceptPreviewSurfaceSceneBackground(read: () => Scene, source: string): void {
+  let scene: Scene
+  try {
+    scene = read()
+  } catch (error) {
+    logBackend('warn', `Main dropped an invalid ${source} payload: ${errorMessageText(error)}`)
+    return
+  }
+  const background = scene.background ?? null
+  if (JSON.stringify(background) === JSON.stringify(previewSurfaceCommittedBackground ?? null)) {
+    if (previewSurfaceCommittedBackground === undefined) {
+      previewSurfaceCommittedBackground = background
+    }
+    return
+  }
+  previewSurfaceCommittedBackground = background
+  nativePreviewCommittedCompositorScene = null
 }
 
 async function updateNativePreviewSurfaceBanners(): Promise<PreviewSurfaceStatus> {
@@ -9906,6 +9982,20 @@ function protectedOAuthPersistenceCodec(): SecurePersistenceCodec {
   return oauthPersistenceCodec
 }
 
+// A removable drive that was unplugged takes the chosen folder with it: say so
+// by name instead of passing Node's ENOENT through to the Record toast.
+function resolveOutputDirectoryHandle(directoryHandleId: unknown): string {
+  try {
+    return outputDirectoryAuthority().resolve(directoryHandleId)
+  } catch (error) {
+    if (error instanceof DirectoryUnavailableError) {
+      console.warn('[output-directory] the chosen recordings folder is unavailable', error.cause)
+      throw new Error(outputDirectoryUnavailableMessage(error.displayName), { cause: error })
+    }
+    throw error
+  }
+}
+
 function outputDirectoryAuthority(): PersistentDirectoryAuthority {
   if (!persistentDirectoryAuthority) {
     persistentDirectoryAuthority = new PersistentDirectoryAuthority(
@@ -10305,7 +10395,10 @@ function resolveCargoBinary(): string {
 }
 
 function devCargoEnvOverrides(): Record<string, string> {
-  if (app.isPackaged) {
+  // Incremental is off for the macOS arm64 stale-serde link bug. Elsewhere the
+  // dev app follows the developer's Cargo setting, so it does not fight a
+  // terminal build over the fingerprint and force a full backend rebuild.
+  if (app.isPackaged || process.platform !== 'darwin') {
     return {}
   }
 
@@ -10932,14 +11025,21 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
   const bannersListRequestId = `main-banners-list-${Date.now()}`
   const overlayLayoutRequestId = `main-overlay-layout-${Date.now()}`
+  const sceneRequestId = `main-scene-${Date.now()}`
   let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
     if (backendEventSocket === socket) {
       logBackend('info', 'Main process connected to backend events.')
       // Plan 186: the proof surface draws the showing banners; plan 205 S9:
-      // and the Buddy's layer while its switches put it in the program.
-      const includedEvents = ['recording.status', 'banners.changed', 'overlays.layout']
+      // and the Buddy's layer while its switches put it in the program; and
+      // the committed scene's background.
+      const includedEvents = [
+        'recording.status',
+        'banners.changed',
+        'overlays.layout',
+        'scene.changed'
+      ]
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
       }
@@ -10979,6 +11079,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             socket.send(
               JSON.stringify({ id: overlayLayoutRequestId, method: 'overlays.layout.get' })
             )
+            socket.send(JSON.stringify({ id: sceneRequestId, method: 'scene.get' }))
             if (process.platform === 'win32') {
               previewSurfaceStatusRequestGeneration = previewWindowSurfaceGeneration()
               socket.send(
@@ -11040,6 +11141,17 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             )
           }
         }
+        if (parsed.id === sceneRequestId) {
+          // Never fatal: the background is a drawing, not capture state.
+          if (parsed.ok === true) {
+            acceptPreviewSurfaceSceneBackground(() => parseMainScene(parsed.payload), 'scene.get')
+          } else {
+            logBackend(
+              'warn',
+              `Main could not read the committed scene: ${parsed.error?.message ?? 'unknown error'}`
+            )
+          }
+        }
         // Responses to fire-and-forget present reports are deliberately ignored.
         return
       }
@@ -11059,6 +11171,13 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         acceptPreviewSurfaceOverlayLayout(
           () => parseMainOverlayLayoutEvent(parsed.payload),
           'overlays.layout'
+        )
+        return
+      }
+      if (parsed.event === 'scene.changed') {
+        acceptPreviewSurfaceSceneBackground(
+          () => parseMainSceneChangedEvent(parsed.payload),
+          'scene.changed'
         )
         return
       }
@@ -13290,6 +13409,7 @@ async function runSmokePreviewMotionCommand(
           statsMenuItems,
           menuOpenAfter: Boolean(document.querySelector('[role="menu"]')),
           windowWidth: window.innerWidth,
+          numberFormatLocale: new Intl.NumberFormat().resolvedOptions().locale,
           documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 0.5,
           header: box(header),
           headerItems: visibleDescendants(header),
@@ -14363,6 +14483,24 @@ function smokeCompositorStatusFromSceneParams(
               height: params.activeScreen.status === 'ready' ? 720 : undefined
             }
           ]
+        : []),
+      // The compositor names the program's background the way the backend
+      // does; the proof surface keeps the smoke's layer for it.
+      ...(params.scene?.background
+        ? [
+            {
+              id: `background-image:${params.scene.background.assetId}`,
+              name: 'Background',
+              kind: 'background-image' as const,
+              state: 'live',
+              visible: true,
+              transform: fullFrameTransform(),
+              fit:
+                params.scene.background.fit === 'fit' ? ('contain' as const) : ('cover' as const),
+              mirror: false,
+              imagePath: params.scene.background.managedAssetPath
+            }
+          ]
         : [])
     ],
     sources: [],
@@ -15334,6 +15472,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
     backendCrashes: backendCrashRecords,
     firstFrameDecisions: firstFrameDecisions.snapshot(),
     windowGlass: mainWindowGlassInfo(),
+    globalShortcutsUnavailable,
     env: process.env
   })
 }
@@ -15380,7 +15519,7 @@ async function revealSelectedResource(
   if (kind !== 'output-directory') {
     throw new Error('Only output-directory handles can be revealed by this operation.')
   }
-  const path = outputDirectoryAuthority().resolve(directoryHandleId)
+  const path = resolveOutputDirectoryHandle(directoryHandleId)
   shell.showItemInFolder(path)
 }
 
@@ -15724,7 +15863,7 @@ async function checkDirectoryFactsForCapability(
 }
 
 async function authorizeOutputDirectory(directoryHandleId: unknown): Promise<ResourceSelection> {
-  const path = outputDirectoryAuthority().resolve(directoryHandleId)
+  const path = resolveOutputDirectoryHandle(directoryHandleId)
   const handle = {
     directoryHandleId: String(directoryHandleId),
     displayName: basename(path) || path
@@ -17903,16 +18042,64 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Smoke/performance harnesses stop the isolated process group with SIGTERM.
-// Keep these listeners installed for the entire drain: a repeated signal must
-// remain routed through Electron's prevented before-quit path instead of
-// restoring Node's default immediate process termination while export runs.
-installPersistentBackendShutdownSignalHandlers(process, (signal) => {
+function requestSignalledQuit(signal: string): void {
   logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
   // A signal is never the person's quit: it must not wait on a question.
   liveExitGuard.allow('quit')
   app.quit()
-})
+}
+
+// Smoke/performance harnesses stop the isolated process group with SIGTERM.
+// Keep these listeners installed for the entire drain: a repeated signal must
+// remain routed through Electron's prevented before-quit path instead of
+// restoring Node's default immediate process termination while export runs.
+//
+// On Linux the same signal also reaches Chromium's helpers, and Chromium
+// aborts while relaunching them, so Linux takes the signals over once the app
+// is ready (linux-termination-signals.ts). It installs nothing before that:
+// Electron's own handler replaces any listener added before `ready`, and a
+// listener left from then would keep Node from taking the signal back.
+if (process.platform === 'linux') {
+  void app.whenReady().then(() => {
+    linuxTerminationSignals = installLinuxTerminationSignalTakeover({
+      source: process,
+      browserPid: process.pid,
+      listHelpers: () => app.getAppMetrics().map(({ pid, type }) => ({ pid, type })),
+      readProcStat: (pid) => {
+        try {
+          return readFileSync(`/proc/${pid}/stat`, 'utf8')
+        } catch {
+          return null
+        }
+      },
+      requestQuit: requestSignalledQuit,
+      beforeEnd: endBackendWithSignalledApp,
+      raise: (signal) => {
+        process.kill(process.pid, signal)
+        // The default action has ended the process by now; this only runs if
+        // something still holds the signal.
+        setTimeout(() => app.exit(128 + osConstants.signals[signal]), 1000)
+      },
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (handle) => clearInterval(handle as NodeJS.Timeout),
+      now: () => Date.now()
+    })
+  })
+} else {
+  installPersistentBackendShutdownSignalHandlers(process, requestSignalledQuit)
+}
+
+function endBackendWithSignalledApp(signal: LinuxTerminationSignal, reason: string): void {
+  logBackend(
+    'warn',
+    `Received ${signal} with Chromium's helpers (${reason}); ending now, before Chromium aborts relaunching them. The backend finalizes the recording on its own SIGTERM.`
+  )
+  // The signal usually reached the backend too; a second SIGTERM is ignored
+  // there. Only a child that has not exited still owns its PID.
+  if (backendProcess && backendProcess.exitCode === null && backendProcess.signalCode === null) {
+    backendProcess.kill('SIGTERM')
+  }
+}
 
 previewLifecycleEvidence.bindBeforeQuit(app, {
   onPrevented: () => {
