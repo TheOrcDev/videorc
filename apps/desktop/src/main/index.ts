@@ -101,7 +101,7 @@ import {
   type ServerResponse as HttpResponse
 } from 'node:http'
 import { createRequire } from 'node:module'
-import { homedir, release } from 'node:os'
+import { constants as osConstants, homedir, release } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -362,6 +362,11 @@ import {
   shouldPersistGpuFallback,
   writeGpuFallbackState
 } from './gpu-fallback'
+import {
+  installLinuxTerminationSignalTakeover,
+  type LinuxTerminationSignal,
+  type LinuxTerminationSignalTakeover
+} from './linux-termination-signals'
 import {
   backgroundThrottlingFor,
   electronBackgroundPolicyFromEnv,
@@ -1282,6 +1287,7 @@ const glassStyle: GlassStyle = resolveGlassStyle(process.env.VIDEORC_GLASS_STYLE
 let clearGlassFailureLogged = false
 let gpuProcessCrashCount = 0
 let gpuFallbackPersistedThisLaunch = false
+let linuxTerminationSignals: LinuxTerminationSignalTakeover | null = null
 // A dead renderer leaves its window empty, and child-process-gone never fires
 // for renderers: without this line a support bundle says nothing (plan 082).
 app.on('render-process-gone', (_event, contents, details) => {
@@ -1300,6 +1306,7 @@ app.on('render-process-gone', (_event, contents, details) => {
   )
 })
 app.on('child-process-gone', (_event, details) => {
+  linuxTerminationSignals?.childProcessGone(details)
   // Every abnormal child exit is worth a support-bundle line; GPU crashes
   // additionally drive the persisted software-rendering fallback.
   if (details.type !== 'GPU' || !isGpuCrashReason(details.reason)) {
@@ -17898,16 +17905,64 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Smoke/performance harnesses stop the isolated process group with SIGTERM.
-// Keep these listeners installed for the entire drain: a repeated signal must
-// remain routed through Electron's prevented before-quit path instead of
-// restoring Node's default immediate process termination while export runs.
-installPersistentBackendShutdownSignalHandlers(process, (signal) => {
+function requestSignalledQuit(signal: string): void {
   logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
   // A signal is never the person's quit: it must not wait on a question.
   liveExitGuard.allow('quit')
   app.quit()
-})
+}
+
+// Smoke/performance harnesses stop the isolated process group with SIGTERM.
+// Keep these listeners installed for the entire drain: a repeated signal must
+// remain routed through Electron's prevented before-quit path instead of
+// restoring Node's default immediate process termination while export runs.
+//
+// On Linux the same signal also reaches Chromium's helpers, and Chromium
+// aborts while relaunching them, so Linux takes the signals over once the app
+// is ready (linux-termination-signals.ts). It installs nothing before that:
+// Electron's own handler replaces any listener added before `ready`, and a
+// listener left from then would keep Node from taking the signal back.
+if (process.platform === 'linux') {
+  void app.whenReady().then(() => {
+    linuxTerminationSignals = installLinuxTerminationSignalTakeover({
+      source: process,
+      browserPid: process.pid,
+      listHelpers: () => app.getAppMetrics().map(({ pid, type }) => ({ pid, type })),
+      readProcStat: (pid) => {
+        try {
+          return readFileSync(`/proc/${pid}/stat`, 'utf8')
+        } catch {
+          return null
+        }
+      },
+      requestQuit: requestSignalledQuit,
+      beforeEnd: endBackendWithSignalledApp,
+      raise: (signal) => {
+        process.kill(process.pid, signal)
+        // The default action has ended the process by now; this only runs if
+        // something still holds the signal.
+        setTimeout(() => app.exit(128 + osConstants.signals[signal]), 1000)
+      },
+      setInterval: (callback, ms) => setInterval(callback, ms),
+      clearInterval: (handle) => clearInterval(handle as NodeJS.Timeout),
+      now: () => Date.now()
+    })
+  })
+} else {
+  installPersistentBackendShutdownSignalHandlers(process, requestSignalledQuit)
+}
+
+function endBackendWithSignalledApp(signal: LinuxTerminationSignal, reason: string): void {
+  logBackend(
+    'warn',
+    `Received ${signal} with Chromium's helpers (${reason}); ending now, before Chromium aborts relaunching them. The backend finalizes the recording on its own SIGTERM.`
+  )
+  // The signal usually reached the backend too; a second SIGTERM is ignored
+  // there. Only a child that has not exited still owns its PID.
+  if (backendProcess && backendProcess.exitCode === null && backendProcess.signalCode === null) {
+    backendProcess.kill('SIGTERM')
+  }
+}
 
 previewLifecycleEvidence.bindBeforeQuit(app, {
   onPrevented: () => {
