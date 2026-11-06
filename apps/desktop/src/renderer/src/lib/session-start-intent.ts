@@ -6,6 +6,8 @@
 // Live also records, and a destination set up is what makes streaming
 // possible. Pure: no React, so it runs under the node vitest runner.
 
+import { sessionActivity, type SessionActivity } from '../../../shared/capture-state'
+
 /** What a session start asks the backend to do. */
 export interface SessionStartIntent {
   /** Write a local recording. */
@@ -34,6 +36,35 @@ export function savedModeIntent(config: {
   streamEnabled: boolean
 }): SessionStartIntent {
   return { record: config.recordEnabled, stream: config.streamEnabled }
+}
+
+const RUNNING_INTENTS: Record<SessionActivity, SessionStartIntent> = {
+  recording: RECORD_INTENT,
+  'live-stream': { record: false, stream: true },
+  'record+stream': { record: true, stream: true }
+}
+
+/**
+ * What remotes (Stream Deck, phone) see as the session's outputs, so a
+ * Record take never reads as live: the start's own intent; for a session
+ * this renderer did not start, what its status says once it runs. Through
+ * the stop tail, `previous` (the last answer) keeps what the session did.
+ * Idle, or before anything is known, the saved mode a Go Live would follow.
+ */
+export function remoteOutputIntent(input: {
+  sessionActive: boolean
+  startIntent: SessionStartIntent | null
+  status: { state?: string | null; streamUrl?: string | null }
+  config: { recordEnabled: boolean; streamEnabled: boolean }
+  previous: SessionStartIntent | null
+}): SessionStartIntent {
+  const { sessionActive, startIntent, status, config, previous } = input
+  if (!sessionActive) return savedModeIntent(config)
+  if (startIntent) return startIntent
+  if (status.state === 'recording' || status.state === 'streaming') {
+    return RUNNING_INTENTS[sessionActivity(status)]
+  }
+  return previous ?? savedModeIntent(config)
 }
 
 export function sameSessionStartIntent(

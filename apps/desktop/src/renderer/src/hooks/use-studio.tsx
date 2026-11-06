@@ -291,6 +291,7 @@ import {
   RECORD_INTENT,
   captureConfigForIntent,
   livestreamIntent,
+  remoteOutputIntent,
   sameSessionStartIntent,
   savedModeIntent,
   type SessionStartIntent
@@ -2624,6 +2625,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // imperative change-detection, debounce, and retry behavior.
   const remoteSurfacePublisherRef = useRef<RemoteSurfacePublisher | null>(null)
   const remoteSurfaceValuesRef = useRef<RemoteSurfaceValues | null>(null)
+  const remoteOutputsRef = useRef<SessionStartIntent | null>(null)
   // Plan 209 S6: the agents' link (their projection and tool calls), the
   // same lazy latest-value bridge.
   const agentLinkRef = useRef<AgentStudioLink | null>(null)
@@ -18294,11 +18296,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         remoteSurfaceValuesRef.current?.[4] ??
         captureConfig.audio.microphoneMuted)
     : captureConfig.audio.microphoneMuted
+  const remoteOutputs = remoteOutputIntent({
+    sessionActive: isSessionActive,
+    startIntent: activeStartIntent,
+    status: recording,
+    config: captureConfig,
+    previous: remoteOutputsRef.current
+  })
+  remoteOutputsRef.current = isSessionActive ? remoteOutputs : null
   const remoteSurfaceValues: RemoteSurfaceValues = [
     recording.state,
     isSessionActive,
-    captureConfig.recordEnabled,
-    captureConfig.streamEnabled,
+    remoteOutputs.record,
+    remoteOutputs.stream,
     remoteSurfaceMicrophoneMuted,
     captureConfig.layout.layoutPreset,
     activeScreen?.id ?? null,
