@@ -477,9 +477,15 @@ impl std::error::Error for ProducerPoolBusy {}
 
 static PRODUCER_CLOSED: OnceLock<(std::sync::Mutex<()>, std::sync::Condvar)> = OnceLock::new();
 fn wait_for_producer_cleanup(count: &AtomicU64, deadline: Instant) -> bool {
+    wait_for_producer_cleanup_to(count, 0, deadline)
+}
+
+/// Waits until at most `kept` producers remain on `count`: a bus that handed
+/// its microphone to the next session (#1068) waits only for the rest.
+fn wait_for_producer_cleanup_to(count: &AtomicU64, kept: u64, deadline: Instant) -> bool {
     let (mutex, closed) = PRODUCER_CLOSED.get_or_init(Default::default);
     let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
-    while count.load(Ordering::Acquire) != 0 {
+    while count.load(Ordering::Acquire) > kept {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return false;
@@ -1717,6 +1723,12 @@ struct AudioShared {
     /// Plan 157: per-source PCM taps (microphone → Camera file, system →
     /// Screen file). `None` on every session without separate recordings.
     source_taps: Option<Arc<crate::source_audio_tap::SourceAudioTaps>>,
+    /// #1068: where the microphone goes when this bus ends, instead of
+    /// closing. Set by [`SessionAudio::offer_microphone_handover`].
+    microphone_handover: Option<HandoverOffer>,
+    /// The bus handed its microphone to [`MicrophoneHandover`]; the writer
+    /// then does not wait for that producer to close.
+    microphone_carried: bool,
     #[cfg(test)]
     caption_observer: Option<CaptionObserver>,
     #[cfg(test)]
@@ -1958,6 +1970,153 @@ pub async fn prepare_initial_adapter(
     })
 }
 
+/// #1068: a running microphone carried from a session that is ending to the
+/// session that replaces it. A Record pressed while Clips runs stops the Clips
+/// session first; without this its bus closed the microphone and the new
+/// session opened the same device again, about 1 s of every Windows Record.
+///
+/// The hand-over opens a window ([`Self::open`]) and offers it to the ending
+/// bus ([`SessionAudio::offer_microphone_handover`]). At its end the bus moves
+/// its live producer here instead of retiring it, if the window is still the
+/// current one. The new session takes it for the same device
+/// ([`Self::take`]); whatever it does not take closes when the window closes
+/// ([`Self::close`]). Frames queued while no bus reads are stale by then and
+/// the next bus discards them, as it does for every source at attach.
+#[derive(Default)]
+pub struct MicrophoneHandover {
+    inner: std::sync::Mutex<HandoverSlot>,
+}
+
+#[derive(Default)]
+struct HandoverSlot {
+    generation: u64,
+    open: bool,
+    carried: Option<(String, InitialAudioSource)>,
+}
+
+/// The ending bus's side of an open [`MicrophoneHandover`] window.
+struct HandoverOffer {
+    slot: Arc<MicrophoneHandover>,
+    generation: u64,
+    device_id: String,
+    /// The bus's producer count; the carried producer's permit stays on it and
+    /// the next bus adopts it with the source.
+    count: Arc<AtomicU64>,
+}
+
+impl MicrophoneHandover {
+    /// Opens a new window, closing (and dropping) anything an earlier one
+    /// still holds. Returns the window's generation.
+    fn open(&self) -> u64 {
+        let (generation, previous) = {
+            let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            slot.generation += 1;
+            slot.open = true;
+            (slot.generation, slot.carried.take())
+        };
+        drop(previous);
+        generation
+    }
+
+    /// The bus parks its producer here. Refused (and handed back) once the
+    /// window it was offered has closed or been replaced.
+    #[must_use]
+    fn install(
+        &self,
+        generation: u64,
+        producer: ManagedProducer,
+        count: Arc<AtomicU64>,
+    ) -> Option<ManagedProducer> {
+        let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if !slot.open || slot.generation != generation || slot.carried.is_some() {
+            return Some(producer);
+        }
+        let device_id = producer.device_id.clone();
+        slot.carried = Some((
+            device_id,
+            InitialAudioSource {
+                source: InitialInput::Owned { producer, count },
+            },
+        ));
+        None
+    }
+
+    /// The carried microphone when it is `device_id`. Another device stays
+    /// until the window closes.
+    pub fn take(&self, device_id: &str) -> Option<InitialAudioSource> {
+        let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.carried.as_ref()?.0 != device_id {
+            return None;
+        }
+        slot.carried.take().map(|(_, source)| source)
+    }
+
+    /// Closes the window: a microphone nobody took closes now, and a bus that
+    /// ends later closes its own. Returns true when one was dropped.
+    pub fn close(&self) -> bool {
+        let previous = {
+            let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            slot.open = false;
+            slot.generation += 1;
+            slot.carried.take()
+        };
+        let dropped = previous.is_some();
+        drop(previous);
+        dropped
+    }
+
+    /// The producers parked here, for [`cleanup_pending`]'s standby count.
+    pub fn owned_producer_count(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .carried
+            .as_ref()
+            .map_or(0, |(_, source)| source.owned_producer_count())
+    }
+}
+
+/// #1068: hands the bus's microphone to an open [`MicrophoneHandover`]
+/// window. Returns the producer when it stays, for the usual retire. Only a
+/// producer that is still running, still has its receiver and is the offered
+/// device moves.
+#[must_use]
+fn carry_microphone(
+    producer: ManagedProducer,
+    receiver: Option<mpsc::Receiver<AudioFrame>>,
+    shared: &std::sync::Mutex<AudioShared>,
+) -> Option<ManagedProducer> {
+    let Some(offer) = shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .microphone_handover
+        .take()
+    else {
+        return Some(producer);
+    };
+    let (Some(receiver), true, true) = (
+        receiver,
+        producer.device_id == offer.device_id,
+        producer.completion.as_ref().is_some_and(|c| c.running()),
+    ) else {
+        return Some(producer);
+    };
+    let mut producer = producer;
+    producer.receiver = Some(receiver);
+    if let Some(refused) = offer
+        .slot
+        .install(offer.generation, producer, offer.count.clone())
+    {
+        return Some(refused);
+    }
+    shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .microphone_carried = true;
+    tracing::info!("Session audio handed its live microphone to the next session.");
+    None
+}
+
 pub struct SessionAudio {
     pub fifo_path: PathBuf,
     handle: AudioSwitchHandle,
@@ -2117,6 +2276,31 @@ impl SessionAudio {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .source_taps = Some(taps);
+    }
+
+    /// #1068: opens a hand-over window on `slot` and asks this bus to park its
+    /// microphone there when it ends, instead of closing it. Offered only when
+    /// the bus's selected microphone is `device_id`, the device the next
+    /// session opens; returns whether it was. Call before the stop.
+    pub fn offer_microphone_handover(
+        &self,
+        slot: &Arc<MicrophoneHandover>,
+        device_id: &str,
+    ) -> bool {
+        let mut shared = self.handle.shared.lock().unwrap_or_else(|p| p.into_inner());
+        let selected = shared.owner_present
+            && shared.status.selected_input
+            && shared.status.device_id.as_deref() == Some(device_id);
+        if !selected || self.handle.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        shared.microphone_handover = Some(HandoverOffer {
+            slot: slot.clone(),
+            generation: slot.open(),
+            device_id: device_id.to_string(),
+            count: self.handle.producer_count.clone(),
+        });
+        true
     }
 
     pub fn request_stop(&self) {
@@ -2520,6 +2704,8 @@ pub fn attach_prepared_with(
         mix_clipped_samples: 0,
         levels: BusLevelWindows::default(),
         source_taps: None,
+        microphone_handover: None,
+        microphone_carried: false,
         #[cfg(test)]
         caption_observer: None,
         #[cfg(test)]
@@ -2636,7 +2822,13 @@ pub fn attach_prepared_with(
             tracing::warn!("Session audio transport ended: {error}");
         }
         let cleanup_deadline = Instant::now() + WRITE_DEADLINE;
-        if !wait_for_producer_cleanup(&producer_count, cleanup_deadline) {
+        let carried = u64::from(
+            shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .microphone_carried,
+        );
+        if !wait_for_producer_cleanup_to(&producer_count, carried, cleanup_deadline) {
             tracing::warn!(
                 "Microphone owner remains quarantined after 5s; next session admission is fenced until actual close."
             );
@@ -5342,8 +5534,15 @@ fn run_bus(
     let mut system_retired = Vec::new();
     let shared = context.shared;
     let sound_commands = context.sound_commands;
+    // Held here, not in the loop, so it outlives every exit of the loop (a
+    // killed FFmpeg ends it with a write error) and can travel with a carried
+    // microphone (#1068).
+    let mut receiver = producer
+        .as_mut()
+        .and_then(|producer| producer.receiver.take());
     let result = run_bus_owned(
         &mut producer,
+        &mut receiver,
         path,
         video_epoch,
         commands,
@@ -5373,9 +5572,17 @@ fn run_bus(
     while let Ok(command) = sound_commands.try_recv() {
         refuse_sound_command(command);
     }
-    if let Some(producer) = producer {
+    if let Some(producer) = producer
+        && let Some(producer) = carry_microphone(producer, receiver.take(), shared)
+    {
         retired.push(producer.retire());
     }
+    // An offer the bus could not take up (the microphone already left on its
+    // retire list, or never matched) must not outlive it.
+    shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .microphone_handover = None;
     for completion in retired {
         if matches!(
             completion.closed.try_recv(),
@@ -5407,6 +5614,7 @@ fn cancel_drain_observation(observe: &mut Option<OutputObservation>) {
 
 fn retire_draining_sources(
     producer: &mut Option<ManagedProducer>,
+    receiver: &mut Option<mpsc::Receiver<AudioFrame>>,
     pending: &mut Option<PendingHandoff>,
     commands: &mpsc::Receiver<AudioSwitchCommand>,
     shared: &std::sync::Mutex<AudioShared>,
@@ -5422,9 +5630,14 @@ fn retire_draining_sources(
             .push((id, completion.state.clone()));
         retired.push(completion);
     };
-    if let Some(owner) = producer.take() {
+    // A silent drain ends capture here; a carried microphone (#1068) leaves
+    // with its receiver for the next session instead.
+    if let Some(owner) = producer.take()
+        && let Some(owner) = carry_microphone(owner, receiver.take(), shared)
+    {
         retire(owner);
     }
+    *receiver = None;
     let mut cancel = |mut command: AudioSwitchCommand| {
         if let Some(owner) = command.candidate.take() {
             retire(owner);
@@ -5448,6 +5661,7 @@ fn retire_draining_sources(
 #[allow(clippy::too_many_arguments)]
 fn run_bus_owned(
     producer: &mut Option<ManagedProducer>,
+    receiver: &mut Option<mpsc::Receiver<AudioFrame>>,
     path: &std::path::Path,
     video_epoch: Option<Arc<OnceLock<Instant>>>,
     commands: mpsc::Receiver<AudioSwitchCommand>,
@@ -5487,9 +5701,6 @@ fn run_bus_owned(
         .unwrap_or_else(|p| p.into_inner())
         .system_stats
         .clone();
-    let mut receiver = producer
-        .as_mut()
-        .and_then(|producer| producer.receiver.take());
     let mut producer_stats = producer.as_ref().map(|producer| producer.stats.clone());
     let mut stats = shared
         .lock()
@@ -5613,8 +5824,8 @@ fn run_bus_owned(
             // ramps out and retires on its own list at the chunk end, so a
             // closing system capture never blocks the microphone path. Stop
             // afterwards runs the bounded drain above over this silence.
-            retire_draining_sources(producer, &mut pending, &commands, shared, retired);
-            receiver = None;
+            retire_draining_sources(producer, receiver, &mut pending, &commands, shared, retired);
+            *receiver = None;
             producer_stats = None;
             timeline.select_generation(generation);
             cancel_drain_observation(&mut observe);
@@ -5708,7 +5919,7 @@ fn run_bus_owned(
         }
         match loss_reason {
             Some(SourceLossReason::CaptureStopped) => {
-                receiver = None;
+                *receiver = None;
                 microphone_fault = TimelineFault::default();
                 {
                     let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -5926,7 +6137,7 @@ fn run_bus_owned(
                             retired.push(completion);
                         }
                         *producer = handoff.command.candidate.take();
-                        receiver = producer
+                        *receiver = producer
                             .as_mut()
                             .and_then(|producer| producer.receiver.take());
                         producer_stats = producer.as_ref().map(|producer| producer.stats.clone());
@@ -6189,8 +6400,15 @@ fn run_bus_owned(
                 write_stop.store(true, Ordering::Release);
             }
             if draining.load(Ordering::Acquire) {
-                retire_draining_sources(producer, &mut pending, &commands, shared, retired);
-                receiver = None;
+                retire_draining_sources(
+                    producer,
+                    receiver,
+                    &mut pending,
+                    &commands,
+                    shared,
+                    retired,
+                );
+                *receiver = None;
                 producer_stats = None;
             }
             // The FIFO reader is behind. Keep ingesting so a bursty reader
@@ -8079,6 +8297,224 @@ mod tests {
         .expect("Failed start retained microphone owner");
         assert_eq!(*closed.borrow(), ProducerCompletion::Closed);
         assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
+    /// A FIFO with a reader that forwards each chunk's samples until
+    /// `close` is set or the writer closes.
+    fn handover_pcm_reader(
+        tag: &str,
+    ) -> (
+        PathBuf,
+        Arc<AtomicBool>,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
+        thread::JoinHandle<()>,
+    ) {
+        use std::io::Read;
+        let path = crate::audio::native_audio_fifo_path(&format!(
+            "handover-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        crate::audio::create_native_audio_fifo(&path).unwrap();
+        let reader_path = path.clone();
+        let close = Arc::new(AtomicBool::new(false));
+        let reader_close = close.clone();
+        let (chunks, received) = tokio::sync::mpsc::unbounded_channel();
+        let reader = thread::spawn(move || {
+            let Ok(mut file) = std::fs::File::open(reader_path) else {
+                return;
+            };
+            while !reader_close.load(Ordering::Acquire) {
+                let mut bytes = [0_u8; CHUNK_FRAMES * 8];
+                if file.read_exact(&mut bytes).is_err() {
+                    break;
+                }
+                let samples = bytes
+                    .chunks_exact(4)
+                    .map(|value| f32::from_le_bytes(value.try_into().unwrap()))
+                    .collect();
+                let _ = chunks.send(samples);
+            }
+        });
+        (path, close, received, reader)
+    }
+
+    async fn await_captured_pcm(received: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let samples = received.recv().await.expect("reader ended before PCM");
+                if samples.iter().all(|sample| *sample > 0.1) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("captured PCM");
+    }
+
+    /// #1068: a Clips session that ends with a hand-over offered parks its
+    /// running microphone instead of closing it, on every way a bus ends, and
+    /// the next session's bus records from it without reopening anything.
+    #[tokio::test]
+    async fn a_carried_microphone_outlives_its_bus_and_feeds_the_next_session() {
+        const MIC: &str = "microphone:dshow:Test Mic";
+        for exit in ["stop", "silent-drain", "reader-exit"] {
+            let slot = Arc::new(MicrophoneHandover::default());
+            let count = Arc::new(AtomicU64::new(0));
+            let producer = paced_test_producer(MIC, 0.5, count.clone(), None).await;
+            let mut completion = producer.completion.as_ref().unwrap().state.clone();
+            let (path, close_reader, mut received, reader) = handover_pcm_reader("clips");
+            let clips = attach_prepared(
+                Some(InitialAudioSource {
+                    source: InitialInput::Owned {
+                        producer,
+                        count: count.clone(),
+                    },
+                }),
+                path,
+                None,
+                AudioProcessingSettings::default(),
+                Duration::from_secs(1),
+            );
+            await_captured_pcm(&mut received).await;
+            assert!(
+                !clips.offer_microphone_handover(&slot, "microphone:dshow:Other"),
+                "{exit}: offered a microphone the next session does not open"
+            );
+            assert!(clips.offer_microphone_handover(&slot, MIC), "{exit}");
+            match exit {
+                "stop" => clips.request_stop(),
+                "silent-drain" => assert!(clips.request_silent_drain()),
+                _ => close_reader.store(true, Ordering::Release),
+            }
+            let ended = Instant::now();
+            drop(clips);
+            // The writer does not wait out its 5 s quarantine for a producer
+            // it handed on.
+            assert!(
+                ended.elapsed() < Duration::from_secs(3),
+                "{exit}: bus end waited {:?}",
+                ended.elapsed()
+            );
+            close_reader.store(true, Ordering::Release);
+            reader.join().unwrap();
+            assert_eq!(
+                *completion.borrow(),
+                ProducerCompletion::Running,
+                "{exit}: the carried microphone closed"
+            );
+            assert_eq!(count.load(Ordering::Acquire), 1, "{exit}");
+            assert_eq!(slot.owned_producer_count(), 1, "{exit}");
+            assert!(slot.take("microphone:dshow:Other").is_none(), "{exit}");
+            let carried = slot.take(MIC).expect("carried microphone");
+            assert_eq!(slot.owned_producer_count(), 0, "{exit}");
+
+            let (path, close_reader, mut received, reader) = handover_pcm_reader("record");
+            let record = attach_prepared(
+                Some(carried),
+                path,
+                None,
+                AudioProcessingSettings::default(),
+                Duration::from_secs(1),
+            );
+            await_captured_pcm(&mut received).await;
+            assert_eq!(record.status().device_id.as_deref(), Some(MIC), "{exit}");
+            drop(record);
+            close_reader.store(true, Ordering::Release);
+            reader.join().unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while *completion.borrow() == ProducerCompletion::Running {
+                    completion.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("the next session closes the carried microphone");
+            assert_eq!(*completion.borrow(), ProducerCompletion::Closed, "{exit}");
+            assert_eq!(count.load(Ordering::Acquire), 0, "{exit}");
+        }
+    }
+
+    /// A window that closed before the bus ended (the new session failed or
+    /// gave up waiting) gets nothing: the bus closes its microphone as it
+    /// always did, and nothing is left open.
+    #[tokio::test]
+    async fn a_closed_handover_window_closes_the_microphone_with_its_bus() {
+        const MIC: &str = "microphone:dshow:Test Mic";
+        let slot = Arc::new(MicrophoneHandover::default());
+        let count = Arc::new(AtomicU64::new(0));
+        let producer = paced_test_producer(MIC, 0.5, count.clone(), None).await;
+        let mut completion = producer.completion.as_ref().unwrap().state.clone();
+        let (path, close_reader, mut received, reader) = handover_pcm_reader("closed");
+        let clips = attach_prepared(
+            Some(InitialAudioSource {
+                source: InitialInput::Owned {
+                    producer,
+                    count: count.clone(),
+                },
+            }),
+            path,
+            None,
+            AudioProcessingSettings::default(),
+            Duration::from_secs(1),
+        );
+        await_captured_pcm(&mut received).await;
+        assert!(clips.offer_microphone_handover(&slot, MIC));
+        assert!(!slot.close(), "nothing carried yet");
+        drop(clips);
+        close_reader.store(true, Ordering::Release);
+        reader.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *completion.borrow() == ProducerCompletion::Running {
+                completion.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the microphone closes with its bus");
+        assert_eq!(*completion.borrow(), ProducerCompletion::Closed);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert_eq!(slot.owned_producer_count(), 0);
+        assert!(slot.take(MIC).is_none());
+    }
+
+    /// A carried microphone the new session never took (it opened another
+    /// device, or failed before the microphone) closes with the window.
+    #[tokio::test]
+    async fn an_unclaimed_carried_microphone_closes_with_the_window() {
+        const MIC: &str = "microphone:dshow:Test Mic";
+        let slot = Arc::new(MicrophoneHandover::default());
+        let count = Arc::new(AtomicU64::new(0));
+        let producer = paced_test_producer(MIC, 0.5, count.clone(), None).await;
+        let mut completion = producer.completion.as_ref().unwrap().state.clone();
+        let (path, close_reader, mut received, reader) = handover_pcm_reader("unclaimed");
+        let clips = attach_prepared(
+            Some(InitialAudioSource {
+                source: InitialInput::Owned {
+                    producer,
+                    count: count.clone(),
+                },
+            }),
+            path,
+            None,
+            AudioProcessingSettings::default(),
+            Duration::from_secs(1),
+        );
+        await_captured_pcm(&mut received).await;
+        assert!(clips.offer_microphone_handover(&slot, MIC));
+        drop(clips);
+        close_reader.store(true, Ordering::Release);
+        reader.join().unwrap();
+        assert_eq!(slot.owned_producer_count(), 1);
+        assert_eq!(*completion.borrow(), ProducerCompletion::Running);
+        assert!(slot.close(), "the window dropped the carried microphone");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while *completion.borrow() == ProducerCompletion::Running {
+                completion.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the unclaimed microphone closes");
+        assert_eq!(*completion.borrow(), ProducerCompletion::Closed);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert_eq!(slot.owned_producer_count(), 0);
     }
 
     #[cfg(unix)]
