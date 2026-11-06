@@ -48,10 +48,10 @@ import { NO_VALUE } from '@/lib/format'
 import { PAGE_TRAIL_COLUMN } from '@/lib/page-layout'
 import { destinationLabel } from '@/lib/platform-copy'
 import { formatBitrate, formatVideoQuality } from '@/lib/format-video'
+import type { RecentStreamDrops } from '@/lib/stream-drop-activity'
 import {
   classifyStreamHealthAttribution,
   liveProblemLabel,
-  type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
 import { cn } from '@/lib/utils'

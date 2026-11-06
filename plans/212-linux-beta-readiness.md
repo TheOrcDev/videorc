@@ -3687,3 +3687,107 @@ are skipped; 5.1 sides and rears are summed at full gain; a link the user
 removes is not recreated while its stream lives. Also, any process launched
 under the Electron main process and not reparented is left out as Videorc's
 own.
+
+### Ogre test day and main through `a424fe73`, 2026-11-06
+
+The goal for the day was to test the latest Linux build properly on Ogre,
+fix what failed and open a PR per fix. The packaged 0.20.1 and 0.20.2 Linux
+builds and main were run through the device, portal, companion, endurance,
+latency and storage smokes. Every fix below is merged on main:
+
+- #1198: a signal sent to the whole app (logout, `pkill videorc`, Ctrl+C)
+  ended in a Chromium abort and a core dump, because Electron's own handler
+  replaces Node's listeners (electron#54547). Linux now takes the signals
+  over after ready and exits by the same signal.
+- #1199: the smokes found the local RTMP listener with `lsof`, which Ogre
+  does not have. They read `/proc` now.
+- #1200: the Linux proof Preview surface ignored the scene background.
+- #1201: the layout switch smoke recorded 640x360 while streaming 1080p30.
+  Linux always shares one encode (plan 0016), so the backend refused; the
+  smoke now records at the stream's profile.
+- #1202: the preview lifecycle census counted a renderer that had exited as
+  a second Electron main, and the gate failed 2 runs of 3.
+- #1203: a recordings folder removed after it was chosen (an unplugged USB
+  drive under `/run/media`) toasted a raw `ENOENT ... realpath`.
+- #1204: a folder deleted during a recording saved a take that no longer
+  existed. Stop now fails it with `recording-file-missing`.
+- #1205: an FFmpeg that exits during startup made Record wait the 4 s
+  priming deadline and blame the encoder. It fails at once with FFmpeg's
+  own reason.
+- #1206: global shortcuts on Wayland never fire (the portal wants an app id
+  Chromium does not register, electron#51875), yet Settings said they were
+  registered. Linux on Wayland now says they can't work.
+- #1207: Linux repairs had no re-encoder (the bundle has no libx264). They
+  use the bundled OpenH264.
+- #1208: the finalization barrier smokes never reached their shim on Linux,
+  and the process census classified by argv substring.
+- #1209: OpenH264 record-only takes skipped frames under hard content (39 of
+  301 kept in session decay). Record-only keeps every frame; a stream still
+  allows skips.
+- #1214: `format:check` failed on main because a prettier brace glob passed
+  the 255-byte file name limit.
+- #1216: a resized proof Preview could keep the old width after a failed
+  first request.
+- #1219: a capture recovery test raced its returned status on Linux CI.
+- #1222: a Stop before FFmpeg opened its audio FIFO waited 6 s for SIGKILL
+  (a 6,553 ms cold Record, once in about 22 runs).
+- #1223: the Clips handover threw away a 250 to 300 ms ring flush on every
+  warm Record. VAAPI warm click to recording p95 went from 537 to 266 ms.
+
+Passing on Ogre without a change: the packaged av-devices smoke (microphone,
+camera at 31.8 fps), the packaged portal smokes, agent-mcp, remote-control,
+youtube-quota, buddy-act, soundboard-fixture, captions-contract,
+separate-source-fixture, remote-lan, backend-resilience, process-lifecycle,
+platform-lifecycle and multistream. Storage: a read-only folder, a full disk
+mid-recording and Record again after freeing the space all behave.
+
+Still open:
+
+- Ogre's UHD 630 reads 100 MHz on every active sample (RPn 350, max 1100)
+  with BD_PROCHOT clear. With it VAAPI misses the Stop budget (click to idle
+  p95 334 to 368 ms against 300) and the VAAPI hard content session decay
+  fails. The time is the recording's own `h264_vaapi` flush
+  (`i915_request_wait_timeout`). A second Intel box would show whether it is
+  this host. The iGPU cap is the owner's decision.
+- Global shortcuts stay off on Wayland until Chromium registers an app id
+  with the portal.
+- Videorc Camera stays hidden on Linux (owner decision, 2026-11-03).
+  v4l2loopback is not installed on Ogre.
+- `smoke-live-background-app.mjs` is macOS-only. Live backgrounds on Linux
+  were checked by hand: GLES renders, then the gpu-budget guard drops to the
+  still after about 4 s.
+- Copy: after a full-disk stop an extra `interrupted-take-recovery-failed`
+  event reads like a crash. Clicking the selected Picture tile again does
+  not turn the background off.
+
+Main merges: `d4add1cf` takes main through `050485dc` (#1222), `a5ca49e1`
+through `a424fe73` (#1223). The one conflict, in
+`smoke-record-latency-app.mjs`, keeps both report fields: this branch's
+`sceneFixture` and main's `warnings`.
+
+The merged tree was over the renderer budget. #930's CI at `b7d3b2c0` had
+failed the old ceilings (2,324,578 raw / 476,520 gzip against 2,320,000 /
+476,000); main has since raised them to 2,325,000 / 477,000, and `d4add1cf`
+measured 2,327,852 / 477,455. Sourcemap attribution put all of
+`stream-health-attribution` in the entry: the Studio provider folds every
+diagnostics sample into its drop window, so Rollup kept the whole module,
+classifier and labels included, in the eager chunk. The drop window now
+lives in `lib/stream-drop-activity.ts`, and the classifier loads with the
+lazy surfaces that read it, in its own 4,988-byte chunk. The eager JS is
+2,323,061 raw / 476,341 gzip (entry 1,013,414 / 213,192). The budget is
+unchanged.
+
+Gates on Ogre:
+
+- At `d4add1cf`: format, lint, typecheck, test:scripts (3,304 passed, 0
+  failed), desktop tests (7,295 passed, 1 skipped), cargo fmt, Linux CI
+  clippy with `--all-targets`, backend tests (4,532 passed, 0 failed, 23
+  ignored) and the direct 1080p30 matrix on both backends (OpenH264 level
+  4.0, BT.709 TV range, 10 ms tail; VAAPI on renderD128 level 4.0, BT.709 TV
+  range, 1 ms tail).
+- At `a5ca49e1` with the split: format, lint, typecheck, test:scripts (3,305
+  passed, 0 failed), desktop tests (7,295 passed, 1 skipped), the renderer
+  budget, cargo fmt, Linux CI clippy with `--all-targets` and the backend
+  tests (4,534 passed, 0 failed, 23 ignored) pass. The direct 1080p30
+  matrix passes on both backends: OpenH264 level 4.0, BT.709 TV range,
+  10 ms tail; VAAPI on renderD128 level 4.0, BT.709 TV range, 2 ms tail.

@@ -137,7 +137,7 @@ import {
   recentStreamDrops,
   type RecentStreamDrops,
   type StreamDropActivity
-} from '@/lib/stream-health-attribution'
+} from '@/lib/stream-drop-activity'
 import {
   connectionBlockedReason,
   sceneSourceOffBlockedReason,
