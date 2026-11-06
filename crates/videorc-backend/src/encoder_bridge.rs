@@ -1659,8 +1659,8 @@ struct StreamBitrateController {
 }
 
 impl StreamBitrateController {
-    // Plan 218 S3a: only the macOS VideoToolbox stream encoder adapts its
-    // bitrate; elsewhere the controller is always `None` outside tests.
+    /// Only a VideoToolbox stream encoder adapts today, so off macOS the
+    /// controller is built by the tests alone.
     #[cfg(any(target_os = "macos", test))]
     fn new(chosen_kbps: u32, fps: u32, now: Instant) -> Self {
         Self {
