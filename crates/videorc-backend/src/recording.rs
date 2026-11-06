@@ -6360,11 +6360,17 @@ async fn start_session_with_timeline(
         dir: ring.dir.clone(),
         seconds: ring.seconds,
     });
+    // The ring's tee slave when it shares the file's encode: its failure
+    // turns Clips off and leaves the take running.
+    let mut replay_tee_slave = None;
     let mut args = if use_encoder_bridge {
         let fifo_path = encoder_bridge_fifo
             .as_deref()
             .context("Encoder bridge FIFO path was not prepared")?;
         if params.output.record_enabled && !params.output.stream_enabled && output_path.is_some() {
+            replay_tee_slave = replay_output.as_ref().and_then(|_| {
+                replay_shared_tee_slave(&params, encoder_bridge_video_output, true, 0)
+            });
             bridge_recording_ffmpeg_args_with_encoder_and_replay(
                 &capture,
                 &params,
@@ -6390,6 +6396,14 @@ async fn start_session_with_timeline(
                 replay_output.as_ref(),
             )?
         } else {
+            replay_tee_slave = replay_output.as_ref().and_then(|_| {
+                replay_shared_tee_slave(
+                    &params,
+                    encoder_bridge_video_output,
+                    output_path.is_some(),
+                    stream_targets.len(),
+                )
+            });
             bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &capture,
                 &params,
@@ -6898,6 +6912,25 @@ async fn start_session_with_timeline(
                         reason,
                     )
                     .await;
+                }
+                // The Clips ring sharing the file's tee (onfail=ignore): the
+                // take keeps running, so only Clips goes off and says why.
+                if let Some(failure) = parse_tee_slave_failure(trimmed)
+                    && Some(failure.slave_index) == replay_tee_slave
+                {
+                    let message = replay_tee_failure_message(&failure.reason);
+                    crate::replay_buffer::retire(
+                        &log_state,
+                        &log_session_id,
+                        crate::replay_buffer::RetireOutcome::Failed(message.clone()),
+                    );
+                    let _ = emit_health_event(
+                        &log_state,
+                        Some(&log_session_id),
+                        HealthLevel::Warn,
+                        "replay-buffer-failed",
+                        &message,
+                    );
                 }
             };
             // A short capture or abrupt stderr end may not include a final
@@ -21496,6 +21529,56 @@ enum ReplayVideoCodec {
     },
 }
 
+/// The ring's tee slave index when it shares the file's encode on the raw
+/// path, or `None` when it keeps an output of its own.
+///
+/// A `split` of the raw graph encoded every frame twice, once for the file
+/// and once for the ring. On a slow iGPU that halved the VAAPI rate and
+/// pushed Record and Stop past their budgets (Ogre, UHD 630: warm Record p95
+/// 548 ms and Stop p95 469 ms with Clips on, 229 ms and 324 ms off). With a
+/// file the ring rides the file's tee as its last slave instead. It needs
+/// AAC for the segments and the saved clip's MP4. A stream-only session
+/// keeps its own encode: a ring slave would keep the tee alive after every
+/// stream leg failed, and a single stream would leave its plain `flv`.
+fn replay_shared_tee_slave(
+    params: &StartSessionParams,
+    video_output: EncoderBridgeVideoOutput,
+    has_file: bool,
+    stream_count: usize,
+) -> Option<usize> {
+    (video_output == EncoderBridgeVideoOutput::RawYuv420p
+        && has_file
+        && OutputAudioCodec::for_session(params, stream_count > 0).fits_replay_ring())
+    .then_some(1 + stream_count)
+}
+
+/// The ring as the file's last tee slave: the segment muxer with the options
+/// of its own output, written in the muxing thread (`use_fifo=0`, as its own
+/// output was) so no fifo of its own can be read as a stream leg's. A full
+/// disk or a removed ring folder drops this slave only (`onfail=ignore`).
+fn replay_tee_leg(replay: &ReplayOutput) -> String {
+    let (options, pattern) =
+        crate::replay_buffer::segment_muxer_options(&replay.dir, replay.seconds);
+    let options = options
+        .iter()
+        .map(|(key, value)| format!("{key}={}", escape_tee_option_value(value)))
+        .collect::<Vec<_>>()
+        .join(":");
+    format!(
+        "[f=segment:onfail=ignore:use_fifo=0:{options}]{}",
+        escape_tee_target(&pattern)
+    )
+}
+
+/// Why Clips went off when its tee slave failed; the take keeps recording.
+fn replay_tee_failure_message(reason: &str) -> String {
+    if reason.is_empty() {
+        "Clips stopped writing, so clips are off. The recording continues.".to_string()
+    } else {
+        format!("Clips stopped writing ({reason}), so clips are off. The recording continues.")
+    }
+}
+
 /// Appends the ring as one more output: the same audio mix the file gets,
 /// encoded to AAC, and a `-f segment` MPEG-TS ring (plan 181 S2).
 fn append_replay_segment_output(
@@ -21786,7 +21869,8 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
     let performance_check = params.purpose.is_performance_check();
     // Plan 181: a buffer-only session has no primary output; the ring maps
     // the video itself. With a primary output the ring copies the encoded
-    // stream, or rides a `split` of the raw graph.
+    // stream, rides the file's tee on the raw path, or else rides a `split`
+    // of the raw graph.
     let primary_output = output_path.is_some() || !stream_targets.is_empty();
     let session_params = ffmpeg_session_params(
         capture,
@@ -21794,6 +21878,15 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
         crate::system_audio_session::system_audio_capable(),
     );
     let params = session_params.as_ref();
+    let shared_replay = replay.filter(|_| {
+        replay_shared_tee_slave(
+            params,
+            video_output,
+            output_path.is_some(),
+            stream_targets.len(),
+        )
+        .is_some()
+    });
     // RTMP legs here are fifo-wrapped too: their "Recovery successful" is
     // INFO, so without `level+info` a reconnected leg never shows as resumed.
     let loglevel = if stream_targets.is_empty() {
@@ -21835,7 +21928,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                     encoder,
                 );
                 let filter = match replay {
-                    Some(_) if primary_output => {
+                    Some(_) if primary_output && shared_replay.is_none() => {
                         crate::replay_buffer::split_video_filter_for_replay(&filter)
                             .unwrap_or(filter)
                     }
@@ -21901,7 +21994,19 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
         .collect::<Vec<_>>();
 
     match (output_path, stream_targets) {
-        (Some(path), []) => args.push(ffmpeg_file_path(path)),
+        (Some(path), []) => match shared_replay {
+            // A plain tee, no fifo: the file keeps its direct writes.
+            Some(replay) => args.extend([
+                "-f".to_string(),
+                "tee".to_string(),
+                format!(
+                    "[f=matroska:onfail=abort]{}|{}",
+                    escape_tee_target(&ffmpeg_file_path(path)),
+                    replay_tee_leg(replay)
+                ),
+            ]),
+            None => args.push(ffmpeg_file_path(path)),
+        },
         (Some(path), _) if copy_stream_fanout => {
             append_bridge_copy_file_output(
                 &mut args,
@@ -21930,6 +22035,8 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 escape_tee_target(&ffmpeg_file_path(path))
             )];
             legs.extend(stream_legs);
+            // Last, so the stream legs keep their slave indexes.
+            legs.extend(shared_replay.map(replay_tee_leg));
             args.extend(tee_output_args(legs.join("|")));
         }
         (None, targets) if copy_stream_fanout => {
@@ -21962,7 +22069,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
         (None, _) => bail!("At least one output target is required"),
     }
 
-    if let Some(replay) = replay {
+    if let Some(replay) = replay.filter(|_| shared_replay.is_none()) {
         let video = match video_output {
             EncoderBridgeVideoOutput::RawYuv420p => {
                 let mut encoder_args = Vec::new();
@@ -23326,6 +23433,12 @@ impl OutputAudioCodec {
 
     fn is_streaming(self) -> bool {
         self == Self::StreamAac
+    }
+
+    /// The ring's MPEG-TS segments and the MP4 a clip saves to carry AAC,
+    /// so only an AAC output can share its encode with the ring.
+    fn fits_replay_ring(self) -> bool {
+        self != Self::RecordPcm
     }
 
     fn encoder_args(self) -> &'static [&'static str] {
@@ -26624,14 +26737,31 @@ fn redact_stream_url(url: &str) -> String {
     }
 }
 
+/// Backslash-escapes `special`, the backslash and the quote for one
+/// `av_get_token` pass, which treats `\x` as `x` and `'…'` as quoted text.
+fn escape_ffmpeg_token(text: &str, special: &[char]) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character == '\\' || character == '\'' || special.contains(&character) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 fn escape_tee_target(target: &str) -> String {
-    // The tee muxer uses `|` to separate slave outputs and `[]` for per-output
-    // options; backslash-escape those so URLs/paths cannot break the filtergraph.
-    target
-        .replace('\\', "\\\\\\\\")
-        .replace('|', "\\|")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
+    // The tee muxer splits its slaves on `|` with one `av_get_token` pass and
+    // reads `[]` as per-output options, so a slave's file name or URL is
+    // escaped once. An unescaped quote swallowed the rest of the spec, and a
+    // backslash escaped twice reached FFmpeg doubled.
+    escape_ffmpeg_token(target, &['|', '[', ']'])
+}
+
+/// A tee slave option value is unescaped twice: by the slave split on `|`,
+/// then by the slave's option parse on `:` and `]`.
+fn escape_tee_option_value(value: &str) -> String {
+    escape_ffmpeg_token(&escape_ffmpeg_token(value, &[':', '[', ']']), &['|'])
 }
 
 fn resolve_stream_target(
@@ -36760,6 +36890,32 @@ mod tests {
         assert!(parse_tee_slave_failure("[tee @ 0x10] Slave muxer failed somehow").is_none());
     }
 
+    // FFmpeg 7.1 on ogre wrote each name below to that exact path, with and
+    // without the tee-wide fifo.
+    #[test]
+    fn a_tee_slave_name_is_escaped_once() {
+        assert_eq!(
+            escape_tee_target(r"/r/Bob's v:1 [x] a|b\c"),
+            r"/r/Bob\'s v:1 \[x\] a\|b\\c"
+        );
+        assert_eq!(
+            escape_tee_target(r"C:\Users\Bob\Videos\take.mkv"),
+            r"C:\\Users\\Bob\\Videos\\take.mkv"
+        );
+    }
+
+    #[test]
+    fn a_tee_slave_option_value_is_escaped_twice() {
+        assert_eq!(
+            escape_tee_option_value(r"/r/Bob's v:1 [x] a|b\c"),
+            r"/r/Bob\\\'s v\\:1 \\[x\\] a\|b\\\\c"
+        );
+        assert_eq!(
+            escape_tee_option_value("/tmp/ring/segments.csv"),
+            "/tmp/ring/segments.csv"
+        );
+    }
+
     // Plan 023: per-target fifo-muxer legs report failures by URL.
     #[test]
     fn parses_fifo_output_failure_lines() {
@@ -38901,13 +39057,141 @@ mod tests {
             assert_ring_output(&args);
         }
 
-        #[test]
-        fn raw_bridge_ride_along_splits_the_graph_and_encodes_twice() {
-            let mut params = base_params(true, false);
+        /// The ring as the file's last tee slave, with the options of its
+        /// own `-f segment` output.
+        fn ring_tee_leg() -> String {
+            let dir = ring().dir;
+            let list = escape_tee_option_value(&ffmpeg_file_path(&dir.join("segments.csv")));
+            let pattern = escape_tee_target(&ffmpeg_file_path(&dir.join("seg-%06d.ts")));
+            format!(
+                "[f=segment:onfail=ignore:use_fifo=0:segment_format=mpegts:segment_time=2:\
+                 reset_timestamps=0:segment_list={list}:segment_list_type=csv:\
+                 segment_list_size=17:segment_list_flags=+live]{pattern}"
+            )
+        }
+
+        fn ride_along_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
+            let mut params = base_params(record_enabled, stream_enabled);
             params.replay = Some(ReplayParams {
                 seconds: 30,
                 auto: false,
             });
+            params
+        }
+
+        /// The ring encoded on its own: a `split` of the raw graph.
+        fn assert_split_ring(args: &[String]) {
+            let filter = arg_value(args, "-filter_complex").unwrap();
+            assert!(
+                filter.ends_with(";[v_replay_src]split=2[v_main][v_replay]"),
+                "{filter}"
+            );
+            let maps = all_values(args, "-map");
+            assert!(
+                maps.contains(&"[v_main]") && maps.contains(&"[v_replay]"),
+                "{maps:?}"
+            );
+            assert_eq!(all_values(args, "-c:v").len(), 2, "two encodes: {args:?}");
+            assert_ring_output(args);
+        }
+
+        #[test]
+        fn raw_bridge_ride_along_shares_the_file_encode_through_a_plain_tee() {
+            let params = ride_along_params(true, false);
+            let args = bridge_recording_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-raw.mkv")),
+                Path::new("/tmp/videorc-ring-raw.yuv"),
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            let filter = arg_value(&args, "-filter_complex").unwrap();
+            assert!(!filter.contains("split"), "{filter}");
+            assert_eq!(all_values(&args, "-map").first(), Some(&"[v_main]"));
+            assert!(!all_values(&args, "-map").contains(&"[v_replay]"));
+            assert_eq!(all_values(&args, "-c:v").len(), 1, "one encode: {args:?}");
+            // The ring takes the file's own AAC.
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac"]);
+            assert_eq!(arg_value(&args, "-b:a"), Some(RECORD_AAC_BITRATE));
+            assert!(!args.iter().any(|arg| arg == "segment"), "{args:?}");
+            // No fifo: the file keeps the direct writes it had without a ring.
+            assert!(!args.iter().any(|arg| arg == "-use_fifo"), "{args:?}");
+            assert_eq!(args[args.len() - 3..args.len() - 1], ["-f", "tee"]);
+            assert_eq!(
+                args.last().unwrap(),
+                &format!(
+                    "[f=matroska:onfail=abort]/tmp/videorc-replay-raw.mkv|{}",
+                    ring_tee_leg()
+                )
+            );
+            assert_eq!(
+                replay_shared_tee_slave(&params, EncoderBridgeVideoOutput::RawYuv420p, true, 0),
+                Some(1)
+            );
+        }
+
+        #[test]
+        fn raw_bridge_record_and_stream_ring_is_the_last_tee_slave() {
+            let mut params = ride_along_params(true, true);
+            let streaming = streaming_for(&[
+                (
+                    StreamPlatform::Youtube,
+                    "rtmp://a.rtmp.youtube.com/live2",
+                    "yt",
+                ),
+                (StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw"),
+            ]);
+            params.streaming = Some(streaming.clone());
+            let targets = stream_targets_from_streaming(&streaming).unwrap();
+            let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                Some(Path::new("/tmp/videorc-replay-raw.mkv")),
+                &targets,
+                Path::new("/tmp/videorc-ring-raw.yuv"),
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            assert!(
+                !arg_value(&args, "-filter_complex")
+                    .unwrap()
+                    .contains("split")
+            );
+            assert_eq!(all_values(&args, "-c:v").len(), 1, "one encode: {args:?}");
+            assert_eq!(all_values(&args, "-c:a"), vec!["aac"]);
+            assert_eq!(arg_value(&args, "-b:a"), Some("160k"));
+            assert_eq!(arg_value(&args, "-use_fifo"), Some("1"));
+            let tee = args.last().unwrap();
+            assert!(
+                tee.starts_with("[f=matroska:onfail=abort]/tmp/videorc-replay-raw.mkv|"),
+                "{tee}"
+            );
+            assert_eq!(tee.matches("[f=flv").count(), 2, "{tee}");
+            // The stream legs keep slaves 1 and 2; the ring is slave 3.
+            assert!(tee.ends_with(&format!("|{}", ring_tee_leg())), "{tee}");
+            assert_eq!(
+                replay_shared_tee_slave(
+                    &params,
+                    EncoderBridgeVideoOutput::RawYuv420p,
+                    true,
+                    targets.len()
+                ),
+                Some(3)
+            );
+            let (_, slave_positions, _) = build_stream_runtime(&targets, &[], true);
+            assert_eq!(slave_positions.get(3), None, "slave 3 is no stream leg");
+        }
+
+        #[test]
+        fn raw_bridge_ride_along_keeps_its_own_encode_for_pcm_and_stream_only() {
+            // "Keep original recording" writes PCM; the ring needs AAC.
+            let mut params = ride_along_params(true, false);
+            params.output.keep_original_mkv = true;
             let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                 &capture(),
                 &params,
@@ -38919,19 +39203,70 @@ mod tests {
                 Some(&ring()),
             )
             .unwrap();
-            let filter = arg_value(&args, "-filter_complex").unwrap();
-            assert!(
-                filter.ends_with(";[v_replay_src]split=2[v_main][v_replay]"),
-                "{filter}"
+            assert_split_ring(&args);
+            assert_eq!(all_values(&args, "-c:a"), vec!["pcm_s16le", "aac"]);
+            assert!(args.iter().any(|arg| arg == "/tmp/videorc-replay-raw.mkv"));
+            assert_eq!(
+                replay_shared_tee_slave(&params, EncoderBridgeVideoOutput::RawYuv420p, true, 0),
+                None
             );
-            let maps = all_values(&args, "-map");
-            assert!(
-                maps.contains(&"[v_main]") && maps.contains(&"[v_replay]"),
-                "{maps:?}"
+
+            // A stream-only session has no file for the ring to share.
+            let mut params = ride_along_params(false, true);
+            let streaming =
+                streaming_for(&[(StreamPlatform::Twitch, "rtmp://live.twitch.tv/app", "tw")]);
+            params.streaming = Some(streaming.clone());
+            let targets = stream_targets_from_streaming(&streaming).unwrap();
+            let args = bridge_compositor_ffmpeg_args_with_encoder_and_replay(
+                &capture(),
+                &params,
+                None,
+                &targets,
+                Path::new("/tmp/videorc-ring-raw.yuv"),
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &encoder(),
+                Some(&ring()),
+            )
+            .unwrap();
+            assert_split_ring(&args);
+            assert!(!args.iter().any(|arg| arg == "tee"), "{args:?}");
+            assert_eq!(
+                replay_shared_tee_slave(&params, EncoderBridgeVideoOutput::RawYuv420p, false, 1),
+                None
             );
-            assert_eq!(all_values(&args, "-c:v").len(), 2, "two encodes: {args:?}");
-            assert_eq!(all_values(&args, "-c:a"), vec!["aac", "aac"]);
-            assert_ring_output(&args);
+        }
+
+        #[test]
+        fn only_the_raw_path_shares_the_file_encode() {
+            let params = ride_along_params(true, false);
+            for video_output in [
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            ] {
+                assert_eq!(
+                    replay_shared_tee_slave(&params, video_output, true, 0),
+                    None
+                );
+            }
+        }
+
+        #[test]
+        fn a_failed_ring_slave_names_its_reason() {
+            let failure = parse_tee_slave_failure(
+                "[tee @ 0x5581] Slave muxer #1 failed: Permission denied, continuing with 1/2 slaves.",
+            )
+            .unwrap();
+            assert_eq!(failure.slave_index, 1);
+            assert_eq!(
+                replay_tee_failure_message(&failure.reason),
+                "Clips stopped writing (Permission denied), so clips are off. \
+                 The recording continues."
+            );
+            assert_eq!(
+                replay_tee_failure_message(""),
+                "Clips stopped writing, so clips are off. The recording continues."
+            );
         }
 
         #[test]

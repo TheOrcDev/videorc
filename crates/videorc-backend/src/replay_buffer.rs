@@ -271,31 +271,43 @@ pub fn concat_list(selection: &Selection, segment_dir: &Path) -> String {
     script
 }
 
+/// The segment muxer's options and its output pattern: the ring as its own
+/// output ([`segment_muxer_args`]) or as a tee slave beside the file (the
+/// Linux raw path shares the file's encode with the ring).
+pub fn segment_muxer_options(
+    segment_dir: &Path,
+    seconds: u32,
+) -> (Vec<(&'static str, String)>, String) {
+    let options = vec![
+        ("segment_format", "mpegts".to_string()),
+        ("segment_time", SEGMENT_SECONDS.to_string()),
+        ("reset_timestamps", "0".to_string()),
+        (
+            "segment_list",
+            crate::ffmpeg::ffmpeg_file_path(&segment_dir.join(SEGMENT_LIST_FILE)),
+        ),
+        ("segment_list_type", "csv".to_string()),
+        ("segment_list_size", keep_count(seconds).to_string()),
+        ("segment_list_flags", "+live".to_string()),
+    ];
+    let pattern = crate::ffmpeg::ffmpeg_file_path(
+        &segment_dir.join(format!("{SEGMENT_FILE_PREFIX}%06d{SEGMENT_FILE_SUFFIX}")),
+    );
+    (options, pattern)
+}
+
 /// The segment muxer tail of the ring output. The caller has already mapped
 /// the streams and chosen the codecs (`-c:v copy` behind an encoded bridge,
 /// the platform encoder on the raw and legacy paths, AAC audio either way).
 pub fn segment_muxer_args(segment_dir: &Path, seconds: u32) -> Vec<String> {
-    vec![
-        "-f".to_string(),
-        "segment".to_string(),
-        "-segment_format".to_string(),
-        "mpegts".to_string(),
-        "-segment_time".to_string(),
-        SEGMENT_SECONDS.to_string(),
-        "-reset_timestamps".to_string(),
-        "0".to_string(),
-        "-segment_list".to_string(),
-        crate::ffmpeg::ffmpeg_file_path(&segment_dir.join(SEGMENT_LIST_FILE)),
-        "-segment_list_type".to_string(),
-        "csv".to_string(),
-        "-segment_list_size".to_string(),
-        keep_count(seconds).to_string(),
-        "-segment_list_flags".to_string(),
-        "+live".to_string(),
-        crate::ffmpeg::ffmpeg_file_path(
-            &segment_dir.join(format!("{SEGMENT_FILE_PREFIX}%06d{SEGMENT_FILE_SUFFIX}")),
-        ),
-    ]
+    let (options, pattern) = segment_muxer_options(segment_dir, seconds);
+    let mut args = vec!["-f".to_string(), "segment".to_string()];
+    for (key, value) in options {
+        args.push(format!("-{key}"));
+        args.push(value);
+    }
+    args.push(pattern);
+    args
 }
 
 /// The audio encoding of the ring output: the session's own audio filter
