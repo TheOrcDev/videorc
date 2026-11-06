@@ -350,6 +350,56 @@ export function relaunchGate(result) {
   return { ok: failures.length === 0, failures }
 }
 
+/**
+ * Step 7 (plan 219): a captured window minimized for a while on the canvas
+ * is held, never restarted, and comes back on the same generation; a start
+ * on an out-of-sight window is refused with copy the streamer can act on,
+ * and goes live once the window is back.
+ */
+export function outOfSightGate(result) {
+  const failures = []
+  if (!result) return { ok: false, failures: ['no out-of-sight evidence'] }
+  if (!result.noticed) failures.push('no out-of-sight notice while the window was minimized')
+  if (result.recoveryPhases?.length)
+    failures.push(
+      `capture recovery ran (${result.recoveryPhases.join(', ')}) for a window that was only minimized`
+    )
+  if (result.sourceMissingSeen)
+    failures.push('the window went source-missing while it was only minimized')
+  if (result.screenStates?.some((state) => state !== 'live'))
+    failures.push(
+      `the screen preview left live (${result.screenStates.join(', ')}) during the hold`
+    )
+  if (!(result.framesWhileHidden >= result.framesBefore))
+    failures.push('the frame counter reset during the hold, so the generation was replaced')
+  if (!(result.framesAfter > result.framesWhileHidden))
+    failures.push('frames did not resume after the window was restored')
+  if (!result.back) failures.push('no window-back notice after the restore')
+  if (result.refusal) {
+    if (result.refusal.state !== 'source-missing')
+      failures.push(
+        `a start on the minimized window answered ${result.refusal.state}, not source-missing`
+      )
+    if (!result.refusal.copyOk)
+      failures.push(`the refusal copy was ${JSON.stringify(result.refusal.message)}`)
+    if (!result.refusal.liveAfterRestore)
+      failures.push('the same start did not go live once the window was restored')
+  } else {
+    failures.push('no refusal evidence for a start on the minimized window')
+  }
+  return { ok: failures.length === 0, failures }
+}
+
+/** The plan 219 S2 refusal, without an id, an enum or an engine name. */
+export function outOfSightRefusalCopyOk(message) {
+  if (typeof message !== 'string') return false
+  return (
+    / is minimized, hidden or on another desktop\. Bring it back, then try again\.$/.test(
+      message
+    ) && !/screencapturekit|SourceMissing|ScreenCaptureKit/.test(message)
+  )
+}
+
 /** Step 1: two scenes made for the fixtures, each with `app` and no `audio`. */
 export function newScenesGate(scenes, fixtures) {
   const failures = []

@@ -582,6 +582,23 @@ describe('session audio news (plan 076)', () => {
     )
   })
 
+  it('reports a captured window that is out of sight, and its return, on the screen-capture key', () => {
+    showSessionHealthEvent(healthEvent('screen-window-out-of-sight'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Window out of sight',
+      expect.objectContaining({
+        id: 'screen-capture',
+        duration: 20_000,
+        description: 'screen-window-out-of-sight message'
+      })
+    )
+    showSessionHealthEvent(healthEvent('screen-window-back', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'The window is back',
+      expect.objectContaining({ id: 'screen-capture' })
+    )
+  })
+
   it('warns once that the computer is overloaded', () => {
     showSessionHealthEvent(healthEvent('host-overloaded'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(

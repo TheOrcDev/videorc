@@ -2508,6 +2508,12 @@ async fn execute_registered_preview_screen(
             }
         }
         NativeScreenStartup::SourceMissing(message) => {
+            tracing::warn!(
+                source_id = %source.source_id,
+                generation = start_lease.generation,
+                %message,
+                "screen preview start refused: source missing"
+            );
             stop_supervised_screen(supervisor, Some(start_lease.generation), "source-missing")
                 .await;
             let status = status_for_missing_source(
@@ -7465,10 +7471,16 @@ mod macos {
                     ))
                 })?;
                 let window = find_window(content, window_id).ok_or_else(|| {
-                    NativeScreenStartup::SourceMissing(format!(
-                        "ScreenCaptureKit window is missing: {}",
-                        config.source_id
-                    ))
+                    // Plan 219 S2: the on-screen list drops a window that is
+                    // minimized, hidden or on another desktop; say which it
+                    // is, so the streamer can act. The id stays in the log.
+                    let presence = crate::screen_capture::window_presence(window_id);
+                    tracing::warn!(
+                        source_id = %config.source_id,
+                        presence = ?presence,
+                        "ScreenCaptureKit window is missing from the on-screen content"
+                    );
+                    NativeScreenStartup::SourceMissing(missing_window_message(&presence))
                 })?;
                 // F-013: a foreign-session window (the macOS login window)
                 // ABORTS the process inside SkyLight when wrapped in an
@@ -7514,6 +7526,20 @@ mod macos {
                     screen_rect: Some(screen_rect_of(&frame)),
                 })
             }
+        }
+    }
+
+    /// Plan 219 S2: the start refusal for a picked window that is not in
+    /// the on-screen list, classified by where the window server says it is.
+    fn missing_window_message(presence: &crate::screen_capture::WindowPresence) -> String {
+        use crate::screen_capture::WindowPresence;
+        match presence {
+            WindowPresence::OffScreen { name } | WindowPresence::OnScreen { name } => {
+                // OnScreen here is a race (listed by the window server, not
+                // yet by ScreenCaptureKit): the same fix applies.
+                WindowPresence::out_of_sight_start_message(name)
+            }
+            WindowPresence::Gone => WindowPresence::closed_message(),
         }
     }
 
