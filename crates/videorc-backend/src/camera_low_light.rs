@@ -49,7 +49,9 @@ type LowLightPrefs = BTreeMap<String, bool>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceLowLight {
     /// The control exists and the device now holds `compensation`.
-    /// `changed` is true when Videorc's write moved it.
+    /// `changed` is true when Videorc's write moved it. Off Windows only the
+    /// tests build it, because no camera there has the control.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     Holds { compensation: bool, changed: bool },
     /// The camera has no such control (or is not a camera Videorc can set),
     /// and why. Asking again will not change the answer.
