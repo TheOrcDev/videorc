@@ -2,6 +2,8 @@ import { dirname, resolve } from 'node:path'
 
 // electron-builder `linux.executableName`.
 const LINUX_EXECUTABLE_NAME = 'videorc'
+// The desktop entry electron-builder writes at the AppImage's root.
+const LINUX_APPIMAGE_DESKTOP_ENTRY = 'videorc.desktop'
 
 export function defaultPackagedAppExecutable({ repoRoot, platform = process.platform } = {}) {
   if (!repoRoot) {
@@ -51,15 +53,17 @@ export function isLinuxAppImageExecutable(appExecutable, platform = process.plat
 
 /**
  * What `check:packaged-app` reads from an AppImage. The Electron binary (its
- * fuse wire) and `app.asar` (the build flags) sit inside the squashfs, where
- * the fuse sentinel cannot be found; the AppImage runtime's
- * `--appimage-extract <member>` writes each member under `squashfs-root` in
- * its working directory without starting the app.
+ * fuse wire), `app.asar` (the build flags) and the bundled `videorc.desktop`
+ * (its launch flags) sit inside the squashfs, where the fuse sentinel cannot
+ * be found; the AppImage runtime's `--appimage-extract <member>` writes each
+ * member under `squashfs-root` in its working directory without starting the
+ * app.
  */
 export function linuxAppImageCheckPayload(extractDirectory) {
   return {
-    members: [LINUX_EXECUTABLE_NAME, 'resources/app.asar'],
-    executable: resolve(extractDirectory, 'squashfs-root', LINUX_EXECUTABLE_NAME)
+    members: [LINUX_EXECUTABLE_NAME, 'resources/app.asar', LINUX_APPIMAGE_DESKTOP_ENTRY],
+    executable: resolve(extractDirectory, 'squashfs-root', LINUX_EXECUTABLE_NAME),
+    desktopEntry: resolve(extractDirectory, 'squashfs-root', LINUX_APPIMAGE_DESKTOP_ENTRY)
   }
 }
 

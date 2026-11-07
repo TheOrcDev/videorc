@@ -134,6 +134,27 @@ diff --git a/out/codeSign/windowsSignAzureManager.js b/out/codeSign/windowsSignA
              const escapedValue = String(value).replace(/'/g, "''");
              return [...res, `-${field}`, `'${escapedValue}'`];
          }, [])
+diff --git a/out/targets/appimage/AppImageTarget.js b/out/targets/appimage/AppImageTarget.js
+--- a/out/targets/appimage/AppImageTarget.js
++++ b/out/targets/appimage/AppImageTarget.js
+@@ -21,9 +21,14 @@
+         this.outDir = outDir;
+         this.options = { ...this.packager.platformSpecificBuildOptions, ...this.packager.config[this.name] };
+         this.desktopEntry = new lazy_val_1.Lazy(() => {
+-            var _a;
+-            const args = ((_a = this.options.executableArgs) === null || _a === void 0 ? void 0 : _a.join(" ")) || "--no-sandbox";
+-            return helper.computeDesktopEntry(this.options, `${exports.APP_RUN_ENTRYPOINT} ${args} %U`, {
++            var _a, _b;
++            // Backport of electron-builder #9590 (26.9.0): with a toolset runtime
++            // AppRun decides --no-sandbox, so the entry does not force it.
++            const appimageTool = (_a = packager.config.toolsets) === null || _a === void 0 ? void 0 : _a.appimage;
++            const defaultArgs = appimageTool == null || appimageTool === "0.0.0" ? ["--no-sandbox"] : [];
++            const args = (_b = this.options.executableArgs) !== null && _b !== void 0 ? _b : defaultArgs;
++            const exec = [exports.APP_RUN_ENTRYPOINT, ...args, "%U"].join(" ");
++            return helper.computeDesktopEntry(this.options, exec, {
+                 "X-AppImage-Version": `${packager.appInfo.buildVersion}`,
+             });
+         });
 diff --git a/out/targets/appimage/appImageUtil.js b/out/targets/appimage/appImageUtil.js
 --- a/out/targets/appimage/appImageUtil.js
 +++ b/out/targets/appimage/appImageUtil.js

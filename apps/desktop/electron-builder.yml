@@ -267,7 +267,9 @@ linux:
 # in and it mounts through fusermount3. `--appimage-extract`, which the release
 # validator and the live-lab installer use, works the same. Its AppRun adds
 # --no-sandbox where unprivileged user namespaces are refused (the AppRun hunk
-# in patches/app-builder-lib@26.8.1.patch).
+# in patches/app-builder-lib@26.8.1.patch); with this toolset the bundled
+# videorc.desktop runs `AppRun %U` and leaves the flag to that probe (the
+# AppImageTarget hunk).
 toolsets:
   appimage: '1.0.2'
 
