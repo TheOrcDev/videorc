@@ -144,9 +144,13 @@ restrictions.
   AppRun probes `unshare -Ur true` and adds `--no-sandbox` only where
   unprivileged user namespaces are refused (Ubuntu 24.04's AppArmor
   default). This is a backport of electron-builder #9590 in
-  `patches/app-builder-lib@26.8.1.patch`. The desktop entries still pass
-  `--no-sandbox` themselves (`apps/desktop/src/main/linux-desktop-entry.ts`
-  and the bundled entry).
+  `patches/app-builder-lib@26.8.1.patch`. Neither desktop entry passes the
+  flag itself: the bundled `videorc.desktop` runs `AppRun %U` (the
+  `AppImageTarget` hunk of the same patch) and the entry the app writes for
+  `videorc://` links runs the AppImage with `%U`
+  (`apps/desktop/src/main/linux-desktop-entry.ts`), so a launch from the
+  menu or a link gets the same probe. `pnpm check:packaged-app` fails an
+  AppImage whose bundled entry passes `--no-sandbox`.
 - FFmpeg: the SHA-256-pinned LGPL Linux x64 bundle fetched by
   `pnpm ffmpeg:fetch:linux`, including `ffmpeg`, `ffprobe`, license,
   source-offer, and build-config metadata. `libx264` is forbidden.

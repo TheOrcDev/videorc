@@ -98,8 +98,11 @@ function isRepresentablePath(value: string): boolean {
   return value.length > 0 && !/[\u0000-\u001f\u007f]/.test(value)
 }
 
-// The same launch flags as the entry electron-builder bundles in the AppImage
-// (`AppRun --no-sandbox %U`): the AppImage's chrome-sandbox cannot be setuid.
+// The same launch as the entry electron-builder bundles in the AppImage
+// (`AppRun %U`). The AppImage's chrome-sandbox cannot be setuid, so AppRun adds
+// --no-sandbox only where unprivileged user namespaces are refused (the AppRun
+// hunk in patches/app-builder-lib@26.8.1.patch). Passing it here would turn
+// Chromium's sandbox off for every launch from the menu or a videorc:// link.
 export function buildVideorcDesktopEntry(appImagePath: string): string | null {
   const exec = quoteDesktopExecArgument(appImagePath)
   if (!exec) {
@@ -109,7 +112,7 @@ export function buildVideorcDesktopEntry(appImagePath: string): string | null {
     '[Desktop Entry]',
     'Name=Videorc',
     'Comment=Videorc desktop app.',
-    `Exec=${exec} --no-sandbox %U`,
+    `Exec=${exec} %U`,
     `TryExec=${escapeDesktopString(appImagePath)}`,
     'Terminal=false',
     'Type=Application',

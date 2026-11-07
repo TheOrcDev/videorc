@@ -85,6 +85,38 @@ export function buildFlagsProblems(flags, { allowTestHooks = false } = {}) {
 }
 
 /**
+ * Pure. The desktop entry bundled in an AppImage must leave the Chromium
+ * sandbox to AppRun, which adds --no-sandbox only where unprivileged user
+ * namespaces are refused (patches/app-builder-lib@26.8.1.patch). An entry
+ * that passes the flag turns the sandbox off for every launch through it, on
+ * every host. `text` is the file's content, or null when it is missing.
+ */
+export function appImageDesktopEntryProblems(text) {
+  if (typeof text !== 'string') {
+    return ['the AppImage has no videorc.desktop']
+  }
+  let inMainGroup = false
+  let exec = null
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line.startsWith('[')) {
+      inMainGroup = line === '[Desktop Entry]'
+    } else if (inMainGroup && /^Exec\s*=/.test(line)) {
+      exec = line.slice(line.indexOf('=') + 1).trim()
+    }
+  }
+  if (!exec) {
+    return ['videorc.desktop has no Exec line']
+  }
+  if (exec.split(/\s+/).includes('--no-sandbox')) {
+    return [
+      `videorc.desktop runs "${exec}": --no-sandbox turns the Chromium sandbox off for every launch from it; AppRun adds it only where user namespaces are refused`
+    ]
+  }
+  return []
+}
+
+/**
  * Pure. Reads one file out of an asar archive buffer (header pickle, then
  * file bodies at `8 + headerSize + offset`). Returns null when absent.
  */

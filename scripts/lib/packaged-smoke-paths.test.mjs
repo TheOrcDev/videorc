@@ -58,8 +58,12 @@ describe('packaged smoke paths', () => {
   it('names the AppImage members the packaged app check extracts', () => {
     const payload = linuxAppImageCheckPayload('/tmp/check')
 
-    assert.deepEqual(payload.members, ['videorc', 'resources/app.asar'])
+    assert.deepEqual(payload.members, ['videorc', 'resources/app.asar', 'videorc.desktop'])
     assert.match(posixPath(payload.executable), /\/tmp\/check\/squashfs-root\/videorc$/)
+    assert.match(
+      posixPath(payload.desktopEntry),
+      /\/tmp\/check\/squashfs-root\/videorc\.desktop$/
+    )
   })
 
   it('launches the dev app when no packaged executable is given', () => {
