@@ -2,6 +2,7 @@ import {
   cameraIsAvailable,
   cameraSelectionDiagnostics,
   cameraPreviewStartAllowed,
+  freshestPreviewCameraStatus,
   returningSourceChoices,
   sourceReturnAction
 } from '@/lib/source-return'
@@ -11577,13 +11578,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     )
       return current
 
-    const status = await client.request<PreviewCameraStatus>('preview.camera.start', {
+    const reply = await client.request<PreviewCameraStatus>('preview.camera.start', {
       sources: captureConfig.sources,
       layout: captureConfig.layout,
       video: captureConfig.video
     })
     nativePreviewCameraKeyRef.current = key
-    applyPreviewCameraStatus(status)
+    const status = freshestPreviewCameraStatus(previewCameraStatusRef.current, reply)
+    if (status === reply) applyPreviewCameraStatus(status)
     if (status.state === 'permission-needed') {
       const permissionReport = window.videorc?.reportPreviewPermissionRequired?.(
         'camera-required',
