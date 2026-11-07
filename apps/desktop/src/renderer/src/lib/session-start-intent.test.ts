@@ -30,7 +30,7 @@ describe('session start intents', () => {
     const outputs = (
       sessionActive: boolean,
       startIntent: SessionStartIntent | null,
-      status: { state: string; streamUrl?: string },
+      status: { state: string; sessionId?: string; outputPath?: string; streamUrl?: string },
       previous: SessionStartIntent | null = null
     ) => remoteOutputIntent({ sessionActive, startIntent, status, config, previous })
 
@@ -56,7 +56,16 @@ describe('session start intents', () => {
       expect(outputs(true, null, { state: 'idle' }, RECORD_INTENT)).toEqual(RECORD_INTENT)
     })
 
-    it('falls back to the saved mode while a session not started here still starts', () => {
+    it('reads a session not started here from the backend starting status', () => {
+      const starting = { state: 'starting', sessionId: 's-1' }
+      expect(outputs(true, null, { ...starting, outputPath: '/take.mp4' })).toEqual(RECORD_INTENT)
+      expect(outputs(true, null, { ...starting, streamUrl: 'rtmp://x' })).toEqual({
+        record: false,
+        stream: true
+      })
+    })
+
+    it('falls back to the saved mode before the backend names the starting session', () => {
       expect(outputs(true, null, { state: 'starting' })).toEqual(savedMode)
     })
   })

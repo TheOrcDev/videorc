@@ -47,14 +47,20 @@ const RUNNING_INTENTS: Record<SessionActivity, SessionStartIntent> = {
 /**
  * What remotes (Stream Deck, phone) see as the session's outputs, so a
  * Record take never reads as live: the start's own intent; for a session
- * this renderer did not start, what its status says once it runs. Through
+ * this renderer did not start, what its status says once the backend names
+ * it (a starting status lists the file and the stream it opens). Through
  * the stop tail, `previous` (the last answer) keeps what the session did.
  * Idle, or before anything is known, the saved mode a Go Live would follow.
  */
 export function remoteOutputIntent(input: {
   sessionActive: boolean
   startIntent: SessionStartIntent | null
-  status: { state?: string | null; streamUrl?: string | null }
+  status: {
+    state?: string | null
+    sessionId?: string | null
+    outputPath?: string | null
+    streamUrl?: string | null
+  }
   config: { recordEnabled: boolean; streamEnabled: boolean }
   previous: SessionStartIntent | null
 }): SessionStartIntent {
@@ -63,6 +69,9 @@ export function remoteOutputIntent(input: {
   if (startIntent) return startIntent
   if (status.state === 'recording' || status.state === 'streaming') {
     return RUNNING_INTENTS[sessionActivity(status)]
+  }
+  if (status.state === 'starting' && status.sessionId) {
+    return { record: Boolean(status.outputPath), stream: Boolean(status.streamUrl) }
   }
   return previous ?? savedModeIntent(config)
 }
