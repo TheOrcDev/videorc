@@ -72,6 +72,12 @@ try {
   ws = await connectBackend(backend, timeoutMs)
 
   await smokeCommand(smoke, 'preview-window-open')
+  // A fresh profile starts the Preview stuck to the app (plan 213 D5). Only
+  // macOS docks it into the Layout tab's canvas; elsewhere the docked Preview
+  // lives in the Studio slot and hides on this tab, so float it to watch it.
+  if (process.platform !== 'darwin') {
+    await smokeCommand(smoke, 'preview-window-set-mode', { mode: 'floating' })
+  }
   // Isolated smoke profiles persist no camera; camera presets need one selected.
   await smokeCommand(smoke, 'select-camera-device', { settleMs })
   // Enable the synthetic replacement last. A late device-list reconciliation
