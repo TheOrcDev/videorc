@@ -11315,18 +11315,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // refs after the lazy module loads, so a fast background/shape choice
       // cannot restore the layout from an earlier render.
       void import('@/lib/first-run-look').then(
-        ({ firstRunBackgroundChoice, firstRunLookPatch, firstRunLookFromState }) => {
-          const previous =
-            firstRunLookHoldRef.current ??
-            firstRunLookFromState(captureConfigRef.current, backgroundRegistryRef.current)
-          const look = { ...previous, ...patch }
-          if (
-            look.orientation === previous.orientation &&
-            look.layoutPreset === previous.layoutPreset &&
-            look.cameraShape === previous.cameraShape &&
-            look.liveBackgroundId === previous.liveBackgroundId
+        ({ firstRunBackgroundChoice, firstRunLookPatch, firstRunLookWithPatch }) => {
+          const look = firstRunLookWithPatch(
+            firstRunLookHoldRef.current,
+            captureConfigRef.current,
+            backgroundRegistryRef.current,
+            patch
           )
-            return
+          if (!look) return
           if (firstRunLookWritesHeld(recordingRef.current)) {
             firstRunLookHoldRef.current = look
             setFirstRunLookHold(look)
@@ -17260,15 +17256,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       previewCamera: previewCameraStatus,
       previewScreen: previewScreenStatus
     })
-  const replayStartContextRef = useRef({
-    captureConfig,
-    sceneWithBackground,
-    sceneEditMode,
-    recordBlockedReason,
-    replayGrantWait,
-    sourceDeviceSwitchPending
-  })
-  replayStartContextRef.current = {
+  const replayStartContext = {
     captureConfig,
     sceneWithBackground,
     sceneEditMode,
@@ -17276,6 +17264,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     replayGrantWait,
     sourceDeviceSwitchPending
   }
+  const replayStartContextRef = useRef(replayStartContext)
+  replayStartContextRef.current = replayStartContext
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
     const currentContext = replayStartContextRef.current

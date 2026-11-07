@@ -4023,3 +4023,81 @@ the test wait for each stored row first, as the Twitch tests already do.
 With a 50 or 200 ms persistence delay injected (scratch, not committed)
 the old test failed 8 of 8 with that message and the new one passed 8 of
 8; with no delay it passed 15 of 15.
+
+### Packaged 0.20.3 on Ogre and main through `3ea7d112`, 2026-11-07
+
+0.20.3 was built locally from `a636ad03` (clean tree, `linux-unpacked` and
+the AppImage, sha256 `4081ed97…`); the published Alpha artifact was not
+used. Run on Ogre at 800 MHz, the lid closed and the owner's session
+locked, with an owned null sink as `PULSE_SINK`:
+
+| Check                                  | Unpacked             | AppImage                |
+| -------------------------------------- | -------------------- | ----------------------- |
+| `check:packaged-app` (fuses and flags) | pass                 | cannot read an AppImage |
+| packaged app smoke, 6 layouts          | pass, A/V skew 6 ms  | pass, A/V skew 6 ms     |
+| packaged asset decode and poster       | pass                 | pass                    |
+| `smoke:linux-av-devices` (mic, camera) | pass                 | pass                    |
+| quit on SIGTERM to the main process    | exit 0 after 343 ms  | not run                 |
+| quit on SIGTERM to the process group   | SIGTERM after 65 ms  | not run                 |
+| quit through the app's quit            | exit 0 after 321 ms  | exit 0 after 461 ms     |
+| session decay                          | fail, session 1 of 6 | not run                 |
+| `smoke:linux-portal-capture`           | pass, 2880x1800      | not run                 |
+| `smoke:linux-portal-record`            | fail, 2000 ms freeze | fail, 2000 ms freeze    |
+
+No quit left a dialog. The process group quit ends on the signal because
+Chromium's helpers exit first; that is how Electron answers a group stop.
+
+What the failures are:
+
+- `check:packaged-app` given the AppImage: `@electron/fuses` reports "Could
+  not find sentinel", since the Electron binary sits inside the squashfs.
+  The unpacked tree it was packed from passes.
+- Session decay: a 30 fps take with 69.7% unique frames (320 of 459), 31.9%
+  bridge coverage, 12.6% degraded bridge and 35 repeat bursts. Ogre's VAAPI
+  session decay already failed with the iGPU at 100 MHz (Still open,
+  above); this run is not separated from that host cap.
+- Portal record: the frames show the lock screen. #1242 (below) makes the
+  smoke say so.
+- The first `linux-av-devices` run on each build asked for a microphone id
+  the run script had wrong; with the id fixed both builds pass. The mic
+  takes read a mean of -1 dB (peak -0.2 to -0.7 dB): Ogre's internal mic
+  with the lid shut is pegged, so these passes do not show mic audio, and
+  under #1242's gate they fail as pegged. Two AppImage takes carried
+  `mic-dropped-frames` and one `recording-output-pressure`.
+
+Every Chromium child of the packaged app carries
+`--render-node-override=/dev/dri/renderD129`, Ogre's quarantined amdgpu
+node; other Electron apps on Ogre carry the same flag, so Chromium picks
+it, not Videorc. The backend's VAAPI device stays pinned to `renderD128`.
+Noted, not investigated.
+
+Merged on main since the last section:
+
+- #1236 and #1240, the two test fixes described above.
+- #1242: the Linux portal record smoke checks for a session lock
+  (Hyprland's `solitaryBlockedBy`, else logind's `LockedHint`) before the
+  take and again after a failed one, and names it; the motion window
+  reports its paint rate and the smoke rejects a take whose window was not
+  presented (a display that is off), instead of blaming the pipeline for a
+  freeze; `smoke:linux-av-devices` fails a microphone whose mean is within
+  6 dB of full scale. Harness only.
+
+#### The renderer asset budget
+
+CI's JS job failed on `130b9f1a`: "initial eager JavaScript raw bytes
+2325194 exceeded 2325000". Main at `3f450a10` measures 2,324,220, and
+#1236, #1240 and #1242 touch no renderer file. This branch's eager
+additions are the Studio fixes above (the selection and supersession
+guards, the in-flight scene loads, the held source picks), not new UI, so
+the budget is not raised. Two trims instead:
+
+- The patch-over-held-look step of `applyFirstRunLook` moved into
+  `firstRunLookWithPatch` in `first-run-look.ts`, which loads on demand;
+  the provider still imports three names from it, since each added name
+  repeats in the preload wrapper.
+- The replay start context is built once and the ref takes it.
+
+After: 2,324,933 raw / 476,755 gzip, entry 1,015,286 / 213,609, 67 bytes
+under the raw limit (main has 780). Format, lint and typecheck are clean;
+the first-run look, replay start and look hook tests pass (42), and the
+StudioProvider integration file passes (218).

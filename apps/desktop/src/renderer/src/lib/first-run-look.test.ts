@@ -11,6 +11,7 @@ import {
   firstRunLayoutOptions,
   firstRunLookPatch,
   firstRunLookPreset,
+  firstRunLookWithPatch,
   registryLiveBackgroundId,
   shapeApplies
 } from './first-run-look'
@@ -434,6 +435,45 @@ describe('firstRunLayoutOptions', () => {
     // chosen sources unavailable, so the step must pass the real list.
     const { options } = base({ devices: [] })
     expect(options.find((option) => option.preset === 'screen-camera')?.available).toBe(false)
+  })
+})
+
+describe('firstRunLookWithPatch', () => {
+  const studio = applyLiveBackground(createDefaultRegistry(), 'silk')
+  const look = {
+    orientation: 'horizontal',
+    layoutPreset: 'screen-camera',
+    cameraShape: 'rectangle',
+    liveBackgroundId: 'silk'
+  } as const
+
+  it('a control writes only its own fields over the latest Studio state', () => {
+    expect(
+      firstRunLookWithPatch(null, defaultCaptureConfig, studio, { cameraShape: 'circle' })
+    ).toEqual({ ...look, cameraShape: 'circle' })
+    expect(
+      firstRunLookWithPatch(null, defaultCaptureConfig, studio, { liveBackgroundId: null })
+    ).toEqual({ ...look, liveBackgroundId: null })
+  })
+
+  it('a held look, not the Studio, is what the next control changes', () => {
+    const held = { ...look, cameraShape: 'circle' } as const
+    expect(
+      firstRunLookWithPatch(held, defaultCaptureConfig, studio, { liveBackgroundId: null })
+    ).toEqual({ ...held, liveBackgroundId: null })
+    expect(
+      firstRunLookWithPatch(held, defaultCaptureConfig, studio, { cameraShape: 'circle' })
+    ).toBeNull()
+  })
+
+  it('a pick that changes nothing is no write', () => {
+    expect(firstRunLookWithPatch(null, defaultCaptureConfig, studio, {})).toBeNull()
+    expect(
+      firstRunLookWithPatch(null, defaultCaptureConfig, studio, {
+        orientation: 'horizontal',
+        layoutPreset: 'screen-camera'
+      })
+    ).toBeNull()
   })
 })
 
