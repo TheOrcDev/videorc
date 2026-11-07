@@ -253,6 +253,26 @@ export function smokeAppEnv(env = {}, options = {}) {
   } else {
     delete result.VIDEORC_SMOKE_TRASH_DIR
   }
+  // A packaged Linux build started through its AppImage writes the user's
+  // videorc.desktop and icon under XDG_DATA_HOME, aimed at the AppImage it ran
+  // from: a smoke of a scratch AppImage left the real app menu entry and the
+  // videorc:// handler pointing at a file the run then deleted. Keep them in
+  // the run. The dev app writes none, and its pnpm launch reads its own paths
+  // from XDG_DATA_HOME, so only packaged launches move. XDG_CONFIG_HOME stays
+  // shared: Electron's appData there holds the global owned-process ledger,
+  // and `xdg-mime` re-asserts the same `x-scheme-handler/videorc` line every
+  // real launch writes.
+  if (
+    (options.platform ?? process.platform) === 'linux' &&
+    result.VIDEORC_PACKAGED_SMOKE_TEST === '1'
+  ) {
+    result.XDG_DATA_HOME = isolatedSmokePath(
+      env,
+      'XDG_DATA_HOME',
+      join(appDataDir, 'xdg-data'),
+      isolationRoots
+    )
+  }
   return result
 }
 
