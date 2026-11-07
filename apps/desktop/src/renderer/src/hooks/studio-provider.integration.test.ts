@@ -473,7 +473,6 @@ class StudioBackend {
   xPrepareCount = 0
   xPrepareFailuresRemaining = 0
   xPublishCount = 0
-  xPublishTweetError: string | undefined
   xEndFailuresRemaining = 0
   platformAccountValidations: PlatformAccountValidation[] = []
   audioProcessingResponseDelayMs = 0
@@ -1416,7 +1415,6 @@ class StudioBackend {
           mediaKey: `x-media-key-${publishSequence}`,
           shareUrl: `https://x.com/i/broadcasts/${publishSequence}`,
           state: 'running',
-          ...(this.xPublishTweetError ? { tweetError: this.xPublishTweetError } : {}),
           message: 'X broadcast published.'
         }
       }
@@ -14842,7 +14840,6 @@ describe('real StudioProvider lifecycle', () => {
   it('ends the actual X broadcast when the session dies during publish', async () => {
     const backend = new StudioBackend()
     enableXOauthForTest(backend)
-    backend.xPublishTweetError = 'The announcement post was rejected.'
     backend.terminalRecordingStatusOnMethod = 'streamTargets.x.publish'
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -14904,10 +14901,9 @@ describe('real StudioProvider lifecycle', () => {
     ).toBe('stopped')
   })
 
-  it('keeps a published X broadcast live when only the announcement post fails', async () => {
+  it('shows a published X broadcast live with its share link and no error', async () => {
     const backend = new StudioBackend()
     enableXOauthForTest(backend)
-    backend.xPublishTweetError = 'The announcement post was rejected.'
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
     const api = createVideorcApi({
@@ -14939,9 +14935,20 @@ describe('real StudioProvider lifecycle', () => {
       latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
     ).toMatchObject({
       state: 'live',
-      lastError: 'The announcement post was rejected.',
+      message: 'X broadcast is live: https://x.com/i/broadcasts/1',
       redactedUrl: 'https://x.com/i/broadcasts/1'
     })
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
+        ?.lastError
+    ).toBeUndefined()
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.publish')
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.not.objectContaining({ region: expect.anything() })
+      })
+    ])
     expect(
       backend.sentCommands.filter((command) => command.method === 'liveChat.x.start')
     ).toHaveLength(1)

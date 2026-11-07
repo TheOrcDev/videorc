@@ -8707,7 +8707,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               : {
                   state: 'warning' as const,
                   message:
-                    'X never produced playback for this broadcast. Viewers saw a loading spinner. Your local recording is unaffected.',
+                    'X ended your broadcast while Videorc was still streaming (usually no video reached X). Your local recording is unaffected.',
                   redactedUrl: event.shareUrl
                 }
         setCaptureConfig((current) => {
@@ -14813,8 +14813,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : client.request<XPublishResult>('streamTargets.x.publish', {
                 accountId: target.accountId,
                 sourceId,
-                region,
-                isLowLatency: true,
                 sessionId
               })
           const publishedStreamingPromise = publishRequest.then((result) =>
@@ -14824,11 +14822,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               platformStreamId: result.mediaKey,
               status: {
                 state: 'live',
-                message: result.tweetError
-                  ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
-                  : `X broadcast is live: ${result.shareUrl}`,
-                redactedUrl: result.shareUrl,
-                ...(result.tweetError ? { lastError: result.tweetError } : {})
+                message: `X broadcast is live: ${result.shareUrl}`,
+                redactedUrl: result.shareUrl
               }
             })
           )
@@ -14859,11 +14854,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           xEndedBroadcastResultsRef.current.delete(publishedBroadcastEndKey)
           const publishedStatus: StreamTargetStatus = {
             state: 'live',
-            message: result.tweetError
-              ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
-              : `X broadcast is live: ${result.shareUrl}`,
-            redactedUrl: result.shareUrl,
-            ...(result.tweetError ? { lastError: result.tweetError } : {})
+            message: `X broadcast is live: ${result.shareUrl}`,
+            redactedUrl: result.shareUrl
           }
           if (sessionId && platformLifecycleOwnerRef.current?.sessionId === sessionId) {
             platformLifecycleOwnerRef.current = {

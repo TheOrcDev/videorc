@@ -377,9 +377,11 @@ export function showXPlaybackEvent(event: XPlaybackEvent): void {
         'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
     })
   } else {
-    notifyOnce('x-playback', 'error', 'X never showed your stream', {
+    // X's API exposes no playback URL any more: `unavailable` means X ended
+    // the broadcast (usually TIMED_OUT: no video reached X in 5 minutes).
+    notifyOnce('x-playback', 'error', 'X ended your broadcast', {
       description:
-        'Viewers saw a loading spinner. Your local recording is unaffected; the next Go Live uses a replacement source if this repeats.'
+        'X stopped it while Videorc was still streaming, usually because no video reached X. Your local recording is unaffected.'
     })
   }
 }
