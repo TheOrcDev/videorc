@@ -468,7 +468,9 @@ The AppImage is extracted (no FUSE) and the harness spawns its `videorc`
 directly, in its own process group, so the app PID is the one it started.
 Electron's sandbox then relies on unprivileged user namespaces, which Arch
 allows; if a distro refuses them (Ubuntu 24.04's AppArmor), the app fails at
-launch with a SUID sandbox error: that is a known gap.
+launch with a SUID sandbox error: that is a known gap. The AppImage's own
+AppRun adds `--no-sandbox` in that case (`docs/distribution.md`), but the
+harness does not start the app through AppRun.
 
 ### L6. Hookup, policy and doctor
 
