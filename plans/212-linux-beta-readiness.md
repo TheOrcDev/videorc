@@ -4101,3 +4101,116 @@ After: 2,324,933 raw / 476,755 gzip, entry 1,015,286 / 213,609, 67 bytes
 under the raw limit (main has 780). Format, lint and typecheck are clean;
 the first-run look, replay start and look hook tests pass (42), and the
 StudioProvider integration file passes (218).
+
+### Ogre smoke batch and main through `0d6fc7b7`, 2026-11-07
+
+Merged on main since the last section:
+
+- #1243: `check:packaged-app` reads an AppImage. The AppImage's own
+  runtime extracts `videorc` and `resources/app.asar` (without starting the
+  app) into a temporary folder, and the fuses and build flags are read from
+  there.
+- #1244: the AppImage opens on stock Ubuntu 24.04. Electron Builder 26's
+  default runtime dlopens `libfuse.so.2`, which 24.04 does not ship; the
+  appimage 1.0.2 toolset's static type2 runtime links FUSE in and mounts
+  through `fusermount3`. Then Chromium's SUID sandbox check aborted, since an
+  AppImage cannot carry a setuid `chrome-sandbox` and 24.04's AppArmor
+  refuses unprivileged user namespaces. AppRun now probes `unshare -Ur true`
+  and adds `--no-sandbox` only when it fails (electron-builder #9590,
+  backported in the app-builder-lib patch). On Ogre, under bwrap: with user
+  namespaces allowed the sandbox stays on (renderer zygotes `seccomp=2`);
+  with them blocked AppRun adds the flag once and the app starts; an
+  explicit `--no-sandbox` is not doubled; a missing `unshare` adds it. Not
+  yet run on a real Ubuntu 24.04 desktop (no operator).
+- #1245: a packaged Linux smoke keeps its desktop entry inside the run.
+  An AppImage launch writes `videorc.desktop` under `XDG_DATA_HOME`, and a
+  packaged smoke of a scratch AppImage had rewritten the owner's entry to a
+  file the run then deleted. The entry was restored by hand.
+- #1246: `smoke:oauth-guards` expects X's Livestream docs URL. It failed on
+  every platform after #1231 moved X Live to the new routes.
+- #1247: a fresh Linux profile records the system default microphone.
+  The backend listed Pulse sources in index order and the renderer takes the
+  first row for a profile with no microphone, so Ogre's silent
+  `videorc_lab_mic` won over the built-in microphone. The source Pulse
+  marks as default now comes first.
+
+Open: #1248, two Linux harness fixes (below).
+
+#### The batch
+
+Dev app from this branch, an owned null sink as `PULSE_SINK`, eDP-1 on
+for each run, the lid closed and the owner's session locked.
+
+Pass: `app-quit-recording`, `captions-live`, `live-chat-fake-providers`,
+`buddy-commands`, `oauth-guards` (after #1246), `streaming-secrets`,
+`start-labels`, `repair-encoder`, `process-memory:sentinel`, `session-ops`,
+`command-lanes`, `live-control-recycle`, `live-source-switch`,
+`live-microphone:linux`, `stream-leg-eof`, `comment-highlight-stream`,
+`studio-chat`, `discord-announce`, `cohost-fake`, `session-markers`,
+`obs-import`, `live-layout-switch-recording`, `scene-item-drag`,
+`preview-scene-commit`, `encoder-bridge`, `buddy-pet`,
+`scene-switch-pixels` (rerun), and after the fixes below `replay-buffer`,
+`layout-source-loop` and `noise-cleanup:bundled`.
+
+`scene-switch-pixels` first failed in the batch: its fixture test passed,
+then its own encode of the fixture frames exited 8 ("Unknown encoder
+'libx264'"), because the batch script had pointed
+`VIDEORC_SMOKE_FFMPEG_PATH` at the vendored Linux FFmpeg, which has no
+libx264. On the system `ffmpeg`, the smoke's default, it passes: the
+recording and the loopback stream each match the 120 fixture frames
+(worst mean error 0.05 and 0.07).
+
+Skip, each naming why: `output-stall` and the three `stream-thin-uplink`
+variants (the VideoToolbox seams are macOS only), `clean-cut` (its synthetic
+microphone is CoreAudio only), `multistream:vertical-fill` (Linux has no
+separate vertical encoder), `separate-source-runtime` (macOS only), and the
+provider readiness report (no provider credentials here, by design).
+
+Fixed:
+
+- `replay-buffer` failed its silent-microphone gate: "audio track is
+  digital silence (under -80 dBFS) for 100.0% of the take ... although a
+  microphone was selected". Two causes. The fresh profile took
+  `videorc_lab_mic` (#1247). And with the lid shut a T2 MacBook cuts its
+  internal microphone in hardware, so the default microphone is silent on
+  Ogre too. The smoke now creates the owned Pulse fixtures on Linux, under
+  the host lock and before the app's first device listing, selects the
+  440 Hz source through the scene presets hook, and stops the fixtures on
+  exit. This lives on this branch only, with `linux-pulse-fixture.mjs`.
+  Result: PASS; three clips and a clip during a recording, all complete, and
+  the 115 s recording passes the analyzer. A clip's audio reads -24 dBFS
+  with a zero-crossing rate of 0.0184, which is 440 Hz at 48 kHz.
+- `layout-source-loop` failed every layout with "Preview window was not
+  visibly presenting". Only macOS docks the Preview into the Layout tab's
+  canvas; elsewhere a docked Preview hides on that tab. The smoke floats it
+  off macOS (#1248). All 11 layouts pass.
+- `noise-cleanup:bundled` looked for `vendor/ffmpeg/current`, the macOS
+  bundle. Linux now uses `linux-x64` (#1248). PASS on the vendored build.
+  The script is a capture-decay D3 dependency path; the switch is inlined so
+  its import closure is unchanged, and the D3 acceptance and gate tests pass
+  (49).
+
+Not fixed, with what they are:
+
+- `freeform-editor`: 49 gestures over the 33 ms p95 budget, then a CDP
+  screenshot timeout. Not separated from this host's load.
+- `preview-motion` ("Current native preview is below OBS target: renderer
+  60.0fps, p95 interval 16.8ms") and `preview-real-launch` (first-frame
+  contract with the synthetic scene): both assert the macOS native
+  presenter's contract.
+- `recording-performance` (1440p30 encoder speed 0.87x, under 0.98x) and
+  `session-decay:gate` (session 1, 5.0% degraded bridge): Ogre's known CPU
+  composition and iGPU limits (Still open, above).
+- `live-background-off-ab`: an A/B tool that needs
+  `--base <main worktree>`; not a gate, not run.
+
+The default microphone on a fresh profile, end to end after #1247: a
+fresh dev-app profile on Ogre lists the built-in microphone
+(`alsa_input.pci-0000_02_00.3.HiFi__Mic__source`, the Pulse default)
+first and `videorc_lab_mic` second, and the renderer selects the first
+row. With the lid shut that microphone records silence, which is the
+hardware, not the selection.
+
+On macOS `replay-buffer` probably fails the same gate since #1139 added
+it: the smoke records the silent synthetic bus and does not pass
+`microphoneAvailable`. Not checked; no Mac here.
