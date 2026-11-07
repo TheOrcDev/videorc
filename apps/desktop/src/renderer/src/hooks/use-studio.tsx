@@ -15758,7 +15758,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
             applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
           }
-          if (!isActiveRecordingState(recordingRef.current.state)) {
+          if (
+            !isActiveRecordingState(recordingRef.current.state) ||
+            recordingRef.current.sessionId !== platformSessionId
+          ) {
+            // Nothing runs, or the session that runs is not this start's.
             setActiveStartIntent(null)
           }
           return false

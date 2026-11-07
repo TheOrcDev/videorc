@@ -5786,6 +5786,33 @@ describe('real StudioProvider lifecycle', () => {
       await latest().core.stopSession()
     })
     await waitForObservation(() => latest().recording.recording.state === 'idle')
+
+    // A Go Live started elsewhere wins while this Record start is in flight,
+    // and the start fails: remotes read the Go Live, not the lost Record.
+    const startsSent = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'session.start').length
+    const startsBefore = startsSent()
+    const releaseFailedStart = backend.deferFailure(
+      'session.start',
+      new Error('A capture session is already running.')
+    )
+    await pushEvent('remote.intent', { intentId: 'rec-2', intent: { kind: 'recordStart' } })
+    await waitForObservation(() => startsSent() > startsBefore)
+    await pushEvent('recording.status', goLive('go-live-winner'))
+    await act(async () => {
+      releaseFailedStart()
+      await Promise.resolve()
+    })
+    await waitForObservation(() => acks().some((ack) => ack.intentId === 'rec-2'))
+    expect(acks().find((ack) => ack.intentId === 'rec-2')?.ok).toBe(false)
+    await waitForObservation(() => latest().recording.recording.sessionId === 'go-live-winner')
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
+    expect(publishedDuringSession().at(-1)).toMatchObject({
+      recordEnabled: true,
+      streamEnabled: true
+    })
   })
 
   // Plan 174 S3.1 (D2): main holds a quit or a main-window close while on air
