@@ -6,6 +6,7 @@ import {
   bundledFfmpegPathForPackagedApp,
   defaultPackagedAppExecutable,
   isLinuxAppImageExecutable,
+  linuxAppImageCheckPayload,
   packagedSmokeLaunchOptions
 } from './packaged-smoke-paths.mjs'
 
@@ -52,6 +53,13 @@ describe('packaged smoke paths', () => {
     assert.equal(isLinuxAppImageExecutable(executable, 'linux'), false)
     assert.equal(isLinuxAppImageExecutable('/x/Videorc.AppImage', 'win32'), false)
     assert.doesNotThrow(() => assertPackagedSmokePlatform('linux'))
+  })
+
+  it('names the AppImage members the packaged app check extracts', () => {
+    const payload = linuxAppImageCheckPayload('/tmp/check')
+
+    assert.deepEqual(payload.members, ['videorc', 'resources/app.asar'])
+    assert.match(posixPath(payload.executable), /\/tmp\/check\/squashfs-root\/videorc$/)
   })
 
   it('launches the dev app when no packaged executable is given', () => {

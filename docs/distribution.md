@@ -84,7 +84,12 @@ Check an artifact:
 ```sh
 pnpm check:packaged-app                      # default release/ path for this OS
 pnpm check:packaged-app --app /path/to/Videorc.app
+pnpm check:packaged-app --app /path/to/Videorc-<version>-linux-x64.AppImage
 ```
+
+An AppImage keeps the Electron binary inside its squashfs, so the check has
+the AppImage's own runtime extract the binary and `app.asar` to a temporary
+folder (without starting the app) and reads those.
 
 A harness that needs CDP in a packaged app (the live lab, `smoke:windows-main-window-recovery`, perf probes against a packaged build) needs a **packaged test build**: set `VIDEORC_PACKAGED_TEST_HOOKS=1` when `electron-vite build` runs (`pnpm --filter @videorc/desktop package:linux:test-hooks`, `VIDEORC_PACKAGED_TEST_HOOKS=1 pnpm package:desktop`, or `$env:VIDEORC_PACKAGED_TEST_HOOKS='1'` before `pnpm package:desktop:windows`). The fuses stay flipped. `pnpm check:packaged-app` refuses such a build unless you pass `--allow-test-hooks`; it must never ship. The packaged smoke command server (`VIDEORC_PACKAGED_SMOKE_TEST`, used by `smoke:packaged*` against the exact release payload) is unchanged.
 
