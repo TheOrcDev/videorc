@@ -9205,6 +9205,18 @@ async fn emit_encoder_bridge_diagnostics(
                 &message,
             );
         }
+        // The writer emits one event carrying its error when it gives up.
+        // The handler reads the bridge's own terminal failure, so a writer
+        // that merely saw FFmpeg exit (downstream closed) does not count.
+        // A shared writer carries the stream too (always on Linux, plan 0016).
+        if error.is_some() {
+            crate::recording::handle_recording_output_failure_if_active(
+                state,
+                session_id,
+                effective_encoder_bridge_output_role(diagnostics_context)
+                    == EncoderBridgeOutputRole::Shared,
+            );
+        }
     }
 
     // Plan 087: the session record names an overloaded host while it is
