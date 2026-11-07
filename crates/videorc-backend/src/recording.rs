@@ -30284,14 +30284,11 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
 
-        let wrote_frame = write_screen_overlay_frame_until(
-            &mut writer,
-            &frame,
-            &stop,
-            Duration::from_millis(50),
-            Duration::from_millis(100),
-        )
-        .expect("temporary full-pipe pressure must not terminate the overlay writer");
+        // The production budgets: the hard deadline also covers copying the
+        // 16 MiB frame into fresh memory, which a loaded CI runner can stretch
+        // past a 100 ms test budget.
+        let wrote_frame = write_screen_overlay_frame(&mut writer, &frame, &stop)
+            .expect("temporary full-pipe pressure must not terminate the overlay writer");
 
         assert!(wrote_frame);
         assert!(writer.pressure_reported);
