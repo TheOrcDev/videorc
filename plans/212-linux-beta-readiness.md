@@ -4195,7 +4195,10 @@ Fixed:
 Not fixed, with what they are:
 
 - `freeform-editor`: 49 gestures over the 33 ms p95 budget, then a CDP
-  screenshot timeout. Not separated from this host's load.
+  screenshot timeout. Not separated from this host's load. (Later
+  separated: the latency is this host's clock times React's dev mode, and
+  the first gesture's dropped capture was a real bug, fixed in #1252. See
+  "The Not fixed list worked through", below.)
 - `preview-motion` ("Current native preview is below OBS target: renderer
   60.0fps, p95 interval 16.8ms") and `preview-real-launch` (first-frame
   contract with the synthetic scene): both assert the macOS native
@@ -4290,3 +4293,128 @@ On this host the desktop unit tests can fail on time alone: in #1249's run
 timed out in a `vi.waitFor` on the lazily imported Buddy onboarding, while
 cold transforms ran at 800 MHz. Neither file is touched there; both pass
 on rerun.
+
+### The Not fixed list worked through, 2026-11-07
+
+The packaged-main section above left items standing. Each was taken on Ogre
+against main (`16456e7f` after #1251), with the same throttle, lid and lock
+as above, and an owned null sink as `PULSE_SINK`.
+
+#### A dead shared writer now ends the take (#1251)
+
+Linux runs one encode for the recording and the stream (plan 0016), so one
+shared writer feeds FFmpeg's file and every stream leg. A 40 s SIGSTOP on
+FFmpeg in `smoke:multistream-endurance` (`VIDEORC_SMOKE_FATAL_FREEZE_MS=40000`)
+showed what happened when that writer died on `3ff1819b`:
+
+- The writer gave up at 10 s.
+- Main reads a writer's mid-session error only for a separate stream leg,
+  so the session kept showing live.
+- The session audio ended at 30 s with a WARN and no health event.
+- The failure surfaced only when FFmpeg woke at 40 s.
+
+#1251 carries #1126 forward and adds the shared-writer case. A recording
+writer's terminal failure ends the take with `recording-output-failed`. An
+audio transport that closes mid-take raises `audio-output-failed`. A dead
+shared writer also raises `stream-output-failed`, once. With the fix the
+40 s freeze passes: both codes land once at 10.0 s, Stop SIGKILLs the
+frozen FFmpeg 13.1 s later (`recording-stop-forced`), and the MKV is
+recovered as MP4 and passes the analyzer. The default 6 s freeze still
+passes and ends `idle`, so a recoverable freeze does not trip the new path.
+Merged as `16456e7f`. This closes the "audio transport health event" item.
+
+#### Stop drains the stream, and fast (#1230 holds)
+
+`smoke:scheduled-streams` passes on Ogre:
+
+- The received FLVs match their recordings frame for frame: 159 of 159 and
+  161 of 161 video frames, with no static tail and no silent stretch
+  (`silencedetect` at -80 dB).
+- Stop took 119 ms and 116 ms from click to idle. The FFmpeg exit landed
+  113 ms after the click; the budget is 300 ms.
+
+So "the stream not draining cleanly on stop" and "Stop taking 3 s" are not
+reproducible on main. #1230 closed both.
+
+#### Noise cleanup matches macOS
+
+`smoke:noise-cleanup:bundled` on the vendored `linux-x64` FFmpeg:
+
+| Container | Noise reduction | SNR gain |
+| --------- | --------------- | -------- |
+| MP4       | 3.4 dB          | 2.0 dB   |
+| MKV       | 3.1 dB          | 2.0 dB   |
+
+The gate is 3 dB and 2 dB, with the shared preset
+`afftdn=nr=18:nf=-34:tn=1` (`noise_cleanup.rs`). macOS's acceptance
+(`docs/acceptance/2026-07-13-noise-cleanup.md`) reads the same four numbers.
+The thin margin belongs to the cross-platform preset, not to Linux.
+Widening it is an owner decision about how the cleanup sounds. It is not a
+Linux Beta blocker.
+
+#### The direct matrix still passes
+
+The AGENTS.md Linux direct matrix command, OpenH264 1080p30
+(`VIDEORC_LINUX_VAAPI_DEVICE=/dev/dri/renderD128`), passes: level 4.0,
+bt709/tv, a 13 ms tail. The bridge ran at 12.5 fps input under the throttle
+and did not trip the writer budget.
+
+#### Freeform: a real bug under a host-bound budget
+
+The `freeform-editor` smoke's budgets (p95 pointer to paint 33 ms, no
+gesture task over 50 ms) were calibrated on an Apple M4, where p95 reads
+10.7 to 16.2 ms. On Ogre at 800 MHz, a CPU profile of the gestures showed:
+
+- The renderer's main thread is about 96% busy.
+- React's dev runtime is about 57% of that busy time: `jsxDEV`'s stack
+  capture, validation, and StrictMode's double renders.
+- The heaviest components by inclusive time are SceneStage (22.6 s),
+  StudioProvider (11.9 s) and LayoutTab (4.5 s).
+- Idle, backend status re-renders cost about 18% of a core in dev.
+
+The smoke cannot run under the production renderer, because its synthetic
+source toggle is DEV only. So the latency failures are this host's clock
+times React's dev mode. They say nothing a Linux user would see.
+
+The profile did turn up a real bug: the first grab on the stage was dropped.
+The stage's first grab turns the editor on, and the Scene page's "Edit
+scene" button unmounted at that pointerdown. The Scenes header lost a
+button, its description rewrapped 16 px shorter, the pane scroll-anchored
+(scrollTop 591.5 to 575.5), and the stage's capture-phase `scroll` listener
+cancelled the gesture and released pointer capture. Every later grab
+worked. This is not Linux-specific: any window where the description wraps
+and the pane is scrolled past it does the same.
+
+#1252 keeps the button mounted, `invisible` and `disabled`, while the
+editor is on. The same smoke from its branch, compared with main:
+
+| "landscape move 0" | main           | #1252             |
+| ------------------ | -------------- | ----------------- |
+| pointer capture    | not acquired   | acquired          |
+| transform commits  | 0 of 1         | 1                 |
+| scene revision     | unchanged      | advanced          |
+| accepted rect      | the start rect | moved by (+8, +4) |
+
+The smoke still fails here on latency for every gesture (p95 100 to
+730 ms), then on the same CDP screenshot timeout. The scene-list,
+scene-stage and layout-tab tests (41), typecheck, lint and format pass.
+
+#### What still stands
+
+- `recording-performance`, 1440p30 at 0.87x encoder speed (gate 0.98x), and
+  `session-decay:gate` (5.0 to 15.3% degraded bridge): Ogre's CPU
+  composition and iGPU caps (Still open). Both need a host without the
+  external PROCHOT clamp to say anything about the app.
+- `promote-linux-alpha.yml` is still owed and is not written here. The
+  tooling it would call already lives on this branch:
+  `release:validate:linux-beta-acceptance`, `release:candidate:download:linux`
+  and the read-only `release:plan:linux-beta-promotion`. The workflow that
+  wires them into a protected public path is deferred by this plan's own
+  "Promotion wiring is still open" note, and this token lacks `workflow`
+  scope, so it could not be pushed from here regardless. The owner wires it.
+- The six workflow-file edits already in this branch's working tree
+  (`ci.yml`, `linux.yml`, `promote-macos-capture-decay-d3.yml`,
+  `release-linux-alpha.yml`, `release-windows-alpha.yml`,
+  `release-windows-gates.yml`) stay uncommitted for the same token reason.
+  Backups: `~/.vrc-workflow-edits-232c8aea.patch`.
+- Ubuntu 24.04 acceptance: no operator.
