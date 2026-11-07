@@ -29,10 +29,16 @@ pub const CAMERA_LOW_LIGHT_SETTINGS_KEY: &str = "camera.lowLightCompensation";
 /// schema holds it to the same length.
 pub const CAMERA_LOW_LIGHT_CAMERA_ID_MAX_LEN: usize = 1024;
 
+/// The most cameras that can have compensation on at once. Bounded like the
+/// other stored per-device records (`windows_mf_rejections` keeps 64). At the
+/// limit a saved camera can still be changed or turned off; only a new one
+/// is refused, so nobody's choice is dropped to make room.
+pub const CAMERA_LOW_LIGHT_MAX_CAMERAS: usize = 64;
+
 /// How long `camera.lowLight.get` and `.set` wait for the camera. A driver
-/// that stalls keeps its own thread and its camera's lock; the answer still
-/// comes back well inside the backend's 10 s mutation deadline, so a stalled
-/// camera never gets the backend restarted or holds up later commands.
+/// that stalls keeps only its camera's worker; the answer still comes back
+/// well inside the backend's 10 s mutation deadline, so a stalled camera never
+/// gets the backend restarted or holds up later commands.
 pub const CAMERA_LOW_LIGHT_DEVICE_WAIT: Duration = Duration::from_secs(3);
 
 /// Camera id → compensation on. Only `true` entries are kept: off is the
@@ -45,11 +51,16 @@ pub enum DeviceLowLight {
     /// The control exists and the device now holds `compensation`.
     /// `changed` is true when Videorc's write moved it.
     Holds { compensation: bool, changed: bool },
-    /// Videorc cannot set it here, and why.
+    /// The camera has no such control (or is not a camera Videorc can set),
+    /// and why. Asking again will not change the answer.
     Unsupported(String),
+    /// The camera may have the control, but this attempt failed (Media
+    /// Foundation, the driver, a stall or a panic), and why. Worth retrying.
+    Failed(String),
 }
 
 impl DeviceLowLight {
+    /// True when the camera has the control.
     pub fn supported(&self) -> bool {
         matches!(self, Self::Holds { .. })
     }
@@ -62,11 +73,14 @@ fn auto_exposure_priority_value(compensation: bool) -> i32 {
     i32::from(compensation)
 }
 
+/// Reads the control's value back as a choice: any non-zero value lets
+/// exposure lower the frame rate.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 fn compensation_from_priority(value: i32) -> bool {
     value != 0
 }
 
+/// Every saved choice; an unreadable setting counts as none saved.
 fn load_prefs(database: &Database) -> LowLightPrefs {
     match database.load_setting::<LowLightPrefs>(CAMERA_LOW_LIGHT_SETTINGS_KEY) {
         Ok(prefs) => prefs.unwrap_or_default(),
@@ -85,6 +99,7 @@ pub fn stored_compensation(database: &Database, camera_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `prefs` with this camera's choice applied: on adds its entry, off removes it.
 fn with_compensation(
     mut prefs: LowLightPrefs,
     camera_id: &str,
@@ -102,13 +117,22 @@ fn with_compensation(
 /// so two cameras switched at once never drop each other's choice.
 static PREF_SAVES: Mutex<()> = Mutex::new(());
 
+/// Saves this camera's choice. Refuses a new camera once
+/// [`CAMERA_LOW_LIGHT_MAX_CAMERAS`] have compensation on.
 pub fn save_compensation(
     database: &Database,
     camera_id: &str,
     compensation: bool,
 ) -> anyhow::Result<()> {
     let _serialized = PREF_SAVES.lock().unwrap_or_else(PoisonError::into_inner);
-    let prefs = with_compensation(load_prefs(database), camera_id, compensation);
+    let prefs = load_prefs(database);
+    if compensation && !prefs.contains_key(camera_id) && prefs.len() >= CAMERA_LOW_LIGHT_MAX_CAMERAS
+    {
+        anyhow::bail!(
+            "it is already on for {CAMERA_LOW_LIGHT_MAX_CAMERAS} cameras; turn it off for one first"
+        );
+    }
+    let prefs = with_compensation(prefs, camera_id, compensation);
     database.save_setting(CAMERA_LOW_LIGHT_SETTINGS_KEY, &prefs)
 }
 
@@ -136,100 +160,219 @@ pub fn write_device(camera_id: &str, compensation: bool) -> DeviceLowLight {
     device_control(camera_id, Some(compensation))
 }
 
-/// One lock per camera. Writes to a camera run one at a time and each reads
-/// the saved choice inside its lock, so a switch flipped while the camera
-/// opens is never overwritten by the value the open read before it. A driver
-/// that stalls holds only its own camera's lock.
-static DEVICE_LOCKS: Mutex<BTreeMap<String, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+/// Reads the camera's control.
+type ReadOp = dyn Fn(&str) -> DeviceLowLight + Send + Sync;
+/// Writes the camera's control.
+type WriteOp = dyn Fn(&str, bool) -> DeviceLowLight + Send + Sync;
 
-/// Cameras with an open's write running. `true` means another open came in
-/// meanwhile and the running thread writes once more, so opens never pile
-/// up threads behind a stalled camera.
-static OPEN_WRITES: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
-
-fn device_lock(camera_id: &str) -> Arc<Mutex<()>> {
-    DEVICE_LOCKS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(camera_id.to_string())
-        .or_default()
-        .clone()
+/// The device calls a camera's worker makes. Production uses the real
+/// camera ([`DeviceOps::camera`]); tests pass doubles that stall or panic.
+#[derive(Clone)]
+struct DeviceOps {
+    read: Arc<ReadOp>,
+    write: Arc<WriteOp>,
 }
 
-fn write_stored(database: &Database, camera_id: &str) -> DeviceLowLight {
-    write_stored_with(database, camera_id, write_device)
+impl DeviceOps {
+    /// The real camera control.
+    fn camera() -> Self {
+        Self {
+            read: Arc::new(read_device),
+            write: Arc::new(write_device),
+        }
+    }
 }
 
-fn write_stored_with(
+/// Where a worker sends the result of the pass that served a request.
+type DeviceReply = tokio::sync::oneshot::Sender<DeviceLowLight>;
+
+/// What one request asks a camera's worker for.
+enum DeviceRequest {
+    /// Write the saved choice (read when the write runs), and maybe answer.
+    Write(Option<DeviceReply>),
+    /// Read the control and answer.
+    Read(DeviceReply),
+}
+
+/// Work queued for a camera's next pass.
+#[derive(Default)]
+struct CameraWork {
+    write: bool,
+    replies: Vec<DeviceReply>,
+}
+
+/// Cameras whose worker thread is running, with the work queued for its next
+/// pass. Each camera has at most one worker: requests that arrive while it
+/// runs (or stalls in a driver) join its next pass instead of starting more
+/// threads, so a stalled camera holds exactly one thread and nothing piles
+/// up behind it, while other cameras keep their own workers. A write reads
+/// the saved choice when its pass starts, so the camera always ends on the
+/// latest choice saved before that pass.
+static CAMERA_WORKERS: Mutex<BTreeMap<String, CameraWork>> = Mutex::new(BTreeMap::new());
+
+/// Queues `request` for `camera_id` and starts the camera's worker unless one
+/// is running. A worker that cannot start drops its replies, which their
+/// callers read as a failure.
+fn request_device_work(
     database: &Database,
     camera_id: &str,
-    write: impl FnOnce(&str, bool) -> DeviceLowLight,
+    ops: &DeviceOps,
+    request: DeviceRequest,
+) {
+    let start = {
+        let mut workers = CAMERA_WORKERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let start = !workers.contains_key(camera_id);
+        let work = workers.entry(camera_id.to_string()).or_default();
+        match request {
+            DeviceRequest::Write(reply) => {
+                work.write = true;
+                work.replies.extend(reply);
+            }
+            DeviceRequest::Read(reply) => work.replies.push(reply),
+        }
+        start
+    };
+    if !start {
+        return;
+    }
+    let database = database.clone();
+    let worker_camera_id = camera_id.to_string();
+    let ops = ops.clone();
+    let spawned = std::thread::Builder::new()
+        .name("videorc-camera-low-light".to_string())
+        .spawn(move || run_camera_worker(&database, &worker_camera_id, &ops));
+    if let Err(error) = spawned {
+        CAMERA_WORKERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(camera_id);
+        tracing::warn!("Camera low-light worker did not start: {error}");
+    }
+}
+
+/// A camera's worker: one pass per batch of queued work until none is left.
+/// A pass writes when any queued request asked for a write (a write answers
+/// reads too), otherwise it reads; every reply in the batch gets its result.
+fn run_camera_worker(database: &Database, camera_id: &str, ops: &DeviceOps) {
+    loop {
+        let work = {
+            let mut workers = CAMERA_WORKERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let Some(queued) = workers.get_mut(camera_id) else {
+                return;
+            };
+            if !queued.write && queued.replies.is_empty() {
+                workers.remove(camera_id);
+                return;
+            }
+            std::mem::take(queued)
+        };
+        let device = run_device_pass(database, camera_id, ops, work.write);
+        if work.write {
+            log_applied(camera_id, &device);
+        }
+        for reply in work.replies {
+            let _ = reply.send(device.clone());
+        }
+    }
+}
+
+/// One device call. A panic in the driver call is a failure of this pass,
+/// never the end of the camera's worker.
+fn run_device_pass(
+    database: &Database,
+    camera_id: &str,
+    ops: &DeviceOps,
+    write: bool,
 ) -> DeviceLowLight {
-    let lock = device_lock(camera_id);
-    let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
-    write(camera_id, stored_compensation(database, camera_id))
+    let call = || {
+        if write {
+            (ops.write)(camera_id, stored_compensation(database, camera_id))
+        } else {
+            (ops.read)(camera_id)
+        }
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).unwrap_or_else(|_| {
+        DeviceLowLight::Failed("the camera's control call panicked".to_string())
+    })
 }
 
-/// Runs a device call on the blocking pool and waits at most `wait` for it.
-/// `None` means the camera did not answer in time; the call keeps running on
-/// its own thread (still holding its camera's lock) and finishes on its own.
-async fn bounded_device_call<F>(wait: Duration, call: F) -> Option<DeviceLowLight>
-where
-    F: FnOnce() -> DeviceLowLight + Send + 'static,
-{
-    match tokio::time::timeout(wait, tokio::task::spawn_blocking(call)).await {
-        Ok(Ok(device)) => Some(device),
-        Ok(Err(error)) => Some(DeviceLowLight::Unsupported(error.to_string())),
-        Err(_) => None,
+/// Logs what a write left on the camera.
+fn log_applied(camera_id: &str, device: &DeviceLowLight) {
+    match device {
+        DeviceLowLight::Holds {
+            compensation,
+            changed,
+        } => tracing::info!(
+            camera = %camera_id,
+            compensation,
+            changed,
+            "Camera low-light compensation applied"
+        ),
+        DeviceLowLight::Unsupported(reason) => tracing::info!(
+            camera = %camera_id,
+            "Camera low-light compensation not available: {reason}"
+        ),
+        DeviceLowLight::Failed(reason) => tracing::warn!(
+            camera = %camera_id,
+            "Camera low-light compensation was not applied: {reason}"
+        ),
     }
 }
 
-fn no_answer_reason(wait: Duration) -> String {
-    format!("The camera did not answer within {} s.", wait.as_secs())
-}
-
-/// Claims the open write for `camera_id`: true when this caller should start
-/// it, false when one is running (it is told to write once more).
-fn claim_open_write(camera_id: &str) -> bool {
-    let mut running = OPEN_WRITES.lock().unwrap_or_else(PoisonError::into_inner);
-    match running.get_mut(camera_id) {
-        Some(again) => {
-            *again = true;
-            false
-        }
-        None => {
-            running.insert(camera_id.to_string(), false);
-            true
-        }
-    }
-}
-
-/// After a write: true when another open asked for one more.
-fn finish_open_write(camera_id: &str) -> bool {
-    let mut running = OPEN_WRITES.lock().unwrap_or_else(PoisonError::into_inner);
-    match running.get_mut(camera_id) {
-        Some(again) if *again => {
-            *again = false;
-            true
-        }
-        _ => {
-            running.remove(camera_id);
-            false
-        }
+/// Queues a read (or a write of the saved choice) and waits at most `wait`
+/// for the pass that serves it. A camera that does not answer in time is a
+/// [`DeviceLowLight::Failed`]; its pass keeps running on the camera's worker
+/// and finishes on its own.
+async fn device_answer(
+    database: &Database,
+    camera_id: &str,
+    ops: &DeviceOps,
+    wait: Duration,
+    write: bool,
+) -> DeviceLowLight {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let request = if write {
+        DeviceRequest::Write(Some(reply))
+    } else {
+        DeviceRequest::Read(reply)
+    };
+    request_device_work(database, camera_id, ops, request);
+    match tokio::time::timeout(wait, answer).await {
+        Ok(Ok(device)) => device,
+        Ok(Err(_)) => DeviceLowLight::Failed("the camera's worker did not start".to_string()),
+        Err(_) => DeviceLowLight::Failed(format!(
+            "the camera did not answer within {} s",
+            wait.as_secs()
+        )),
     }
 }
 
 /// `camera.lowLight.get`: the stored choice, and whether the camera has the
-/// control (read from the device, without changing it).
-pub async fn get(state: &crate::state::AppState, camera_id: String) -> CameraLowLightState {
+/// control (read from the device, without changing it). A failed read is an
+/// error, not "no control", so the renderer can ask again.
+pub async fn get(
+    state: &crate::state::AppState,
+    camera_id: String,
+) -> Result<CameraLowLightState, String> {
     let compensation = stored_compensation(&state.database, &camera_id);
-    let id = camera_id.clone();
-    let device = bounded_device_call(CAMERA_LOW_LIGHT_DEVICE_WAIT, move || read_device(&id))
-        .await
-        .unwrap_or_else(|| {
-            DeviceLowLight::Unsupported(no_answer_reason(CAMERA_LOW_LIGHT_DEVICE_WAIT))
-        });
-    state_for(&camera_id, compensation, &device)
+    let device = device_answer(
+        &state.database,
+        &camera_id,
+        &DeviceOps::camera(),
+        CAMERA_LOW_LIGHT_DEVICE_WAIT,
+        false,
+    )
+    .await;
+    if let DeviceLowLight::Failed(reason) = &device {
+        return Err(format!(
+            "Low-light compensation could not be read: {reason}."
+        ));
+    }
+    Ok(state_for(&camera_id, compensation, &device))
 }
 
 /// `camera.lowLight.set`: saves the choice and writes it to the device now,
@@ -249,25 +392,14 @@ pub async fn set(
     }
     save_compensation(&state.database, &camera_id, compensation)
         .map_err(|error| format!("Low-light compensation was not saved: {error}"))?;
-    let id = camera_id.clone();
-    let database = state.database.clone();
-    let Some(device) = bounded_device_call(CAMERA_LOW_LIGHT_DEVICE_WAIT, move || {
-        write_stored(&database, &id)
-    })
-    .await
-    else {
-        // Saved; the write still runs on its own thread and applies the
-        // saved choice when the camera answers.
-        tracing::warn!(
-            camera = %camera_id,
-            compensation,
-            "Camera low-light compensation saved; the camera did not answer in time"
-        );
-        return Err(format!(
-            "Low-light compensation was saved, but {}",
-            no_answer_reason(CAMERA_LOW_LIGHT_DEVICE_WAIT).to_lowercase()
-        ));
-    };
+    let device = device_answer(
+        &state.database,
+        &camera_id,
+        &DeviceOps::camera(),
+        CAMERA_LOW_LIGHT_DEVICE_WAIT,
+        true,
+    )
+    .await;
     match &device {
         DeviceLowLight::Holds { changed, .. } => tracing::info!(
             camera = %camera_id,
@@ -280,73 +412,50 @@ pub async fn set(
             compensation,
             "Camera low-light compensation saved, not written: {reason}"
         ),
+        // Saved; the camera's worker applies the saved choice when the
+        // camera answers.
+        DeviceLowLight::Failed(reason) => {
+            tracing::warn!(
+                camera = %camera_id,
+                compensation,
+                "Camera low-light compensation saved, not written yet: {reason}"
+            );
+            return Err(format!("Low-light compensation was saved, but {reason}."));
+        }
     }
     Ok(state_for(&camera_id, compensation, &device))
 }
 
-/// Called as Videorc opens a camera: writes the stored choice to the device
-/// on its own thread, so the camera's start never waits on it (a write while
-/// FFmpeg already streams takes effect within a second).
+/// Called as Videorc opens a camera: queues a write of the stored choice on
+/// the camera's worker, so the camera's start never waits on it (a write
+/// while FFmpeg already streams takes effect within a second).
 pub fn apply_stored_on_open(database: &Database, camera_id: &str) {
     // Unit tests start cameras with made-up dshow names; they must never
     // write to a real camera on the machine running them.
     if cfg!(test) || crate::camera_capture::parse_windows_dshow_camera_id(camera_id).is_none() {
         return;
     }
-    if !claim_open_write(camera_id) {
-        return;
-    }
-    let database = database.clone();
-    let camera_id = camera_id.to_string();
-    let thread_camera_id = camera_id.clone();
-    let spawned = std::thread::Builder::new()
-        .name("videorc-camera-low-light".to_string())
-        .spawn(move || {
-            let camera_id = thread_camera_id;
-            loop {
-                match write_stored(&database, &camera_id) {
-                    DeviceLowLight::Holds {
-                        compensation,
-                        changed,
-                    } => tracing::info!(
-                        camera = %camera_id,
-                        compensation,
-                        changed,
-                        "Camera low-light compensation applied"
-                    ),
-                    DeviceLowLight::Unsupported(reason) => tracing::info!(
-                        camera = %camera_id,
-                        "Camera low-light compensation not available: {reason}"
-                    ),
-                }
-                if !finish_open_write(&camera_id) {
-                    break;
-                }
-            }
-        });
-    if let Err(error) = spawned {
-        OPEN_WRITES
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&camera_id);
-        tracing::warn!("Camera low-light compensation thread did not start: {error}");
-    }
+    request_device_work(
+        database,
+        camera_id,
+        &DeviceOps::camera(),
+        DeviceRequest::Write(None),
+    );
 }
 
+/// Off Windows there is no control to set.
 #[cfg(not(target_os = "windows"))]
 fn device_control(_camera_id: &str, _write: Option<bool>) -> DeviceLowLight {
     DeviceLowLight::Unsupported("Videorc sets low-light compensation on Windows only.".to_string())
 }
 
+/// Reads or writes the control of the Windows camera `camera_id` names.
 #[cfg(target_os = "windows")]
 fn device_control(camera_id: &str, write: Option<bool>) -> DeviceLowLight {
     let Some(device_name) = crate::camera_capture::parse_windows_dshow_camera_id(camera_id) else {
         return DeviceLowLight::Unsupported("Not a Windows camera.".to_string());
     };
-    match windows_device::control(&device_name, write) {
-        Ok(device) => device,
-        Err(error) => DeviceLowLight::Unsupported(error),
-    }
+    windows_device::control(&device_name, write)
 }
 
 #[cfg(target_os = "windows")]
@@ -368,6 +477,7 @@ mod windows_device {
     };
     use windows::core::Interface;
 
+    /// Uninitializes COM on drop when this thread's initialization succeeded.
     struct ComScope(bool);
 
     impl Drop for ComScope {
@@ -378,6 +488,7 @@ mod windows_device {
         }
     }
 
+    /// Balances this call's `MFStartup` on drop.
     struct MediaFoundationScope;
 
     impl Drop for MediaFoundationScope {
@@ -388,31 +499,40 @@ mod windows_device {
 
     /// Every camera whose DirectShow friendly name is `device_name` (the name
     /// FFmpeg opens). Two identical cameras share a name; both get the write.
-    pub(super) fn control(
+    /// Media Foundation and driver errors are failures worth retrying; a
+    /// camera that is missing or has no such control is unsupported.
+    pub(super) fn control(device_name: &str, write: Option<bool>) -> DeviceLowLight {
+        enumerate_and_control(device_name, write).unwrap_or_else(|device| device)
+    }
+
+    /// The body of [`control`]; `Err` carries the unsupported or failed answer.
+    fn enumerate_and_control(
         device_name: &str,
         write: Option<bool>,
-    ) -> Result<DeviceLowLight, String> {
+    ) -> Result<DeviceLowLight, DeviceLowLight> {
+        let failed = DeviceLowLight::Failed;
         let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         let _com = ComScope(com.is_ok());
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
-            .map_err(|error| format!("Media Foundation did not start: {error}"))?;
+            .map_err(|error| failed(format!("Media Foundation did not start: {error}")))?;
         let _media_foundation = MediaFoundationScope;
 
         let mut attributes = None;
         unsafe { MFCreateAttributes(&mut attributes, 1) }
-            .map_err(|error| format!("Camera enumeration failed: {error}"))?;
-        let attributes = attributes.ok_or("Camera enumeration returned no attributes.")?;
+            .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
+        let attributes = attributes
+            .ok_or_else(|| failed("Camera enumeration returned no attributes.".to_string()))?;
         unsafe {
             attributes.SetGUID(
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
             )
         }
-        .map_err(|error| format!("Camera enumeration failed: {error}"))?;
+        .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
         let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
         let mut count = 0;
         unsafe { MFEnumDeviceSources(&attributes, &mut activates, &mut count) }
-            .map_err(|error| format!("Camera enumeration failed: {error}"))?;
+            .map_err(|error| failed(format!("Camera enumeration failed: {error}")))?;
         let mut matches = Vec::new();
         for index in 0..count {
             // Reading takes ownership, so every activate is released.
@@ -425,7 +545,9 @@ mod windows_device {
         unsafe { CoTaskMemFree(Some(activates.cast())) };
 
         if matches.is_empty() {
-            return Err(format!("No camera named `{device_name}` is connected."));
+            return Err(DeviceLowLight::Unsupported(format!(
+                "No camera named `{device_name}` is connected."
+            )));
         }
         let mut result = None;
         let mut last_error = None;
@@ -438,9 +560,12 @@ mod windows_device {
             }
             let _ = unsafe { activate.ShutdownObject() };
         }
-        result.ok_or_else(|| last_error.unwrap_or_default())
+        result.ok_or_else(|| {
+            last_error.unwrap_or_else(|| failed("The camera gave no answer.".to_string()))
+        })
     }
 
+    /// The camera's friendly name, the one DirectShow (and FFmpeg) shows.
     fn friendly_name(activate: &IMFActivate) -> Option<String> {
         let len =
             unsafe { activate.GetStringLength(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME) }.ok()?;
@@ -459,18 +584,29 @@ mod windows_device {
         (!name.is_empty()).then(|| name.to_string())
     }
 
-    fn control_one(activate: &IMFActivate, write: Option<bool>) -> Result<DeviceLowLight, String> {
+    /// Reads one camera's control and writes it when `write` differs.
+    fn control_one(
+        activate: &IMFActivate,
+        write: Option<bool>,
+    ) -> Result<DeviceLowLight, DeviceLowLight> {
         // The camera's frame server shares the device, so this opens it
         // beside a running FFmpeg capture without taking it over.
-        let source: IMFMediaSource = unsafe { activate.ActivateObject() }
-            .map_err(|error| format!("The camera did not open for its controls: {error}"))?;
+        let source: IMFMediaSource = unsafe { activate.ActivateObject() }.map_err(|error| {
+            DeviceLowLight::Failed(format!("The camera did not open for its controls: {error}"))
+        })?;
         let outcome = source
             .cast::<IKsControl>()
-            .map_err(|_| "The camera's driver exposes no camera controls.".to_string())
+            .map_err(|_| {
+                DeviceLowLight::Unsupported(
+                    "The camera's driver exposes no camera controls.".to_string(),
+                )
+            })
             .and_then(|control| {
                 let current =
                     auto_exposure_priority(&control, KSPROPERTY_TYPE_GET, 0).map_err(|error| {
-                        format!("The camera has no auto-exposure priority control: {error}")
+                        DeviceLowLight::Unsupported(format!(
+                            "The camera has no auto-exposure priority control: {error}"
+                        ))
                     })?;
                 let current = compensation_from_priority(current);
                 match write {
@@ -481,7 +617,9 @@ mod windows_device {
                             auto_exposure_priority_value(wanted),
                         )
                         .map_err(|error| {
-                            format!("The camera refused its auto-exposure priority: {error}")
+                            DeviceLowLight::Failed(format!(
+                                "The camera refused its auto-exposure priority: {error}"
+                            ))
                         })?;
                         Ok(DeviceLowLight::Holds {
                             compensation: wanted,
@@ -498,6 +636,8 @@ mod windows_device {
         outcome
     }
 
+    /// One `KSPROPERTY_CAMERACONTROL_AUTO_EXPOSURE_PRIORITY` GET or SET; returns
+    /// the value the driver reports.
     fn auto_exposure_priority(
         control: &IKsControl,
         kind: u32,
@@ -607,6 +747,38 @@ mod tests {
     }
 
     #[test]
+    fn at_the_camera_limit_saved_choices_still_change_but_a_new_camera_is_refused() {
+        let database = Database::open_in_memory_for_tests();
+        let id = |n: usize| format!("camera:windows-dshow:limit-{n:03}");
+        for n in 0..CAMERA_LOW_LIGHT_MAX_CAMERAS {
+            save_compensation(&database, &id(n), true).unwrap();
+        }
+        let refused = save_compensation(&database, &id(CAMERA_LOW_LIGHT_MAX_CAMERAS), true)
+            .expect_err("a new camera past the limit is refused");
+        assert!(
+            refused.to_string().contains("turn it off for one first"),
+            "{refused}"
+        );
+        assert!(!stored_compensation(
+            &database,
+            &id(CAMERA_LOW_LIGHT_MAX_CAMERAS)
+        ));
+
+        save_compensation(&database, &id(0), true).expect("a saved camera can be set again");
+        save_compensation(&database, &id(CAMERA_LOW_LIGHT_MAX_CAMERAS), false)
+            .expect("turning one off is never refused");
+        save_compensation(&database, &id(1), false).unwrap();
+        save_compensation(&database, &id(CAMERA_LOW_LIGHT_MAX_CAMERAS), true)
+            .expect("a freed place takes a new camera");
+        for n in (0..CAMERA_LOW_LIGHT_MAX_CAMERAS).filter(|n| *n != 1) {
+            assert!(
+                stored_compensation(&database, &id(n)),
+                "camera {n} kept its choice"
+            );
+        }
+    }
+
+    #[test]
     fn the_choice_is_kept_per_camera_and_off_removes_the_entry() {
         let database = Database::open_in_memory_for_tests();
         save_compensation(&database, "camera:windows-dshow:aa", true).unwrap();
@@ -639,80 +811,151 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_open_while_a_write_runs_asks_for_one_more_write_not_another_thread() {
-        let id = "camera:windows-dshow:test-open-coalescing";
-        assert!(claim_open_write(id), "the first open starts the write");
-        assert!(
-            !claim_open_write(id),
-            "a second open joins the running write"
-        );
-        assert!(!claim_open_write(id), "a third open joins it too");
-        assert!(finish_open_write(id), "the running thread writes once more");
-        assert!(!finish_open_write(id), "and then stops");
-        assert!(claim_open_write(id), "a later open starts a new write");
-        assert!(!finish_open_write(id));
+    /// A device double: the first write to `stall_id` blocks until released
+    /// (after saying it started); every write is recorded with its value.
+    struct StallingCamera {
+        ops: DeviceOps,
+        writes: Arc<Mutex<Vec<(String, bool)>>>,
+        reads: Arc<Mutex<usize>>,
+        entered: std::sync::mpsc::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_stalled_camera_answers_in_time_and_never_holds_up_another_camera() {
-        let database = Database::open_in_memory_for_tests();
-        let a = "camera:windows-dshow:test-stall-a";
-        let b = "camera:windows-dshow:test-stall-b";
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-
-        let stalled_database = database.clone();
-        let stalled = bounded_device_call(Duration::from_millis(50), move || {
-            write_stored_with(&stalled_database, a, |_, compensation| {
-                entered_tx.send(()).unwrap();
-                let _ = release_rx.recv();
+    fn stalling_camera(stall_id: &'static str) -> StallingCamera {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let reads = Arc::new(Mutex::new(0));
+        let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let gate = Arc::new(Mutex::new(Some((entered_tx, release_rx))));
+        let recorded = writes.clone();
+        let counted = reads.clone();
+        let ops = DeviceOps {
+            read: Arc::new(move |_: &str| {
+                *counted.lock().unwrap() += 1;
+                DeviceLowLight::Holds {
+                    compensation: false,
+                    changed: false,
+                }
+            }),
+            write: Arc::new(move |camera_id: &str, compensation: bool| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((camera_id.to_string(), compensation));
+                if camera_id == stall_id
+                    && let Some((entered_tx, release_rx)) = gate.lock().unwrap().take()
+                {
+                    entered_tx.send(()).unwrap();
+                    let _ = release_rx.recv();
+                }
                 DeviceLowLight::Holds {
                     compensation,
                     changed: true,
                 }
-            })
-        })
-        .await;
-        assert_eq!(stalled, None, "a stalled camera's answer is bounded");
-        // Camera A is inside its write now, holding its own lock.
-        tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+            }),
+        };
+        StallingCamera {
+            ops,
+            writes,
+            reads,
+            entered,
+            release,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_camera_holds_one_worker_and_never_holds_up_another_camera() {
+        let database = Database::open_in_memory_for_tests();
+        let a = "camera:windows-dshow:test-stall-a";
+        let b = "camera:windows-dshow:test-stall-b";
+        let camera = stalling_camera(a);
+        let short = Duration::from_millis(50);
+        let long = Duration::from_secs(30);
+
+        let first = device_answer(&database, a, &camera.ops, short, true).await;
+        assert!(
+            matches!(first, DeviceLowLight::Failed(ref reason) if reason.contains("did not answer")),
+            "a stalled camera's answer is a bounded failure, not unsupported: {first:?}"
+        );
+        // Camera A's worker is inside its first write now.
+        let entered = camera.entered;
+        tokio::task::spawn_blocking(move || entered.recv().unwrap())
             .await
             .unwrap();
 
-        let other_database = database.clone();
-        let other = bounded_device_call(Duration::from_secs(30), move || {
-            write_stored_with(&other_database, b, |_, compensation| {
-                DeviceLowLight::Holds {
-                    compensation,
-                    changed: false,
-                }
-            })
-        })
-        .await;
+        // Repeated sets and reads while A stalls join A's next pass.
+        for (n, on) in [true, false, true, false, true].into_iter().enumerate() {
+            save_compensation(&database, a, on).unwrap();
+            let set = device_answer(&database, a, &camera.ops, short, true).await;
+            assert!(matches!(set, DeviceLowLight::Failed(_)), "set {n}: {set:?}");
+            let read = device_answer(&database, a, &camera.ops, short, false).await;
+            assert!(
+                matches!(read, DeviceLowLight::Failed(_)),
+                "read {n}: {read:?}"
+            );
+        }
+
+        // Camera B has its own worker and answers meanwhile.
+        let other = device_answer(&database, b, &camera.ops, long, true).await;
         assert_eq!(
             other,
-            Some(DeviceLowLight::Holds {
+            DeviceLowLight::Holds {
                 compensation: false,
-                changed: false
-            }),
+                changed: true
+            },
             "camera B is written while camera A stalls"
         );
-        release_tx.send(()).unwrap();
+
+        camera.release.send(()).unwrap();
+        // Served by A's next pass (or one after it): either way after the
+        // queued write has run.
+        let after = device_answer(&database, a, &camera.ops, long, false).await;
+        assert!(after.supported(), "{after:?}");
+        let a_writes: Vec<bool> = camera
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| id == a)
+            .map(|(_, on)| *on)
+            .collect();
+        assert_eq!(
+            a_writes,
+            vec![false, true],
+            "five queued sets ran as one write of the latest saved choice"
+        );
+        assert!(
+            *camera.reads.lock().unwrap() <= 1,
+            "queued reads were answered by the write, not run one by one"
+        );
     }
 
-    #[test]
-    fn each_camera_has_its_own_device_lock() {
-        let a = device_lock("camera:windows-dshow:test-lock-a");
-        let b = device_lock("camera:windows-dshow:test-lock-b");
-        assert!(Arc::ptr_eq(
-            &a,
-            &device_lock("camera:windows-dshow:test-lock-a")
-        ));
-        let _held = a.lock().unwrap();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_driver_call_is_a_failure_and_the_camera_still_answers_after() {
+        let database = Database::open_in_memory_for_tests();
+        let id = "camera:windows-dshow:test-panic";
+        let counted = std::sync::atomic::AtomicUsize::new(0);
+        let ops = DeviceOps {
+            read: Arc::new(move |_: &str| {
+                let call = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                assert!(call > 1, "the driver call panics once");
+                DeviceLowLight::Holds {
+                    compensation: false,
+                    changed: false,
+                }
+            }),
+            write: Arc::new(|_: &str, _: bool| unreachable!("this test only reads")),
+        };
+        let long = Duration::from_secs(30);
+        let first = device_answer(&database, id, &ops, long, false).await;
         assert!(
-            b.try_lock().is_ok(),
-            "a stalled camera must not hold another camera's lock"
+            matches!(first, DeviceLowLight::Failed(ref reason) if reason.contains("panicked")),
+            "{first:?}"
+        );
+        let second = device_answer(&database, id, &ops, long, false).await;
+        assert!(
+            second.supported(),
+            "the camera's worker survives: {second:?}"
         );
     }
 
@@ -736,6 +979,7 @@ mod tests {
         assert!(state.compensation);
         let missing = DeviceLowLight::Unsupported("no control".to_string());
         assert!(!state_for("camera:windows-dshow:aa", false, &missing).supported);
+        assert!(!DeviceLowLight::Failed("stalled".to_string()).supported());
     }
 
     /// On a Windows box with a UVC camera that has the control:

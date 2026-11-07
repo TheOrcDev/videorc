@@ -13901,10 +13901,14 @@ async fn handle_text_message_with_role(
         // Issue #1066: a camera's low-light compensation, saved per camera.
         "camera.lowLight.get" => {
             match serde_json::from_value::<protocol::CameraLowLightParams>(command.params) {
-                Ok(params) => ServerResponse::ok(
-                    command.id,
-                    camera_low_light::get(state, params.camera_id).await,
-                ),
+                // A failed read is an error the renderer retries, never
+                // "no control".
+                Ok(params) => match camera_low_light::get(state, params.camera_id).await {
+                    Ok(low_light) => ServerResponse::ok(command.id, low_light),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "camera-low-light-unavailable", error)
+                    }
+                },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }

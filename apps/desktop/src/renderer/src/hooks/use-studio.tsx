@@ -11,6 +11,7 @@ import {
   sameCameraLowFrameRate,
   type CameraLowFrameRate
 } from '@/lib/camera-frame-rate'
+import { cameraLowLightReadRetryDelayMs } from '@/lib/camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
@@ -17651,15 +17652,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, commitPerformanceCheck, releasePerformanceCheckHold, wsStatus])
 
   // Issue #1066: the selected camera's low-light compensation. Read whenever
-  // the camera or the connection changes; a backend without the method (or a
-  // camera without the control) leaves the switch hidden.
+  // the camera or the connection changes; a camera without the control leaves
+  // the switch hidden. A failed read (a stalled camera, a driver error) is
+  // asked again with backoff, and only clears the switch once retries run out.
   const selectedCameraIdForLowLight = captureConfig.sources.cameraId
   const [cameraLowLight, setCameraLowLightState] = useState<CameraLowLightState | null>(null)
   const [cameraLowLightPending, setCameraLowLightPending] = useState(false)
   const cameraLowLightRevision = useRef(0)
+  const cameraLowLightRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Reads the camera's state; an answer for an older camera or request is dropped.
   const readCameraLowLight = useCallback(
-    (cameraId: string, revision: number) => {
+    (cameraId: string, revision: number, failures = 0) => {
       if (!client) return
       void client
         .requestTyped('camera.lowLight.get', { cameraId })
@@ -17667,7 +17670,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (revision === cameraLowLightRevision.current) setCameraLowLightState(state)
         })
         .catch(() => {
-          if (revision === cameraLowLightRevision.current) setCameraLowLightState(null)
+          if (revision !== cameraLowLightRevision.current) return
+          const delay = cameraLowLightReadRetryDelayMs(failures + 1)
+          if (delay === null) {
+            setCameraLowLightState(null)
+            return
+          }
+          cameraLowLightRetryTimer.current = setTimeout(() => {
+            cameraLowLightRetryTimer.current = null
+            if (revision === cameraLowLightRevision.current) {
+              readCameraLowLight(cameraId, revision, failures + 1)
+            }
+          }, delay)
         })
     },
     [client]
@@ -17679,6 +17693,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     readCameraLowLight(selectedCameraIdForLowLight, revision)
+    return () => {
+      if (cameraLowLightRetryTimer.current) clearTimeout(cameraLowLightRetryTimer.current)
+      cameraLowLightRetryTimer.current = null
+    }
   }, [client, wsStatus, selectedCameraIdForLowLight, readCameraLowLight])
 
   const setCameraLowLight = useCallback(
