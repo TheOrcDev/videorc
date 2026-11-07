@@ -10,6 +10,7 @@ import {
   cameraIsAvailable,
   cameraSelectionDiagnostics,
   cameraPreviewStartAllowed,
+  freshestPreviewCameraStatus,
   returningSourceChoices,
   sourceReturnAction
 } from './source-return'
@@ -167,6 +168,42 @@ it('records the wanted camera separately from the camera the backend holds', () 
     state: 'disconnected'
   })
   expect(cameraSelectionDiagnostics({ cameraId: 'builtin' }, status).wantedCameraId).toBe('builtin')
+})
+
+describe('a camera start reply racing its status events (issue #1068)', () => {
+  const starting: PreviewCameraStatus = {
+    state: 'starting',
+    cameraId: 'c920',
+    targetFps: 30,
+    framesCaptured: 0,
+    droppedFrames: 0,
+    updatedAt: '2026-11-06T22:00:00.100123456+00:00'
+  }
+  const live: PreviewCameraStatus = {
+    ...starting,
+    state: 'live',
+    framesCaptured: 3,
+    updatedAt: '2026-11-06T22:00:02.350000000+00:00'
+  }
+
+  it('keeps the live event when the admitted reply arrives after it', () => {
+    expect(freshestPreviewCameraStatus(live, starting)).toBe(live)
+  })
+
+  it('applies a reply that is newer than what the renderer holds', () => {
+    expect(freshestPreviewCameraStatus(starting, live)).toBe(live)
+    const idle = { ...starting, state: 'disconnected' as const, updatedAt: '2026-11-06T21:59:00Z' }
+    expect(freshestPreviewCameraStatus(idle, starting)).toBe(starting)
+  })
+
+  it('applies the reply on a tie or an unreadable timestamp', () => {
+    expect(freshestPreviewCameraStatus({ ...starting }, starting)).toBe(starting)
+    expect(freshestPreviewCameraStatus({ ...live, updatedAt: '' }, starting)).toBe(starting)
+    expect(freshestPreviewCameraStatus(live, { ...starting, updatedAt: 'later' })).toEqual({
+      ...starting,
+      updatedAt: 'later'
+    })
+  })
 })
 
 describe('a disconnected camera standing in for another camera', () => {
