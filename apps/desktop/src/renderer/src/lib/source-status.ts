@@ -118,6 +118,8 @@ export function videoSourceStatus(input: {
   standIn?: SourceStandIn
   /** Issue #1066: the camera's rate has stayed low (`camera-frame-rate.ts`). */
   lowFrameRate?: CameraLowFrameRate | null
+  /** Issue #1066: the camera's low-light compensation is on. */
+  lowLightCompensation?: boolean
 }): SourceStatus | null {
   const status = pipelineSourceStatus(input)
   if (!input.standIn || input.switching || !input.selected) return status
@@ -160,7 +162,9 @@ function pipelineSourceStatus(
       return {
         label: 'Low frame rate',
         tone: 'warn',
-        hint: cameraLowFrameRateLine(input.name, input.lowFrameRate)
+        hint: cameraLowFrameRateLine(input.name, input.lowFrameRate, {
+          lowLightCompensation: input.lowLightCompensation
+        })
       }
     }
     // Producing frames reads "Receiving" (plan 174 D4): "On air" is the livestream's alone.
