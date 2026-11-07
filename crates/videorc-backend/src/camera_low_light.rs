@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use crate::protocol::CameraLowLightState;
 use crate::storage::Database;
@@ -27,6 +28,12 @@ pub const CAMERA_LOW_LIGHT_SETTINGS_KEY: &str = "camera.lowLightCompensation";
 /// The longest camera id `camera.lowLight.set` saves; the renderer's wire
 /// schema holds it to the same length.
 pub const CAMERA_LOW_LIGHT_CAMERA_ID_MAX_LEN: usize = 1024;
+
+/// How long `camera.lowLight.get` and `.set` wait for the camera. A driver
+/// that stalls keeps its own thread and its camera's lock; the answer still
+/// comes back well inside the backend's 10 s mutation deadline, so a stalled
+/// camera never gets the backend restarted or holds up later commands.
+pub const CAMERA_LOW_LIGHT_DEVICE_WAIT: Duration = Duration::from_secs(3);
 
 /// Camera id → compensation on. Only `true` entries are kept: off is the
 /// default, so turning it off removes the camera's entry.
@@ -150,9 +157,35 @@ fn device_lock(camera_id: &str) -> Arc<Mutex<()>> {
 }
 
 fn write_stored(database: &Database, camera_id: &str) -> DeviceLowLight {
+    write_stored_with(database, camera_id, write_device)
+}
+
+fn write_stored_with(
+    database: &Database,
+    camera_id: &str,
+    write: impl FnOnce(&str, bool) -> DeviceLowLight,
+) -> DeviceLowLight {
     let lock = device_lock(camera_id);
     let _serialized = lock.lock().unwrap_or_else(PoisonError::into_inner);
-    write_device(camera_id, stored_compensation(database, camera_id))
+    write(camera_id, stored_compensation(database, camera_id))
+}
+
+/// Runs a device call on the blocking pool and waits at most `wait` for it.
+/// `None` means the camera did not answer in time; the call keeps running on
+/// its own thread (still holding its camera's lock) and finishes on its own.
+async fn bounded_device_call<F>(wait: Duration, call: F) -> Option<DeviceLowLight>
+where
+    F: FnOnce() -> DeviceLowLight + Send + 'static,
+{
+    match tokio::time::timeout(wait, tokio::task::spawn_blocking(call)).await {
+        Ok(Ok(device)) => Some(device),
+        Ok(Err(error)) => Some(DeviceLowLight::Unsupported(error.to_string())),
+        Err(_) => None,
+    }
+}
+
+fn no_answer_reason(wait: Duration) -> String {
+    format!("The camera did not answer within {} s.", wait.as_secs())
 }
 
 /// Claims the open write for `camera_id`: true when this caller should start
@@ -191,9 +224,11 @@ fn finish_open_write(camera_id: &str) -> bool {
 pub async fn get(state: &crate::state::AppState, camera_id: String) -> CameraLowLightState {
     let compensation = stored_compensation(&state.database, &camera_id);
     let id = camera_id.clone();
-    let device = tokio::task::spawn_blocking(move || read_device(&id))
+    let device = bounded_device_call(CAMERA_LOW_LIGHT_DEVICE_WAIT, move || read_device(&id))
         .await
-        .unwrap_or_else(|error| DeviceLowLight::Unsupported(error.to_string()));
+        .unwrap_or_else(|| {
+            DeviceLowLight::Unsupported(no_answer_reason(CAMERA_LOW_LIGHT_DEVICE_WAIT))
+        });
     state_for(&camera_id, compensation, &device)
 }
 
@@ -216,9 +251,23 @@ pub async fn set(
         .map_err(|error| format!("Low-light compensation was not saved: {error}"))?;
     let id = camera_id.clone();
     let database = state.database.clone();
-    let device = tokio::task::spawn_blocking(move || write_stored(&database, &id))
-        .await
-        .unwrap_or_else(|error| DeviceLowLight::Unsupported(error.to_string()));
+    let Some(device) = bounded_device_call(CAMERA_LOW_LIGHT_DEVICE_WAIT, move || {
+        write_stored(&database, &id)
+    })
+    .await
+    else {
+        // Saved; the write still runs on its own thread and applies the
+        // saved choice when the camera answers.
+        tracing::warn!(
+            camera = %camera_id,
+            compensation,
+            "Camera low-light compensation saved; the camera did not answer in time"
+        );
+        return Err(format!(
+            "Low-light compensation was saved, but {}",
+            no_answer_reason(CAMERA_LOW_LIGHT_DEVICE_WAIT).to_lowercase()
+        ));
+    };
     match &device {
         DeviceLowLight::Holds { changed, .. } => tracing::info!(
             camera = %camera_id,
@@ -603,6 +652,53 @@ mod tests {
         assert!(!finish_open_write(id), "and then stops");
         assert!(claim_open_write(id), "a later open starts a new write");
         assert!(!finish_open_write(id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_camera_answers_in_time_and_never_holds_up_another_camera() {
+        let database = Database::open_in_memory_for_tests();
+        let a = "camera:windows-dshow:test-stall-a";
+        let b = "camera:windows-dshow:test-stall-b";
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        let stalled_database = database.clone();
+        let stalled = bounded_device_call(Duration::from_millis(50), move || {
+            write_stored_with(&stalled_database, a, |_, compensation| {
+                entered_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                DeviceLowLight::Holds {
+                    compensation,
+                    changed: true,
+                }
+            })
+        })
+        .await;
+        assert_eq!(stalled, None, "a stalled camera's answer is bounded");
+        // Camera A is inside its write now, holding its own lock.
+        tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+            .await
+            .unwrap();
+
+        let other_database = database.clone();
+        let other = bounded_device_call(Duration::from_secs(30), move || {
+            write_stored_with(&other_database, b, |_, compensation| {
+                DeviceLowLight::Holds {
+                    compensation,
+                    changed: false,
+                }
+            })
+        })
+        .await;
+        assert_eq!(
+            other,
+            Some(DeviceLowLight::Holds {
+                compensation: false,
+                changed: false
+            }),
+            "camera B is written while camera A stalls"
+        );
+        release_tx.send(()).unwrap();
     }
 
     #[test]
