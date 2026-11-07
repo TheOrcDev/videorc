@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::protocol::CameraLowLightState;
 use crate::storage::Database;
@@ -80,23 +80,39 @@ fn compensation_from_priority(value: i32) -> bool {
     value != 0
 }
 
-/// Every saved choice; an unreadable setting counts as none saved.
-fn load_prefs(database: &Database) -> LowLightPrefs {
-    match database.load_setting::<LowLightPrefs>(CAMERA_LOW_LIGHT_SETTINGS_KEY) {
-        Ok(prefs) => prefs.unwrap_or_default(),
-        Err(error) => {
-            tracing::warn!("Camera low-light settings are unreadable; using the default: {error}");
-            LowLightPrefs::default()
-        }
-    }
+/// Whether a failed `KsProperty` GET means the camera has no such control.
+/// Kernel streaming answers a missing property with `ERROR_NOT_FOUND`
+/// (`E_PROP_ID_UNSUPPORTED`) or `ERROR_SET_NOT_FOUND` (`E_PROP_SET_UNSUPPORTED`);
+/// some drivers say `ERROR_NOT_SUPPORTED` or `E_NOTIMPL`. Any other error is
+/// the driver failing this time, which is worth retrying.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn ks_get_error_means_unsupported(hresult: i32) -> bool {
+    const E_PROP_ID_UNSUPPORTED: u32 = 0x8007_0490;
+    const E_PROP_SET_UNSUPPORTED: u32 = 0x8007_0492;
+    const HRESULT_ERROR_NOT_SUPPORTED: u32 = 0x8007_0032;
+    const E_NOTIMPL: u32 = 0x8000_4001;
+    matches!(
+        hresult as u32,
+        E_PROP_ID_UNSUPPORTED | E_PROP_SET_UNSUPPORTED | HRESULT_ERROR_NOT_SUPPORTED | E_NOTIMPL
+    )
+}
+
+/// Every saved choice; a missing setting is none saved. An unreadable one is
+/// an error: treating it as empty would let the next save drop every other
+/// camera's choice, or a camera open turn off a choice that is on.
+fn load_prefs(database: &Database) -> anyhow::Result<LowLightPrefs> {
+    database
+        .load_setting::<LowLightPrefs>(CAMERA_LOW_LIGHT_SETTINGS_KEY)
+        .map(Option::unwrap_or_default)
+        .map_err(|error| anyhow::anyhow!("the saved low-light choices are unreadable: {error}"))
 }
 
 /// The user's choice for this camera (off unless they turned it on).
-pub fn stored_compensation(database: &Database, camera_id: &str) -> bool {
-    load_prefs(database)
+pub fn stored_compensation(database: &Database, camera_id: &str) -> anyhow::Result<bool> {
+    Ok(load_prefs(database)?
         .get(camera_id)
         .copied()
-        .unwrap_or(false)
+        .unwrap_or(false))
 }
 
 /// `prefs` with this camera's choice applied: on adds its entry, off removes it.
@@ -125,7 +141,7 @@ pub fn save_compensation(
     compensation: bool,
 ) -> anyhow::Result<()> {
     let _serialized = PREF_SAVES.lock().unwrap_or_else(PoisonError::into_inner);
-    let prefs = load_prefs(database);
+    let prefs = load_prefs(database)?;
     if compensation && !prefs.contains_key(camera_id) && prefs.len() >= CAMERA_LOW_LIGHT_MAX_CAMERAS
     {
         anyhow::bail!(
@@ -210,9 +226,24 @@ struct CameraWork {
 /// latest choice saved before that pass.
 static CAMERA_WORKERS: Mutex<BTreeMap<String, CameraWork>> = Mutex::new(BTreeMap::new());
 
+/// The most callers that can wait on one camera at once. Callers stop waiting
+/// after [`CAMERA_LOW_LIGHT_DEVICE_WAIT`], so this is only reached by a burst.
+pub const CAMERA_LOW_LIGHT_MAX_WAITING: usize = 32;
+
+/// When each running camera worker started its current pass.
+static PASS_STARTED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
+
+/// A pass running longer than this counts as stuck: a read does not wait on
+/// it. A healthy write or read takes well under this (about 50 ms measured
+/// on the HP HD Camera, enumeration included).
+pub const CAMERA_LOW_LIGHT_STALLED_PASS: Duration = Duration::from_secs(1);
+
 /// Queues `request` for `camera_id` and starts the camera's worker unless one
 /// is running. A worker that cannot start drops its replies, which their
-/// callers read as a failure.
+/// callers read as a failure. Replies whose callers already gave up are
+/// dropped first, and at most [`CAMERA_LOW_LIGHT_MAX_WAITING`] wait, so a
+/// camera stuck in a driver never grows its queue: a request past the limit
+/// is answered at once as a failure (a write still queues).
 fn request_device_work(
     database: &Database,
     camera_id: &str,
@@ -225,12 +256,19 @@ fn request_device_work(
             .unwrap_or_else(PoisonError::into_inner);
         let start = !workers.contains_key(camera_id);
         let work = workers.entry(camera_id.to_string()).or_default();
-        match request {
+        work.replies.retain(|reply| !reply.is_closed());
+        let reply = match request {
             DeviceRequest::Write(reply) => {
                 work.write = true;
-                work.replies.extend(reply);
+                reply
             }
-            DeviceRequest::Read(reply) => work.replies.push(reply),
+            DeviceRequest::Read(reply) => Some(reply),
+        };
+        // Dropping a reply past the limit answers its caller at once.
+        if let Some(reply) = reply
+            && work.replies.len() < CAMERA_LOW_LIGHT_MAX_WAITING
+        {
+            work.replies.push(reply);
         }
         start
     };
@@ -270,7 +308,15 @@ fn run_camera_worker(database: &Database, camera_id: &str, ops: &DeviceOps) {
             }
             std::mem::take(queued)
         };
+        PASS_STARTED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(camera_id.to_string(), Instant::now());
         let device = run_device_pass(database, camera_id, ops, work.write);
+        PASS_STARTED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(camera_id);
         if work.write {
             log_applied(camera_id, &device);
         }
@@ -290,7 +336,12 @@ fn run_device_pass(
 ) -> DeviceLowLight {
     let call = || {
         if write {
-            (ops.write)(camera_id, stored_compensation(database, camera_id))
+            // An unreadable saved choice is never guessed at: the camera
+            // keeps whatever it holds.
+            match stored_compensation(database, camera_id) {
+                Ok(compensation) => (ops.write)(camera_id, compensation),
+                Err(error) => DeviceLowLight::Failed(error.to_string()),
+            }
         } else {
             (ops.read)(camera_id)
         }
@@ -343,12 +394,38 @@ async fn device_answer(
     request_device_work(database, camera_id, ops, request);
     match tokio::time::timeout(wait, answer).await {
         Ok(Ok(device)) => device,
-        Ok(Err(_)) => DeviceLowLight::Failed("the camera's worker did not start".to_string()),
+        Ok(Err(_)) => DeviceLowLight::Failed("the camera is not taking more requests".to_string()),
         Err(_) => DeviceLowLight::Failed(format!(
             "the camera did not answer within {} s",
             wait.as_secs()
         )),
     }
+}
+
+/// True when the camera's worker has been in one pass for longer than `after`.
+fn camera_pass_running_longer_than(camera_id: &str, after: Duration) -> bool {
+    PASS_STARTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(camera_id)
+        .is_some_and(|started| started.elapsed() > after)
+}
+
+/// A read for `camera.lowLight.get`. It runs on the read-only request lane,
+/// so it never waits on a camera already stuck in a pass: that answers "not
+/// answering" at once (the renderer asks again later) instead of holding a
+/// lane slot. Only the first read of a stall waits, at most `wait`.
+async fn device_read_answer(
+    database: &Database,
+    camera_id: &str,
+    ops: &DeviceOps,
+    wait: Duration,
+    stalled_after: Duration,
+) -> DeviceLowLight {
+    if camera_pass_running_longer_than(camera_id, stalled_after) {
+        return DeviceLowLight::Failed("the camera is not answering".to_string());
+    }
+    device_answer(database, camera_id, ops, wait, false).await
 }
 
 /// `camera.lowLight.get`: the stored choice, and whether the camera has the
@@ -358,13 +435,14 @@ pub async fn get(
     state: &crate::state::AppState,
     camera_id: String,
 ) -> Result<CameraLowLightState, String> {
-    let compensation = stored_compensation(&state.database, &camera_id);
-    let device = device_answer(
+    let compensation = stored_compensation(&state.database, &camera_id)
+        .map_err(|error| format!("Low-light compensation could not be read: {error}."))?;
+    let device = device_read_answer(
         &state.database,
         &camera_id,
         &DeviceOps::camera(),
         CAMERA_LOW_LIGHT_DEVICE_WAIT,
-        false,
+        CAMERA_LOW_LIGHT_STALLED_PASS,
     )
     .await;
     if let DeviceLowLight::Failed(reason) = &device {
@@ -460,7 +538,10 @@ fn device_control(camera_id: &str, write: Option<bool>) -> DeviceLowLight {
 
 #[cfg(target_os = "windows")]
 mod windows_device {
-    use super::{DeviceLowLight, auto_exposure_priority_value, compensation_from_priority};
+    use super::{
+        DeviceLowLight, auto_exposure_priority_value, compensation_from_priority,
+        ks_get_error_means_unsupported,
+    };
     use windows::Win32::Media::KernelStreaming::{
         IKsControl, KSIDENTIFIER, KSIDENTIFIER_0, KSIDENTIFIER_0_0,
         KSPROPERTY_CAMERACONTROL_AUTO_EXPOSURE_PRIORITY, KSPROPERTY_CAMERACONTROL_FLAGS_MANUAL,
@@ -604,9 +685,15 @@ mod windows_device {
             .and_then(|control| {
                 let current =
                     auto_exposure_priority(&control, KSPROPERTY_TYPE_GET, 0).map_err(|error| {
-                        DeviceLowLight::Unsupported(format!(
-                            "The camera has no auto-exposure priority control: {error}"
-                        ))
+                        if ks_get_error_means_unsupported(error.code().0) {
+                            DeviceLowLight::Unsupported(format!(
+                                "The camera has no auto-exposure priority control: {error}"
+                            ))
+                        } else {
+                            DeviceLowLight::Failed(format!(
+                                "The camera did not report its auto-exposure priority: {error}"
+                            ))
+                        }
                     })?;
                 let current = compensation_from_priority(current);
                 match write {
@@ -676,6 +763,11 @@ mod windows_device {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The saved choice in a test database that is always readable.
+    fn stored(camera_id: &str, database: &Database) -> bool {
+        stored_compensation(database, camera_id).unwrap()
+    }
     use crate::protocol::{CameraLowLightParams, CameraLowLightSetParams};
 
     /// The shared wire fixture; the renderer's contract test reads it too.
@@ -741,9 +833,35 @@ mod tests {
     }
 
     #[test]
+    fn only_a_missing_property_reads_as_no_control() {
+        // E_PROP_ID_UNSUPPORTED, E_PROP_SET_UNSUPPORTED, ERROR_NOT_SUPPORTED, E_NOTIMPL.
+        for unsupported in [0x8007_0490_u32, 0x8007_0492, 0x8007_0032, 0x8000_4001] {
+            assert!(
+                ks_get_error_means_unsupported(unsupported as i32),
+                "{unsupported:#x} means no control"
+            );
+        }
+        // Device busy or not ready, a generic failure, a timeout, a lost
+        // device, access denied: the driver failed this time.
+        for failed in [
+            0x8007_00AA_u32,
+            0x8007_0015,
+            0x8000_4005,
+            0x8007_05B4,
+            0x8007_048F,
+            0x8007_0005,
+        ] {
+            assert!(
+                !ks_get_error_means_unsupported(failed as i32),
+                "{failed:#x} is a failure worth retrying"
+            );
+        }
+    }
+
+    #[test]
     fn a_camera_with_no_entry_keeps_its_frame_rate() {
         let database = Database::open_in_memory_for_tests();
-        assert!(!stored_compensation(&database, "camera:windows-dshow:00"));
+        assert!(!stored("camera:windows-dshow:00", &database));
     }
 
     #[test]
@@ -759,10 +877,7 @@ mod tests {
             refused.to_string().contains("turn it off for one first"),
             "{refused}"
         );
-        assert!(!stored_compensation(
-            &database,
-            &id(CAMERA_LOW_LIGHT_MAX_CAMERAS)
-        ));
+        assert!(!stored(&id(CAMERA_LOW_LIGHT_MAX_CAMERAS), &database));
 
         save_compensation(&database, &id(0), true).expect("a saved camera can be set again");
         save_compensation(&database, &id(CAMERA_LOW_LIGHT_MAX_CAMERAS), false)
@@ -771,10 +886,7 @@ mod tests {
         save_compensation(&database, &id(CAMERA_LOW_LIGHT_MAX_CAMERAS), true)
             .expect("a freed place takes a new camera");
         for n in (0..CAMERA_LOW_LIGHT_MAX_CAMERAS).filter(|n| *n != 1) {
-            assert!(
-                stored_compensation(&database, &id(n)),
-                "camera {n} kept its choice"
-            );
+            assert!(stored(&id(n), &database), "camera {n} kept its choice");
         }
     }
 
@@ -783,8 +895,8 @@ mod tests {
         let database = Database::open_in_memory_for_tests();
         save_compensation(&database, "camera:windows-dshow:aa", true).unwrap();
         save_compensation(&database, "camera:windows-dshow:bb", false).unwrap();
-        assert!(stored_compensation(&database, "camera:windows-dshow:aa"));
-        assert!(!stored_compensation(&database, "camera:windows-dshow:bb"));
+        assert!(stored("camera:windows-dshow:aa", &database));
+        assert!(!stored("camera:windows-dshow:bb", &database));
 
         save_compensation(&database, "camera:windows-dshow:aa", false).unwrap();
         let prefs: LowLightPrefs = database
@@ -807,7 +919,7 @@ mod tests {
             }
         });
         for id in &ids {
-            assert!(stored_compensation(&database, id), "{id} lost its choice");
+            assert!(stored(id, &database), "{id} lost its choice");
         }
     }
 
@@ -960,12 +1072,138 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_settings_fall_back_to_keeping_the_frame_rate() {
+    fn unreadable_settings_are_never_overwritten_or_guessed_onto_a_camera() {
         let database = Database::open_in_memory_for_tests();
         database
             .save_setting(CAMERA_LOW_LIGHT_SETTINGS_KEY, &"not a map")
             .unwrap();
-        assert!(!stored_compensation(&database, "camera:windows-dshow:aa"));
+        let id = "camera:windows-dshow:aa";
+        assert!(stored_compensation(&database, id).is_err());
+        assert!(
+            save_compensation(&database, id, true).is_err(),
+            "a save must not replace choices it could not read"
+        );
+        let kept: String = database
+            .load_setting(CAMERA_LOW_LIGHT_SETTINGS_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept, "not a map");
+
+        let ops = DeviceOps {
+            read: Arc::new(|_: &str| unreachable!("a write pass only writes")),
+            write: Arc::new(|_: &str, _: bool| {
+                unreachable!("an unreadable choice is never written")
+            }),
+        };
+        let device = run_device_pass(&database, id, &ops, true);
+        assert!(
+            matches!(device, DeviceLowLight::Failed(ref reason) if reason.contains("unreadable")),
+            "{device:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_setting_is_off() {
+        let database = Database::open_in_memory_for_tests();
+        assert!(!stored("camera:windows-dshow:aa", &database));
+    }
+
+    /// How many callers wait on this camera's next pass.
+    fn waiting_replies(camera_id: &str) -> usize {
+        CAMERA_WORKERS
+            .lock()
+            .unwrap()
+            .get(camera_id)
+            .map_or(0, |work| work.replies.len())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stuck_camera_keeps_no_reply_its_caller_gave_up_on() {
+        let database = Database::open_in_memory_for_tests();
+        let id = "camera:windows-dshow:test-stuck-replies";
+        let camera = stalling_camera(id);
+        let short = Duration::from_millis(5);
+        let first = device_answer(&database, id, &camera.ops, short, true).await;
+        assert!(matches!(first, DeviceLowLight::Failed(_)), "{first:?}");
+        let entered = camera.entered;
+        tokio::task::spawn_blocking(move || entered.recv().unwrap())
+            .await
+            .unwrap();
+
+        // Far more timed-out sets and reads than the limit, one after another.
+        for n in 0..(CAMERA_LOW_LIGHT_MAX_WAITING * 3) {
+            let set = device_answer(&database, id, &camera.ops, short, n % 2 == 0).await;
+            assert!(matches!(set, DeviceLowLight::Failed(_)), "{n}: {set:?}");
+            assert!(
+                waiting_replies(id) <= 1,
+                "{n}: replies of callers that gave up are dropped"
+            );
+        }
+
+        // A burst of callers still waiting is held to the limit; the ones
+        // past it are answered at once.
+        let mut burst = Vec::new();
+        for _ in 0..(CAMERA_LOW_LIGHT_MAX_WAITING + 8) {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            request_device_work(&database, id, &camera.ops, DeviceRequest::Read(reply));
+            burst.push(answer);
+        }
+        assert_eq!(waiting_replies(id), CAMERA_LOW_LIGHT_MAX_WAITING);
+        let refused = burst
+            .iter_mut()
+            .map(|answer| answer.try_recv())
+            .filter(|answer| {
+                matches!(
+                    answer,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                )
+            })
+            .count();
+        assert_eq!(refused, 8, "callers past the limit are answered at once");
+
+        // The burst's callers give up, which frees their places.
+        drop(burst);
+        camera.release.send(()).unwrap();
+        let after = device_answer(&database, id, &camera.ops, Duration::from_secs(30), false).await;
+        assert!(after.supported(), "{after:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_read_never_waits_on_a_camera_already_stuck_in_a_pass() {
+        let database = Database::open_in_memory_for_tests();
+        let id = "camera:windows-dshow:test-stuck-read";
+        let camera = stalling_camera(id);
+        let first =
+            device_answer(&database, id, &camera.ops, Duration::from_millis(50), true).await;
+        assert!(matches!(first, DeviceLowLight::Failed(_)), "{first:?}");
+        let entered = camera.entered;
+        tokio::task::spawn_blocking(move || entered.recv().unwrap())
+            .await
+            .unwrap();
+
+        // The pass is running; with a zero threshold it already counts as
+        // stuck, so the read answers at once without queuing.
+        let started = Instant::now();
+        let read = device_read_answer(
+            &database,
+            id,
+            &camera.ops,
+            Duration::from_secs(30),
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            matches!(read, DeviceLowLight::Failed(ref reason) if reason.contains("not answering")),
+            "{read:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the read did not wait for the stuck pass"
+        );
+        assert_eq!(*camera.reads.lock().unwrap(), 0, "no read was queued");
+        camera.release.send(()).unwrap();
+        let after = device_answer(&database, id, &camera.ops, Duration::from_secs(30), false).await;
+        assert!(after.supported(), "{after:?}");
     }
 
     #[test]
