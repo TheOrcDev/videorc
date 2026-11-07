@@ -237,7 +237,7 @@ export function AudioSectionView({
   systemAudio
 }: {
   microphone: MicrophoneRowProps
-  /** Null where System audio can't run (Linux, older Windows): Microphone only. */
+  /** Null where System audio can't run (no PipeWire, older Windows): Microphone only. */
   systemAudio: SystemAudioRowProps | null
 }): ReactElement {
   return (

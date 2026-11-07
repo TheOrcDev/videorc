@@ -13,7 +13,7 @@ import type {
   VideoSettings
 } from '@/lib/backend'
 import { defaultCaptureConfig, videoPresets, type ProviderStreamOutputPlan } from '@/lib/capture'
-import { NO_RECENT_DROPS } from '@/lib/stream-health-attribution'
+import { NO_RECENT_DROPS } from '@/lib/stream-drop-activity'
 
 import {
   encoderLabel,

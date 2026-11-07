@@ -26,11 +26,12 @@
 //      itself passes the analyzer, and the ring re-arms after Stop;
 //   6. turns the switch off: the ring reports off and no session runs.
 //
-// The dev binary has no microphone or Screen Recording grant, so the
+// The dev binary has no microphone or Screen Recording grant, so on macOS the
 // session's audio is its silent bus: the analyzer proves the AAC stream's
-// continuity and the stop tail, not an audible offset. The A/V offset of the
-// copied packets is the recording's (same clock, same packets); the
-// real-game acceptance checks it by ear.
+// continuity and the stop tail, not an audible offset. Linux opens the chosen
+// Pulse microphone for real, so there the clips record an owned 440 Hz
+// source. The A/V offset of the copied packets is the recording's (same
+// clock, same packets); the real-game acceptance checks it by ear.
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -39,6 +40,8 @@ import { parseArgs } from 'node:util'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
+import { acquireHostSmokeLock } from './lib/host-lock.mjs'
+import { startLinuxPulseFixtures } from './lib/linux-pulse-fixture.mjs'
 import {
   BackendEventRecorder,
   disposeRecordLatencyRun,
@@ -119,6 +122,7 @@ let stopApp = null
 let renderer = null
 let remote = null
 let recorder = null
+let pulseFixtures = null
 
 async function seedRendererProfile(smoke) {
   await requestSmokeCommand(
@@ -147,6 +151,59 @@ async function seedRendererProfile(smoke) {
     { timeoutMs }
   )
   await sleep(2500)
+}
+
+/**
+ * Linux records the selected Pulse microphone, and a fresh profile takes the
+ * system default, which can be silent, pegged (a T2 MacBook with its lid shut
+ * reads a constant at full scale) or absent. Select the owned tone through the
+ * picker's owner, as the recording matrix does, before the ring re-arms with
+ * it.
+ */
+async function selectOwnedMicrophone(smoke, microphoneId) {
+  const deadline = Date.now() + timeoutMs
+  let requested = false
+  let last = null
+  while (Date.now() < deadline) {
+    const response = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: `
+          const scenes = window.__videorcSmokeScenePresets;
+          if (!scenes) return { hook: false };
+          const config = scenes.streamingState().captureConfig;
+          if (params.select) {
+            await scenes.source('microphone', {
+              ...config.sources,
+              microphoneId: params.microphoneId,
+              microphoneName: undefined,
+              microphoneOff: undefined
+            });
+            scenes.configure({
+              audio: { ...config.audio, microphoneMuted: false, microphoneGainDb: 0 }
+            });
+          }
+          return {
+            hook: true,
+            microphoneId: config?.sources?.microphoneId ?? null,
+            microphoneMuted: config?.audio?.microphoneMuted
+          };
+        `,
+        microphoneId,
+        select: !requested
+      },
+      { timeoutMs }
+    )
+    last = response?.result
+    if (last?.hook && !requested) {
+      requested = true
+      continue
+    }
+    if (last?.microphoneId === microphoneId && last.microphoneMuted === false) return
+    await sleep(250)
+  }
+  fail(`the owned microphone was not selected: ${JSON.stringify(last)}`)
 }
 
 async function waitForBackendState(method, predicate, label, waitMs = timeoutMs) {
@@ -279,6 +336,13 @@ const report = {
 
 try {
   mkdirSync(outputDirectory, { recursive: true })
+  if (process.platform === 'linux') {
+    // Create the owned sources before the app's first device listing, holding
+    // the host lock so no other app smoke runs meanwhile. Tones play into
+    // owned null sinks; the system default stays put.
+    await acquireHostSmokeLock()
+    pulseFixtures = await startLinuxPulseFixtures({ ffmpegPath, otherFrequency: 997 })
+  }
   const launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -310,6 +374,11 @@ try {
     'synthetic compositor readiness'
   )
   log('synthetic source live; preview compositor rendering')
+  if (pulseFixtures) {
+    const tone = pulseFixtures.sources.find((source) => source.frequency === 440)
+    await selectOwnedMicrophone(smoke, tone.deviceId)
+    log(`owned 440 Hz microphone selected: ${tone.source}`)
+  }
 
   const { discovery } = await enableRemoteControl(renderer, { timeoutMs })
   remote = await connectRemote(discovery.host, discovery.port, discovery.token, { timeoutMs })
@@ -638,6 +707,12 @@ try {
   })
   for (const failure of cleanup.failures) {
     console.error(`replay-buffer: cleanup failed for ${failure.owner}.`)
+    process.exitCode = 1
+  }
+  try {
+    await pulseFixtures?.stop()
+  } catch (error) {
+    console.error(`replay-buffer: Pulse fixture cleanup failed: ${error.message}`)
     process.exitCode = 1
   }
 }

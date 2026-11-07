@@ -14,9 +14,9 @@
 //
 // Pure and electron-free so it is unit-testable; index.ts does the IO.
 
-// XDG paths are Linux paths: posix joins keep them so on every host.
 import { posix } from 'node:path'
 
+// These are always Linux paths, including when tested on another host.
 const { join } = posix
 
 export const VIDEORC_DESKTOP_FILE_NAME = 'videorc.desktop'

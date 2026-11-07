@@ -2036,7 +2036,15 @@ mod tests {
         wait_for_input_state(&session, NativeAudioInputState::SourceLost);
 
         assert!(session.source_loss_after_ms().is_some());
-        assert!(session.claim_source_loss_event().is_some());
+        // The bus flips the input state before it queues the loss event, so
+        // a preempted runner can read between the two.
+        let loss_deadline = Instant::now() + Duration::from_secs(1);
+        let mut loss = session.claim_source_loss_event();
+        while loss.is_none() && Instant::now() < loss_deadline {
+            thread::sleep(Duration::from_millis(5));
+            loss = session.claim_source_loss_event();
+        }
+        assert!(loss.is_some());
         assert_eq!(session.claim_source_loss_event(), None);
         let deadline = Instant::now() + Duration::from_secs(1);
         while session.status().sample_cursor < 4800 && Instant::now() < deadline {

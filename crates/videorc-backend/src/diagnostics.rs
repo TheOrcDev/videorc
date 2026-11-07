@@ -1,4 +1,8 @@
+#[cfg(not(target_os = "linux"))]
 use std::process::Command;
+
+#[cfg(target_os = "linux")]
+mod linux_process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
@@ -2424,16 +2428,25 @@ fn collect_runtime_resource_snapshot() -> RuntimeResourceSnapshot {
     // ~40 ms of CPU, ~32 ms of it system time (measured), so forking it every second
     // burned ~4% of a core for as long as the app was open. On macOS libproc reads
     // the same rows for the backend's own process tree in ~35 µs, with `ps` kept as
-    // the fallback for any sample libproc cannot take. Every other platform keeps `ps`.
+    // the fallback for any sample libproc cannot take. Linux reads the owned tree
+    // from procfs; a failed read must not fall back to a host-wide scan.
     #[cfg(target_os = "macos")]
     {
         if let Some(rows) = collect_native_process_rows() {
             return runtime_resource_snapshot_from_rows(&rows, backend_pid);
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        linux_process::collect(backend_pid, std::path::Path::new("/proc"))
+            .map(|rows| runtime_resource_snapshot_from_rows(&rows, backend_pid))
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "linux"))]
     collect_ps_runtime_resource_snapshot(backend_pid)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn collect_ps_runtime_resource_snapshot(backend_pid: u32) -> RuntimeResourceSnapshot {
     let output = Command::new("ps")
         .args(["-axo", "pid=,ppid=,rss=,comm="])
@@ -2453,6 +2466,7 @@ struct ProcessSampleRow {
     command: String,
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn parse_runtime_resource_snapshot(output: &str, backend_pid: u32) -> RuntimeResourceSnapshot {
     let rows = output
         .lines()
@@ -2504,6 +2518,7 @@ fn runtime_resource_snapshot_from_rows(
     snapshot
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
     let mut fields = line.split_whitespace();
     let pid = fields.next()?.parse().ok()?;

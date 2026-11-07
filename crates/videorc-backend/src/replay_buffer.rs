@@ -1862,8 +1862,37 @@ mod runtime_tests {
         assert_eq!(report.segment_files, 0);
     }
 
+    // Included in Windows' 25-pass live_control_ ownership filter. A shared
+    // process root let one in-memory state remove another test's live ring.
+    #[test]
+    fn live_control_replay_roots_isolate_in_memory_states() {
+        let first = test_state();
+        let second = test_state();
+        let first_dir = ring_dir(&first, "shared-session-name");
+        let second_dir = ring_dir(&second, "shared-session-name");
+        assert_ne!(
+            first_dir, second_dir,
+            "independent states own independent rings"
+        );
+        assert_eq!(first_dir, ring_dir(&first.clone(), "shared-session-name"));
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+        let segment = second_dir.join("seg-000001.ts");
+        std::fs::write(&segment, b"other state's live segment").unwrap();
+
+        clean_leftovers(&first);
+        assert!(!ring_root(&first).exists());
+        assert_eq!(
+            std::fs::read(&segment).unwrap(),
+            b"other state's live segment"
+        );
+        assert_eq!(second_dir, ring_dir(&second.clone(), "shared-session-name"));
+        clean_leftovers(&second);
+        assert!(!ring_root(&second).exists());
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn prepare_attach_and_retire_own_the_ring_directory_and_the_state() {
+    async fn live_control_prepare_attach_and_retire_own_the_ring_directory_and_the_state() {
         let state = test_state();
         let mut events = state.events.subscribe();
         let params: StartSessionParams = serde_json::from_value(serde_json::json!({

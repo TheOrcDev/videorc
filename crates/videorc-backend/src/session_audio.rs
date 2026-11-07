@@ -4089,7 +4089,7 @@ impl PendingHandoff {
         self
     }
 
-    fn poll(&mut self, epoch: Instant, now: Instant) {
+    fn poll(&mut self, epoch: Instant, mut now: impl FnMut() -> Instant) {
         let Some(receiver) = self
             .command
             .candidate
@@ -4101,8 +4101,13 @@ impl PendingHandoff {
         loop {
             match receiver.try_recv() {
                 Ok(frame) => {
-                    if !valid_fresh_frame(&frame, now) {
-                        self.pcm.counters.discarded_frames += frame.frame_count() as u64;
+                    // Capture can publish another packet while this queue is
+                    // draining. Judge it at receipt, not against the instant
+                    // before the drain, which would make fresh PCM look future-dated.
+                    if !valid_fresh_frame(&frame, now()) {
+                        let frames = frame.frame_count() as u64;
+                        self.pcm.counters.discarded_frames += frames;
+                        self.pcm.losses.discarded_stale += frames;
                         continue;
                     }
                     let delay_frames = self.delay_frames;
@@ -5318,6 +5323,34 @@ impl StopDrain {
             playout_delay,
         )
     }
+    /// The drain of a bus with ISO legs armed. ISO muxers trim the common
+    /// negative track shift, so it also flushes the system samples already
+    /// captured behind that shift. The deadline moves with the target: a
+    /// paced cursor reaches it that much later, and cutting earlier leaves
+    /// the Screen file's tail to FFmpeg's silence (plan 212).
+    fn for_bus(
+        stop_requested_at: &OnceLock<Instant>,
+        epoch: Instant,
+        timing: BusTiming,
+        shared: &std::sync::Mutex<AudioShared>,
+    ) -> Self {
+        let mut drain = Self::at(stop_requested_at, epoch, timing.playout_delay);
+        if shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .source_taps
+            .is_some()
+        {
+            drain.extend(timing.system_delay_frames);
+        }
+        drain
+    }
+    fn extend(&mut self, frames: u64) {
+        self.target = self.target.saturating_add(frames);
+        self.deadline += Duration::from_nanos(
+            frames.saturating_mul(1_000_000_000) / u64::from(NATIVE_AUDIO_SAMPLE_RATE),
+        );
+    }
     fn done(&self, cursor: u64, now: Instant) -> bool {
         cursor >= self.target || now >= self.deadline
     }
@@ -5614,20 +5647,10 @@ fn run_bus_owned(
     let mut drain: Option<StopDrain> = None;
     loop {
         if stop.load(Ordering::Acquire) {
+            // The unpaced bounded drain flushes what was captured; it does
+            // not await new audio.
             let drain = drain.get_or_insert_with(|| {
-                let mut drain = StopDrain::at(stop_requested_at, epoch, playout_delay);
-                // ISO muxers trim the common negative track shift. Flush the
-                // already captured system samples delayed by that same shift;
-                // the existing unpaced bounded drain does not await new audio.
-                if shared
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .source_taps
-                    .is_some()
-                {
-                    drain.target = drain.target.saturating_add(timing.system_delay_frames);
-                }
-                drain
+                StopDrain::for_bus(stop_requested_at, epoch, timing, shared)
             });
             if drain.done(timeline.cursor(), Instant::now()) {
                 break;
@@ -5687,7 +5710,7 @@ fn run_bus_owned(
             );
         }
         if let Some(pending) = pending.as_mut() {
-            pending.poll(epoch, Instant::now());
+            pending.poll(epoch, Instant::now);
         }
         if let Some(stats) = producer_stats.as_ref() {
             let drops = stats.dropped_frames();
@@ -6210,7 +6233,8 @@ fn run_bus_owned(
         let mut wait = || {
             // A stop that arrives mid-write drains too, until its deadline.
             if stop.load(Ordering::Acquire)
-                && StopDrain::at(stop_requested_at, epoch, playout_delay).done(0, Instant::now())
+                && StopDrain::for_bus(stop_requested_at, epoch, timing, shared)
+                    .done(0, Instant::now())
             {
                 write_stop.store(true, Ordering::Release);
             }
@@ -8385,7 +8409,7 @@ mod tests {
         second.timestamp_micros = 21_250;
         second.captured_at = epoch + Duration::from_nanos(1_520 * 1_000_000_000 / 48_000);
         sender.send(second).unwrap();
-        handoff.poll(epoch, epoch + Duration::from_millis(35));
+        handoff.poll(epoch, || epoch + Duration::from_millis(35));
         assert!(handoff.ready());
         assert_eq!(handoff.pcm.counters.discarded_frames, 240);
         assert!(handoff.pcm.packets.iter().all(|packet| packet.start >= 960));
@@ -8419,12 +8443,51 @@ mod tests {
     }
 
     #[test]
+    fn handoff_checks_freshness_at_each_packet_receipt() {
+        let epoch = Instant::now();
+        let (mut handoff, sender) = handoff(epoch, 480, epoch + Duration::from_millis(20));
+        for (start_ms, level) in [(20, 0.2), (30, 0.3)] {
+            let mut packet = frame(level, 480);
+            packet.timestamp_micros = start_ms * 1_000;
+            packet.captured_at = epoch + Duration::from_millis(start_ms + 10);
+            sender.send(packet).unwrap();
+        }
+        // The second packet arrives during the drain. A timestamp sampled
+        // only before the first receipt wrongly rejects that packet as future PCM.
+        let mut receipts = [30, 40].into_iter();
+        handoff.poll(epoch, || {
+            epoch + Duration::from_millis(receipts.next().expect("one clock read per packet"))
+        });
+        assert!(handoff.pcm.covers(960, 960));
+        assert_eq!(handoff.pcm.counters.discarded_frames, 0);
+        assert_eq!(handoff.pcm.render_chunk(), vec![0.2; 960]);
+        assert_eq!(handoff.pcm.render_chunk(), vec![0.3; 960]);
+        assert!(receipts.next().is_none());
+    }
+
+    #[test]
+    fn handoff_still_rejects_future_and_stale_packets_at_receipt() {
+        let epoch = Instant::now();
+        let now = epoch + MAX_FRAME_AGE + Duration::from_millis(20);
+        let (mut handoff, sender) = handoff(epoch, 480, now);
+        for captured_at in [now + Duration::from_millis(1), epoch] {
+            let mut packet = frame(0.2, 480);
+            packet.captured_at = captured_at;
+            sender.send(packet).unwrap();
+        }
+        handoff.poll(epoch, || now);
+        assert!(!handoff.ready());
+        assert_eq!(handoff.pcm.counters.discarded_frames, 960);
+        assert_eq!(handoff.pcm.losses.discarded_stale, 960);
+    }
+
+    #[test]
     fn eof_after_candidate_readiness_and_stop_both_preserve_old_route() {
         let epoch = Instant::now();
         let (mut handoff, sender) = handoff(epoch, 0, epoch);
         handoff.pcm.push(1, 480, frame(0.7, 480));
         drop(sender);
-        handoff.poll(epoch, epoch);
+        handoff.poll(epoch, || epoch);
         assert_eq!(handoff.action(0, epoch, false), HandoffAction::Cancel);
         assert_eq!(handoff.action(0, epoch, true), HandoffAction::Cancel);
         assert_eq!(
@@ -11096,12 +11159,15 @@ mod mix_tests {
         for options in [SessionAudioOptions::default(), system_options()] {
             let epoch = Instant::now() + Duration::from_millis(100);
             let microphone = signal_packets(epoch, 0, 48_000 * 30, 480, |_| (0.2, 0.2));
-            let (bus, evidence) = start_observed_bus(
+            // Keep packet/write evidence for the exact "before" assertion too:
+            // run-wide lateness cannot attribute a gap in this interval.
+            let (bus, evidence) = start_observed_bus_with_trace(
                 epoch,
                 Some(microphone),
                 AudioProcessingSettings::default(),
                 options,
                 Some((72_000, Duration::from_secs(3))),
+                Some((24_000, 72_000)),
             )
             .await;
             let (losses, stalls, input_state, caught_up) = observe_until_stall_reported(&bus).await;
@@ -12900,7 +12966,7 @@ mod mix_tests {
     async fn a_microphone_hot_swap_commits_behind_a_one_second_microphone_bus_delay() {
         for delay in [0_u64, 48_000] {
             let epoch = Instant::now();
-            let bus = start_bus(
+            let (bus, observation) = start_observed_bus(
                 epoch,
                 None,
                 AudioProcessingSettings::default(),
@@ -12909,6 +12975,7 @@ mod mix_tests {
                     microphone_delay_frames: delay,
                     ..SessionAudioOptions::default()
                 },
+                None,
             )
             .await;
             bus.wait_for_frames(4_800).await;
@@ -12937,7 +13004,12 @@ mod mix_tests {
                 samples[(cutover + RAMP_FRAMES as usize) * 2..(cutover + 9_600) * 2]
                     .iter()
                     .all(|sample| (*sample - 0.2).abs() < 1.0e-6),
-                "delay {delay}: the new microphone plays from the cutover"
+                "delay {delay}: the new microphone plays from the cutover; cutover={cutover}, first mismatch={:?}, bus={}",
+                samples[(cutover + RAMP_FRAMES as usize) * 2..(cutover + 9_600) * 2]
+                    .iter()
+                    .position(|sample| (*sample - 0.2).abs() >= 1.0e-6)
+                    .map(|sample| cutover + RAMP_FRAMES as usize + sample / 2),
+                observation.lock().unwrap().value()
             );
             if delay == 0 {
                 assert!(
@@ -13038,7 +13110,7 @@ mod mix_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn source_iso_stop_flushes_delayed_system_without_future_microphone() {
         let epoch = Instant::now() + Duration::from_millis(100);
-        let bus = start_bus(
+        let (bus, observation) = start_observed_bus(
             epoch,
             Some(signal_packets(epoch, 0, 480_000, 480, |_| (0.2, 0.2))),
             AudioProcessingSettings::default(),
@@ -13048,6 +13120,7 @@ mod mix_tests {
                 echo_guard: false,
                 ..system_options()
             },
+            None,
         )
         .await;
         bus.session
@@ -13071,12 +13144,16 @@ mod mix_tests {
         let samples = decode(&bytes);
         assert!(
             samples.len() / 2 >= source_end + 48_000,
-            "residual trim requires another second of raw bus samples"
+            "residual trim requires another second of raw bus samples; written={}, source_end={source_end}, stop_elapsed={:?}, bus={}",
+            samples.len() / 2,
+            stopped.elapsed(),
+            observation.lock().unwrap().value()
         );
         let tail = &samples[(source_end + 960) * 2..(source_end + 48_000 - 960) * 2];
         assert!(
             tail.iter().all(|sample| (*sample - 0.3).abs() < 0.0001),
-            "already captured delayed system survives, post-Stop microphone stays silent"
+            "already captured delayed system survives, post-Stop microphone stays silent; bus={}",
+            observation.lock().unwrap().value()
         );
     }
 
@@ -13094,6 +13171,16 @@ mod mix_tests {
         assert!(!drain.done(47_520, stop_at));
         assert!(drain.done(48_000, stop_at));
         assert!(drain.done(0, drain.deadline), "never past the deadline");
+        let mut iso = drain;
+        iso.extend(48_000);
+        assert_eq!(iso.target, 96_000);
+        assert_eq!(iso.flush_at, drain.flush_at, "the flush still starts early");
+        assert_eq!(
+            iso.deadline,
+            drain.deadline + Duration::from_secs(1),
+            "a paced cursor still reaches the delayed target"
+        );
+        assert!(!iso.done(48_000, drain.deadline));
         let short = StopDrain::new(stop_at, epoch, PLAYOUT_DELAY);
         assert_eq!(
             short.flush_at,

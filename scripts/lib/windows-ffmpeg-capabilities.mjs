@@ -23,12 +23,13 @@ export const REQUIRED_WINDOWS_FFMPEG_PROTOCOLS = ['rtmp', 'rtmps', 'tls']
  * renders with `h264_mf` too and falls back to `libopenh264`, which is
  * reported with the optional set below rather than required. */
 export const REQUIRED_WINDOWS_FFMPEG_ENCODERS = ['h264_mf', 'aac', 'pcm_s16le']
-/** `afftdn` for Noise Cleanup, the trim/concat set Clean cut renders with
+/** `afftdn` for Noise Cleanup, `geq` for the legacy recording path's circle
+ * and rounded camera masks, the trim/concat set Clean cut renders with
  * (plan 119 S13), and the full-range YUV lookup-table chain the legacy
  * recording path grades the camera look with (plan 213 I; never the GPL-only
  * `eq`). */
 export const REQUIRED_WINDOWS_FFMPEG_FILTERS = [
-  ...new Set(['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS])
+  ...new Set(['afftdn', 'geq', ...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS])
 ]
 
 /** Encoders the app uses when present and lives without when absent: Intel
@@ -49,10 +50,11 @@ function hasWord(output, word) {
   return new RegExp(`(^|[^A-Za-z0-9_])${word}([^A-Za-z0-9_]|$)`, 'm').test(output)
 }
 
-/** The component names a `-muxers` / `-demuxers` / `-bsfs` listing carries:
- * flags first, then the name (a comma-joined alias list is one component).
- * Descriptions are ignored, so "streaming segment muxer" never passes for
- * `segment`. */
+/** The component names a `-filters` / `-muxers` / `-demuxers` / `-bsfs`
+ * listing carries: flags first, then the name (a comma-joined alias list is
+ * one component). Descriptions are ignored, so "streaming segment muxer"
+ * never passes for `segment`, nor `scale`'s "convert the image format." for
+ * `format`. */
 function listedComponentNames(output) {
   return String(output ?? '')
     .split(/\r?\n/)
@@ -86,8 +88,9 @@ export function assessWindowsFfmpegCapabilities({
       missing.push(`encoder:${encoder}`)
     }
   }
+  const filters = listedComponentNames(filtersOutput)
   for (const filter of REQUIRED_WINDOWS_FFMPEG_FILTERS) {
-    if (!hasWord(filtersOutput, filter)) {
+    if (!filters.includes(filter)) {
       missing.push(`filter:${filter}`)
     }
   }

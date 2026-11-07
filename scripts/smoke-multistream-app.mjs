@@ -109,6 +109,11 @@ const verticalLegFraming = ['fit', 'fill'].includes(process.env.VIDEORC_SMOKE_VE
   ? process.env.VIDEORC_SMOKE_VERTICAL_LEG
   : null
 const verticalLegCanvas = { width: 360, height: 640 }
+// Linux's raw bridge cannot encode a separate vertical scene (plan 0016), so
+// the backend refuses the whole session rather than send the landscape program
+// to the vertical destination. There the refusal is what this smoke proves.
+const verticalRefusedOnLinux = process.platform === 'linux' && verticalLegFraming !== null
+class SkipSmoke extends Error {}
 const verticalTarget = verticalLegFraming
   ? (() => {
       const port = basePort + targetCount + 1
@@ -205,12 +210,32 @@ try {
       { kind: 'output-directory', path: outputDirectory },
       { timeoutMs }
     )
-    const started = await request(
+    const start = request(
       ws,
       timeoutMs,
       'session.start',
       multistreamParams(recordingDirectory.capabilityId)
     )
+    if (verticalRefusedOnLinux) {
+      const refusal = await start.then(
+        () => null,
+        (error) => error
+      )
+      if (!/can't encode a separate vertical stream/.test(refusal?.message ?? '')) {
+        throw new Error(
+          `Expected Linux to refuse the vertical leg, got ${refusal?.message ?? 'a started session'}`
+        )
+      }
+      const status = await request(ws, timeoutMs, 'recording.status')
+      if (status.state !== 'idle') {
+        throw new Error(`The refused vertical session left the backend ${status.state}.`)
+      }
+      console.log(
+        '[vertical] SKIP: Linux has no separate vertical encoder; the backend refused the session before any destination got the landscape video'
+      )
+      throw new SkipSmoke()
+    }
+    const started = await start
     if (started.state !== 'recording') {
       throw new Error(`Expected recording state after start, got ${started.state}.`)
     }
@@ -239,7 +264,8 @@ try {
       console.log(`Save replay mid-stream accepted (${accepted.saveId})`)
       const deadline = Date.now() + 45_000
       while (!replayOutcomes.some((outcome) => outcome.payload?.saveId === accepted.saveId)) {
-        if (Date.now() > deadline) throw new Error('No replay.saved or replay.saveFailed within 45 s.')
+        if (Date.now() > deadline)
+          throw new Error('No replay.saved or replay.saveFailed within 45 s.')
         await sleep(200)
       }
       replay = replayOutcomes.find((outcome) => outcome.payload?.saveId === accepted.saveId)
@@ -271,6 +297,8 @@ try {
   } finally {
     ws.close()
   }
+} catch (error) {
+  if (!(error instanceof SkipSmoke)) throw error
 } finally {
   stopping = true
   for (const listener of listeners) {

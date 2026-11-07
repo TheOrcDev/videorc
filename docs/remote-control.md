@@ -444,3 +444,12 @@ the Studio's privacy state. Only that boolean crosses the LAN: no reason,
 timestamp or screen contents. The phone is the streamer's own paired
 device. Hiding is the safe direction; showing is a deliberate key press.
 No route, credential or LAN event is added.
+
+The backend test `remote_surface_is_pinned_to_reviewed_plan_210` pins the
+complete `RemoteIntent` enum to main commit `9028bec9`. Relative to the
+original Agents baseline `dc1309cb`, the only additions are the bounded
+`sceneId` above and these three fieldless privacy intents. The test still
+pins the original five `LAN_EVENTS`; the remote method allowlist and
+renderer-only Agents events retain their separate admission tests. A later
+intent change needs its own reviewed scope and leak argument before this
+pin changes.

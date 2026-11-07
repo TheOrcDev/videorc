@@ -110,7 +110,7 @@ describe('first-run setup (plan 203 S5)', () => {
     expect(firstRunSetupDescription('win32')).toBe(
       'First, check that Windows lets Videorc use your camera and microphone. You can change this later in Settings → Permissions.'
     )
-    expect(firstRunSetupDescription('linux')).toContain('nothing to grant here')
+    expect(firstRunSetupDescription('linux')).toContain('Set up screen sharing')
   })
 
   it('trusts the rows once the OS has answered and the devices are listed, or after the wait', () => {

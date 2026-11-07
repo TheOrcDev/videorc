@@ -16,7 +16,7 @@ import { NO_VALUE, formatMetric, plural } from '@/lib/format'
 import { cameraNoVideoLine, cameraSendsNoVideo } from '@/lib/source-status'
 import { previewSourceStateLabel, previewStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
-import type { RecentStreamDrops } from '@/lib/stream-health-attribution'
+import type { RecentStreamDrops } from '@/lib/stream-drop-activity'
 import { isNativePreviewCapability } from '../../../shared/native-preview-capability'
 
 // Health's checks and verdict (plan 174 S3.18, I-4, I-25, V-7). Every check

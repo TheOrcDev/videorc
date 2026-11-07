@@ -10,7 +10,8 @@ import { buildSignedS3Request } from './lib/release-upload-s3.mjs'
 import {
   assertPrivateLinuxCandidateS3Config,
   buildLinuxCandidateStoragePlan,
-  classifyLinuxCandidateObjectHead
+  classifyLinuxCandidateObjectHead,
+  verifyLinuxCandidateObjectBody
 } from './lib/linux-release-candidate.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -57,16 +58,16 @@ async function main() {
     const config = assertPrivateLinuxCandidateS3Config(origin.config)
     for (const artifact of plan.artifacts) {
       const state = await headArtifact({ artifact, config })
-      if (state === 'identical') {
-        console.log(`linux-alpha-release-upload: identical ${origin.name} ${artifact.objectKey}`)
-        continue
+      if (state !== 'identical') {
+        await putArtifact({ artifact, config })
       }
-      await putArtifact({ artifact, config })
-      classifyLinuxCandidateObjectHead({
+      await verifyLinuxCandidateObjectBody({
         artifact,
-        response: await signedFetch({ config, method: 'HEAD', objectKey: artifact.objectKey })
+        response: await signedFetch({ config, method: 'GET', objectKey: artifact.objectKey })
       })
-      console.log(`linux-alpha-release-upload: stored ${origin.name} ${artifact.objectKey}`)
+      console.log(
+        `linux-alpha-release-upload: verified ${origin.name} ${artifact.objectKey} (${state === 'identical' ? 'reused' : 'stored'})`
+      )
     }
   }
   console.log('linux-alpha-release-upload: PASS')
@@ -96,7 +97,8 @@ async function putArtifact({ artifact, config }) {
       'If-None-Match': '*'
     },
     method: 'PUT',
-    redirect: 'error'
+    redirect: 'error',
+    signal: AbortSignal.timeout(10 * 60_000)
   })
   if (response.status === 412) {
     const state = await headArtifact({ artifact, config })
@@ -112,7 +114,8 @@ function signedFetch({ config, method, objectKey }) {
   return fetch(signed.url, {
     headers: { ...signed.headers, 'accept-encoding': 'identity' },
     method,
-    redirect: 'error'
+    redirect: 'error',
+    signal: AbortSignal.timeout(method === 'GET' ? 10 * 60_000 : 60_000)
   })
 }
 

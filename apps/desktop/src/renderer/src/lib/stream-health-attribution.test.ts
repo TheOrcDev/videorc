@@ -3,14 +3,16 @@ import { describe, expect, it } from 'vitest'
 import type { DiagnosticStats, StreamHealth, StreamTargetRuntime } from '@/lib/backend'
 import {
   advanceStreamDropActivity,
-  classifyStreamHealthAttribution,
   emptyStreamDropActivity,
-  liveProblemLabel,
   NO_RECENT_DROPS,
   RECENT_DROP_WINDOW_MS,
-  RECENT_UPLINK_OVERFLOW_WINDOW_MS,
   recentStreamDrops,
-  type RecentStreamDrops,
+  type RecentStreamDrops
+} from '@/lib/stream-drop-activity'
+import {
+  classifyStreamHealthAttribution,
+  liveProblemLabel,
+  RECENT_UPLINK_OVERFLOW_WINDOW_MS,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
 

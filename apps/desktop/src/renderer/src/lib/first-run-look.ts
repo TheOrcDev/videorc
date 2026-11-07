@@ -50,6 +50,39 @@ export type FirstRunLook = {
   liveBackgroundId: LiveBackgroundId | null
 }
 
+/** Read the latest Studio state before applying an individual setup choice. */
+export function firstRunLookFromState(
+  config: Pick<CaptureConfig, 'layout'>,
+  registry: Pick<BackgroundAssetRegistry, 'activeSlotId' | 'live'>
+): FirstRunLook {
+  return {
+    orientation: layoutPresetOrientation(config.layout.layoutPreset),
+    layoutPreset: config.layout.layoutPreset,
+    cameraShape: config.layout.cameraShape,
+    liveBackgroundId: registryLiveBackgroundId(registry)
+  }
+}
+
+/**
+ * One setup control's changed fields over the held look, or else the latest
+ * Studio state; null when they change nothing (a repeat pick writes no state).
+ */
+export function firstRunLookWithPatch(
+  held: FirstRunLook | null,
+  config: Pick<CaptureConfig, 'layout'>,
+  registry: Pick<BackgroundAssetRegistry, 'activeSlotId' | 'live'>,
+  patch: Partial<FirstRunLook>
+): FirstRunLook | null {
+  const previous = held ?? firstRunLookFromState(config, registry)
+  const look = { ...previous, ...patch }
+  return look.orientation === previous.orientation &&
+    look.layoutPreset === previous.layoutPreset &&
+    look.cameraShape === previous.cameraShape &&
+    look.liveBackgroundId === previous.liveBackgroundId
+    ? null
+    : look
+}
+
 export type FirstRunLookChoice = Pick<FirstRunLook, 'orientation' | 'layoutPreset' | 'cameraShape'>
 
 /**

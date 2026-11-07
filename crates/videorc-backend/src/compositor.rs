@@ -7980,11 +7980,12 @@ fn cpu_live_background_source(
 }
 
 /// Plan 190 S5: stop the Linux live background thread when composition stops
-/// (the idle preview composes no pixels) or the live background leaves.
+/// (the idle preview composes no pixels) or the live background leaves, and
+/// forget the status it reported, so the next take reports again.
 fn release_cpu_live_background(slot: &mut Option<Box<LiveBackgroundGpuRenderer>>) {
     #[cfg(target_os = "linux")]
     if let Some(renderer) = slot.as_mut()
-        && renderer.holds_resources()
+        && renderer.needs_release()
     {
         renderer.release();
     }
@@ -8812,10 +8813,11 @@ fn try_gpu_compose_with_chrome(
     let layout = &snapshot.layout;
     let mut prepared_sources = Vec::new();
     // Plan 190: with no live background this tick, the renderer holds
-    // nothing (one `Option` check; it frees its textures when one goes away).
+    // nothing and remembers no status (one `Option` check; it frees its
+    // textures when one goes away).
     if inputs.live_background.is_none()
         && let Some(renderer) = live_renderer.as_mut()
-        && renderer.holds_resources()
+        && renderer.needs_release()
     {
         renderer.release();
     }
@@ -20550,6 +20552,109 @@ mod tests {
         assert!(state.compositor.lock().await.benchmark_scene.is_none());
     }
 
+    #[tokio::test]
+    async fn idle_capture_config_edits_stay_separate_from_benchmark_encoder_frames() {
+        for in_place in [false, true] {
+            let state = test_state();
+            let _run_guard = StopSyntheticRunOnDrop::new(state.clone());
+            start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+            let (mut user_scene, user_sources) = test_pattern_scene(64, 36);
+            user_scene.id = "user-before-check".into();
+            update_compositor_scene_with_selected_sources(
+                &state,
+                CompositorSceneUpdateParams {
+                    revision: 10,
+                    scene: Some(user_scene.clone()),
+                    layout: crate::protocol::default_layout_settings(),
+                    active_screen: None,
+                    transition_ms: None,
+                },
+                &user_sources,
+            )
+            .await;
+            wait_for_frame_at_revision(&state, Some(10)).await;
+            if in_place {
+                arm_compositor_for_capture(
+                    &state,
+                    "private-check",
+                    CompositorArmParams {
+                        benchmark: true,
+                        ..arm_params(128, 72)
+                    },
+                )
+                .await
+                .expect("benchmark arms the preview run");
+            } else {
+                start_synthetic_compositor(
+                    state.clone(),
+                    CompositorStartParams {
+                        benchmark: true,
+                        frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                        ..preview_params(128, 72)
+                    },
+                )
+                .await;
+            }
+            let (mut benchmark_scene, benchmark_sources) = test_pattern_scene(128, 72);
+            benchmark_scene.id = "private-check-scene".into();
+            assert!(
+                commit_benchmark_scene(
+                    &state,
+                    11,
+                    benchmark_scene,
+                    crate::protocol::default_layout_settings(),
+                    benchmark_sources,
+                )
+                .await
+            );
+            *state.recording.lock().await = Some(
+                crate::recording::test_performance_check_recording_stub("private-check"),
+            );
+            user_scene.id = "user-chosen-look".into();
+            let committed = crate::live_layout::commit_idle_scene_with_layout(
+                &state,
+                &user_scene,
+                crate::protocol::default_layout_settings(),
+                None,
+            )
+            .await
+            .expect("the user can edit a look while the private check runs");
+            assert!(committed.applied);
+            assert_eq!(committed.scene.id, "user-chosen-look");
+            assert_eq!(state.scene.lock().await.id, "user-chosen-look");
+            wait_for_frame_at_revision(&state, Some(11)).await;
+            {
+                let compositor = state.compositor.lock().await;
+                assert_eq!(
+                    compositor.status.scene_revision,
+                    Some(committed.scene_revision)
+                );
+                assert_eq!(
+                    compositor.status.scene_id.as_deref(),
+                    Some("user-chosen-look")
+                );
+                let benchmark = compositor.benchmark_scene.as_ref().unwrap();
+                assert_eq!(benchmark.revision, 11);
+                assert_eq!(benchmark.scene.as_ref().unwrap().id, "private-check-scene");
+                assert!(benchmark.synthetic_hard_content);
+                assert!(
+                    compositor
+                        .frame_store
+                        .lock()
+                        .unwrap()
+                        .latest()
+                        .unwrap()
+                        .metadata
+                        .is_benchmark()
+                );
+            }
+            let active = state.recording.lock().await.take().unwrap();
+            assert!(active.is_performance_check());
+            assert_eq!(active.session_id, "private-check");
+            stop_compositor(&state).await;
+        }
+    }
+
     /// #1069: a failed assertion while a synthetic run is live reports as a
     /// failure instead of hanging the whole test binary in the runtime's
     /// blocking-pool shutdown (the guard stops the run as the test unwinds).
@@ -27707,6 +27812,37 @@ mod live_background_cpu_tests {
         assert!(slot.is_none());
         release_cpu_live_background(&mut slot);
         assert!(slot.is_none());
+    }
+
+    /// A still holds no GL thread but has reported. When the live background
+    /// leaves, the compositor clears the board; when the same one comes back
+    /// (two takes in a row on one background), it must report again.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_still_reports_again_when_its_background_comes_back() {
+        let board = Arc::new(LiveBackgroundBoard::default());
+        let now = Instant::now();
+        let mut runtime = None;
+        sync_live_background(&mut runtime, Some(&spec()), now);
+        let input = runtime.unwrap().frame_input(
+            &background(),
+            &board,
+            LiveBackgroundTick::unmeasured(now),
+        );
+        let forced = Some(crate::protocol::LiveBackgroundStillReason::Forced);
+        let mut slot = Some(Box::new(LiveBackgroundGpuRenderer::new(Arc::clone(&board))));
+        let renderer = slot.as_mut().unwrap();
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert!(!renderer.holds_resources());
+        let reported = board.snapshot().0.expect("the still reports");
+        // It leaves: the board is cleared and the leg gets no input.
+        board.clear();
+        assert!(cpu_live_background_source(&mut slot, None, (640, 360)).is_none());
+        let renderer = slot.as_mut().unwrap();
+        assert!(!renderer.needs_release());
+        // It comes back with the same still.
+        assert!(renderer.render(&input, (640, 360), forced).is_none());
+        assert_eq!(board.snapshot().0, Some(reported));
     }
 
     #[cfg(not(target_os = "linux"))]

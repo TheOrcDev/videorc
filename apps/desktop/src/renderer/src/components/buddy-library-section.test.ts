@@ -405,6 +405,10 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     await render(fakeBackend().client)
     expect(byTestId('buddy-onboarding')).toBeNull()
     await act(async () => requestBuddyOnboarding())
+    // Wait for the real lazy chunk before checking its committed dialog.
+    await act(async () => {
+      await vi.dynamicImportSettled()
+    })
     const sheet = await vi.waitFor(() => {
       const element = byTestId('buddy-onboarding')
       expect(element).not.toBeNull()

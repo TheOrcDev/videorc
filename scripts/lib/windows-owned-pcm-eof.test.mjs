@@ -7,7 +7,10 @@ import {
   ownedPcmEofVerdict,
   ownedPcmEofAggregate,
   ownedPcmReaderClosed,
-  runOwnedPcmEof
+  runOwnedPcmEof,
+  runIndependentToneEof,
+  independentToneEofVerdict,
+  independentToneEofAggregate
 } from './windows-owned-pcm-eof.mjs'
 
 const valid = {
@@ -141,4 +144,87 @@ test('owned PCM aggregate preserves the existing startup and stop p95 budgets', 
     ).pass,
     false
   )
+})
+
+test('independent tone rejects the observed tail and preserves frame, latency and cleanup gates', () => {
+  const tone = { ...valid, audioSource: 'tone', paceTone: true }
+  assert.equal(independentToneEofVerdict(tone).pass, true)
+  for (const delta of [
+    { audioSource: 'pcm' },
+    { packetTail: { pass: false, videoEndSeconds: 3.987, tailMismatchMs: 151 } },
+    { packetTail: { pass: true, videoEndSeconds: 4.021, tailMismatchMs: 151 } },
+    { packetTail: { pass: true, videoEndSeconds: 3.5, tailMismatchMs: 11 } },
+    { writtenVideoFrames: 119 },
+    { encodedVideoFrames: 125, fpsOutputFrames: 125 },
+    { fpsOutputFrames: 121 },
+    { firstOutputMs: null },
+    { stopMs: NaN },
+    { startSkewMs: 101 },
+    { inputsClosed: false },
+    { childReaped: false },
+    { unsafeCleanup: true },
+    { videoProducerError: 'socket failed' },
+    { error: 'spawn failed' },
+    { exitCode: 1 }
+  ])
+    assert.equal(
+      independentToneEofVerdict({ ...tone, ...delta }).pass,
+      false,
+      JSON.stringify(delta)
+    )
+  const rows = Array.from({ length: 25 }, () => ({ ...tone }))
+  assert.equal(independentToneEofAggregate(rows, 25).pass, true)
+  assert.equal(independentToneEofAggregate(rows.slice(1), 25).pass, false)
+  assert.equal(
+    independentToneEofAggregate(
+      rows.map((row) => ({ ...row, stopMs: 586 })),
+      25
+    ).pass,
+    false
+  )
+  assert.equal(
+    independentToneEofAggregate(
+      rows.map((row) => ({ ...row, firstOutputMs: 1001 })),
+      25
+    ).pass,
+    false
+  )
+  assert.equal(
+    independentToneEofAggregate(
+      rows.map((row) => ({ ...row, paceTone: false })),
+      25
+    ).pass,
+    false
+  )
+  assert.equal(
+    independentToneEofAggregate(
+      [{ ...tone, paceTone: false, error: 'baseline failed' }, ...rows],
+      25
+    ).pass,
+    true
+  )
+})
+
+test('independent tone spawn failure reaps the child and closes its video listener for both policies', async () => {
+  const output = mkdtempSync(join(tmpdir(), 'videorc-tone-spawn-'))
+  try {
+    for (const paceTone of [false, true]) {
+      const row = await runIndependentToneEof({
+        ffmpeg: join(output, 'missing-ffmpeg'),
+        ffprobe: join(output, 'missing-ffprobe'),
+        output,
+        paceTone
+      })
+      assert.equal(row.verdict.pass, false)
+      assert.equal(row.childReaped, true)
+      assert.equal(row.inputsClosed, true)
+      assert.equal(row.unsafeCleanup, undefined)
+      assert.ok(row.error)
+      assert.equal(row.argv.includes('-readrate'), paceTone)
+      assert.equal(row.argv.includes('apad'), false)
+      assert.equal(row.writtenAudioFrames, 0, 'independent tone must bypass the PCM producer')
+    }
+  } finally {
+    rmSync(output, { recursive: true, force: true })
+  }
 })

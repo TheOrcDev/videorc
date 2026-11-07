@@ -35,7 +35,8 @@ const MAC_STAND_IN: Pick<Device, 'status'> = Object.freeze({ status: 'available'
  * or waiting on the Screen Recording grant), so until the first device list
  * arrives the rows stand in an Available one: the row is there from launch
  * with the Microphone's instead of popping in seconds later. Elsewhere it can
- * be missing for good (Linux, Windows before build 20348), so those rows wait.
+ * be missing for good (Linux without PipeWire, Windows before build 20348), so
+ * those rows wait.
  */
 export function systemAudioRowDevice(
   deviceList: DeviceList,

@@ -18,10 +18,11 @@ export const REQUIRED_LINUX_H264_ENCODERS = ['h264_vaapi', 'libopenh264']
 
 /** The filters Clean cut renders with (plan 119 S13), the full-range YUV
  * lookup-table chain the legacy recording path grades the camera look with
- * (plan 213 I; never the GPL-only `eq`), plus `hwupload` for the VAAPI arm.
+ * (plan 213 I; never the GPL-only `eq`), `hwupload` for the VAAPI arm, and
+ * `geq` for the legacy path's circle and rounded camera masks.
  * Required from `ffmpeg -filters`; a missing listing fails closed. */
 export const REQUIRED_LINUX_FFMPEG_FILTERS = [
-  ...new Set([...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS, 'hwupload'])
+  ...new Set([...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS, 'hwupload', 'geq'])
 ]
 
 export function lastDayOfMonth(year, month) {
@@ -82,8 +83,10 @@ export const REQUIRED_LINUX_FFMPEG_DEMUXERS = ['concat', 'mpegts']
 export const REQUIRED_LINUX_FFMPEG_BITSTREAM_FILTERS = ['aac_adtstoasc']
 
 function listedNames(output) {
-  // `-muxers` / `-demuxers` print one component per line, flags first; a
-  // comma-joined alias list (`stream_segment,ssegment`) is one component.
+  // `-filters` / `-muxers` / `-demuxers` print one component per line, flags
+  // first; a comma-joined alias list (`stream_segment,ssegment`) is one
+  // component. Descriptions are ignored, so `scale2ref`'s "convert the image
+  // format" never passes for `format`.
   return String(output ?? '')
     .split(/\r?\n/)
     .flatMap((line) => line.trim().split(/\s+/).slice(0, 2))
@@ -120,7 +123,7 @@ export function assessLinuxFfmpegCapabilities({
   if (typeof filtersOutput !== 'string') {
     problems.push('ffmpeg -filters output was not provided')
   } else {
-    const filters = filtersOutput.split(/\s+/)
+    const filters = listedNames(filtersOutput)
     for (const filter of REQUIRED_LINUX_FFMPEG_FILTERS) {
       if (!filters.includes(filter)) problems.push(`missing filter ${filter}`)
     }

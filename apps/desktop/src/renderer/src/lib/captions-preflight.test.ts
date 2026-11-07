@@ -5,7 +5,6 @@ import type { AiCapabilities } from '@/lib/backend'
 import {
   captionsEnabledForSession,
   captionsPlatformUnavailableReason,
-  CAPTIONS_UNAVAILABLE_ON_LINUX,
   captionsSuppressedForSession,
   captionRuntimeStartBlocked,
   captionSessionOutputReadiness,
@@ -19,29 +18,38 @@ function capabilities(captions: AiCapabilities['captions']): AiCapabilities {
 }
 
 describe('decideGoLiveCaptionsReadiness', () => {
-  it('starts without captions on Linux and says why, instead of a refused session', () => {
-    expect(captionsPlatformUnavailableReason('linux')).toBe(CAPTIONS_UNAVAILABLE_ON_LINUX)
-    expect(captionsPlatformUnavailableReason('darwin')).toBeNull()
-    expect(captionsPlatformUnavailableReason('win32')).toBeNull()
-    const result = decideGoLiveCaptionsReadiness({
-      persistedEnabled: true,
-      suppressForSession: true,
-      capabilities: capabilities(undefined),
-      platformUnavailable: captionsPlatformUnavailableReason('linux')
-    })
-    expect(result).toMatchObject({
-      kind: 'skipped',
-      blocksStart: false,
-      title: 'Captions unavailable',
-      description: CAPTIONS_UNAVAILABLE_ON_LINUX,
-      transport: null
-    })
+  it.each(['darwin', 'win32', 'linux'])(
+    'keeps requested captions subject to deployment readiness on %s',
+    (platform) => {
+      expect(captionsPlatformUnavailableReason(platform)).toBeNull()
+      const result = decideGoLiveCaptionsReadiness({
+        persistedEnabled: true,
+        suppressForSession: false,
+        capabilities: capabilities(undefined),
+        platformUnavailable: captionsPlatformUnavailableReason(platform)
+      })
+      expect(result).toMatchObject({ kind: 'blocked', blocksStart: true, transport: null })
+      expect(result.description).toContain("couldn't verify")
+    }
+  )
+
+  it('explains captions suppression on an unsupported platform', () => {
+    const reason = captionsPlatformUnavailableReason('unsupported')
+    expect(reason).toContain("aren't available on this system")
+    expect(
+      decideGoLiveCaptionsReadiness({
+        persistedEnabled: true,
+        suppressForSession: false,
+        capabilities: null,
+        platformUnavailable: reason
+      })
+    ).toMatchObject({ kind: 'skipped', blocksStart: false, description: reason })
     expect(
       decideGoLiveCaptionsReadiness({
         persistedEnabled: false,
-        suppressForSession: true,
+        suppressForSession: false,
         capabilities: null,
-        platformUnavailable: CAPTIONS_UNAVAILABLE_ON_LINUX
+        platformUnavailable: reason
       }).kind
     ).toBe('disabled')
   })

@@ -338,6 +338,26 @@ export function startedSessionStatus(status) {
   )
 }
 
+/**
+ * The session a failed case left running, or null: the last session a case
+ * started (never the Clips ring) while its latest status is not terminal. A
+ * case that fails mid-recording returns without its Stop.
+ */
+export function sessionLeftRunning(events) {
+  let started = null
+  const latest = new Map()
+  for (const record of events ?? []) {
+    if (record?.event !== 'recording.status') continue
+    const status = record.payload
+    if (typeof status?.sessionId !== 'string') continue
+    latest.set(status.sessionId, status.state)
+    if (startedSessionStatus(status)) started = status.sessionId
+  }
+  if (!started) return null
+  const state = latest.get(started)
+  return state === 'idle' || state === 'failed' ? null : started
+}
+
 function describeRegions(regions) {
   if (regions.length === 0) return 'none'
   return regions

@@ -11,6 +11,14 @@ import type { SystemAccessAction, SystemAccessRow, SystemAccessState } from '@/l
 
 export type SystemAccessTone = 'good' | 'warn' | 'neutral'
 
+// Linux does not expose a standing grant snapshot through this app. The
+// portal and device access still enforce permissions; do not imply otherwise.
+export const LINUX_CAPTURE_ACCESS = {
+  title: 'Screen sharing on Linux',
+  description:
+    'When you add a screen or window, your desktop asks what to share. Camera and microphone access depends on your desktop and device permissions.'
+} as const
+
 /** One word and one tone per state, wherever the row appears. */
 export function systemAccessStatus(state: SystemAccessState): {
   label: string
@@ -90,7 +98,7 @@ export function firstRunSetupDescription(platform: string | undefined): string {
     case 'Windows':
       return 'First, check that Windows lets Videorc use your camera and microphone. You can change this later in Settings → Permissions.'
     default:
-      return 'Linux keeps no capture permissions for apps, so there is nothing to grant here. Your desktop may ask when Videorc starts capturing the screen.'
+      return 'Set up screen sharing, your camera and your microphone. You can change your choices later in Sources.'
   }
 }
 

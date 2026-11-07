@@ -182,7 +182,7 @@ describe('Audio section (plan 201 S2)', () => {
     expect(markup).not.toContain('Reset to')
   })
 
-  it('drops the System audio row where it cannot run, and stays Audio (Linux, older Windows)', () => {
+  it('drops the System audio row where it cannot run, and stays Audio (no PipeWire, older Windows)', () => {
     const markup = render()
     expect(markup).toContain('>Audio</h2>')
     expect(markup).not.toContain('System audio')

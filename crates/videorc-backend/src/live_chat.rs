@@ -3332,12 +3332,11 @@ async fn send_to_destination(
                     provider_message_id: Some(format!("fake-probe-{}", uuid::Uuid::new_v4())),
                 }),
                 FakeChatSendBehavior::Failed => Err("Fake provider rejected the send.".to_string()),
-                FakeChatSendBehavior::Timeout => {
-                    sleep(CHAT_SEND_TIMEOUT + Duration::from_millis(25)).await;
-                    Ok(ProviderSendReceipt {
-                        provider_message_id: Some("fake-probe-timeout-late".to_string()),
-                    })
-                }
+                // Never answers, so the send deadline always decides. A
+                // late receipt raced it: `timeout` polls the send before
+                // its deadline, so a runtime woken after both took the
+                // receipt as Sent (Windows stability pass, plan 212).
+                FakeChatSendBehavior::Timeout => std::future::pending().await,
             }
         }
     }

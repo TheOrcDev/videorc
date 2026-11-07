@@ -100,18 +100,13 @@ describe('Captions page (plan 174 S3.7)', () => {
     expect(disabledAttr(markup, 'id="caption-language"')).toBe(true)
   })
 
-  it('says live captions are not on Linux yet, and has nothing to turn on there', () => {
-    // ogre 2026-10-13: the backend refuses any captioned session without the
-    // native microphone path, which Linux doesn't have.
+  it('lets Linux choose captions on the shared microphone bus', () => {
     const off = render({ platform: 'linux' })
-    expect(off).toContain('data-testid="captions-platform-unavailable"')
-    expect(off).toContain('available on Linux yet')
-    expect(disabledAttr(off, 'role="switch"')).toBe(true)
-    // Someone who had them on can still turn them off; no livestream rule is shown.
+    expect(off).not.toContain('data-testid="captions-platform-unavailable"')
+    expect(disabledAttr(off, 'role="switch"')).toBe(false)
     const on = render({ platform: 'linux', enabled: true })
     expect(disabledAttr(on, 'role="switch"')).toBe(false)
-    expect(on).not.toContain('data-testid="captions-livestream-blocker"')
-    expect(render()).not.toContain('captions-platform-unavailable')
+    expect(on).not.toContain('data-testid="captions-platform-unavailable"')
   })
 
   it('keeps everything usable when captions are part of the plan', () => {

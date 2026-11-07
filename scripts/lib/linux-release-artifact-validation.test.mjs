@@ -5,6 +5,7 @@ import { buildLinuxUpdateFeedYml } from './linux-alpha-release.mjs'
 import {
   LinuxReleaseValidationError,
   formatLinuxReleaseValidationReport,
+  linuxReleaseBuildIdentityProblems,
   validateLinuxReleaseFacts
 } from './linux-release-artifact-validation.mjs'
 
@@ -55,6 +56,7 @@ function facts(overrides = {}) {
     ffmpegCapabilities: { ok: true, problems: [] },
     files: {
       appImage: true,
+      appArchive: true,
       backend: true,
       ffmpeg: true,
       ffmpegBuildConfig: true,
@@ -70,6 +72,32 @@ function facts(overrides = {}) {
 }
 
 describe('Linux release artifact validation', () => {
+  it('requires every payload file, even if an inspector omits its key', () => {
+    assert.throws(() => validateLinuxReleaseFacts(facts({ files: {} })), /Missing required/)
+  })
+
+  it('binds the immutable Beta build channel and source while retaining legacy Alpha', () => {
+    const beta = { ...manifest(), channel: 'beta', releaseId: '0.10.0-beta.1' }
+    assert.deepEqual(linuxReleaseBuildIdentityProblems({}, manifest()), [])
+    assert.deepEqual(
+      linuxReleaseBuildIdentityProblems(
+        { linuxReleaseIdentity: { ...manifest(), sourceCommit: null } },
+        manifest()
+      ),
+      []
+    )
+    assert.equal(linuxReleaseBuildIdentityProblems({}, beta).length, 1)
+    assert.deepEqual(linuxReleaseBuildIdentityProblems({ linuxReleaseIdentity: beta }, beta), [])
+    for (const field of ['channel', 'releaseId', 'bundleVersion', 'platform', 'sourceCommit']) {
+      assert.equal(
+        linuxReleaseBuildIdentityProblems(
+          { linuxReleaseIdentity: { ...beta, [field]: 'wrong' } },
+          beta
+        ).length,
+        1
+      )
+    }
+  })
   it('passes a matching unsigned AppImage, Linux feed, and LGPL FFmpeg report', () => {
     const result = validateLinuxReleaseFacts(facts())
     assert.equal(result.ok, true)

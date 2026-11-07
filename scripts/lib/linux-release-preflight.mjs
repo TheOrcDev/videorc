@@ -1,4 +1,5 @@
 import { releaseBundledOauthChecks } from './release-bundled-oauth.mjs'
+import { parseLinuxReleaseId } from './linux-release.mjs'
 
 export const LINUX_RELEASE_CANDIDATE_UPLOAD_ENV = [
   ['VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID', 'VIDEORC_DOWNLOAD_S3_ACCESS_KEY_ID'],
@@ -41,9 +42,9 @@ export function evaluateLinuxReleasePreflight({
     check('git-clean', 'release checkout is clean', Boolean(gitClean), 'working tree is dirty'),
     check(
       'release-id',
-      'explicit Linux alpha release id',
+      'explicit Linux release id',
       validReleaseId(env.VIDEORC_RELEASE_ID, packageVersion),
-      `expected ${packageVersion}-alpha.N`
+      `expected ${packageVersion}-alpha.N or ${packageVersion}-beta.N`
     ),
     check(
       'changelog-entry',
@@ -119,12 +120,11 @@ export function isHttpsReleaseUploadEndpoint(value) {
 }
 
 function validReleaseId(value, packageVersion) {
-  const releaseId = nonEmpty(value)
-  return Boolean(
-    releaseId &&
-    typeof packageVersion === 'string' &&
-    new RegExp(`^${escapeRegExp(packageVersion)}-alpha\\.\\d+$`).test(releaseId)
-  )
+  try {
+    return parseLinuxReleaseId(value).bundleVersion === packageVersion
+  } catch {
+    return false
+  }
 }
 
 function isCandidateStage(value) {
@@ -138,8 +138,4 @@ function check(id, label, ok, detail) {
 
 function nonEmpty(value) {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }

@@ -4,6 +4,8 @@ import { resolve } from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import desktopPackage from './package.json'
+import { linuxReleaseIdentityForBuild } from './src/shared/linux-release-identity'
 
 import {
   BUILD_FLAGS_FILE_NAME,
@@ -38,6 +40,12 @@ const developmentRendererCspPlugin = {
 // native module overrides; release builds refuse them (packaged-test-hooks.ts).
 // The flags file lets `pnpm check:packaged-app` prove which one an artifact is.
 const packagedTestHooks = packagedTestHooksBuildEnabled(process.env)
+const linuxReleaseIdentity = linuxReleaseIdentityForBuild({
+  platform: process.platform,
+  packageVersion: desktopPackage.version,
+  releaseId: process.env.VIDEORC_RELEASE_ID,
+  sourceCommit: process.env.VIDEORC_RELEASE_SOURCE_COMMIT
+})
 const buildFlagsPlugin = {
   name: 'videorc-build-flags',
   generateBundle(this: {
@@ -46,7 +54,7 @@ const buildFlagsPlugin = {
     this.emitFile({
       type: 'asset',
       fileName: BUILD_FLAGS_FILE_NAME,
-      source: `${JSON.stringify({ packagedTestHooks })}\n`
+      source: `${JSON.stringify({ packagedTestHooks, linuxReleaseIdentity })}\n`
     })
   }
 }
@@ -62,6 +70,9 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {
+    define: {
+      __VIDEORC_LINUX_RELEASE_CHANNEL__: JSON.stringify(linuxReleaseIdentity?.channel ?? 'alpha')
+    },
     root: resolve('src/renderer'),
     server: {
       // Vite injects React Refresh before the document's CSP meta tag. A

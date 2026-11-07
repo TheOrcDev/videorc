@@ -81,7 +81,7 @@ export function firstRunSnapshotDecision({
   suppressed: boolean
   platform: string | undefined
 }): FirstRunDecision {
-  if (suppressed || !platform || platform === 'linux') return 'hide'
+  if (suppressed || !platform) return 'hide'
   return snapshot === 'fresh' || snapshot === 'resume' ? 'show' : 'hide'
 }
 
@@ -102,12 +102,8 @@ export interface FirstRunStepContext {
   mode: FirstRunSetupMode
 }
 
-export function firstRunStepsFor({ goal, platform }: FirstRunStepContext): FirstRunStep[] {
-  return FIRST_RUN_STEPS.filter(
-    (step) =>
-      (step !== 'permissions' || platform !== 'linux') &&
-      (step !== 'destinations' || goal !== 'record')
-  )
+export function firstRunStepsFor({ goal }: FirstRunStepContext): FirstRunStep[] {
+  return FIRST_RUN_STEPS.filter((step) => step !== 'destinations' || goal !== 'record')
 }
 
 export function nextFirstRunStep(
@@ -138,7 +134,7 @@ export function firstRunStepPosition(
   context: FirstRunStepContext
 ): { index: number; count: number } {
   const steps = firstRunStepsFor(context)
-  // A saved Permissions step on Linux starts at the first applicable step.
+  // A saved step excluded by the goal counts as the last applicable step.
   const index = steps.filter(
     (candidate) => FIRST_RUN_STEPS.indexOf(candidate) < FIRST_RUN_STEPS.indexOf(step)
   ).length
@@ -285,8 +281,8 @@ export interface FirstRunLeave {
 }
 
 /**
- * The line under "Run setup again…": it names permissions only where setup
- * has that step, so Linux, which skips it, is not promised one.
+ * The line under "Run setup again…": Linux's first step explains sharing
+ * instead of offering permission controls. Keep that distinction in Settings.
  */
 export function firstRunReplayDescription(platform: string | undefined): string {
   const [first] = firstRunStepsFor({
@@ -294,7 +290,7 @@ export function firstRunReplayDescription(platform: string | undefined): string 
     platform,
     mode: { kind: 'replay', returnTo: 'settings' }
   })
-  return first === 'permissions'
+  return first === 'permissions' && platform !== 'linux'
     ? 'Go through the welcome steps again, starting with permissions.'
     : 'Go through the welcome steps again.'
 }

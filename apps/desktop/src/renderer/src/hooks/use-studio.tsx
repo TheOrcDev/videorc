@@ -138,7 +138,7 @@ import {
   recentStreamDrops,
   type RecentStreamDrops,
   type StreamDropActivity
-} from '@/lib/stream-health-attribution'
+} from '@/lib/stream-drop-activity'
 import {
   connectionBlockedReason,
   sceneSourceOffBlockedReason,
@@ -1538,7 +1538,7 @@ export type StudioContextValue = {
    * is held here and applied through one transaction when setup closes.
    */
   firstRunLookHold: FirstRunLook | null
-  applyFirstRunLook: (look: FirstRunLook) => void
+  applyFirstRunLook: (patch: Partial<FirstRunLook>) => void
   savedScenes: SavedScene[]
   activeSavedSceneId: string | null
   savedScenePendingId: string | null
@@ -4049,8 +4049,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [runtimeInfo, setRuntimeInfo] = useState<RuntimeInfo | null>(null)
   // Plan 214 E: Videorc Camera's status, switch and actions, in its own context.
   const virtualCamera = useVirtualCameraController(client, wsStatus, runtimeInfo)
-  // Linux can't caption at all (no native microphone path): every session
-  // skips captions there, as if "Continue without captions" were chosen.
+  // Only an unsupported platform suppresses captions automatically. A Linux
+  // worker feeds the same post-controls bus; a direct-input fallback is refused
+  // by the backend instead of silently dropping requested captions.
   const captionsPlatformUnavailable = captionsPlatformUnavailableReason(runtimeInfo?.platform)
   const suppressCaptionsForSession = suppressCaptionsChoice || captionsPlatformUnavailable !== null
   // "Go live without …" for this attempt only (plan 174 S3.4, B-8).
@@ -4443,6 +4444,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const layoutIntentAwaitingProofRef = useRef<number | null>(null)
   const latestLayoutTransactionCommitRef = useRef<LayoutTransactionSnapshot | null>(null)
   const skipNextConfigSceneReloadRef = useRef(false)
+  const sceneLoadsInFlightRef = useRef(new Set<Promise<void>>())
+  const layoutTransactionSettledRef = useRef<Promise<void>>(Promise.resolve())
+  const heldSourcePicksRef = useRef<
+    { kind: LiveSourceDeviceSwitchPending; sources: SourceSelection }[]
+  >([])
   useEffect(() => {
     captureConfigRef.current = captureConfig
   }, [captureConfig])
@@ -9297,28 +9303,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       config: Pick<CaptureConfig, 'sources' | 'layout' | 'video'>,
       requestedSources = config.sources
     ) => {
-      if (!client || wsStatus !== 'connected') {
+      if (!client || wsStatus !== 'connected' || layoutIntentAwaitingProofRef.current !== null) {
         return
       }
 
+      const intentId = layoutIntentIdRef.current
       const params: SceneConfigParams = {
         ...config,
         background: activeSceneBackground
       }
-      const status = await client.request<SceneCommitStatus>(
-        'scene.load_from_capture_config',
-        params
-      )
-      applyCommittedScene(status)
-      persistWorkingVisual(
-        config.layout,
-        requestedSources,
-        status.scene.background ?? null,
-        activeSavedSceneIdRef.current
-      )
+      const pending = (async () => {
+        const status = await client.request<SceneCommitStatus>(
+          'scene.load_from_capture_config',
+          params
+        )
+        // A newer layout owns the working visual even while it waits for this
+        // earlier backend load. Its response must not restore the old look.
+        if (layoutIntentIdRef.current !== intentId) return
+        applyCommittedScene(status)
+        persistWorkingVisual(
+          config.layout,
+          requestedSources,
+          status.scene.background ?? null,
+          activeSavedSceneIdRef.current
+        )
+      })()
+      sceneLoadsInFlightRef.current.add(pending)
+      try {
+        await pending
+      } finally {
+        sceneLoadsInFlightRef.current.delete(pending)
+      }
     },
     [activeSceneBackground, applyCommittedScene, client, wsStatus, persistWorkingVisual]
   )
+
+  // Resolves once no layout awaits presentation proof, following any newer
+  // layout that starts while an earlier one settles.
+  const waitForLayoutTransactions = useCallback(async () => {
+    let settled: Promise<void> | null = null
+    while (
+      layoutIntentAwaitingProofRef.current !== null &&
+      layoutTransactionSettledRef.current !== settled
+    ) {
+      settled = layoutTransactionSettledRef.current
+      await settled
+    }
+  }, [])
 
   const reloadSceneFromCaptureConfig = useCallback(async () => {
     const config = {
@@ -9707,6 +9738,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const checkRunning = (): boolean => performanceCheckHoldRef.current || performanceCheckRunning
     if (
       !client ||
+      visualTransactionPending ||
       !shouldReloadSceneFromCaptureConfig({
         connected: wsStatus === 'connected',
         sceneEditMode,
@@ -9723,8 +9755,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
 
+    const scheduledLayoutIntent = layoutIntentIdRef.current
     const timer = window.setTimeout(() => {
       if (
+        scheduledLayoutIntent !== layoutIntentIdRef.current ||
+        layoutIntentAwaitingProofRef.current !== null ||
         !shouldReloadSceneFromCaptureConfig({
           connected: wsStatusRef.current === 'connected',
           sceneEditMode,
@@ -9762,8 +9797,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sceneEditMode,
     startRequestPending,
     stopRequestPending,
+    visualTransactionPending,
     wsStatus
   ])
+
+  // Edit-mode source picks held behind a pending layout load here, from the
+  // render that holds both the settled layout and the reapplied picks.
+  const [heldSourcePickLoad, setHeldSourcePickLoad] = useState(0)
+  const loadedHeldSourcePickRef = useRef(0)
+  useEffect(() => {
+    if (heldSourcePickLoad === loadedHeldSourcePickRef.current) return
+    loadedHeldSourcePickRef.current = heldSourcePickLoad
+    void reloadSceneFromCaptureConfig().catch(reportError)
+  }, [heldSourcePickLoad, reloadSceneFromCaptureConfig, reportError])
 
   const resetSceneSource = useCallback(
     async (sourceId = selectedSceneSourceId ?? undefined) => {
@@ -10316,11 +10362,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         resolveCommitReceipt(committed)
       }
 
-      void (async () => {
+      layoutTransactionSettledRef.current = (async () => {
         let requestedSceneEvidence: LayoutTransactionSceneEvidence | null = null
         let sceneRevisionBeforeRequest: number | undefined
         let sceneRequestDispatched = false
         try {
+          // Idle reloads and layout transactions use different backend lanes.
+          // Drain already dispatched loads before sending the newer layout;
+          // the pending intent prevents another idle reload from overtaking it.
+          if (sceneLoadsInFlightRef.current.size > 0) {
+            await Promise.allSettled([...sceneLoadsInFlightRef.current])
+            if (layoutIntentIdRef.current !== intentId) return
+          }
           const requestedConfig = captureConfigRef.current
           const requestedSources =
             options?.sourcesOverride ??
@@ -11257,19 +11310,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Studio with no undo history and no saved-scene origin (a built-in look).
   // The setup chunk has already loaded the look's helpers when this runs.
   const applyFirstRunLook = useCallback(
-    (look: FirstRunLook): void => {
-      if (firstRunLookWritesHeld(recordingRef.current)) {
-        firstRunLookHoldRef.current = look
-        setFirstRunLookHold(look)
-        return
-      }
-      // The session that held an earlier look has ended: this write wins.
-      if (firstRunLookHoldRef.current) {
-        firstRunLookHoldRef.current = null
-        setFirstRunLookHold(null)
-      }
+    (patch: Partial<FirstRunLook>): void => {
+      // Each control owns only its changed fields. Resolve against the latest
+      // refs after the lazy module loads, so a fast background/shape choice
+      // cannot restore the layout from an earlier render.
       void import('@/lib/first-run-look').then(
-        ({ firstRunBackgroundChoice, firstRunLookPatch }) => {
+        ({ firstRunBackgroundChoice, firstRunLookPatch, firstRunLookWithPatch }) => {
+          const look = firstRunLookWithPatch(
+            firstRunLookHoldRef.current,
+            captureConfigRef.current,
+            backgroundRegistryRef.current,
+            patch
+          )
+          if (!look) return
+          if (firstRunLookWritesHeld(recordingRef.current)) {
+            firstRunLookHoldRef.current = look
+            setFirstRunLookHold(look)
+            return
+          }
+          if (firstRunLookHoldRef.current) {
+            firstRunLookHoldRef.current = null
+            setFirstRunLookHold(null)
+          }
           const current = captureConfigRef.current
           if (current.layout.arrangementMode === 'freeform') {
             noteLayoutLeavingFreeform(current.layout)
@@ -11279,6 +11341,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           setWorkingOrigin('builtin')
           activeSavedSceneIdRef.current = null
           setActiveSavedSceneId(null)
+          captureConfigRef.current = next
           setCaptureConfig((latest) => firstRunLookPatch(latest, look))
           const registry = backgroundRegistryRef.current
           const nextRegistry = firstRunBackgroundChoice(registry, look.liveBackgroundId)
@@ -11286,7 +11349,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           libraryBackgroundFingerprintRef.current = JSON.stringify(snapshotBackground(background))
           workingBackgroundRef.current = background
           setWorkingBackground(background)
-          if (nextRegistry !== registry) setBackgroundRegistry(nextRegistry)
+          if (nextRegistry !== registry) {
+            backgroundRegistryRef.current = nextRegistry
+            setBackgroundRegistry(nextRegistry)
+          }
         }
       )
     },
@@ -11363,6 +11429,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           captureConfigRef.current = next
           return next
         })
+        if (layoutIntentAwaitingProofRef.current !== null) {
+          // A layout awaiting proof writes back the sources it was sent with
+          // when it settles, and holds scene loads until then. Reapply every
+          // pick made meanwhile after it settles, then load the result once.
+          heldSourcePicksRef.current.push({ kind: sourceKind, sources })
+          await waitForLayoutTransactions()
+          const held = heldSourcePicksRef.current.splice(0)
+          if (held.length === 0) return
+          setCaptureConfig((current) => {
+            const next = {
+              ...current,
+              sources: held.reduce(
+                (merged, pick) => mergeSourceKind(merged, pick.sources, pick.kind),
+                current.sources
+              )
+            }
+            captureConfigRef.current = next
+            return next
+          })
+          if (!held.some((pick) => pick.kind !== 'microphone')) return
+          if (sceneEditMode) {
+            // Edit mode has no idle reload; load once React has the result.
+            setHeldSourcePickLoad((count) => count + 1)
+          } else {
+            // The settled layout's commit skips the next idle reload as a
+            // repeat of itself; this one carries the picks.
+            skipNextConfigSceneReloadRef.current = false
+          }
+          return
+        }
         if (sceneEditMode && sourceKind !== 'microphone') {
           await loadScene({
             sources: mergeSourceKind(captureConfigRef.current.sources, sources, sourceKind),
@@ -11452,7 +11548,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       loadScene,
       reportError,
       sceneEditMode,
-      persistWorkingVisual
+      persistWorkingVisual,
+      waitForLayoutTransactions
     ]
   )
 
@@ -12019,7 +12116,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const timer = window.setInterval(() => {
       void reconcile()
     }, 4000)
-    const unsubscribe = window.videorc?.onPreviewWindowState?.((state) => setPreviewWindow(state))
+    const unsubscribe = window.videorc?.onPreviewWindowState?.((state) =>
+      setPreviewWindow((current) =>
+        JSON.stringify(current) === JSON.stringify(state) ? current : state
+      )
+    )
     return () => {
       cancelled = true
       window.clearInterval(timer)
@@ -12668,7 +12769,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             previewCameraStatusRef.current
           ),
           automaticSourceFallbacks: automaticSourceFallbacks.current,
-          nativePreviewSurfaceStatus: previewSurfaceStatus,
+          // Read at export time, including telemetry received while main was
+          // refreshing runtime info. Capturing the state here also made this
+          // core action invalidate every Assets control on each preview tick.
+          nativePreviewSurfaceStatus: previewSurfaceStatusRef.current,
           runtimeInfo: freshRuntimeInfo ?? undefined,
           // Plan 214 E3: the camera's state, never its words.
           virtualCamera: (await import('@/lib/virtual-camera-view')).virtualCameraBundleLine(
@@ -12708,14 +12812,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } finally {
       setSupportBundleExportPending(false)
     }
-  }, [
-    client,
-    previewSurfaceStatus,
-    reportError,
-    runtimeInfo,
-    supportBundleExportPending,
-    virtualCamera.status
-  ])
+  }, [client, reportError, runtimeInfo, supportBundleExportPending, virtualCamera.status])
   // Plan 174 A-20: a toast whose raw details were withheld offers this export
   // (latest-value hand-off, like the ref mirrors above; idempotent per render).
   registerSupportBundleExport(() => void exportSupportBundle())
@@ -17159,26 +17256,87 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       previewCamera: previewCameraStatus,
       previewScreen: previewScreenStatus
     })
+  const replayStartContext = {
+    captureConfig,
+    sceneWithBackground,
+    sceneEditMode,
+    recordBlockedReason,
+    replayGrantWait,
+    sourceDeviceSwitchPending
+  }
+  const replayStartContextRef = useRef(replayStartContext)
+  replayStartContextRef.current = replayStartContext
   const startReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || replayStartInFlightRef.current || !replayArmedRef.current) return
-    if (recordBlockedReason || replayGrantWait) {
+    const currentContext = replayStartContextRef.current
+    if (currentContext.recordBlockedReason || currentContext.replayGrantWait) {
       // Not yet: a source or a permission is missing. The switch stays on
       // and the ring starts once the reason clears (the effect below), so a
       // launch before Sources settle never turns clips off.
       return
     }
+    const selectionReady = (): boolean => {
+      const current = replayStartContextRef.current
+      return (
+        replayArmedRef.current &&
+        (recordingRef.current.state === 'idle' || recordingRef.current.state === 'failed') &&
+        (replayStateRef.current.state === 'off' || replayStateRef.current.state === 'error') &&
+        !replayReconcileHoldRef.current &&
+        replaySceneReloadsRef.current === 0 &&
+        !performanceCheckHoldRef.current &&
+        layoutIntentAwaitingProofRef.current === null &&
+        current.sourceDeviceSwitchPending === null &&
+        !current.recordBlockedReason &&
+        !current.replayGrantWait &&
+        current.captureConfig === captureConfigRef.current &&
+        sessionStartInFlightRef.current === null &&
+        !sessionStartLifecycleActiveRef.current &&
+        stopSessionInFlightPromiseRef.current === null
+      )
+    }
+    if (!selectionReady()) {
+      scheduleReplayReconcile()
+      return
+    }
     replayStartInFlightRef.current = true
     replaySourcesMovedDuringStartRef.current = null
+    let superseded = false
     let started = false
     try {
       const replay = await import('@/lib/replay-buffer')
+      if (!selectionReady()) {
+        superseded = true
+        return
+      }
+      // Read after the lazy import: a scheduled callback may belong to an
+      // older render. Keep one coherent scene/config until dispatch, then
+      // cancel if authorization lets a newer intent overtake it.
+      const context = replayStartContextRef.current
+      const config = captureConfigRef.current
+      const settings = settingsRef.current
+      const layoutIntent = layoutIntentIdRef.current
       const status = await replay.startBufferOnlySession({
         client,
-        captureConfig: captureConfigRef.current,
-        scene: sceneWithBackground,
-        sceneEditMode,
-        settings: settingsRef.current
+        captureConfig: config,
+        scene: context.sceneWithBackground,
+        sceneEditMode: context.sceneEditMode,
+        settings,
+        isCurrent: () => {
+          const current = replayStartContextRef.current
+          return (
+            selectionReady() &&
+            layoutIntentIdRef.current === layoutIntent &&
+            captureConfigRef.current === config &&
+            settingsRef.current === settings &&
+            current.sceneWithBackground === context.sceneWithBackground &&
+            current.sceneEditMode === context.sceneEditMode
+          )
+        }
       })
+      if (status === null) {
+        superseded = true
+        return
+      }
       replayFailedStartsRef.current = 0
       replayBlockedReasonRef.current = null
       setReplayBlockedReasonState(null)
@@ -17237,16 +17395,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const moved = replaySourcesMovedDuringStartRef.current
       replaySourcesMovedDuringStartRef.current = null
       if (started && moved !== null) restartReplayForSourcesRef.current(moved === 'visual')
+      else if (superseded) scheduleReplayReconcile()
     }
-  }, [
-    applyRecordingStatus,
-    client,
-    recordBlockedReason,
-    replayGrantWait,
-    sceneEditMode,
-    sceneWithBackground,
-    scheduleReplayReconcile
-  ])
+  }, [applyRecordingStatus, client, scheduleReplayReconcile])
 
   const stopReplayBuffer = useCallback(async (): Promise<void> => {
     if (!client || !sessionIsReplayOnly(recordingRef.current)) return
@@ -18809,6 +18960,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         visual: workingVisual,
         diagnostics: {
           wsStatus,
+          replay: {
+            armed: replayArmedRef.current,
+            state: replayStateRef.current.state,
+            firstRunSetupOpen,
+            recordBlockedReason,
+            grantWait: replayGrantWait,
+            startInFlight: replayStartInFlightRef.current,
+            reconcileHeld: replayReconcileHoldRef.current,
+            sceneReloadsHeld: replaySceneReloadsRef.current,
+            performanceCheckHeld: performanceCheckHoldRef.current,
+            failedStarts: replayFailedStartsRef.current,
+            blocked: replayBlockedReasonRef.current !== null
+          },
           layoutIntentId: layoutIntentIdRef.current,
           layoutIntentAwaitingProof: layoutIntentAwaitingProofRef.current,
           confirmedSceneRevision: nativePreviewCommittedSceneRef.current?.sceneRevision ?? null,
@@ -18851,6 +19015,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       removeBackground: (id: string) =>
         setBackgroundRegistry((current) => removeSlotAsset(current, id)),
       layout: value.applyCameraPreset,
+      source: value.switchSourceDeviceLive,
       configure: (patch: Partial<CaptureConfig>) =>
         value.setCaptureConfig((current) => ({ ...current, ...patch })),
       start: value.startSession,

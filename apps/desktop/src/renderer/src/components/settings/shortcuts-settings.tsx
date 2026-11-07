@@ -45,10 +45,10 @@ export const GLOBAL_ROW_APP_KEYS: Partial<Record<GlobalShortcutAction, ShortcutR
 }
 
 /**
- * The global shortcut rows this computer can act on. System audio has no
- * producer on Linux, so its shortcut only ever toasted "isn't available"
- * (Linux plan 0019); a binding saved elsewhere stays visible so it can be
- * cleared.
+ * The global shortcut rows this computer can act on. Where System audio can't
+ * run (Linux without PipeWire, Windows before build 20348) its shortcut would
+ * only toast "isn't available" (Linux plan 0019); a binding saved elsewhere
+ * stays visible so it can be cleared.
  */
 export function globalShortcutRows(input: {
   systemAudioAvailable: boolean

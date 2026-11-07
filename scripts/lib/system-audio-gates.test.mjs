@@ -24,6 +24,7 @@ import {
   parseSystemAudioMixCutover,
   parseSystemAudioSyncOffsetMs,
   startedSessionStatus,
+  sessionLeftRunning,
   summarizeSystemAudioSyncRuns,
   toneEnvelope,
   toneWavArgs,
@@ -250,6 +251,46 @@ describe('time alignment helpers', () => {
     }
     assert.equal(startedSessionStatus({ state: 'recording' }), false)
     assert.equal(startedSessionStatus(undefined), false)
+  })
+
+  it('sessionLeftRunning names the started session a failed case never stopped', () => {
+    const status = (state, sessionId, extra = {}) => ({
+      event: 'recording.status',
+      payload: { state, sessionId, ...extra }
+    })
+    assert.equal(sessionLeftRunning([]), null)
+    assert.equal(sessionLeftRunning(undefined), null)
+    // A Record that handed over from the Clips ring and never stopped.
+    assert.equal(
+      sessionLeftRunning([
+        status('recording', 'ring-1', { replayOnly: true }),
+        status('stopping', 'ring-1', { replayOnly: true }),
+        status('idle', 'ring-1', { replayOnly: true }),
+        status('starting', 'rec-1'),
+        status('recording', 'rec-1'),
+        { event: 'health.event', payload: { sessionId: 'rec-1' } },
+        status('recording', 'rec-1')
+      ]),
+      'rec-1'
+    )
+    assert.equal(
+      sessionLeftRunning([status('recording', 'rec-1'), status('stopping', 'rec-1')]),
+      'rec-1'
+    )
+    // Stopped, failed, or only the ring re-arming after a Stop: nothing to end.
+    assert.equal(
+      sessionLeftRunning([
+        status('recording', 'rec-1'),
+        status('idle', 'rec-1'),
+        status('recording', 'ring-2', { replayOnly: true })
+      ]),
+      null
+    )
+    assert.equal(
+      sessionLeftRunning([status('streaming', 'live-1'), status('failed', 'live-1')]),
+      null
+    )
+    assert.equal(sessionLeftRunning([status('recording', 'ring-1', { replayOnly: true })]), null)
   })
 
   it('generates a -6 dBFS stereo tone (lavfi sine is too quiet)', () => {

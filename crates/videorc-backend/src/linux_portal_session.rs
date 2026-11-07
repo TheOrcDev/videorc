@@ -138,6 +138,40 @@ async fn before_restore_token<T, E: std::fmt::Display>(
     }
 }
 
+/// Races a call made before the picker against Videorc stopping the start.
+/// Only the picker steps watched `cancelled`, so a stop during an unanswered
+/// `CreateSession` held the screen transition, and the `session.start` fenced
+/// behind it, for the whole 10 s bound (ogre, 2026-11-02). The call keeps
+/// running on the portal runtime; what it returns after the stop goes to
+/// `late`, so a session the portal creates late is still closed.
+async fn unless_cancelled<T, Late>(
+    call: impl std::future::Future<Output = Result<T, PortalStart>> + Send + 'static,
+    cancelled: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    late: impl FnOnce(T) -> Late + Send + 'static,
+) -> Result<T, PortalStart>
+where
+    T: Send + 'static,
+    Late: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut call = tokio::spawn(call);
+    tokio::select! {
+        biased;
+        () = cancelled => {
+            tokio::spawn(async move {
+                if let Ok(Ok(value)) = call.await {
+                    late(value).await;
+                }
+            });
+            Err(PortalStart::Abandoned)
+        }
+        joined = &mut call => joined.unwrap_or_else(|error| {
+            Err(PortalStart::Unavailable(PortalCaptureState::MissingSource {
+                reason: format!("portal call task failed: {error}"),
+            }))
+        }),
+    }
+}
+
 fn is_cancelled(error: &ashpd::Error) -> bool {
     matches!(
         error,
@@ -172,28 +206,44 @@ fn picker_step_failed(step: &str, error: ashpd::Error, dialog_shown: bool) -> Po
 /// A refused restore token falls back to the picker once (the caller
 /// forgets the token when [`restore_token_refused`] holds for the outcome).
 /// Run it on [`portal_runtime`]; a session that is not granted is closed.
-/// `cancelled` ends the negotiation (the picker steps can wait on a person
-/// indefinitely); closing the session then lets the portal dismiss its dialog.
+/// `cancelled` ends the start at any step: the picker steps can wait on a
+/// person indefinitely, and the bounded calls before them on a wedged portal
+/// backend. Closing the session then lets the portal dismiss its dialog.
 pub async fn start_portal_session(
     source: PortalSourceType,
     restore_token: Option<String>,
     include_cursor: bool,
     cancelled: impl std::future::Future<Output = ()>,
 ) -> PortalStart {
-    let proxy = match before_restore_token(
-        Screencast::new(),
-        "ScreenCast portal unreachable",
-        "ScreenCast portal did not answer within 10s",
+    tokio::pin!(cancelled);
+    let proxy = match unless_cancelled(
+        before_restore_token(
+            Screencast::new(),
+            "ScreenCast portal unreachable",
+            "ScreenCast portal did not answer within 10s",
+        ),
+        cancelled.as_mut(),
+        |_proxy| async {},
     )
     .await
     {
-        Ok(proxy) => proxy,
+        Ok(proxy) => Arc::new(proxy),
         Err(outcome) => return outcome,
     };
-    let session = match before_restore_token(
-        proxy.create_session(CreateSessionOptions::default()),
-        "CreateSession failed",
-        "CreateSession did not answer within 10s",
+    let creating = Arc::clone(&proxy);
+    let session = match unless_cancelled(
+        async move {
+            before_restore_token(
+                creating.create_session(CreateSessionOptions::default()),
+                "CreateSession failed",
+                "CreateSession did not answer within 10s",
+            )
+            .await
+        },
+        cancelled.as_mut(),
+        // The portal may still create the session after the stop; on the
+        // shared connection it would otherwise stay open.
+        |session| async move { close_session(&session).await },
     )
     .await
     {
@@ -441,6 +491,102 @@ mod tests {
         assert!(restore_token_refused(&picker_step_failed(
             "Start", other, false
         )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_ends_an_unanswered_create_session_before_its_bound() {
+        // ogre, 2026-11-02: CreateSession never answered, and the stop that
+        // arrived 2 s in waited out the 10 s bound with `session.start`.
+        let started = tokio::time::Instant::now();
+        let cancelled = tokio::time::sleep(Duration::from_secs(2));
+        tokio::pin!(cancelled);
+        let outcome = unless_cancelled(
+            before_restore_token(
+                std::future::pending::<Result<(), String>>(),
+                "CreateSession failed",
+                "CreateSession did not answer within 10s",
+            ),
+            cancelled.as_mut(),
+            |()| async {},
+        )
+        .await;
+        assert!(matches!(outcome, Err(PortalStart::Abandoned)));
+        assert!(started.elapsed() < PORTAL_CALL_TIMEOUT);
+        assert!(!restore_token_refused(&outcome.unwrap_err()));
+    }
+
+    #[tokio::test]
+    async fn a_session_the_portal_creates_after_the_stop_is_closed() {
+        let (answer_tx, answer_rx) = tokio::sync::oneshot::channel::<u32>();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<u32>();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let wait = tokio::spawn(async move {
+            let cancelled = async move {
+                let _ = stop_rx.await;
+            };
+            tokio::pin!(cancelled);
+            unless_cancelled(
+                async move { Ok(answer_rx.await.expect("the portal answers")) },
+                cancelled.as_mut(),
+                move |session| async move {
+                    let _ = closed_tx.send(session);
+                },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!wait.is_finished(), "nothing ends the call before the stop");
+        stop_tx.send(()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("the stop must end the wait")
+            .expect("wait task");
+        assert!(matches!(outcome, Err(PortalStart::Abandoned)));
+        answer_tx.send(7).unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(5), closed_rx)
+            .await
+            .expect("the late session must be closed")
+            .expect("late handler");
+        assert_eq!(closed, 7);
+    }
+
+    #[tokio::test]
+    async fn a_portal_call_that_answers_before_any_stop_keeps_its_answer() {
+        let (closed_tx, mut closed_rx) = tokio::sync::oneshot::channel::<u32>();
+        let cancelled = std::future::pending::<()>();
+        tokio::pin!(cancelled);
+        let answered = unless_cancelled(
+            async { Ok(5) },
+            cancelled.as_mut(),
+            move |session| async move {
+                let _ = closed_tx.send(session);
+            },
+        )
+        .await;
+        assert!(matches!(answered, Ok(5)));
+        assert!(
+            matches!(
+                closed_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ),
+            "a session answered in time is not closed"
+        );
+        let failed = unless_cancelled(
+            before_restore_token(
+                async { Err::<(), _>("org.freedesktop.DBus.Error.ServiceUnknown") },
+                "ScreenCast portal unreachable",
+                "ScreenCast portal did not answer within 10s",
+            ),
+            cancelled.as_mut(),
+            |()| async {},
+        )
+        .await;
+        assert!(matches!(
+            failed,
+            Err(PortalStart::Unavailable(
+                PortalCaptureState::MissingSource { .. }
+            ))
+        ));
     }
 
     #[tokio::test]

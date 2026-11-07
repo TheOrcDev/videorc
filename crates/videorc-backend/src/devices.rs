@@ -66,7 +66,7 @@ pub async fn list_devices(ffmpeg_path: &str) -> DeviceList {
 
 /// Linux: the portal screen/window entries (Plan 0006, L4), V4L2 cameras
 /// (L3), PulseAudio / PipeWire microphones through FFmpeg (L2), and the
-/// system audio device (Unavailable: Linux system audio is out of scope).
+/// system audio device (Available where PipeWire is reachable, plan 212).
 #[cfg(target_os = "linux")]
 async fn list_linux_devices(ffmpeg_path: &str) -> DeviceList {
     let native_capture_sources = list_native_capture_sources();
@@ -376,8 +376,11 @@ enum SystemAudioSupport {
     Ready,
     /// macOS: system audio rides the Screen Recording grant, which is missing.
     ScreenRecordingPermissionMissing,
+    /// Linux: no PipeWire socket, so no graph to capture from (a bare
+    /// PulseAudio or ALSA desktop).
+    PipeWireMissing,
     /// No system audio capture here: Windows before build 20348 (no process
-    /// loopback), or Linux (out of scope).
+    /// loopback), or a platform without a capture path.
     UnsupportedPlatform,
 }
 
@@ -437,6 +440,75 @@ pub(crate) fn windows_system_audio_supported() -> bool {
     })
 }
 
+/// Product gate for Linux system audio (plan 212), the same switch as
+/// `WINDOWS_SYSTEM_AUDIO_SESSIONS_WIRED`: false hides the row and makes Linux
+/// sessions ignore the switch.
+#[cfg(any(target_os = "linux", test))]
+const LINUX_SYSTEM_AUDIO_SESSIONS_WIRED: bool = true;
+
+/// Where libpipewire looks for the daemon's socket, in its order:
+/// `PIPEWIRE_REMOTE` (default `pipewire-0`; an absolute path is used as is)
+/// under `PIPEWIRE_RUNTIME_DIR`, else `XDG_RUNTIME_DIR`, then the system
+/// directory `/run/pipewire`.
+#[cfg(any(target_os = "linux", test))]
+fn pipewire_socket_candidates(
+    remote: Option<&str>,
+    pipewire_runtime_dir: Option<&str>,
+    xdg_runtime_dir: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    fn set(value: Option<&str>) -> Option<&str> {
+        value.filter(|value| !value.is_empty())
+    }
+    let name = set(remote).unwrap_or("pipewire-0");
+    if name.starts_with('/') {
+        return vec![std::path::PathBuf::from(name)];
+    }
+    // Joined with '/' as libpipewire does, so the tests read the same on every
+    // host (`Path::join` would use '\' on Windows).
+    set(pipewire_runtime_dir)
+        .or(set(xdg_runtime_dir))
+        .into_iter()
+        .chain(["/run/pipewire"])
+        .map(|dir| std::path::PathBuf::from(format!("{dir}/{name}")))
+        .collect()
+}
+
+/// The Linux probe: Ready when a PipeWire socket exists and sessions can use
+/// it. Like loopback on Windows, PipeWire has no grant to miss.
+#[cfg(any(target_os = "linux", test))]
+fn linux_system_audio_support(socket_found: bool, sessions_wired: bool) -> SystemAudioSupport {
+    match (sessions_wired, socket_found) {
+        (false, _) => SystemAudioSupport::UnsupportedPlatform,
+        (true, false) => SystemAudioSupport::PipeWireMissing,
+        (true, true) => SystemAudioSupport::Ready,
+    }
+}
+
+/// Whether this Linux session can capture system audio: the device row's
+/// probe, read once, and the answer sessions use
+/// (`system_audio_session::system_audio_capable`). A socket that exists but
+/// does not answer fails the capture's start with its own status.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_system_audio_supported() -> bool {
+    linux_system_audio_probe() == SystemAudioSupport::Ready
+}
+
+#[cfg(target_os = "linux")]
+fn linux_system_audio_probe() -> SystemAudioSupport {
+    static SUPPORT: std::sync::OnceLock<SystemAudioSupport> = std::sync::OnceLock::new();
+    *SUPPORT.get_or_init(|| {
+        let env = |key: &str| std::env::var(key).ok();
+        let socket_found = pipewire_socket_candidates(
+            env("PIPEWIRE_REMOTE").as_deref(),
+            env("PIPEWIRE_RUNTIME_DIR").as_deref(),
+            env("XDG_RUNTIME_DIR").as_deref(),
+        )
+        .iter()
+        .any(|path| path.exists());
+        linux_system_audio_support(socket_found, LINUX_SYSTEM_AUDIO_SESSIONS_WIRED)
+    })
+}
+
 fn system_audio_support() -> SystemAudioSupport {
     #[cfg(target_os = "macos")]
     {
@@ -457,7 +529,11 @@ fn system_audio_support() -> SystemAudioSupport {
             SystemAudioSupport::UnsupportedPlatform
         }
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_system_audio_probe()
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         SystemAudioSupport::UnsupportedPlatform
     }
@@ -480,6 +556,10 @@ fn system_audio_device_for(support: SystemAudioSupport) -> Device {
                 "System audio needs the Screen Recording permission. Allow Videorc in System Settings > Privacy & Security > Screen & System Audio Recording."
                     .to_string(),
             ),
+        ),
+        SystemAudioSupport::PipeWireMissing => (
+            DeviceStatus::Unavailable,
+            Some("System audio on Linux needs PipeWire.".to_string()),
         ),
         SystemAudioSupport::UnsupportedPlatform => (
             DeviceStatus::Unavailable,
@@ -1482,7 +1562,18 @@ mod tests {
         assert_eq!(unsupported.status, DeviceStatus::Unavailable);
         assert!(unsupported.detail.is_some());
 
-        for device in [ready, missing, unsupported] {
+        let no_pipewire = system_audio_device_for(SystemAudioSupport::PipeWireMissing);
+        assert_eq!(no_pipewire.id, "system-audio:default");
+        assert_eq!(no_pipewire.status, DeviceStatus::Unavailable);
+        assert!(
+            no_pipewire
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("PipeWire")),
+            "the row must name what is missing: {no_pipewire:?}"
+        );
+
+        for device in [ready, missing, unsupported, no_pipewire] {
             let detail = device.detail.clone().unwrap_or_default();
             assert!(
                 !detail.contains('\u{2014}'),
@@ -1538,6 +1629,59 @@ mod tests {
     }
 
     #[test]
+    fn linux_system_audio_is_ready_only_with_a_pipewire_socket_once_sessions_are_wired() {
+        assert_eq!(
+            linux_system_audio_support(true, true),
+            SystemAudioSupport::Ready
+        );
+        assert_eq!(
+            linux_system_audio_support(false, true),
+            SystemAudioSupport::PipeWireMissing
+        );
+        // Pulling the gate hides the row whether or not PipeWire runs.
+        for socket_found in [true, false] {
+            assert_eq!(
+                linux_system_audio_support(socket_found, false),
+                SystemAudioSupport::UnsupportedPlatform
+            );
+        }
+        const { assert!(LINUX_SYSTEM_AUDIO_SESSIONS_WIRED) };
+    }
+
+    #[test]
+    fn pipewire_socket_candidates_follow_libpipewire_lookup() {
+        let paths = |remote, pipewire_dir, xdg_dir| {
+            pipewire_socket_candidates(remote, pipewire_dir, xdg_dir)
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(None, None, Some("/run/user/1000")),
+            ["/run/user/1000/pipewire-0", "/run/pipewire/pipewire-0"]
+        );
+        // PIPEWIRE_RUNTIME_DIR wins over XDG_RUNTIME_DIR; empty means unset.
+        assert_eq!(
+            paths(Some(""), Some("/tmp/pw"), Some("/run/user/1000")),
+            ["/tmp/pw/pipewire-0", "/run/pipewire/pipewire-0"]
+        );
+        assert_eq!(
+            paths(Some("pipewire-1"), Some(""), Some("/run/user/7")),
+            ["/run/user/7/pipewire-1", "/run/pipewire/pipewire-1"]
+        );
+        assert_eq!(paths(None, None, None), ["/run/pipewire/pipewire-0"]);
+        // An absolute remote is the socket itself.
+        assert_eq!(
+            paths(
+                Some("/srv/pw.sock"),
+                Some("/tmp/pw"),
+                Some("/run/user/1000")
+            ),
+            ["/srv/pw.sock"]
+        );
+    }
+
+    #[test]
     fn system_audio_device_status_comes_from_the_platform_probe() {
         let device = system_audio_device();
         assert_eq!(device.id, "system-audio:default");
@@ -1562,8 +1706,15 @@ mod tests {
             },
             "{device:?}"
         );
-        // Linux is out of scope: the row stays hidden.
-        #[cfg(not(any(target_os = "macos", windows)))]
+        // Linux: Available where a PipeWire socket exists, the same answer
+        // sessions mix by.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            device.status == DeviceStatus::Available,
+            linux_system_audio_supported(),
+            "{device:?}"
+        );
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         assert_eq!(device.status, DeviceStatus::Unavailable);
     }
 

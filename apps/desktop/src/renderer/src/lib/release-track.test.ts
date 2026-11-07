@@ -3,6 +3,11 @@ import { describe, expect, it } from 'vitest'
 import { releaseTrackLabel } from './release-track'
 
 describe('releaseTrackLabel', () => {
+  it('labels only a packaged Linux Beta identity as Beta', () => {
+    expect(releaseTrackLabel('linux', true, 'beta')).toBe('Beta')
+    expect(releaseTrackLabel('linux', false, 'beta')).toBe('Development')
+    expect(releaseTrackLabel('win32', true, 'beta')).toBe('Alpha')
+  })
   it('names the track each platform ships on', () => {
     expect(releaseTrackLabel('darwin', true)).toBe('Beta')
     expect(releaseTrackLabel('win32', true)).toBe('Alpha')

@@ -20,7 +20,7 @@ function controller(
     registry?: ReturnType<typeof createDefaultRegistry>
   } = {}
 ) {
-  const apply = vi.fn<(look: FirstRunLook) => void>()
+  const apply = vi.fn<(patch: Partial<FirstRunLook>) => void>()
   const value = firstRunLookController({
     config: {
       ...defaultCaptureConfig,
@@ -71,19 +71,17 @@ describe('firstRunLookController', () => {
     expect(value.options).toHaveLength(4)
   })
 
-  it('setLayout applies the preset with its orientation and keeps shape and background', () => {
+  it('setLayout changes only the preset and its orientation', () => {
     const { value, apply } = controller({
       registry: applyLiveBackground(createDefaultRegistry(), 'beams')
     })
     value.setLayout('camera-only')
     expect(apply).toHaveBeenCalledWith({
       orientation: 'horizontal',
-      layoutPreset: 'camera-only',
-      cameraShape: 'rectangle',
-      liveBackgroundId: 'beams'
+      layoutPreset: 'camera-only'
     })
     value.setLayout('screen-camera')
-    expect(apply).toHaveBeenCalledTimes(1)
+    expect(apply).toHaveBeenCalledTimes(2)
   })
 
   it('setOrientation lands on the scene remembered for that orientation when it works', () => {
@@ -93,7 +91,7 @@ describe('firstRunLookController', () => {
       expect.objectContaining({ orientation: 'vertical', layoutPreset: 'vertical-split' })
     )
     value.setOrientation('horizontal')
-    expect(apply).toHaveBeenCalledTimes(1)
+    expect(apply).toHaveBeenCalledTimes(2)
   })
 
   it('setOrientation without a screen lands on vertical Camera only', () => {
@@ -109,17 +107,16 @@ describe('firstRunLookController', () => {
     )
   })
 
-  it('setShape and setBackground change one field each and skip no-ops', () => {
+  it('setShape and setBackground change only their own fields, including a quick reversal', () => {
     const { value, apply } = controller()
     value.setShape('rounded')
     expect(apply).toHaveBeenLastCalledWith(expect.objectContaining({ cameraShape: 'rounded' }))
     value.setShape('rectangle')
     value.setBackground('liquid-chrome')
-    expect(apply).toHaveBeenLastCalledWith(
-      expect.objectContaining({ liveBackgroundId: 'liquid-chrome', cameraShape: 'rectangle' })
-    )
+    expect(apply).toHaveBeenLastCalledWith({ liveBackgroundId: 'liquid-chrome' })
     value.setBackground(null)
-    expect(apply).toHaveBeenCalledTimes(2)
+    expect(apply).toHaveBeenLastCalledWith({ liveBackgroundId: null })
+    expect(apply).toHaveBeenCalledTimes(4)
   })
 
   it('a held look wins over the Studio’s state and reads as held', () => {
@@ -137,7 +134,37 @@ describe('firstRunLookController', () => {
     expect(value.liveBackgroundId).toBe('dither')
     expect(value.shapeApplies).toBe(true)
     value.setBackground(null)
-    expect(apply).toHaveBeenCalledWith({ ...hold, liveBackgroundId: null })
+    expect(apply).toHaveBeenCalledWith({ liveBackgroundId: null })
+  })
+
+  it.each([false, true])('preserves rapid choices before rerender (held: %s)', (held) => {
+    const initial: FirstRunLook = {
+      orientation: 'horizontal',
+      layoutPreset: 'screen-camera',
+      cameraShape: 'rectangle',
+      liveBackgroundId: null
+    }
+    const { value, apply } = controller({ hold: held ? initial : null })
+    // The same render handles all clicks while the provider's lazy import is
+    // pending. Background and shape must not bring back the original layout.
+    value.setLayout('screen-only')
+    value.setBackground('silk')
+    value.setShape('rounded')
+    let current = initial
+    for (const [patch] of apply.mock.calls) current = { ...current, ...patch }
+    expect(current).toEqual({
+      orientation: 'horizontal',
+      layoutPreset: 'screen-only',
+      cameraShape: 'rounded',
+      liveBackgroundId: 'silk'
+    })
+    // Choosing the original values before a rerender is still a real change.
+    apply.mockClear()
+    value.setLayout('screen-camera')
+    value.setBackground(null)
+    value.setShape('rectangle')
+    for (const [patch] of apply.mock.calls) current = { ...current, ...patch }
+    expect(current).toEqual(initial)
   })
 
   it('shape does not apply on Camera only', () => {

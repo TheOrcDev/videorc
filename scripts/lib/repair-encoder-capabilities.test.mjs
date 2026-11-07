@@ -42,7 +42,8 @@ const ENCODERS_LGPL_LINUX = [
 ].join('\n')
 
 const PROTOCOLS_WITH_TLS = ['Input:', '  file', '  rtmp', '  rtmps', '  tls'].join('\n')
-const CLEAN_CUT_FILTER_LINES = [
+const RENDER_FILTER_LINES = [
+  ' TS. geq              V->V       Apply generic equation to each pixel.',
   ' ... trim             V->V       Pick one continuous section from the input, drop the rest.',
   ' ... atrim            A->A       Pick one continuous section from the input, drop the rest.',
   ' ... concat           N->N       Concatenate audio and video streams.',
@@ -60,7 +61,7 @@ const CAMERA_LOOK_FILTER_LINES = [
 const FILTERS_WITH_NOISE_CLEANUP = [
   'Filters:',
   ' TS afftdn A->A Denoise audio samples using FFT.',
-  ...CLEAN_CUT_FILTER_LINES,
+  ...RENDER_FILTER_LINES,
   ...CAMERA_LOOK_FILTER_LINES
 ].join('\n')
 
@@ -141,6 +142,7 @@ test('a bundle without videotoolbox or TLS fails closed with named gaps', () => 
 test('the macOS bundle requires every filter the Clean cut render uses (plan 119 S13)', () => {
   assert.deepEqual(REQUIRED_MACOS_FFMPEG_FILTERS, [
     'afftdn',
+    'geq',
     'trim',
     'atrim',
     'concat',
@@ -153,14 +155,16 @@ test('the macOS bundle requires every filter the Clean cut render uses (plan 119
     'scale',
     'lutyuv'
   ])
-  const withoutConcat = assessMacosFfmpegCapabilities({
-    protocolsOutput: PROTOCOLS_WITH_TLS,
-    encodersOutput: ENCODERS_LGPL_MACOS,
-    filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
-      .filter((line) => !/ concat /.test(line))
-      .join('\n')
-  })
-  assert.deepEqual(withoutConcat.missing, ['filter:concat'])
+  for (const name of REQUIRED_MACOS_FFMPEG_FILTERS) {
+    const missingFilter = assessMacosFfmpegCapabilities({
+      protocolsOutput: PROTOCOLS_WITH_TLS,
+      encodersOutput: ENCODERS_LGPL_MACOS,
+      filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
+        .filter((line) => !line.split(/\s+/).includes(name))
+        .join('\n')
+    })
+    assert.deepEqual(missingFilter.missing, [`filter:${name}`])
+  }
 })
 
 test('the macOS bundle requires PCM for MKV Noise Cleanup outputs', () => {
@@ -201,7 +205,7 @@ test('the macOS bundle requires the model-free noise cleanup filter', () => {
     filtersOutput: [
       'Filters:',
       ' T. loudnorm A->A EBU R128 loudness normalization',
-      ...CLEAN_CUT_FILTER_LINES,
+      ...RENDER_FILTER_LINES,
       ...CAMERA_LOOK_FILTER_LINES
     ].join('\n')
   })

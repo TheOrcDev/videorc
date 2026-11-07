@@ -156,10 +156,16 @@ export async function startBufferOnlySession(input: {
   scene: Scene | null
   sceneEditMode: boolean
   settings: SettingsState
-}): Promise<RecordingStatus> {
+  /** A newer scene, source or switch intent cancels this automatic start. */
+  isCurrent: () => boolean
+}): Promise<RecordingStatus | null> {
+  if (!input.isCurrent()) return null
   const outputDirectory = input.settings.outputDirectoryHandle
     ? await window.videorc?.authorizeOutputDirectory?.(input.settings.outputDirectoryHandle)
     : null
+  // Authorization crosses an async boundary. Never let an old automatic
+  // start restore its scene after the user has committed another layout.
+  if (!input.isCurrent()) return null
   const params = buildStartSessionParams({
     captureConfig: input.captureConfig,
     scene: input.scene,

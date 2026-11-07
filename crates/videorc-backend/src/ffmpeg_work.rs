@@ -35,7 +35,8 @@ struct FfmpegWorkState {
     /// never defers, cancels or waits for maintenance; shutdown still joins
     /// it. A count: the re-arm can overlap the previous ring's teardown.
     light_captures: usize,
-    finalizing_active: bool,
+    finalizing: usize,
+    performance_check_finalizing: usize,
     /// Background MP4 exports (post-terminal finalization). They block
     /// maintenance and the shutdown lifecycle join but never a new capture.
     export_active: usize,
@@ -76,7 +77,7 @@ impl FfmpegWorkCoordinator {
             let _ = notified.as_mut().enable();
             let acquired = {
                 let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-                if !state.maintenance_running && !state.finalizing_active {
+                if !state.maintenance_running && state.finalizing == 0 {
                     if waiting_registered {
                         state.capture_waiting = state.capture_waiting.saturating_sub(1);
                     }
@@ -114,7 +115,7 @@ impl FfmpegWorkCoordinator {
         loop {
             let notified = {
                 let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-                if !state.finalizing_active {
+                if state.finalizing == 0 {
                     state.light_captures = state.light_captures.saturating_add(1);
                     return CapturePermit {
                         coordinator: self.clone(),
@@ -128,14 +129,36 @@ impl FfmpegWorkCoordinator {
     }
 
     pub fn begin_finalizing(self: &Arc<Self>) -> FinalizingPermit {
+        self.begin_finalizing_for(false)
+    }
+
+    /// A benchmark still fences capture, maintenance and shutdown, but its
+    /// finalization must not seed a client's recording state on reconnect.
+    pub fn begin_performance_check_finalizing(self: &Arc<Self>) -> FinalizingPermit {
+        self.begin_finalizing_for(true)
+    }
+
+    fn begin_finalizing_for(self: &Arc<Self>, performance_check: bool) -> FinalizingPermit {
         {
             let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-            state.finalizing_active = true;
+            state.finalizing = state.finalizing.saturating_add(1);
+            if performance_check {
+                state.performance_check_finalizing =
+                    state.performance_check_finalizing.saturating_add(1);
+            }
         }
         self.notify.notify_waiters();
         FinalizingPermit {
             coordinator: self.clone(),
+            performance_check,
         }
+    }
+
+    /// The lease's owner decides visibility, not the benchmark's global
+    /// running flag: a user's take can finish during benchmark takeover.
+    pub fn user_finalizing_active(&self) -> bool {
+        let state = self.state.lock().expect("ffmpeg work state poisoned");
+        state.finalizing > state.performance_check_finalizing
     }
 
     /// Marks a background recording export (MKV -> MP4 after the terminal
@@ -164,7 +187,7 @@ impl FfmpegWorkCoordinator {
         if state.capture_waiting > 0 {
             return Err(MaintenanceDeferral::CaptureActive);
         }
-        if state.finalizing_active || state.export_active > 0 {
+        if state.finalizing > 0 || state.export_active > 0 {
             return Err(MaintenanceDeferral::FinalizingActive);
         }
         if state.maintenance_running
@@ -227,7 +250,7 @@ impl FfmpegWorkCoordinator {
                 let mut state = self.state.lock().expect("ffmpeg work state poisoned");
                 if !state.capture_active
                     && state.capture_waiting == 0
-                    && !state.finalizing_active
+                    && state.finalizing == 0
                     && state.export_active == 0
                     && !state.maintenance_running
                     && state.maintenance_workers == 0
@@ -360,7 +383,7 @@ impl FfmpegWorkCoordinator {
             capture_waiting: state.capture_waiting,
             capture_active: state.capture_active,
             light_capture_active: state.light_captures > 0,
-            finalizing_active: state.finalizing_active,
+            finalizing_active: state.finalizing > 0,
             export_active: state.export_active,
             maintenance_running: state.maintenance_running,
             maintenance_cancel_requested: state.maintenance_cancel_requested,
@@ -383,7 +406,7 @@ impl FfmpegWorkCoordinator {
                 let state = self.state.lock().expect("ffmpeg work state poisoned");
                 !state.capture_active
                     && state.light_captures == 0
-                    && !state.finalizing_active
+                    && state.finalizing == 0
                     && state.export_active == 0
             };
             if idle {
@@ -423,10 +446,14 @@ impl FfmpegWorkCoordinator {
         self.notify.notify_waiters();
     }
 
-    fn end_finalizing(&self) {
+    fn end_finalizing(&self, performance_check: bool) {
         {
             let mut state = self.state.lock().expect("ffmpeg work state poisoned");
-            state.finalizing_active = false;
+            state.finalizing = state.finalizing.saturating_sub(1);
+            if performance_check {
+                state.performance_check_finalizing =
+                    state.performance_check_finalizing.saturating_sub(1);
+            }
         }
         self.notify.notify_waiters();
     }
@@ -577,11 +604,12 @@ impl Drop for CapturePermit {
 #[derive(Debug)]
 pub struct FinalizingPermit {
     coordinator: Arc<FfmpegWorkCoordinator>,
+    performance_check: bool,
 }
 
 impl Drop for FinalizingPermit {
     fn drop(&mut self) {
-        self.coordinator.end_finalizing();
+        self.coordinator.end_finalizing(self.performance_check);
     }
 }
 
@@ -703,6 +731,56 @@ impl Drop for MaintenancePermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finalization_visibility_and_fences_follow_every_owned_lease() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        for (first_benchmark, second_benchmark) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+            let begin = |benchmark| {
+                if benchmark {
+                    coordinator.begin_performance_check_finalizing()
+                } else {
+                    coordinator.begin_finalizing()
+                }
+            };
+            let first = begin(first_benchmark);
+            let second = begin(second_benchmark);
+            assert_eq!(
+                coordinator.user_finalizing_active(),
+                !first_benchmark || !second_benchmark
+            );
+            drop(first);
+            assert!(coordinator.snapshot().finalizing_active);
+            assert_eq!(coordinator.user_finalizing_active(), !second_benchmark);
+            assert_eq!(
+                coordinator.try_begin_maintenance().unwrap_err(),
+                MaintenanceDeferral::FinalizingActive
+            );
+
+            // Poll the actual admission/join futures: no timer or scheduler
+            // race can make a still-owned benchmark lease look released.
+            let mut context = Context::from_waker(Waker::noop());
+            let mut capture = std::pin::pin!(coordinator.begin_capture_when_available());
+            let mut shutdown = std::pin::pin!(coordinator.wait_for_capture_and_finalization_idle());
+            assert!(capture.as_mut().poll(&mut context).is_pending());
+            assert!(shutdown.as_mut().poll(&mut context).is_pending());
+            drop(second);
+            assert!(!coordinator.snapshot().finalizing_active);
+            assert!(!coordinator.user_finalizing_active());
+            assert!(shutdown.as_mut().poll(&mut context).is_ready());
+            let Poll::Ready(capture) = capture.as_mut().poll(&mut context) else {
+                panic!("capture must be admitted after the last finalization lease drops");
+            };
+            assert!(coordinator.snapshot().capture_active);
+            drop(capture);
+            assert!(coordinator.try_begin_maintenance().is_ok());
+        }
+    }
 
     #[tokio::test]
     async fn a_timed_out_repair_is_cancelled_and_holds_maintenance_until_it_exits() {

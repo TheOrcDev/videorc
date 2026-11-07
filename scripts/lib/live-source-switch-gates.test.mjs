@@ -65,6 +65,24 @@ test('neutral mapping excludes the transition tail without relaxing the silence 
   )
 })
 
+test('one generated tee carries identical applied timing to recording and stream', () => {
+  for (const shift of [0, -80, 200]) {
+    const combined = [leg('local', 0, shift), leg('stream', 0, shift)]
+    for (const role of ['local', 'stream']) {
+      const timing = resolveTiming(combined, role)
+      assert.equal(timing.outputIndex, 0)
+      assert.equal(sourceSampleWindowStart(96000, timing), 2 + shift / 1000 + 0.25)
+    }
+  }
+  for (const malformed of [
+    [leg('local', 0, 0), leg('stream', 0, -80)],
+    [leg('local', 0, 0), leg('local', 0, 0)],
+    [leg('stream', 0, 0), leg('stream', 0, 0)],
+    [leg('local', 0, 0), leg('stream', 0, 0), leg('stream', 1, 0)]
+  ])
+    for (const role of ['local', 'stream']) assert.throws(() => resolveTiming(malformed, role))
+})
+
 test('applied offsets include clamped trims and delays, with no speculative input-offset sum', () => {
   for (const shift of [-1000, -950, 200, 1000]) {
     const timing = resolveTiming([leg('local', 0, shift)], 'local')
@@ -81,7 +99,7 @@ test('missing, ambiguous, oversized, or malformed timing is unavailable evidence
     { ...valid, legs: [] },
     { ...valid, legs: [leg('local', 0, 0)] },
     { ...valid, legs: [leg('stream', 0, 0), leg('stream', 1, -130)] },
-    { ...valid, legs: [leg('local', 0, 0), leg('stream', 0, 0)] },
+    { ...valid, legs: [leg('local', 0, 0), leg('stream', 0, -130)] },
     { ...valid, legs: Array.from({ length: 9 }, (_, index) => leg('stream', index, 0)) },
     { ...valid, legs: [{ ...leg('stream', 0, 0), filterShiftMs: NaN }] },
     { ...valid, legs: [{ ...leg('stream', 0, 0), filterShiftMs: -1001 }] },

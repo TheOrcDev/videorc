@@ -379,7 +379,7 @@ describe('mapping table rows', () => {
       'Desktop audio: Turns System audio on, once Screen Recording is allowed.'
     )
 
-    // Unsupported here (Windows before S8, Linux): nothing turns on, and the
+    // Unsupported here (older Windows, Linux without PipeWire): nothing turns on, and the
     // report says so instead of promising a roadmap.
     for (const devices of [DEVICES, [...DEVICES, systemAudio('unavailable')]]) {
       const skipped = mapObsSetup(setup, devices)

@@ -6,7 +6,13 @@
  * They count toward the same licence ceiling (docs/icon-set.md), and
  * `no-restricted-imports` exempts this file only.
  */
-import { Coins, Gift, Megaphone, Star, User, UserPlus, UsersThree } from '@phosphor-icons/react'
+import { Coins } from '@phosphor-icons/react/dist/csr/Coins'
+import { Gift } from '@phosphor-icons/react/dist/csr/Gift'
+import { Megaphone } from '@phosphor-icons/react/dist/csr/Megaphone'
+import { Star } from '@phosphor-icons/react/dist/csr/Star'
+import { User } from '@phosphor-icons/react/dist/csr/User'
+import { UserPlus } from '@phosphor-icons/react/dist/csr/UserPlus'
+import { UsersThree } from '@phosphor-icons/react/dist/csr/UsersThree'
 
 import type { AppIcon } from '@/components/icons'
 

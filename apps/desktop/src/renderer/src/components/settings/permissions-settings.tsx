@@ -9,6 +9,7 @@ import { FieldGroup, SettingsRow } from '@/components/ui/field'
 import { useStudioCore } from '@/hooks/use-studio'
 import { osSettingsName } from '@/lib/platform'
 import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
+import { LINUX_CAPTURE_ACCESS } from '@/lib/system-access-view'
 
 /**
  * Settings → Permissions: what the OS lets Videorc capture right now. The
@@ -62,16 +63,11 @@ export function PermissionsSettings(): ReactElement {
           </FieldGroup>
         </>
       ) : (
-        // Linux (plan 174 I-8): no standing camera or microphone grant, and the
-        // desktop portal asks per capture, so there is nothing to list. Say so
-        // instead of an empty box.
+        // Linux has no standing grant snapshot available in this list.
         <Empty className="p-4" data-testid="system-access-none">
           <EmptyHeader>
-            <EmptyTitle>Nothing to grant here</EmptyTitle>
-            <EmptyDescription>
-              Linux keeps no capture permissions for apps. Your desktop may ask when Videorc starts
-              capturing the screen.
-            </EmptyDescription>
+            <EmptyTitle>{LINUX_CAPTURE_ACCESS.title}</EmptyTitle>
+            <EmptyDescription>{LINUX_CAPTURE_ACCESS.description}</EmptyDescription>
           </EmptyHeader>
         </Empty>
       )}

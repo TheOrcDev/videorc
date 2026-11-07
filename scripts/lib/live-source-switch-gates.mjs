@@ -30,7 +30,8 @@ export function resolveSourceOutputAudioTiming(evidence, { sessionId, outputProc
     evidence.legs.length > 8
   )
     fail()
-  const outputs = new Set()
+  const outputs = new Map()
+  const roles = new Set()
   for (const leg of evidence.legs) {
     if (
       !hasOnlyKeys(leg, ['role', 'outputIndex', 'inputOffsetMs', 'filterShiftMs']) ||
@@ -38,13 +39,23 @@ export function resolveSourceOutputAudioTiming(evidence, { sessionId, outputProc
       !Number.isInteger(leg.outputIndex) ||
       leg.outputIndex < 0 ||
       leg.outputIndex >= evidence.legs.length ||
-      outputs.has(leg.outputIndex) ||
+      roles.has(leg.role) ||
       leg.inputOffsetMs !== 0 ||
       !Number.isInteger(leg.filterShiftMs) ||
       Math.abs(leg.filterShiftMs) > 1000
     )
       fail()
-    outputs.add(leg.outputIndex)
+    // The backend recognizes the exact generated tee as one FFmpeg output
+    // feeding both roles. Its shared timing must agree; a duplicate role or
+    // differing offset is still ambiguous evidence, never a default mapping.
+    const shared = outputs.get(leg.outputIndex)
+    if (
+      shared &&
+      (shared.inputOffsetMs !== leg.inputOffsetMs || shared.filterShiftMs !== leg.filterShiftMs)
+    )
+      fail()
+    outputs.set(leg.outputIndex, leg)
+    roles.add(leg.role)
   }
   const matching = evidence.legs.filter((leg) => leg.role === role)
   if (matching.length !== 1) fail()

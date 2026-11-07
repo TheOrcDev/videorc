@@ -84,6 +84,7 @@ describe('Linux FFmpeg capability policy', () => {
     ' ... setpts           V->V       Set PTS for the output video frame.',
     ' ... asetpts          A->A       Set PTS for the output audio frame.',
     ' ... format           V->V       Convert the input video to one of the specified pixel formats.',
+    ' TS. geq              V->V       Apply generic equation to each pixel.',
     ' ... scale            V->V       Scale the input video size and/or convert the image format.',
     ' TS. lutyuv           V->V       Compute and apply a lookup table to the YUV input video.',
     ' ... hwupload         V->V       Upload a normal frame to a hardware frame'
@@ -129,7 +130,8 @@ describe('Linux FFmpeg capability policy', () => {
       'format',
       'scale',
       'lutyuv',
-      'hwupload'
+      'hwupload',
+      'geq'
     ])
   })
 
@@ -168,18 +170,37 @@ describe('Linux FFmpeg capability policy', () => {
   })
 
   it('fails closed on a missing filter or a missing -filters listing (plan 119 S13)', () => {
-    const withoutUpload = assessLinuxFfmpegCapabilities({
+    for (const name of REQUIRED_LINUX_FFMPEG_FILTERS) {
+      const missingFilter = assessLinuxFfmpegCapabilities({
+        versionOutput,
+        encodersOutput,
+        filtersOutput: filtersOutput
+          .split('\n')
+          .filter((line) => !line.split(/\s+/).includes(name))
+          .join('\n'),
+        ...ring
+      })
+      assert.deepEqual(missingFilter.problems, [`missing filter ${name}`])
+    }
+    const unlisted = assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, ...ring })
+    assert.deepEqual(unlisted.problems, ['ffmpeg -filters output was not provided'])
+  })
+
+  it('reads filter names, never a description that mentions one', () => {
+    // FFmpeg's own `scale2ref` line carries a bare "format" word.
+    const describedOnly = assessLinuxFfmpegCapabilities({
       versionOutput,
       encodersOutput,
       filtersOutput: filtersOutput
         .split('\n')
-        .filter((line) => !/ hwupload /.test(line))
+        .filter((line) => !/ format /.test(line))
+        .concat(
+          ' ... scale2ref        VV->VV     Scale the input video size and/or convert the image format to the given reference.'
+        )
         .join('\n'),
       ...ring
     })
-    assert.deepEqual(withoutUpload.problems, ['missing filter hwupload'])
-    const unlisted = assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, ...ring })
-    assert.deepEqual(unlisted.problems, ['ffmpeg -filters output was not provided'])
+    assert.deepEqual(describedOnly.problems, ['missing filter format'])
   })
 
   it('fails closed without the replay ring components or their listings (plan 181)', () => {

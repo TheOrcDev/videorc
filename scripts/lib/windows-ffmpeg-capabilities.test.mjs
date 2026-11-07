@@ -53,7 +53,8 @@ const ENCODERS_WITH_MF = [
   ' A....D aac                  AAC (Advanced Audio Coding)',
   ' A....D pcm_s16le            PCM signed 16-bit little-endian'
 ].join('\n')
-const CLEAN_CUT_FILTER_LINES = [
+const RENDER_FILTER_LINES = [
+  ' TS. geq              V->V       Apply generic equation to each pixel.',
   ' ... trim             V->V       Pick one continuous section from the input, drop the rest.',
   ' ... atrim            A->A       Pick one continuous section from the input, drop the rest.',
   ' ... concat           N->N       Concatenate audio and video streams.',
@@ -71,7 +72,7 @@ const CAMERA_LOOK_FILTER_LINES = [
 const FILTERS_WITH_NOISE_CLEANUP = [
   'Filters:',
   ' TS afftdn A->A Denoise audio samples using FFT.',
-  ...CLEAN_CUT_FILTER_LINES,
+  ...RENDER_FILTER_LINES,
   ...CAMERA_LOOK_FILTER_LINES
 ].join('\n')
 
@@ -138,16 +139,18 @@ test('the Windows bundle requires every filter the Clean cut render uses (plan 1
   ]) {
     assert.ok(REQUIRED_WINDOWS_FFMPEG_FILTERS.includes(name), name)
   }
-  const withoutAfade = assessWindowsFfmpegCapabilities({
-    ...RING,
-    protocolsOutput: PROTOCOLS_WITH_TLS,
-    encodersOutput: ENCODERS_WITH_MF,
-    filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
-      .filter((line) => !/ afade /.test(line))
-      .join('\n')
-  })
-  assert.equal(withoutAfade.ok, false)
-  assert.deepEqual(withoutAfade.missing, ['filter:afade'])
+  for (const name of REQUIRED_WINDOWS_FFMPEG_FILTERS) {
+    const missingFilter = assessWindowsFfmpegCapabilities({
+      ...RING,
+      protocolsOutput: PROTOCOLS_WITH_TLS,
+      encodersOutput: ENCODERS_WITH_MF,
+      filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
+        .filter((line) => !line.split(/\s+/).includes(name))
+        .join('\n')
+    })
+    assert.equal(missingFilter.ok, false)
+    assert.deepEqual(missingFilter.missing, [`filter:${name}`])
+  }
 })
 
 test('an ffmpeg without a TLS stack fails on rtmps and tls (the 0.9.23 class)', () => {
@@ -258,7 +261,7 @@ test('the Windows bundle requires the model-free noise cleanup filter', () => {
     filtersOutput: [
       'Filters:',
       ' T. loudnorm A->A EBU R128 loudness normalization',
-      ...CLEAN_CUT_FILTER_LINES,
+      ...RENDER_FILTER_LINES,
       ...CAMERA_LOOK_FILTER_LINES
     ].join('\n')
   })

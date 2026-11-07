@@ -60,11 +60,12 @@ export const REQUIRED_MACOS_FFMPEG_ENCODERS = ['h264_videotoolbox', 'aac', 'pcm_
 
 /** Filters required by Premium local creative transforms: `afftdn` for Noise
  * Cleanup (built into the LGPL FFmpeg bundle, no separately licensed model),
- * the trim/concat set Clean cut renders with (plan 119 S13), and the
- * full-range YUV lookup-table chain the legacy recording path grades the
- * camera look with (plan 213 I; never the GPL-only `eq`). */
+ * `geq` for the legacy recording path's circle and rounded camera masks, the
+ * trim/concat set Clean cut renders with (plan 119 S13), and the full-range
+ * YUV lookup-table chain the legacy recording path grades the camera look
+ * with (plan 213 I; never the GPL-only `eq`). */
 export const REQUIRED_MACOS_FFMPEG_FILTERS = [
-  ...new Set(['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS])
+  ...new Set(['afftdn', 'geq', ...CLEAN_CUT_FFMPEG_FILTERS, ...CAMERA_LOOK_FFMPEG_FILTERS])
 ]
 
 /** Protocols every shipped macOS ffmpeg must expose. rtmps implies a TLS
@@ -102,6 +103,15 @@ function hasWord(output, word) {
   return new RegExp(`(^|[^A-Za-z0-9_])${word}([^A-Za-z0-9_]|$)`, 'm').test(output)
 }
 
+/** The filter names a `-filters` listing carries: flags first, then the
+ * name. Descriptions are ignored, so `scale`'s "convert the image format."
+ * never passes for `format`. */
+function listedFilterNames(output) {
+  return String(output ?? '')
+    .split(/\r?\n/)
+    .flatMap((line) => line.trim().split(/\s+/).slice(0, 2))
+}
+
 /**
  * Assesses `ffmpeg -protocols` / `ffmpeg -encoders` output against the macOS
  * bundle's required capability set (streaming TLS + repair/record encoders).
@@ -123,8 +133,9 @@ export function assessMacosFfmpegCapabilities({
       missing.push(`encoder:${encoder}`)
     }
   }
+  const filters = listedFilterNames(filtersOutput)
   for (const filter of REQUIRED_MACOS_FFMPEG_FILTERS) {
-    if (!hasWord(filtersOutput, filter)) {
+    if (!filters.includes(filter)) {
       missing.push(`filter:${filter}`)
     }
   }

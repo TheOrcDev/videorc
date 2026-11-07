@@ -21,6 +21,7 @@ import { join, resolve } from 'node:path'
 
 import { performanceAppSpawnSpec } from './lib/app-launcher.mjs'
 import { readPackagedBuildFlags } from './lib/packaged-app-hardening.mjs'
+import { observeRendererCrash } from './lib/main-window-recovery-crash.mjs'
 import {
   evaluateBlankFallback,
   evaluateClearGlassLaunch,
@@ -157,13 +158,8 @@ async function readPage(port) {
 
 async function crashRenderer(port) {
   const target = await mainTarget(port)
-  if (!target) return false
-  const session = await openSession(target.webSocketDebuggerUrl)
-  // Page.crash never answers: the process it would answer from is gone.
-  session.send('Page.crash').catch(() => undefined)
-  await delay(POLL_MS)
-  session.close()
-  return true
+  if (!target) return { crashed: false, error: 'Main renderer CDP target was not found.' }
+  return observeRendererCrash(target.webSocketDebuggerUrl)
 }
 
 async function launch(name, env, userData) {
@@ -238,7 +234,7 @@ const CLEAR_GLASS = { VIDEORC_GLASS: 'clear' }
       evaluateDefaultLaunch({ mounted: isMounted, glass })
     )
 
-    const crashed = await crashRenderer(app.port)
+    const crash = await crashRenderer(app.port)
     const recovered = await waitFor(
       async () =>
         /Reloading the main window/.test(app.log()) && (await readPage(app.port))?.mounted,
@@ -248,8 +244,8 @@ const CLEAR_GLASS = { VIDEORC_GLASS: 'clear' }
     const remounted = Boolean(recovered)
     record(
       'crash-recovery',
-      { crashed, remounted },
-      evaluateCrashRecovery({ crashed, remounted, log: app.log() })
+      { ...crash, remounted },
+      evaluateCrashRecovery({ crashed: crash.crashed, remounted, log: app.log() })
     )
   } finally {
     await app.stop()

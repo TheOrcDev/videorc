@@ -15,7 +15,15 @@ export const RELEASE_CI_GATE_SPECS = Object.freeze({
   'linux-rust-job': Object.freeze({
     id: 'linux-rust-job',
     workflowFile: 'linux.yml',
-    jobNames: Object.freeze(['Linux gates (FFmpeg policy + Rust compile/test)'])
+    jobNames: Object.freeze(['Linux gates (FFmpeg policy + Rust compile/test)']),
+    // The required-check name is also used by the docs/version-only skip job.
+    // A successful job without executed source gates is not release evidence.
+    requiredSteps: Object.freeze([
+      'Test Linux FFmpeg policy',
+      'Fetch and verify pinned Linux FFmpeg',
+      'Clippy',
+      'Test'
+    ])
   })
 })
 
@@ -75,9 +83,17 @@ function workflowPath(file) {
   return `.github/workflows/${file}`
 }
 
-function jobSucceeded(job, jobNames) {
+function jobSucceeded(job, { jobNames, requiredSteps = [] }) {
   return (
-    job && jobNames.includes(job.name) && job.status === 'completed' && job.conclusion === 'success'
+    job &&
+    jobNames.includes(job.name) &&
+    job.status === 'completed' &&
+    job.conclusion === 'success' &&
+    requiredSteps.every((name) =>
+      job.steps?.some(
+        (step) => step.name === name && step.status === 'completed' && step.conclusion === 'success'
+      )
+    )
   )
 }
 
@@ -125,7 +141,7 @@ export async function findReusableReleaseCiGate({ api, repository, sha, spec, ma
     }
     const jobs = await api(`/repos/${exactRepository}/actions/runs/${run.id}/jobs?per_page=100`)
     requireReuse(Array.isArray(jobs?.jobs), 'github-response', 'GitHub returned no job list.')
-    const job = jobs.jobs.find((entry) => jobSucceeded(entry, spec.jobNames))
+    const job = jobs.jobs.find((entry) => jobSucceeded(entry, spec))
     if (!job) continue
     return {
       reused: true,

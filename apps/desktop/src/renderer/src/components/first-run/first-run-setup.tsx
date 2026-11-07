@@ -78,8 +78,7 @@ export function FirstRunSetup({
   const stepsFor = (forGoal: FirstRunGoal | null): FirstRunStep[] =>
     firstRunStepsFor({ goal: forGoal, platform, mode }).filter((step) => step in STEP_SIZES)
   const steps = stepsFor(goal)
-  // A saved step that doesn't apply here (Permissions on Linux) starts at the
-  // next one that does.
+  // A saved step that doesn't apply to the goal falls back to an applicable step.
   const step =
     steps.find((candidate) => stepOrder(candidate) >= stepOrder(savedStep)) ??
     steps.at(-1) ??

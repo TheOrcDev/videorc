@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   assessCameraPreview,
   assessLinuxDeviceList,
+  assessLinuxRecordingQuality,
   assessMicMeter,
   assessMicRecordingAudio,
   parseVolumedetect
@@ -25,6 +26,25 @@ const devices = [
     detail: 'no pulse'
   }
 ]
+
+test('device acceptance rejects missing and failing artifact verdicts', () => {
+  for (const quality of [null, {}, { verdict: {} }]) {
+    assert.equal(assessLinuxRecordingQuality(quality).ok, false)
+  }
+  for (const failure of ['video froze', 'audio gap', 'A/V skew', 'invalid cadence']) {
+    const result = assessLinuxRecordingQuality({ verdict: { failures: [failure] } })
+    assert.equal(result.ok, false)
+    assert.match(result.failures[0], new RegExp(failure))
+  }
+  assert.equal(assessLinuxRecordingQuality({ verdict: { failures: [] } }).ok, false)
+  assert.deepEqual(
+    assessLinuxRecordingQuality({ verdict: { pass: true, failures: [], warnings: [] } }),
+    {
+      ok: true,
+      failures: []
+    }
+  )
+})
 
 test('Linux device lists need an available prefixed row of the kind', () => {
   const mics = assessLinuxDeviceList(devices, 'microphone')

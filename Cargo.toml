@@ -22,3 +22,13 @@ opt-level = 2
 # they multiply dev CPU several-fold. Optimizing them costs one cached rebuild.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The growing backend unit-test binary can exhaust CI's compile deadline when
+# it inherits the real-time dev profile. Keep assertions and overflow checks,
+# but omit debug symbols and optimize only the cached dependencies. App
+# recording/preview performance is verified with the dev/release binaries above.
+[profile.test]
+debug = 0
+
+[profile.test.package.videorc-backend]
+opt-level = 0

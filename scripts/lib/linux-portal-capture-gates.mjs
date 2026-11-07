@@ -125,7 +125,7 @@ export function assessPortalPreviewProof({ compositor, surface } = {}) {
  */
 export function assessPortalRecording(
   { metrics, sizeBytes } = {},
-  { width, height, recordingMs, minBytes = 64 * 1024, minDurationRatio = 0.6 } = {}
+  { width, height, recordingMs, minBytes = 64 * 1024, minDurationRatio = 0.98 } = {}
 ) {
   const failures = []
   if (!metrics?.hasVideo) failures.push('recording has no video stream')
