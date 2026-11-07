@@ -6148,6 +6148,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // the activity a finished session is announced as.
         lastSessionActivityRef.current = sessionActivity(status)
       }
+      const replacedSessionId = recordingRef.current.sessionId
+      if (
+        status.sessionId &&
+        replacedSessionId &&
+        status.sessionId !== replacedSessionId &&
+        sessionStartInFlightRef.current === null &&
+        !sessionStartLifecycleActiveRef.current
+      ) {
+        // A session this renderer did not start replaced the one it did
+        // (its end was missed): the old start intent says nothing about it.
+        setActiveStartIntent(null)
+      }
       recordingRef.current = status
       if (!['recording', 'streaming'].includes(status.state)) {
         toast.dismiss('recording-degraded')

@@ -5772,6 +5772,16 @@ describe('real StudioProvider lifecycle', () => {
     for (const state of publishedDuringSession()) {
       expect(state).toMatchObject({ recordEnabled: true, streamEnabled: false })
     }
+    // The take's end is missed and a Go Live started elsewhere replaces it:
+    // remotes read the new session, not the old Record intent.
+    await pushEvent('recording.status', goLive('go-live-elsewhere'))
+    await waitForObservation(() =>
+      publishedDuringSession().some((state) => state?.streamEnabled === true)
+    )
+    expect(publishedDuringSession().at(-1)).toMatchObject({
+      recordEnabled: true,
+      streamEnabled: true
+    })
     await act(async () => {
       await latest().core.stopSession()
     })
