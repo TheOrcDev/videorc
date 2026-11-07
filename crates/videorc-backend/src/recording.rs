@@ -29079,6 +29079,19 @@ mod tests {
     use crate::capture_input::AVFOUNDATION_VIDEO_PIXEL_FORMAT;
 
     #[test]
+    fn a_media_foundation_stop_drain_ends_well_inside_the_stop_fallback() {
+        // #1074: FFmpeg's EOF waits on the writer's final drain. A drain that
+        // outlasts STOP_TERM_DELAY gets FFmpeg TERMed and the take kept as
+        // recovery media; leave FFmpeg at least as long again to finalize.
+        assert!(
+            crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT * 2 <= STOP_TERM_DELAY,
+            "stop drain {:?} must leave FFmpeg time inside {:?}",
+            crate::encoder_bridge::MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT,
+            STOP_TERM_DELAY
+        );
+    }
+
+    #[test]
     fn audio_levels_event_skips_empty_windows_and_carries_the_session() {
         assert_eq!(
             audio_levels_event("session-1", crate::session_audio::BusLevels::default()),

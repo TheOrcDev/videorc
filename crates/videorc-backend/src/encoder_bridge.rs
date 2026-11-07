@@ -2594,12 +2594,70 @@ impl BridgeFrameSource {
 }
 
 /// Steady-state cap for the bridge writer's Media Foundation input-credit
-/// wait: two frame intervals. A stalled MFT then costs one skipped (counted)
-/// frame instead of freezing the CFR schedule for the encoder's 3 s event
-/// timeout (tester: 119 encoded frames in 6.7 s at 1080p60).
+/// wait: two frame intervals, but never under
+/// [`MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR`]. A stalled MFT then costs a
+/// skipped (counted) frame instead of freezing the CFR schedule for the
+/// encoder's 3 s event timeout (tester: 119 encoded frames in 6.7 s at
+/// 1080p60).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn media_foundation_writer_input_credit_timeout(target_fps: u32) -> Duration {
     Duration::from_secs_f64(2.0 / f64::from(target_fps.max(1)))
+        .max(MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR)
+}
+
+/// #1074: NVIDIA's H.264 MFT withholds input credit for 67-167 ms during
+/// ordinary takes (GTX 1650 SUPER, one frame in flight). Two intervals (66 ms
+/// at 30 fps, 33 ms at 60) skipped a frame on every one of those stalls, and
+/// each skip is a permanent hole in the take. Waiting past them costs no
+/// frame: the absolute schedule feeds the ticks it fell behind on at once.
+const MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR: Duration = Duration::from_millis(250);
+
+/// #1074: how long the Media Foundation writer's final drain waits once Stop
+/// was requested. A healthy NVIDIA, Intel or AMD MFT drains in tens of
+/// milliseconds; a stuck NVIDIA MFT held the full 5 s `DRAIN_TIMEOUT` while
+/// FFmpeg waited for the pipe's EOF, Stop's fallback TERMed FFmpeg at 3 s, and
+/// the take was kept as recovery media. Must stay well under
+/// `recording::STOP_TERM_DELAY` (pinned by a test there).
+pub(crate) const MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The final drain's bound: short after Stop (the user is waiting and FFmpeg
+/// needs the EOF), the encoder's full timeout otherwise.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn media_foundation_writer_drain_timeout(stop_requested: bool, full_timeout: Duration) -> Duration {
+    if stop_requested {
+        MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT.min(full_timeout)
+    } else {
+        full_timeout
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+enum MediaFoundationDrainVerdict {
+    Complete,
+    /// After Stop: the encoder kept its last frames past the bound. The take
+    /// loses them, not its ending.
+    TailDropped {
+        frames: usize,
+    },
+    Failed,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn media_foundation_drain_verdict(
+    stop_requested: bool,
+    complete: bool,
+    abandoned_frames: usize,
+) -> MediaFoundationDrainVerdict {
+    if abandoned_frames == 0 && (complete || stop_requested) {
+        MediaFoundationDrainVerdict::Complete
+    } else if stop_requested {
+        MediaFoundationDrainVerdict::TailDropped {
+            frames: abandoned_frames,
+        }
+    } else {
+        MediaFoundationDrainVerdict::Failed
+    }
 }
 
 /// Classify a tick from the sequence of the frame it fed versus the last fed sequence.
@@ -6117,21 +6175,51 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             media_foundation_ts_writer.as_mut(),
         )
     {
-        match encoder
-            .drain(MEDIA_FOUNDATION_DRAIN_TIMEOUT)
-            .and_then(|frames| {
-                write_media_foundation_frames(
-                    frames,
-                    fifo,
-                    ts_writer,
-                    &stop,
-                    &mut zero_copy_frames,
-                    &mut video_toolbox_output_frames,
-                    &mut video_toolbox_output_bytes,
-                    &mut video_toolbox_fifo_write_times_ms,
-                )
-                .map_err(anyhow::Error::from)
-            }) {
+        // #1074: FFmpeg sees the video EOF only when this thread closes the
+        // pipe after the drain, so after Stop the drain must end well inside
+        // Stop's TERM fallback, or a stuck encoder costs the whole take.
+        let stop_requested = stop.load(Ordering::Relaxed)
+            || graceful_stop_at
+                .as_ref()
+                .and_then(|at| at.boundary())
+                .is_some();
+        let drain_timeout =
+            media_foundation_writer_drain_timeout(stop_requested, MEDIA_FOUNDATION_DRAIN_TIMEOUT);
+        match encoder.drain_within(drain_timeout).and_then(|drain| {
+            let verdict = media_foundation_drain_verdict(
+                stop_requested,
+                drain.complete,
+                drain.abandoned_frames,
+            );
+            write_media_foundation_frames(
+                drain.frames,
+                fifo,
+                ts_writer,
+                &stop,
+                &mut zero_copy_frames,
+                &mut video_toolbox_output_frames,
+                &mut video_toolbox_output_bytes,
+                &mut video_toolbox_fifo_write_times_ms,
+            )
+            .map_err(anyhow::Error::from)?;
+            match verdict {
+                MediaFoundationDrainVerdict::Complete => Ok(()),
+                MediaFoundationDrainVerdict::TailDropped { frames } => {
+                    tracing::warn!(
+                        role = encoder_bridge_output_role_label(output_queue_policy.role),
+                        dropped_frames = frames,
+                        timeout_ms = drain_timeout.as_millis() as u64,
+                        "Media Foundation encoder did not return its last frames after Stop; they were dropped so the recording could finish"
+                    );
+                    Ok(())
+                }
+                MediaFoundationDrainVerdict::Failed => Err(anyhow::anyhow!(
+                    "bounded drain did not complete in {}ms (pending timestamps={})",
+                    drain_timeout.as_millis(),
+                    drain.abandoned_frames
+                )),
+            }
+        }) {
             Ok(()) => {
                 queue_depth = encoder.pending_frame_count() as u64;
             }
@@ -10036,6 +10124,53 @@ mod tests {
     }
 
     #[test]
+    fn media_foundation_final_drain_is_short_only_after_stop() {
+        let full = Duration::from_secs(5);
+        assert_eq!(
+            media_foundation_writer_drain_timeout(true, full),
+            MEDIA_FOUNDATION_STOP_DRAIN_TIMEOUT
+        );
+        assert_eq!(media_foundation_writer_drain_timeout(false, full), full);
+        // Never longer than the encoder's own bound.
+        assert_eq!(
+            media_foundation_writer_drain_timeout(true, Duration::from_millis(200)),
+            Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn a_stuck_encoder_after_stop_drops_its_tail_instead_of_failing_the_take() {
+        // #1074: NVIDIA's MFT held one frame and never signalled
+        // DrainComplete; the take must end with the frame dropped.
+        assert_eq!(
+            media_foundation_drain_verdict(true, false, 1),
+            MediaFoundationDrainVerdict::TailDropped { frames: 1 }
+        );
+        // After Stop, nothing pending is complete even without the event.
+        assert_eq!(
+            media_foundation_drain_verdict(true, false, 0),
+            MediaFoundationDrainVerdict::Complete
+        );
+        assert_eq!(
+            media_foundation_drain_verdict(true, true, 0),
+            MediaFoundationDrainVerdict::Complete
+        );
+        // Without a Stop, an incomplete drain stays a terminal failure.
+        assert_eq!(
+            media_foundation_drain_verdict(false, false, 1),
+            MediaFoundationDrainVerdict::Failed
+        );
+        assert_eq!(
+            media_foundation_drain_verdict(false, false, 0),
+            MediaFoundationDrainVerdict::Failed
+        );
+        assert_eq!(
+            media_foundation_drain_verdict(false, true, 0),
+            MediaFoundationDrainVerdict::Complete
+        );
+    }
+
+    #[test]
     fn main_loop_downstream_close_survives_into_final_drain_timeout_verdict() {
         let terminal_failure = Arc::new(StdMutex::new(None));
         let mut drain_state = EncoderBridgeDrainState::default();
@@ -10560,14 +10695,22 @@ mod tests {
     }
 
     #[test]
-    fn media_foundation_writer_input_credit_cap_is_two_frame_intervals() {
+    fn media_foundation_writer_input_credit_cap_outlasts_an_ordinary_nvenc_stall() {
+        // #1074: stalls of 67-167 ms were measured; neither 30 nor 60 fps
+        // may skip a frame on one.
+        for fps in [24, 30, 60, 120] {
+            let cap = media_foundation_writer_input_credit_timeout(fps);
+            assert!(cap >= Duration::from_millis(167), "{fps} fps cap {cap:?}");
+            assert!(cap < ENCODER_BRIDGE_STALL_REANCHOR_THRESHOLD);
+        }
         assert_eq!(
             media_foundation_writer_input_credit_timeout(60),
-            Duration::from_secs_f64(2.0 / 60.0)
+            MEDIA_FOUNDATION_WRITER_INPUT_CREDIT_FLOOR
         );
+        // Low rates keep two frame intervals.
         assert_eq!(
-            media_foundation_writer_input_credit_timeout(30),
-            Duration::from_secs_f64(2.0 / 30.0)
+            media_foundation_writer_input_credit_timeout(5),
+            Duration::from_secs_f64(2.0 / 5.0)
         );
         // A zero target can never produce an infinite wait.
         assert_eq!(
