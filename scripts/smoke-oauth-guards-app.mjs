@@ -371,9 +371,9 @@ function assertXCapability(capability) {
       `X capability message should explain the OAuth 1.0a credential requirement: ${JSON.stringify(capability)}`
     )
   }
-  if (!String(capability.docsUrl).startsWith('https://github.com/xdevplatform/')) {
+  if (!String(capability.docsUrl).startsWith('https://docs.x.com/livestream-api/')) {
     throw new Error(
-      `X capability should include Livestream API sample docs URL: ${JSON.stringify(capability)}`
+      `X capability should include the Livestream API docs URL: ${JSON.stringify(capability)}`
     )
   }
   if (!String(capability.apiOverviewUrl).startsWith('https://docs.x.com/')) {
