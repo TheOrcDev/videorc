@@ -273,6 +273,12 @@ owed; never treat a private candidate as shipped.
 
 3. Record the workflow URL, AppImage SHA-256, candidate prefix, and any
    owner waiver. Keep the candidate private.
+4. If the step changes `VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY` (or any
+   other videorc-web production env), apply it with `pnpm release:web:redeploy`
+   and record its `web-production: PASS` output. Never `vercel deploy --prod`
+   from a videorc-web checkout and never redeploy whatever production serves
+   now: on 2026-11-05..07 that shipped 2026-10-10 web code and broke X chat for
+   every desktop.
 
 When the Linux download is actually public, preview then send its Discord
 announcement (see section 6). Hold that post until then. Never print
@@ -288,8 +294,11 @@ announcement (see section 6). Hold that post until then. Never print
   downloaded SHA-256.
 - Verify the macOS DMG, checksum, `latest-mac.yml`, zip, and blockmap still point
   to the macOS release prepared above.
-- Authorize the web Windows `public` state only after those checks pass, deploy,
-  and rerun the two-platform smoke matrix.
+- Authorize the web Windows `public` state only after those checks pass, deploy
+  with `pnpm release:web:redeploy`, and rerun the two-platform smoke matrix.
+- Before recording the release, `pnpm release:web:check` must print
+  `web-production: PASS` (production serves the GitHub build of videorc-web
+  `main`).
 - Update `docs/releases/<version>.md` with both platform outcomes, workflow and
   evidence links, rollback status, and any explicitly incomplete external gate.
 - Render/send announcements from the exact platform changelog entry only after
