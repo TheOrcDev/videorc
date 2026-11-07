@@ -17660,7 +17660,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [cameraLowLightPending, setCameraLowLightPending] = useState(false)
   const cameraLowLightRevision = useRef(0)
   const cameraLowLightRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Reads the camera's state; an answer for an older camera or request is dropped.
+  /**
+   * Reads the camera's low-light state. An answer for an older camera or
+   * request is dropped, and a failed read retries on the backoff schedule.
+   */
   const readCameraLowLight = useCallback(
     (cameraId: string, revision: number, failures = 0) => {
       if (!client) return
@@ -17699,6 +17702,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [client, wsStatus, selectedCameraIdForLowLight, readCameraLowLight])
 
+  /**
+   * Saves the selected camera's low-light choice. A failure toasts and reads
+   * the saved state back, and the switch is disabled while the save runs.
+   */
   const setCameraLowLight = useCallback(
     async (compensation: boolean) => {
       const cameraId = selectedCameraIdForLowLight

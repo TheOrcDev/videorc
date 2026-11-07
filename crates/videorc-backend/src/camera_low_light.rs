@@ -238,6 +238,34 @@ static PASS_STARTED: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new
 /// on the HP HD Camera, enumeration included).
 pub const CAMERA_LOW_LIGHT_STALLED_PASS: Duration = Duration::from_secs(1);
 
+/// The one `camera.lowLight.get` that may wait on a camera at a time, across
+/// every camera. Reads share the read-only request lane, whose few slots run
+/// at once; this keeps reads that arrive early in a stall from holding more
+/// than one of them.
+static READ_TURN: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// How long a read waits for [`READ_TURN`] before it answers "busy". A healthy
+/// read holds the turn for about 50 ms, so this only runs out behind a stall.
+pub const CAMERA_LOW_LIGHT_READ_TURN_WAIT: Duration = Duration::from_millis(250);
+
+/// How long a `camera.lowLight.get` may hold its lane slot.
+#[derive(Clone, Copy)]
+struct ReadLimits {
+    /// The longest wait for the camera's answer.
+    wait: Duration,
+    /// A pass running longer than this is stuck; a read does not wait on it.
+    stalled_after: Duration,
+    /// The longest wait for [`READ_TURN`].
+    turn_wait: Duration,
+}
+
+/// The limits `camera.lowLight.get` runs with.
+const READ_LIMITS: ReadLimits = ReadLimits {
+    wait: CAMERA_LOW_LIGHT_DEVICE_WAIT,
+    stalled_after: CAMERA_LOW_LIGHT_STALLED_PASS,
+    turn_wait: CAMERA_LOW_LIGHT_READ_TURN_WAIT,
+};
+
 /// Queues `request` for `camera_id` and starts the camera's worker unless one
 /// is running. A worker that cannot start drops its replies, which their
 /// callers read as a failure. Replies whose callers already gave up are
@@ -412,20 +440,27 @@ fn camera_pass_running_longer_than(camera_id: &str, after: Duration) -> bool {
 }
 
 /// A read for `camera.lowLight.get`. It runs on the read-only request lane,
-/// so it never waits on a camera already stuck in a pass: that answers "not
-/// answering" at once (the renderer asks again later) instead of holding a
-/// lane slot. Only the first read of a stall waits, at most `wait`.
+/// so it never holds a lane slot behind a stuck camera for long:
+/// - a camera already stuck in a pass answers "not answering" at once;
+/// - only the read holding `turn` waits on a camera, at most `limits.wait`;
+///   any other read waits at most `limits.turn_wait` for the turn, then
+///   answers "busy".
+///
+/// The renderer asks again later after either answer.
 async fn device_read_answer(
     database: &Database,
     camera_id: &str,
     ops: &DeviceOps,
-    wait: Duration,
-    stalled_after: Duration,
+    turn: &tokio::sync::Semaphore,
+    limits: ReadLimits,
 ) -> DeviceLowLight {
-    if camera_pass_running_longer_than(camera_id, stalled_after) {
+    if camera_pass_running_longer_than(camera_id, limits.stalled_after) {
         return DeviceLowLight::Failed("the camera is not answering".to_string());
     }
-    device_answer(database, camera_id, ops, wait, false).await
+    let Ok(Ok(_turn)) = tokio::time::timeout(limits.turn_wait, turn.acquire()).await else {
+        return DeviceLowLight::Failed("another camera read is still waiting".to_string());
+    };
+    device_answer(database, camera_id, ops, limits.wait, false).await
 }
 
 /// `camera.lowLight.get`: the stored choice, and whether the camera has the
@@ -441,8 +476,8 @@ pub async fn get(
         &state.database,
         &camera_id,
         &DeviceOps::camera(),
-        CAMERA_LOW_LIGHT_DEVICE_WAIT,
-        CAMERA_LOW_LIGHT_STALLED_PASS,
+        &READ_TURN,
+        READ_LIMITS,
     )
     .await;
     if let DeviceLowLight::Failed(reason) = &device {
@@ -562,6 +597,7 @@ mod windows_device {
     struct ComScope(bool);
 
     impl Drop for ComScope {
+        /// Uninitializes COM only when this scope initialized it.
         fn drop(&mut self) {
             if self.0 {
                 unsafe { CoUninitialize() };
@@ -573,6 +609,7 @@ mod windows_device {
     struct MediaFoundationScope;
 
     impl Drop for MediaFoundationScope {
+        /// Shuts Media Foundation down once for the startup this scope made.
         fn drop(&mut self) {
             let _ = unsafe { MFShutdown() };
         }
@@ -824,6 +861,7 @@ mod tests {
         }
     }
 
+    /// Compensation on writes priority 1 (exposure may lower the rate); off writes 0.
     #[test]
     fn the_control_value_lets_exposure_lower_the_rate_only_when_compensation_is_on() {
         assert_eq!(auto_exposure_priority_value(true), 1);
@@ -832,6 +870,7 @@ mod tests {
         assert!(!compensation_from_priority(0));
     }
 
+    /// Only "not found" and "not supported" HRESULTs mean the camera lacks the control.
     #[test]
     fn only_a_missing_property_reads_as_no_control() {
         // E_PROP_ID_UNSUPPORTED, E_PROP_SET_UNSUPPORTED, ERROR_NOT_SUPPORTED, E_NOTIMPL.
@@ -858,12 +897,14 @@ mod tests {
         }
     }
 
+    /// A camera never switched on reads as compensation off.
     #[test]
     fn a_camera_with_no_entry_keeps_its_frame_rate() {
         let database = Database::open_in_memory_for_tests();
         assert!(!stored("camera:windows-dshow:00", &database));
     }
 
+    /// At 64 saved cameras, saved ones still change but a new camera is refused.
     #[test]
     fn at_the_camera_limit_saved_choices_still_change_but_a_new_camera_is_refused() {
         let database = Database::open_in_memory_for_tests();
@@ -890,6 +931,7 @@ mod tests {
         }
     }
 
+    /// Each camera keeps its own choice, and turning it off removes that camera's entry.
     #[test]
     fn the_choice_is_kept_per_camera_and_off_removes_the_entry() {
         let database = Database::open_in_memory_for_tests();
@@ -906,6 +948,7 @@ mod tests {
         assert!(prefs.is_empty(), "{prefs:?}");
     }
 
+    /// Concurrent saves for different cameras lose neither choice.
     #[test]
     fn saves_for_two_cameras_at_once_keep_both_choices() {
         let database = Database::open_in_memory_for_tests();
@@ -933,6 +976,7 @@ mod tests {
         release: std::sync::mpsc::Sender<()>,
     }
 
+    /// Builds the stalling device double for `stall_id`.
     fn stalling_camera(stall_id: &'static str) -> StallingCamera {
         let writes = Arc::new(Mutex::new(Vec::new()));
         let reads = Arc::new(Mutex::new(0));
@@ -975,6 +1019,7 @@ mod tests {
         }
     }
 
+    /// A stalled camera coalesces its queued work on one worker while another camera answers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stalled_camera_holds_one_worker_and_never_holds_up_another_camera() {
         let database = Database::open_in_memory_for_tests();
@@ -1042,6 +1087,7 @@ mod tests {
         );
     }
 
+    /// A panic in a driver call fails that pass and leaves the camera's worker answering.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_panicking_driver_call_is_a_failure_and_the_camera_still_answers_after() {
         let database = Database::open_in_memory_for_tests();
@@ -1071,6 +1117,7 @@ mod tests {
         );
     }
 
+    /// Unreadable saved choices fail reads, refuse saves and are never written to a camera.
     #[test]
     fn unreadable_settings_are_never_overwritten_or_guessed_onto_a_camera() {
         let database = Database::open_in_memory_for_tests();
@@ -1102,6 +1149,7 @@ mod tests {
         );
     }
 
+    /// No saved setting at all reads as compensation off.
     #[test]
     fn a_missing_setting_is_off() {
         let database = Database::open_in_memory_for_tests();
@@ -1117,6 +1165,7 @@ mod tests {
             .map_or(0, |work| work.replies.len())
     }
 
+    /// A stuck camera drops replies of callers that gave up and holds at most 32 live ones.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stuck_camera_keeps_no_reply_its_caller_gave_up_on() {
         let database = Database::open_in_memory_for_tests();
@@ -1168,6 +1217,7 @@ mod tests {
         assert!(after.supported(), "{after:?}");
     }
 
+    /// A read fails at once, without queuing, when the camera is already stuck in a pass.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_read_never_waits_on_a_camera_already_stuck_in_a_pass() {
         let database = Database::open_in_memory_for_tests();
@@ -1184,14 +1234,13 @@ mod tests {
         // The pass is running; with a zero threshold it already counts as
         // stuck, so the read answers at once without queuing.
         let started = Instant::now();
-        let read = device_read_answer(
-            &database,
-            id,
-            &camera.ops,
-            Duration::from_secs(30),
-            Duration::ZERO,
-        )
-        .await;
+        let turn = tokio::sync::Semaphore::new(1);
+        let limits = ReadLimits {
+            wait: Duration::from_secs(30),
+            stalled_after: Duration::ZERO,
+            turn_wait: Duration::from_secs(30),
+        };
+        let read = device_read_answer(&database, id, &camera.ops, &turn, limits).await;
         assert!(
             matches!(read, DeviceLowLight::Failed(ref reason) if reason.contains("not answering")),
             "{read:?}"
@@ -1206,6 +1255,74 @@ mod tests {
         assert!(after.supported(), "{after:?}");
     }
 
+    /// Reads that all arrive early in a stall, before it counts as stuck,
+    /// leave only one waiting on the camera; the rest answer "busy" within
+    /// the turn wait, so they cannot hold every read-only lane slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reads_early_in_a_stall_hold_at_most_one_lane_slot() {
+        let database = Database::open_in_memory_for_tests();
+        let id = "camera:windows-dshow:test-early-burst";
+        let camera = stalling_camera(id);
+        let first =
+            device_answer(&database, id, &camera.ops, Duration::from_millis(50), true).await;
+        assert!(matches!(first, DeviceLowLight::Failed(_)), "{first:?}");
+        let entered = camera.entered;
+        tokio::task::spawn_blocking(move || entered.recv().unwrap())
+            .await
+            .unwrap();
+
+        // The stall has only just begun: it does not count as stuck yet.
+        let turn = Arc::new(tokio::sync::Semaphore::new(1));
+        let limits = ReadLimits {
+            wait: Duration::from_secs(2),
+            stalled_after: Duration::from_secs(60),
+            turn_wait: Duration::from_millis(100),
+        };
+        let reads: Vec<_> = (0..4)
+            .map(|_| {
+                let database = database.clone();
+                let ops = camera.ops.clone();
+                let turn = turn.clone();
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let read = device_read_answer(&database, id, &ops, &turn, limits).await;
+                    (read, started.elapsed())
+                })
+            })
+            .collect();
+
+        // The three without the turn answer "busy" well before the camera's wait.
+        let mut answers = Vec::new();
+        for read in reads {
+            answers.push(read.await.unwrap());
+        }
+        let busy: Vec<_> = answers
+            .iter()
+            .filter(|(read, _)| {
+                matches!(read, DeviceLowLight::Failed(reason) if reason.contains("another camera read"))
+            })
+            .collect();
+        assert_eq!(busy.len(), 3, "{answers:?}");
+        assert!(
+            busy.iter()
+                .all(|(_, elapsed)| *elapsed < Duration::from_secs(1)),
+            "{answers:?}"
+        );
+        // The one with the turn waited on the camera and timed out.
+        assert!(
+            answers.iter().any(|(read, elapsed)| {
+                matches!(read, DeviceLowLight::Failed(reason) if reason.contains("did not answer"))
+                    && *elapsed >= Duration::from_secs(2)
+            }),
+            "{answers:?}"
+        );
+
+        camera.release.send(()).unwrap();
+        let after = device_answer(&database, id, &camera.ops, Duration::from_secs(30), false).await;
+        assert!(after.supported(), "{after:?}");
+    }
+
+    /// Only a camera that holds the control reports `supported`.
     #[test]
     fn the_state_reports_support_from_the_device() {
         let held = DeviceLowLight::Holds {
@@ -1274,6 +1391,7 @@ mod tests {
         );
     }
 
+    /// An AVFoundation or V4L2 camera id never reports the control.
     #[test]
     fn non_windows_camera_ids_are_never_written() {
         // An AVFoundation or V4L2 id has no dshow name; the Windows path
