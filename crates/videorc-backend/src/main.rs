@@ -24656,7 +24656,10 @@ mod agent_role_tests {
     /// RemoteIntent enum was re-pinned at `9028bec9` (#935), where plan 210 S6
     /// and S7 added `sceneApply.sceneId` and ScreenHide / ScreenShow /
     /// ScreenHideToggle with their own leak argument
-    /// (plans/210-scenes-for-your-apps-and-hide-screen.md).
+    /// (plans/210-scenes-for-your-apps-and-hide-screen.md). Re-pinned for
+    /// BuddyLiveOn / BuddyLiveOff / BuddyLiveToggle (the Stream Deck's Buddy
+    /// key), with their leak argument in docs/remote-control.md ("Buddy Live
+    /// on the phone").
     #[test]
     fn remote_surface_is_pinned_to_dc1309cb() {
         assert_eq!(
@@ -24685,8 +24688,8 @@ mod agent_role_tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            hash, "b68d8ae70b3a142f2b45be1ed66959360bd9104a78048461c280dfcfca605fa8",
-            "RemoteIntent is not byte-identical to its plan 210 pin (9028bec9)"
+            hash, "71bbbc1371a282938695e7414e905a270e2bba45ffc5be450294a3af35f3ddd6",
+            "RemoteIntent is not byte-identical to its Buddy Live pin"
         );
     }
 

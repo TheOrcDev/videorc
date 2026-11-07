@@ -22,6 +22,8 @@ export interface RemoteState {
   /** Plan 069; absent from apps that predate system audio. */
   systemAudioOn?: boolean
   systemAudioAvailable?: boolean
+  /** Buddy Live is on; absent from apps that predate the Buddy key. */
+  buddyLive?: boolean
   savedScenes?: Array<{ id: string; name: string }>
   activeSavedSceneId?: string | null
   layoutPreset?: string

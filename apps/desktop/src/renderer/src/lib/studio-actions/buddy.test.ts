@@ -6,6 +6,7 @@ import { DEFAULT_COHOST_AUTO_CHAT } from '@/lib/cohost-state'
 import { executeAgentIntent, type AgentIntent } from './agent'
 import { BUDDY_TOOL_COPY } from './buddy'
 import type { StudioActionContext, StudioBuddyAccess } from './context'
+import { REMOTE_INTENT_EXECUTORS } from './remote'
 
 // Plan 209 S13: `set_buddy` saves what a Stream Manager command saves, and
 // refuses with Videorc's own sentence.
@@ -36,6 +37,9 @@ function context(overrides: Partial<StudioActionContext> = {}): StudioActionCont
     ...overrides
   }
 }
+
+const executeRemote = (kind: string, studio: StudioActionContext) =>
+  REMOTE_INTENT_EXECUTORS[kind]!(studio, {})
 
 const call = (tool: string, args: Record<string, unknown> = {}): AgentIntent => ({
   intentId: 'ai-1',
@@ -168,5 +172,60 @@ describe('set_buddy (plan 209 S13)', () => {
         context({ buddy: buddy({ settings: null }) })
       )
     ).toEqual({ ok: false, message: BUDDY_TOOL_COPY.loading })
+  })
+})
+
+// The Stream Deck's Buddy key: Buddy Live through `set_buddy`'s own save and
+// gates, so a key and an agent run the same rules.
+describe('remote Buddy Live intents', () => {
+  it('turns Buddy Live on and off with the Stream Manager command save', async () => {
+    const access = buddy()
+    await expect(executeRemote('buddyLiveOn', context({ buddy: access }))).resolves.toMatchObject({
+      ok: true,
+      message: 'Buddy Live is on.'
+    })
+    expect(access.saveSettings).toHaveBeenCalledWith({ enabled: true })
+    const live = buddy({ settings: { enabled: true, autoChat: DEFAULT_COHOST_AUTO_CHAT } })
+    await expect(executeRemote('buddyLiveOff', context({ buddy: live }))).resolves.toMatchObject({
+      ok: true,
+      message: 'Buddy Live is off.'
+    })
+    expect(live.saveSettings).toHaveBeenCalledWith({ enabled: false })
+  })
+
+  it('toggles from the saved setting', async () => {
+    const off = buddy()
+    await executeRemote('buddyLiveToggle', context({ buddy: off }))
+    expect(off.saveSettings).toHaveBeenCalledWith({ enabled: true })
+    const on = buddy({ settings: { enabled: true, autoChat: DEFAULT_COHOST_AUTO_CHAT } })
+    await executeRemote('buddyLiveToggle', context({ buddy: on }))
+    expect(on.saveSettings).toHaveBeenCalledWith({ enabled: false })
+  })
+
+  it('refuses to turn on without Premium or the Cloud AI consent, with the same sentence', async () => {
+    await expect(
+      executeRemote(
+        'buddyLiveOn',
+        context({ buddy: buddy({ entitled: false, entitlementReason: 'Upgrade to go live.' }) })
+      )
+    ).resolves.toEqual({ ok: false, message: 'Upgrade to go live.' })
+    await expect(
+      executeRemote('buddyLiveToggle', context({ buddy: buddy({ consented: false }) }))
+    ).resolves.toEqual({ ok: false, message: BUDDY_CONSENT_OFF_REASON })
+  })
+
+  it('always lets Buddy Live off, and says when Buddy is not there', async () => {
+    const live = buddy({
+      entitled: false,
+      consented: false,
+      settings: { enabled: true, autoChat: DEFAULT_COHOST_AUTO_CHAT }
+    })
+    await expect(executeRemote('buddyLiveOff', context({ buddy: live }))).resolves.toMatchObject({
+      ok: true
+    })
+    await expect(executeRemote('buddyLiveToggle', context())).resolves.toEqual({
+      ok: false,
+      message: BUDDY_TOOL_COPY.unavailable
+    })
   })
 })

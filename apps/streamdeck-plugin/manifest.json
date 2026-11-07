@@ -4,7 +4,7 @@
   "UUID": "com.videorc.streamdeck",
   "Version": "0.1.0.0",
   "Author": "Videorc",
-  "Description": "Control Videorc: start/stop recording and streams, switch scenes, mute your mic, turn system audio on or off, show takeovers and banners, play sounds, and bring windows forward.",
+  "Description": "Control Videorc: start/stop recording and streams, switch scenes, mute your mic, turn system audio and Buddy Live on or off, show takeovers and banners, play sounds, and bring windows forward.",
   "URL": "https://www.videorc.com",
   "Icon": "imgs/plugin",
   "SDKVersion": 2,
@@ -35,8 +35,12 @@
       "States": [
         {
           "Image": "imgs/record"
+        },
+        {
+          "Image": "imgs/record"
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.stream-toggle",
@@ -46,8 +50,12 @@
       "States": [
         {
           "Image": "imgs/stream"
+        },
+        {
+          "Image": "imgs/stream"
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.mic-toggle",
@@ -57,8 +65,12 @@
       "States": [
         {
           "Image": "imgs/mic"
+        },
+        {
+          "Image": "imgs/mic"
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.system-audio-toggle",
@@ -68,8 +80,27 @@
       "States": [
         {
           "Image": "imgs/system-audio"
+        },
+        {
+          "Image": "imgs/system-audio"
         }
-      ]
+      ],
+      "DisableAutomaticStates": true
+    },
+    {
+      "UUID": "com.videorc.streamdeck.buddy-live-toggle",
+      "Name": "Buddy",
+      "Icon": "imgs/buddy",
+      "Tooltip": "Turn Buddy Live on or off.",
+      "States": [
+        {
+          "Image": "imgs/buddy"
+        },
+        {
+          "Image": "imgs/buddy"
+        }
+      ],
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.scene-apply",
@@ -79,9 +110,13 @@
       "States": [
         {
           "Image": "imgs/scene"
+        },
+        {
+          "Image": "imgs/scene"
         }
       ],
-      "PropertyInspectorPath": "ui/property-inspector.html"
+      "PropertyInspectorPath": "ui/property-inspector.html",
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.saved-scene",
@@ -108,9 +143,13 @@
       "States": [
         {
           "Image": "imgs/takeover"
+        },
+        {
+          "Image": "imgs/takeover"
         }
       ],
-      "PropertyInspectorPath": "ui/property-inspector.html"
+      "PropertyInspectorPath": "ui/property-inspector.html",
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.banner-toggle",
@@ -120,9 +159,13 @@
       "States": [
         {
           "Image": "imgs/banner"
+        },
+        {
+          "Image": "imgs/banner"
         }
       ],
-      "PropertyInspectorPath": "ui/property-inspector.html"
+      "PropertyInspectorPath": "ui/property-inspector.html",
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.sound-play",
@@ -132,9 +175,13 @@
       "States": [
         {
           "Image": "imgs/sound"
+        },
+        {
+          "Image": "imgs/sound"
         }
       ],
-      "PropertyInspectorPath": "ui/property-inspector.html"
+      "PropertyInspectorPath": "ui/property-inspector.html",
+      "DisableAutomaticStates": true
     },
     {
       "UUID": "com.videorc.streamdeck.window-front",
@@ -161,7 +208,8 @@
           "Image": "imgs/takeover"
         }
       ],
-      "PropertyInspectorPath": "ui/property-inspector.html"
+      "PropertyInspectorPath": "ui/property-inspector.html",
+      "DisableAutomaticStates": true
     }
   ]
 }
