@@ -105,6 +105,13 @@ packaged app's bundled background (#1067). The session must still take the
 D3D11 path, and the recording's border must match the background from its
 first frame.
 
+Add `--scene-edit` instead to record the scene the renderer sends in scene
+edit mode, with the screen moved into the right half of the canvas (#1175).
+The session must still take the D3D11 path, and from the first frame the left
+half must show the canvas fill while the moved box shows the screen.
+`--scene-edit --background` checks the same placement over the bundled
+background.
+
 On supported hardware, the first two commands require D3D11 capture/composition,
 Media Foundation GPU input, the canonical DirectComposition preview triple, and
 zero production readbacks/raw copies/system-memory encoder samples/BMP work.
