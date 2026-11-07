@@ -11,7 +11,7 @@ import {
   sameCameraLowFrameRate,
   type CameraLowFrameRate
 } from '@/lib/camera-frame-rate'
-import { cameraLowLightReadRetryDelayMs } from '@/lib/camera-low-light'
+import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
@@ -485,7 +485,6 @@ import type {
   PreviewSupervisorState,
   PreviewWindowMode,
   PreviewWindowState,
-  CameraLowLightState,
   EncoderPreferenceState,
   PerformanceCheckProgress,
   PerformanceCheckState,
@@ -1595,15 +1594,8 @@ export type StudioContextValue = {
   /** Windows raw-path encoder choice; null until the backend answers. */
   encoderPreference: EncoderPreferenceState | null
   setEncoderPreference: (preference: WindowsH264EncoderPreference) => Promise<void>
-  /**
-   * The selected camera's low-light compensation (issue #1066); null until the
-   * backend answers, and for no camera. Read it only when its `cameraId` is the
-   * selected camera's.
-   */
-  cameraLowLight: CameraLowLightState | null
-  /** True while a `camera.lowLight.set` is in flight; the switch waits for it. */
-  cameraLowLightPending: boolean
-  setCameraLowLight: (compensation: boolean) => Promise<void>
+  /** Issue #1066: reads or saves a camera's low-light compensation. */
+  requestCameraLowLight: CameraLowLightRequest
   performanceCheckProgress: PerformanceCheckProgress | null
   runPerformanceCheck: () => Promise<void>
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
@@ -17651,82 +17643,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [client, commitPerformanceCheck, releasePerformanceCheckHold, wsStatus])
 
-  // Issue #1066: the selected camera's low-light compensation. Read whenever
-  // the camera or the connection changes; a camera without the control leaves
-  // the switch hidden. A failed read (a stalled camera, a driver error) is
-  // asked again with backoff, and only clears the switch once retries run out.
-  const selectedCameraIdForLowLight = captureConfig.sources.cameraId
-  const [cameraLowLight, setCameraLowLightState] = useState<CameraLowLightState | null>(null)
-  const [cameraLowLightPending, setCameraLowLightPending] = useState(false)
-  const cameraLowLightRevision = useRef(0)
-  const cameraLowLightRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   /**
-   * Reads the camera's low-light state. An answer for an older camera or
-   * request is dropped, and a failed read retries on the backoff schedule.
+   * Issue #1066: reads (no `compensation`) or saves a camera's low-light
+   * compensation. The state and its retries live with the Sources camera row
+   * (`use-camera-low-light.ts`, in the lazy Sources chunk).
    */
-  const readCameraLowLight = useCallback(
-    (cameraId: string, revision: number, failures = 0) => {
-      if (!client) return
-      void client
-        .requestTyped('camera.lowLight.get', { cameraId })
-        .then((state) => {
-          if (revision === cameraLowLightRevision.current) setCameraLowLightState(state)
-        })
-        .catch(() => {
-          if (revision !== cameraLowLightRevision.current) return
-          const delay = cameraLowLightReadRetryDelayMs(failures + 1)
-          if (delay === null) {
-            setCameraLowLightState(null)
-            return
-          }
-          cameraLowLightRetryTimer.current = setTimeout(() => {
-            cameraLowLightRetryTimer.current = null
-            if (revision === cameraLowLightRevision.current) {
-              readCameraLowLight(cameraId, revision, failures + 1)
-            }
-          }, delay)
-        })
+  const requestCameraLowLight = useCallback<CameraLowLightRequest>(
+    ({ cameraId, compensation }) => {
+      if (!client) return Promise.reject(offlineError())
+      return compensation === undefined
+        ? client.requestTyped('camera.lowLight.get', { cameraId })
+        : client.requestTyped('camera.lowLight.set', { cameraId, compensation })
     },
     [client]
-  )
-  useEffect(() => {
-    const revision = ++cameraLowLightRevision.current
-    if (!client || wsStatus !== 'connected' || !selectedCameraIdForLowLight) {
-      setCameraLowLightState(null)
-      return
-    }
-    readCameraLowLight(selectedCameraIdForLowLight, revision)
-    return () => {
-      if (cameraLowLightRetryTimer.current) clearTimeout(cameraLowLightRetryTimer.current)
-      cameraLowLightRetryTimer.current = null
-    }
-  }, [client, wsStatus, selectedCameraIdForLowLight, readCameraLowLight])
-
-  /**
-   * Saves the selected camera's low-light choice. A failure toasts and reads
-   * the saved state back, and the switch is disabled while the save runs.
-   */
-  const setCameraLowLight = useCallback(
-    async (compensation: boolean) => {
-      const cameraId = selectedCameraIdForLowLight
-      if (!client || !cameraId) return
-      const revision = ++cameraLowLightRevision.current
-      setCameraLowLightPending(true)
-      try {
-        const state = await client.requestTyped('camera.lowLight.set', { cameraId, compensation })
-        if (revision === cameraLowLightRevision.current) setCameraLowLightState(state)
-      } catch (error) {
-        toastUserError(error, {
-          action: compensation ? 'turn on' : 'turn off',
-          object: 'low-light compensation'
-        })
-        // The save may have landed before the failure: show what is stored.
-        readCameraLowLight(cameraId, revision)
-      } finally {
-        setCameraLowLightPending(false)
-      }
-    },
-    [client, selectedCameraIdForLowLight, readCameraLowLight]
   )
 
   // Plan 090 C5: which encoder the Windows fallback path may use. A change
@@ -19039,9 +18968,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
-      cameraLowLight,
-      cameraLowLightPending,
-      setCameraLowLight,
+      requestCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,
@@ -19292,9 +19219,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
-      cameraLowLight,
-      cameraLowLightPending,
-      setCameraLowLight,
+      requestCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,

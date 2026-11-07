@@ -8,6 +8,7 @@ import { SourceFacts, SourceItem } from '@/components/sources/source-item'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Switch } from '@/components/ui/switch'
+import { useCameraLowLight } from '@/hooks/use-camera-low-light'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
 import type { Device, DeviceList, SourceSelection } from '@/lib/backend'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
@@ -249,9 +250,7 @@ export function VideoSources(): ReactElement {
     mediaAccess,
     systemAccessContext,
     wsStatus,
-    cameraLowLight,
-    cameraLowLightPending,
-    setCameraLowLight
+    requestCameraLowLight
   } = useStudioCore()
   const { previewCameraStatus, previewCameraLowFrameRate, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats } = useStudioDiagnostics()
@@ -274,6 +273,15 @@ export function VideoSources(): ReactElement {
   })
 
   const shortfall = sources.cameraId ? cameraFormatShortfall(diagnosticStats) : null
+  const {
+    state: cameraLowLight,
+    pending: cameraLowLightPending,
+    setCompensation: setCameraLowLight
+  } = useCameraLowLight({
+    cameraId: sources.cameraId,
+    connected: wsStatus === 'connected',
+    request: requestCameraLowLight
+  })
   // Issue #1066: only the answer for the camera in use counts.
   const lowLight =
     sources.cameraId && cameraLowLight?.cameraId === sources.cameraId && cameraLowLight.supported
