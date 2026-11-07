@@ -11,6 +11,7 @@ import {
   sameCameraLowFrameRate,
   type CameraLowFrameRate
 } from '@/lib/camera-frame-rate'
+import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
@@ -1593,6 +1594,8 @@ export type StudioContextValue = {
   /** Windows raw-path encoder choice; null until the backend answers. */
   encoderPreference: EncoderPreferenceState | null
   setEncoderPreference: (preference: WindowsH264EncoderPreference) => Promise<void>
+  /** Issue #1066: reads or saves a camera's low-light compensation. */
+  requestCameraLowLight: CameraLowLightRequest
   performanceCheckProgress: PerformanceCheckProgress | null
   runPerformanceCheck: () => Promise<void>
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
@@ -17695,6 +17698,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [client, commitPerformanceCheck, releasePerformanceCheckHold, wsStatus])
 
+  /**
+   * Issue #1066: reads (no `compensation`) or saves a camera's low-light
+   * compensation. The state and its retries live with the Sources camera row
+   * (`use-camera-low-light.ts`, in the lazy Sources chunk).
+   */
+  const requestCameraLowLight = useCallback<CameraLowLightRequest>(
+    ({ cameraId, compensation }) => {
+      if (!client) return Promise.reject(offlineError())
+      return compensation === undefined
+        ? client.requestTyped('camera.lowLight.get', { cameraId })
+        : client.requestTyped('camera.lowLight.set', { cameraId, compensation })
+    },
+    [client]
+  )
+
   // Plan 090 C5: which encoder the Windows fallback path may use. A change
   // invalidates both things measured under the old choice: the output check
   // and this computer's performance result.
@@ -19005,6 +19023,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
+      requestCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,
@@ -19255,6 +19274,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       performanceCheck,
       encoderPreference,
       setEncoderPreference,
+      requestCameraLowLight,
       performanceCheckProgress,
       runPerformanceCheck,
       patchStreamingTarget,

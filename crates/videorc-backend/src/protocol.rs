@@ -4397,6 +4397,35 @@ pub enum CompositorState {
     Failed,
 }
 
+/// `camera.lowLight.get` (issue #1066): which camera to describe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLowLightParams {
+    pub camera_id: String,
+}
+
+/// `camera.lowLight.set` (issue #1066): turn a camera's low-light
+/// compensation on or off. Saved per camera and written to the device now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLowLightSetParams {
+    pub camera_id: String,
+    pub compensation: bool,
+}
+
+/// A camera's low-light compensation (issue #1066). On, the camera may
+/// lengthen exposure past one frame in low light and drop to half its frame
+/// rate; off (the default), it keeps its frame rate and the picture is
+/// darker. `supported` is false where Videorc cannot set it: off Windows,
+/// and on cameras whose driver has no auto-exposure-priority control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraLowLightState {
+    pub camera_id: String,
+    pub supported: bool,
+    pub compensation: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewCameraStartParams {
