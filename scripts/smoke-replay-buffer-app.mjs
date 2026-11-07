@@ -155,9 +155,10 @@ async function seedRendererProfile(smoke) {
 
 /**
  * Linux records the selected Pulse microphone, and a fresh profile takes the
- * system default, which can be silent (a T2 MacBook with its lid shut) or
- * absent. Select the owned tone through the picker's owner, as the recording
- * matrix does, before the ring re-arms with it.
+ * system default, which can be silent, pegged (a T2 MacBook with its lid shut
+ * reads a constant at full scale) or absent. Select the owned tone through the
+ * picker's owner, as the recording matrix does, before the ring re-arms with
+ * it.
  */
 async function selectOwnedMicrophone(smoke, microphoneId) {
   const deadline = Date.now() + timeoutMs

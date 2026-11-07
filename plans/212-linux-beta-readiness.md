@@ -4170,16 +4170,18 @@ Fixed:
 
 - `replay-buffer` failed its silent-microphone gate: "audio track is
   digital silence (under -80 dBFS) for 100.0% of the take ... although a
-  microphone was selected". Two causes. The fresh profile took
-  `videorc_lab_mic` (#1247). And with the lid shut a T2 MacBook cuts its
-  internal microphone in hardware, so the default microphone is silent on
-  Ogre too. The smoke now creates the owned Pulse fixtures on Linux, under
-  the host lock and before the app's first device listing, selects the
-  440 Hz source through the scene presets hook, and stops the fixtures on
-  exit. This lives on this branch only, with `linux-pulse-fixture.mjs`.
-  Result: PASS; three clips and a clip during a recording, all complete, and
-  the 115 s recording passes the analyzer. A clip's audio reads -24 dBFS
-  with a zero-crossing rate of 0.0184, which is 440 Hz at 48 kHz.
+  microphone was selected". The fresh profile took `videorc_lab_mic`, which
+  is silent (#1247). The default microphone would not do either: with the
+  lid shut Ogre's internal microphone reads a constant at full scale (peak
+  and RMS 0 dBFS over 3 s), the pegged input noted above, so a clip smoke
+  cannot rest on the host's default. The smoke now creates the owned Pulse
+  fixtures on Linux, under the host lock and before the app's first device
+  listing, selects the 440 Hz source through the scene presets hook, and stops
+  the fixtures on exit. This lives on this branch only, with
+  `linux-pulse-fixture.mjs`. Result: PASS; three clips and a clip during a
+  recording, all complete, and the 115 s recording passes the analyzer. A
+  clip's audio reads -24 dBFS with a zero-crossing rate of 0.0184, which is
+  440 Hz at 48 kHz.
 - `layout-source-loop` failed every layout with "Preview window was not
   visibly presenting". Only macOS docks the Preview into the Layout tab's
   canvas; elsewhere a docked Preview hides on that tab. The smoke floats it
@@ -4208,9 +4210,83 @@ The default microphone on a fresh profile, end to end after #1247: a
 fresh dev-app profile on Ogre lists the built-in microphone
 (`alsa_input.pci-0000_02_00.3.HiFi__Mic__source`, the Pulse default)
 first and `videorc_lab_mic` second, and the renderer selects the first
-row. With the lid shut that microphone records silence, which is the
-hardware, not the selection.
+row. With the lid shut that microphone is pegged at full scale, which is
+the hardware, not the selection. (The commit that added this section,
+`9384691b`, says it records silence; it does not.)
 
 On macOS `replay-buffer` probably fails the same gate since #1139 added
 it: the smoke records the silent synthetic bus and does not pass
 `microphoneAvailable`. Not checked; no Mac here.
+
+### Packaged main `efbafe8e` on Ogre, 2026-11-07
+
+Main at `efbafe8e` (#1243 through #1248) was built locally as the candidate
+workflow builds it: a clean tree, no bundled OAuth secrets, 0.20.3
+`linux-unpacked` and the AppImage (sha256 `a8c7c665…`). The CI artifact
+and the published Alpha were not used. `release:validate:linux` passes all
+19 checks. Run on Ogre at 800 MHz, the lid closed and the owner's session
+locked, with an owned null sink as `PULSE_SINK`:
+
+| Check                                  | Unpacked             | AppImage            |
+| -------------------------------------- | -------------------- | ------------------- |
+| `check:packaged-app` (fuses and flags) | pass                 | pass (#1243)        |
+| packaged app smoke, 6 layouts          | pass, A/V skew 6 ms  | pass, A/V skew 6 ms |
+| packaged asset decode and poster       | pass                 | pass                |
+| `smoke:linux-av-devices`, owned 440 Hz | pass, -24.1 dB       | pass, -24.1 dB      |
+| `smoke:linux-av-devices`, internal mic | fail, pegged         | not run             |
+| quit on SIGTERM to the main process    | exit 0 after 369 ms  | not run             |
+| quit on SIGTERM to the process group   | SIGTERM after 67 ms  | not run             |
+| quit through the app's quit            | exit 0 after 342 ms  | exit 0 after 446 ms |
+| session decay                          | fail, session 1 of 6 | not run             |
+| `smoke:linux-portal-capture`           | pass                 | pass                |
+| `smoke:linux-portal-record`            | fail, session locked | not run             |
+
+No quit left a dialog and no process dumped core. The owner's
+`videorc.desktop` kept its sha256 through the suite (#1245). The
+Chromium sandbox is on in both forms: the zygote's forked renderers run
+with `Seccomp: 2` and no process carries `--no-sandbox`.
+
+What the failures are:
+
+- The internal microphone with the lid shut reads 0 dB on the meter and
+  -1 dB in each take, and #1242's gate names it "a pegged or DC
+  microphone". The owned 440 Hz source passes in both forms, so the mic
+  path works.
+- Session decay: a 30 fps take with 15.3% degraded bridge. The host's CPU
+  and iGPU caps (Still open, above) again.
+- Portal record: "the session was locked before the take (hyprland)",
+  #1242's message. The capture smoke passes on both forms.
+
+The app's update notice reads `unknown` on Linux. It is not a fault: the
+public changelog at `videorc.com/api/changelog` carries no entry for the
+`linux` platform (its 177 entries are `macos` or `windows`), because no
+Linux Alpha entry is published until a Linux promote path exists
+(`promote-linux-alpha.yml` is still owed). The notice cannot say "up to
+date" before that.
+
+#### Both desktop entries turned the sandbox off
+
+The bundled entry in that AppImage runs `AppRun --no-sandbox %U`, and the
+entry the app writes for `videorc://` links runs `<AppImage> --no-sandbox
+%U`. So a launch from the app menu, a launcher or a link skips #1244's
+AppRun probe and runs with the sandbox off on every host; only a launch of
+the file itself got the probe. The bundled entry comes from app-builder-lib
+26.8.1's `AppImageTarget`, which defaults the entry's arguments to
+`--no-sandbox`. Upstream #9590 (26.9.0) drops that default for toolset
+runtimes in the same change whose AppRun hunk #1244 backported.
+
+#1249 backports that hunk too, so the bundled entry runs `AppRun %U`; the
+written entry runs `<AppImage> %U`, and a managed entry from an earlier
+build is rewritten as stale at the next launch. `check:packaged-app` now
+reads the AppImage's `videorc.desktop` and fails an Exec that passes
+`--no-sandbox`. It fails the `efbafe8e` AppImage with that message. On a
+rebuild with #1249 it passes, and an isolated launch writes `Exec=<AppImage>
+%U`, rewrites a seeded `--no-sandbox` entry, and keeps the renderers at
+`Seccomp: 2`. Not run on a real Ubuntu 24.04 desktop (no operator).
+#1249 merged as `4b20253f`, whose tree is the one built and run here.
+
+On this host the desktop unit tests can fail on time alone: in #1249's run
+`comments-snapshot-delta` hit its 5 s timeout and `buddy-library-section`
+timed out in a `vi.waitFor` on the lazily imported Buddy onboarding, while
+cold transforms ran at 800 MHz. Neither file is touched there; both pass
+on rerun.
