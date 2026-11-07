@@ -317,6 +317,8 @@
     "release:record": "node scripts/release.mjs record",
     "release:build:macos": "node scripts/release-build-macos.mjs",
     "release:verify:production": "node scripts/release-verify-production.mjs",
+    "release:web:check": "node scripts/release-web-production.mjs check",
+    "release:web:redeploy": "node scripts/release-web-production.mjs redeploy",
     "release:announce": "node scripts/release-announce.mjs",
     "release:provision": "node scripts/release-provision.mjs",
     "release:rehearse": "node scripts/release-rehearse.mjs",

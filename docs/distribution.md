@@ -399,10 +399,12 @@ If a beta fails before clean-machine acceptance:
 
 If a beta has already been exposed on Videorc Web:
 
-- Set `VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` and redeploy the web app to stop
-  issuing signed download URLs immediately.
+- Set `VIDEORC_DOWNLOAD_STORAGE_PROVIDER=none` and redeploy the web app with
+  `pnpm release:web:redeploy` to stop issuing signed download URLs immediately.
+  Never deploy a local videorc-web checkout (see "Redeploying videorc-web
+  production" in [releases/release-runbook.md](releases/release-runbook.md)).
 - Or change `VIDEORC_DOWNLOAD_MANIFEST_OBJECT_KEY` back to the last accepted
-  `releases/macos/<releaseId>/release.json` and redeploy.
+  `releases/macos/<releaseId>/release.json` and run `pnpm release:web:redeploy`.
 - Confirm anonymous requests still return `401`, signed-in requests no longer
   receive the bad release URL, and `/account/download` shows the expected
   fallback or previous release metadata.
