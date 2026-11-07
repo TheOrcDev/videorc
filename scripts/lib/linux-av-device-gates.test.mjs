@@ -77,6 +77,32 @@ test('recorded mic audio must be above digital silence', () => {
   )
 })
 
+test('a pegged or DC microphone fails the meter and the recording', () => {
+  // ogre 0.20.3, lid shut: the internal mic read a constant -1.0.
+  const meter = assessMicMeter({ status: 'ready', peakDb: 0, meanDb: 0 })
+  assert.equal(meter.ok, false)
+  assert.match(meter.failures[0], /meter mean 0 dB is within 6 dB of full scale/)
+  const take = assessMicRecordingAudio({ hasAudio: true, maxVolumeDb: -0.2, meanVolumeDb: -1 })
+  assert.equal(take.ok, false)
+  assert.match(take.failures[0], /audio mean -1 dB .*pegged or DC microphone/)
+  // A loud voice peaks near full scale but averages well below it.
+  assert.equal(
+    assessMicRecordingAudio({ hasAudio: true, maxVolumeDb: -0.5, meanVolumeDb: -18 }).ok,
+    true
+  )
+  assert.equal(assessMicMeter({ status: 'ready', peakDb: -3, meanDb: -20 }).ok, true)
+  // The bound is inclusive and tunable; a missing mean is not a pegged one.
+  assert.equal(assessMicMeter({ status: 'ready', peakDb: -1, meanDb: -6 }).ok, true)
+  assert.equal(
+    assessMicRecordingAudio(
+      { hasAudio: true, maxVolumeDb: -1, meanVolumeDb: -4 },
+      { maxMeanDb: -3 }
+    ).ok,
+    true
+  )
+  assert.equal(assessMicRecordingAudio({ hasAudio: true, maxVolumeDb: -1 }).ok, true)
+})
+
 test('volumedetect output parses, including -inf', () => {
   const text =
     '[Parsed_volumedetect_0 @ 0x1] mean_volume: -57.7 dB\n[Parsed_volumedetect_0 @ 0x1] max_volume: -44.8 dB\n'

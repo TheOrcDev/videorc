@@ -1395,6 +1395,31 @@ pub(crate) mod tests {
         }
     }
 
+    /// A delivered message shows in the coordinator before its batch is
+    /// durable, so a test that stops the connector waits for the row first.
+    async fn wait_for_persisted_message(
+        state: &AppState,
+        provider_message_id: &str,
+    ) -> LiveChatMessage {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(message) = state
+                .database
+                .list_live_chat_messages("session-1")
+                .unwrap()
+                .into_iter()
+                .find(|message| message.provider_message_id == provider_message_id)
+            {
+                return message;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for durable X message {provider_message_id}"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn wait_for_provider_state(
         state: &AppState,
         expected: LiveChatProviderConnectionState,
@@ -1714,6 +1739,8 @@ pub(crate) mod tests {
         let host_message = wait_for_message(&state, "message-host").await;
         let provider =
             wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
+        let persisted = wait_for_persisted_message(&state, "message-host").await;
+        let persisted_viewer = wait_for_persisted_message(&state, "message-1").await;
         connector.abort();
         let _ = server.shutdown.send(());
 
@@ -1726,21 +1753,7 @@ pub(crate) mod tests {
         // connected account) is stored as the host, like the other platforms.
         assert_eq!(host_message.author_id.as_deref(), Some(X_USER_ID));
         assert_eq!(host_message.author_roles, vec!["owner".to_string()]);
-        let persisted = state
-            .database
-            .list_live_chat_messages("session-1")
-            .unwrap()
-            .into_iter()
-            .find(|message| message.provider_message_id == "message-host")
-            .expect("the host message is persisted");
         assert_eq!(persisted.author_roles, vec!["owner".to_string()]);
-        let persisted_viewer = state
-            .database
-            .list_live_chat_messages("session-1")
-            .unwrap()
-            .into_iter()
-            .find(|message| message.provider_message_id == "message-1")
-            .expect("the viewer message is persisted");
         assert_eq!(persisted_viewer.author_roles, vec!["member".to_string()]);
 
         // Only a one-shot signed header is handed to the relay, never a token.
