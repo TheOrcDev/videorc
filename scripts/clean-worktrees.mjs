@@ -4,7 +4,15 @@
 // with exactly this HEAD, or a detached checkout of origin/main) together with their
 // builds. Dry run by default. Rules: AGENTS.md "Cleanup After Merge".
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, statSync, statfsSync } from 'node:fs'
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  statfsSync
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
@@ -14,7 +22,8 @@ import {
   isInside,
   mergedPrFor,
   parseLsofCwds,
-  parseWorktreeList
+  parseWorktreeList,
+  readProcCwds
 } from './lib/worktree-cleanup.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
@@ -33,7 +42,7 @@ for (const arg of process.argv.slice(2)) {
     process.exit(0)
   } else throw new Error(`Unknown argument ${arg}\n${usage}`)
 }
-if (process.platform === 'win32') throw new Error('clean:worktrees needs lsof (macOS/Linux).')
+if (process.platform === 'win32') throw new Error('clean:worktrees runs on macOS and Linux.')
 
 const run = (command, args, options = {}) =>
   execFileSync(command, args, {
@@ -57,7 +66,14 @@ const freeGb = () => {
   return (bavail * bsize) / 1024 ** 3
 }
 
+const linuxProc = {
+  readFile: (path) => readFileSync(path, 'utf8'),
+  readdir: (path) => readdirSync(path),
+  readlink: (path) => readlinkSync(path)
+}
+
 function processCwds() {
+  if (process.platform === 'linux') return readProcCwds(linuxProc, process.pid)
   try {
     return parseLsofCwds(run('lsof', ['-nP', '-w', '-d', 'cwd', '-Fpcn']), process.pid)
   } catch (error) {

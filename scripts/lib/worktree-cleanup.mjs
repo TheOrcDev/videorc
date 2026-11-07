@@ -50,6 +50,25 @@ export function parseLsofCwds(output, selfPid) {
   return cwds
 }
 
+// Linux reads /proc instead, because Arch and minimal images do not ship lsof. Same
+// result as parseLsofCwds. A process this user may not inspect (EACCES), like those lsof
+// -w skips, or one gone since the listing (ENOENT, ESRCH) is left out.
+const SKIPPED_PROC_ERRORS = new Set(['EACCES', 'ENOENT', 'ESRCH'])
+export function readProcCwds(proc, selfPid) {
+  const cwds = []
+  for (const entry of proc.readdir('/proc')) {
+    if (!/^\d+$/.test(entry) || Number(entry) === selfPid) continue
+    try {
+      const cwd = proc.readlink(`/proc/${entry}/cwd`)
+      const command = proc.readFile(`/proc/${entry}/comm`).trim()
+      cwds.push({ pid: Number(entry), command, cwd })
+    } catch (error) {
+      if (!SKIPPED_PROC_ERRORS.has(error?.code)) throw error
+    }
+  }
+  return cwds
+}
+
 // Squash merges leave a branch unreachable from main, so `git branch --merged` cannot tell.
 // A branch is done only when the local HEAD is a merged PR's head or behind it: anything
 // else means local commits that never reached main.

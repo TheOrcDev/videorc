@@ -1897,11 +1897,16 @@ async fn start_missing_sources(
                         | PreviewCameraState::DeviceMissing
                         | PreviewCameraState::PermissionNeeded
                 ) {
-                    bail!(
-                        "Camera failed to start for the live {action_label} ({:?}): {}",
-                        status.state,
-                        status.message.unwrap_or_else(|| "no detail".to_string())
-                    );
+                    return Err(source_start_failure(
+                        state,
+                        intent_id,
+                        format!(
+                            "Camera failed to start for the live {action_label} ({:?}): {}",
+                            status.state,
+                            status.message.unwrap_or_else(|| "no detail".to_string())
+                        ),
+                    )
+                    .await);
                 }
             }
             "screen" => {
@@ -1957,17 +1962,37 @@ async fn start_missing_sources(
                         | PreviewScreenState::SourceMissing
                         | PreviewScreenState::PermissionNeeded
                 ) {
-                    bail!(
-                        "Screen capture failed to start for the live {action_label} ({:?}): {}",
-                        status.state,
-                        status.message.unwrap_or_else(|| "no detail".to_string())
-                    );
+                    return Err(source_start_failure(
+                        state,
+                        intent_id,
+                        format!(
+                            "Screen capture failed to start for the live {action_label} ({:?}): {}",
+                            status.state,
+                            status.message.unwrap_or_else(|| "no detail".to_string())
+                        ),
+                    )
+                    .await);
                 }
             }
             other => bail!("Unknown source kind {other} for live layout switch."),
         }
     }
     Ok(readiness_deadlines)
+}
+
+/// The error for a source start that ended Failed, missing or without
+/// permission. Supersession wins: a newer intent stops the sources it does not
+/// compose (a stopped screen reads `SourceMissing`), and a superseded waiter's
+/// joined start can return that stopped status before its supersession watcher
+/// is polled. Both are ready together under load and `select!` picks one at
+/// random, so without this check the older intent reported the newer one's
+/// retirement as its own capture failure. The newer intent always registers
+/// before it retires anything, so this check cannot miss it.
+async fn source_start_failure(state: &AppState, intent_id: u64, failure: String) -> anyhow::Error {
+    match ensure_layout_intent_current(state, intent_id).await {
+        Err(superseded) => superseded,
+        Ok(()) => anyhow::anyhow!(failure),
+    }
 }
 
 async fn active_recording_ffmpeg_path(state: &AppState) -> Option<String> {
@@ -5011,6 +5036,38 @@ mod tests {
         assert!(intents.latest_needs_screen);
         drop(intents);
         assert!(source_liveness(&state, &winner_target).await.screen);
+    }
+
+    /// A superseded waiter whose joined start returns first sees the newer
+    /// intent's retirement (a stopped screen reads `SourceMissing`). It must
+    /// report the supersession, never a capture failure of its own; the
+    /// current intent keeps its real failure.
+    #[tokio::test]
+    async fn a_source_start_failure_after_supersession_reports_the_supersession() {
+        let state = test_state();
+        let screen_only = SceneSourceNeeds {
+            camera: false,
+            screen: true,
+        };
+        let older = begin_layout_intent(&state, Some(10), screen_only)
+            .await
+            .expect("older intent should register");
+        let newer = begin_layout_intent(&state, Some(11), SceneSourceNeeds::default())
+            .await
+            .expect("newer intent should register");
+        let failure = "Screen capture failed to start for the live preview layout switch \
+             (SourceMissing): Stopping native screen preview; teardown remains exclusively owned.";
+
+        let superseded = source_start_failure(&state, older, failure.to_string()).await;
+        assert!(
+            superseded
+                .to_string()
+                .contains("superseded by newer intent 11"),
+            "{superseded}"
+        );
+
+        let current = source_start_failure(&state, newer, failure.to_string()).await;
+        assert_eq!(current.to_string(), failure);
     }
 
     #[tokio::test]

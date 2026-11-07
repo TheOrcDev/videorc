@@ -1796,15 +1796,19 @@ const fn compositor_consumer_arms_in_place(consumer: CompositorFrameConsumer) ->
 /// raw-YUV bridge is ready only once FFmpeg's reader has taken a complete first
 /// frame, so the same holds there; waiting for the first progress report cost
 /// a fixed ~510 ms of every Record (one 500 ms `-stats_period`, retest 151).
-/// For both the proof becomes a watchdog that fails the session if FFmpeg never
-/// reports progress. Windows keeps the synchronous proof: its raw-pipe and
-/// Media Foundation outputs can spend seconds on a software first frame.
+/// Windows Media Foundation (#1068) is ready only once its first access unit
+/// is in FFmpeg's FIFO (the CPU writer and the D3D11 writer alike), so a slow
+/// software first frame is already paid; waiting on top for the first progress
+/// report cost ~650 ms of every Windows Record.
+/// For all of them the proof becomes a watchdog that fails the session if
+/// FFmpeg never reports progress. Windows' raw pipe keeps the synchronous
+/// proof: it is ready before FFmpeg has read a frame.
 const fn defers_ffmpeg_output_startup_proof(output: EncoderBridgeVideoOutput) -> bool {
     match output {
         EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
-        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs => true,
+        | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => true,
         EncoderBridgeVideoOutput::RawYuv420p => cfg!(target_os = "linux"),
-        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => false,
     }
 }
 
@@ -44368,16 +44372,16 @@ mod tests {
 
     #[test]
     fn ffmpeg_output_progress_proof_is_a_watchdog_where_the_bridge_already_fed_a_frame() {
-        // VideoToolbox (P4a) and the Linux raw-YUV bridge publish `Recording`
-        // once the first frame is in FFmpeg; Windows keeps the synchronous
-        // proof for its software first frame (retest 151).
+        // VideoToolbox (P4a), the Linux raw-YUV bridge and Windows Media
+        // Foundation (#1068) publish `Recording` once the first frame is in
+        // FFmpeg; Windows' raw pipe keeps the synchronous proof.
         assert!(defers_ffmpeg_output_startup_proof(
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
         ));
         assert!(defers_ffmpeg_output_startup_proof(
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         ));
-        assert!(!defers_ffmpeg_output_startup_proof(
+        assert!(defers_ffmpeg_output_startup_proof(
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
         ));
         assert_eq!(
