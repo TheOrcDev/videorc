@@ -27873,6 +27873,14 @@ fn recording_output_failed_message(error: &str, ending_take: bool) -> String {
     }
 }
 
+/// A stream that rides the recording's encode (always on Linux, plan 0016)
+/// goes off the air when that shared writer dies, and the take ends with it.
+fn shared_stream_output_failed_message(error: &str) -> String {
+    format!(
+        "Streaming stopped: the video encoder your stream shares with the recording stopped accepting frames ({error}). Videorc ended the take; the recording up to this point is being saved."
+    )
+}
+
 /// The session whose dead recording output was already announced.
 static RECORDING_OUTPUT_FAILURE_ANNOUNCED: StdMutex<Option<String>> = StdMutex::new(None);
 
@@ -27892,7 +27900,17 @@ fn announce_recording_output_failure_once(session_id: &str) -> bool {
 /// 1:35). Until now nothing reacted: the session kept "recording" with no
 /// video for 47 s, then Stop waited 18 s on FFmpeg and forced it. Announce
 /// it when it happens, and end the take unless a healthy stream is on air.
-pub(crate) fn handle_recording_output_failure_if_active(state: &AppState, session_id: &str) {
+///
+/// `shared_with_stream` is a writer that also feeds the stream (always on
+/// Linux, plan 0016). On 2026-11-07 a 40 s FFmpeg freeze on Ogre killed it at
+/// 10 s and the session kept showing live with no warning for 30 s, then
+/// reported only the bridge failure once FFmpeg woke. Its stream is gone with
+/// the recording, so the stream's own event says so too.
+pub(crate) fn handle_recording_output_failure_if_active(
+    state: &AppState,
+    session_id: &str,
+    shared_with_stream: bool,
+) {
     let (action, failure) = {
         let Ok(recording) = state.recording.try_lock() else {
             return;
@@ -27930,8 +27948,18 @@ pub(crate) fn handle_recording_output_failure_if_active(state: &AppState, sessio
         session_id,
         failure = failure.as_str(),
         ending_take,
+        shared_with_stream,
         "recording output stopped mid-session"
     );
+    if shared_with_stream && announce_stream_output_failure_once(session_id) {
+        let _ = emit_health_event(
+            state,
+            Some(session_id),
+            HealthLevel::Error,
+            STREAM_OUTPUT_FAILED_CODE,
+            &shared_stream_output_failed_message(&failure),
+        );
+    }
     let message = recording_output_failed_message(&failure, ending_take);
     state.emit_log("error", &message);
     let _ = emit_health_event(
@@ -46054,6 +46082,24 @@ mod tests {
         assert!(ending.contains("FIFO timed out"), "{ending}");
         let streaming = recording_output_failed_message("FIFO timed out", false);
         assert!(streaming.contains("stream is still live"), "{streaming}");
+    }
+
+    #[test]
+    fn a_dead_shared_writer_says_the_stream_stopped_with_the_take() {
+        // Linux's shared encode has no separate stream leg to keep on air,
+        // so its death ends the take, and the stream's event names both.
+        assert_eq!(
+            recording_output_failure_action(false, false, false, true, false),
+            RecordingOutputFailureAction::EndTake
+        );
+        let message = shared_stream_output_failed_message("FIFO timed out");
+        assert!(message.starts_with("Streaming stopped"), "{message}");
+        assert!(message.contains("FIFO timed out"), "{message}");
+        assert!(message.contains("ended the take"), "{message}");
+        assert!(
+            !message.contains("recording continued"),
+            "the shared take ends with the stream: {message}"
+        );
     }
 
     #[test]
