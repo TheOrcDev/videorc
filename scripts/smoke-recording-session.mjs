@@ -729,7 +729,15 @@ export function assertBundledBackgroundFrame({
   return { seekSeconds, meanDifference }
 }
 
-function extractRgbFrame({ inputPath, outputPath, ffmpegPath, width, height, seekSeconds, label }) {
+export function extractRgbFrame({
+  inputPath,
+  outputPath,
+  ffmpegPath,
+  width,
+  height,
+  seekSeconds,
+  label
+}) {
   runCommand(
     ffmpegPath,
     [
@@ -753,7 +761,7 @@ function extractRgbFrame({ inputPath, outputPath, ffmpegPath, width, height, see
   )
 }
 
-function meanRgbDifference(left, right, width, points) {
+export function meanRgbDifference(left, right, width, points) {
   let total = 0
   let samples = 0
   for (const [x, y] of points) {
@@ -766,7 +774,7 @@ function meanRgbDifference(left, right, width, points) {
   return total / Math.max(1, samples)
 }
 
-function rgbRange(bytes, width, points) {
+export function rgbRange(bytes, width, points) {
   let minimum = 255
   let maximum = 0
   for (const [x, y] of points) {
@@ -780,7 +788,7 @@ function rgbRange(bytes, width, points) {
   return maximum - minimum
 }
 
-function sampleGrid({ x0, x1, y0, y1, columns, rows }) {
+export function sampleGrid({ x0, x1, y0, y1, columns, rows }) {
   const points = []
   for (let yIndex = 0; yIndex < rows; yIndex += 1) {
     const y = Math.round(y0 + ((y1 - y0) * yIndex) / Math.max(1, rows - 1))

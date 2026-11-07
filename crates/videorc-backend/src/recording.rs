@@ -11253,7 +11253,7 @@ fn emit_system_audio_echo_paused_health_event(
 
 fn system_audio_echo_paused_message(lag_ms: u32) -> String {
     format!(
-        "System audio is paused: your stream is playing on this Mac and came back {:.1} seconds later, so viewers heard it twice. Mute that tab, then turn System audio on again.",
+        "System audio is paused: your stream is playing on this computer and came back {:.1} seconds later, so viewers heard it twice. Mute that tab, then turn System audio on again.",
         f64::from(lag_ms) / 1_000.0
     )
 }
@@ -11329,7 +11329,7 @@ fn audio_output_failed_message(elapsed_secs: Option<f64>) -> String {
 
 fn audio_output_stalled_message(report: &crate::session_audio::OutputStallReport) -> String {
     format!(
-        "Videorc's output fell behind for {:.1} seconds while this Mac was busy, so {:.1} seconds of audio are silent. Every input kept working.",
+        "Videorc's output fell behind for {:.1} seconds while this computer was busy, so {:.1} seconds of audio are silent. Every input kept working.",
         report.duration_ms as f64 / 1_000.0,
         report.lost_ms as f64 / 1_000.0
     )
@@ -29077,6 +29077,25 @@ pub type LivePreviewSlot = Arc<Mutex<LivePreviewState>>;
 mod tests {
     use super::*;
     use crate::capture_input::AVFOUNDATION_VIDEO_PIXEL_FORMAT;
+
+    #[test]
+    fn audio_output_stalled_message_names_no_platform() {
+        // #1175: the warning reached Windows testers as "this Mac was busy".
+        let message = audio_output_stalled_message(&crate::session_audio::OutputStallReport {
+            duration_ms: 3_600,
+            max_lag_ms: 3_600,
+            lost_ms: 3_500,
+        });
+        assert_eq!(
+            message,
+            "Videorc's output fell behind for 3.6 seconds while this computer was busy, so 3.5 seconds of audio are silent. Every input kept working."
+        );
+        assert!(!message.contains("Mac"));
+        // The echo guard runs on Windows and Linux system audio too.
+        let echo = system_audio_echo_paused_message(3_200);
+        assert!(echo.contains("playing on this computer and came back 3.2 seconds later"));
+        assert!(!echo.contains("Mac"));
+    }
 
     #[test]
     fn audio_levels_event_skips_empty_windows_and_carries_the_session() {

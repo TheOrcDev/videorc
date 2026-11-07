@@ -931,6 +931,7 @@ describe('buildWindowsLocalGateSteps', () => {
       'packaged recording and bundled-background smoke',
       'native Windows ScreenOnly D3D11 zero-copy smoke',
       'native Windows ScreenOnly D3D11 background-scene smoke',
+      'native Windows ScreenOnly D3D11 scene-edit smoke',
       'native Windows ScreenCamera D3D11 direct-record smoke 1080p30',
       'native Windows ScreenCamera D3D11 direct-record smoke 1080p60',
       'native Windows D3D11 Media Foundation encoded-bridge matrix',
@@ -960,6 +961,10 @@ describe('buildWindowsLocalGateSteps', () => {
       steps.find((step) => step.label === 'native Windows ScreenOnly D3D11 background-scene smoke')
         .args,
       ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11', '--background']
+    )
+    assert.deepEqual(
+      steps.find((step) => step.label === 'native Windows ScreenOnly D3D11 scene-edit smoke').args,
+      ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11', '--scene-edit']
     )
     for (const [label, fps] of [
       ['native Windows ScreenCamera D3D11 direct-record smoke 1080p30', '30'],
