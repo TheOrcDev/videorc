@@ -9,6 +9,9 @@
 // --allow-test-hooks accepts a VIDEORC_PACKAGED_TEST_HOOKS=1 build (lab and
 // harness builds); the fuses must still be flipped.
 //
+// An AppImage's bundled videorc.desktop must not pass --no-sandbox: AppRun
+// adds it only where unprivileged user namespaces are refused.
+//
 // Plan 214 B5 (macOS, shape fixed by spike P0a): a Developer ID build must
 // embed the Videorc Camera extension and the one app profile; an embedded
 // extension must then show the P0a shape: exactly the app sandbox and the app
@@ -18,13 +21,14 @@
 // too. An unsigned or ad hoc build without it is only described (the dev
 // packaging path keeps working without the profile).
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { FuseV1Options, getCurrentFuseWire } from '@electron/fuses'
 
 import {
+  appImageDesktopEntryProblems,
   buildFlagsProblems,
   describeFuseWire,
   fuseWireProblems,
@@ -65,7 +69,7 @@ const appPath =
       : defaultPackagedAppExecutable({ repoRoot })
 const allowTestHooks = args.includes('--allow-test-hooks')
 
-// An AppImage is read through the two files its runtime extracts.
+// An AppImage is read through the files its runtime extracts.
 function extractAppImagePayload(appImage) {
   const directory = mkdtempSync(join(tmpdir(), 'videorc-check-appimage-'))
   process.on('exit', () => rmSync(directory, { recursive: true, force: true }))
@@ -81,15 +85,19 @@ function extractAppImagePayload(appImage) {
       process.exit(1)
     }
   }
-  return payload.executable
+  return payload
 }
 
-const checkedPath = isLinuxAppImageExecutable(appPath) ? extractAppImagePayload(appPath) : appPath
+const appImagePayload = isLinuxAppImageExecutable(appPath) ? extractAppImagePayload(appPath) : null
+const checkedPath = appImagePayload?.executable ?? appPath
 const wire = await getCurrentFuseWire(checkedPath)
 const flags = readPackagedBuildFlags(checkedPath)
 const problems = [
   ...fuseWireProblems(wire, FuseV1Options),
-  ...buildFlagsProblems(flags, { allowTestHooks })
+  ...buildFlagsProblems(flags, { allowTestHooks }),
+  ...(appImagePayload
+    ? appImageDesktopEntryProblems(readFileSync(appImagePayload.desktopEntry, 'utf8'))
+    : [])
 ]
 
 let cameraExtension = 'not checked (macOS only)'
@@ -160,4 +168,5 @@ if (problems.length > 0) {
   for (const problem of problems) console.error(`check:packaged-app: ${problem}`)
   process.exit(1)
 }
-console.log(`check:packaged-app: fuses and build flags OK; Videorc Camera ${cameraExtension}`)
+const checked = appImagePayload ? 'fuses, build flags and desktop entry' : 'fuses and build flags'
+console.log(`check:packaged-app: ${checked} OK; Videorc Camera ${cameraExtension}`)

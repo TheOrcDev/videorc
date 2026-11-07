@@ -107,7 +107,7 @@ describe('buildVideorcDesktopEntry', () => {
         '[Desktop Entry]',
         'Name=Videorc',
         'Comment=Videorc desktop app.',
-        `Exec=${APPIMAGE} --no-sandbox %U`,
+        `Exec=${APPIMAGE} %U`,
         `TryExec=${APPIMAGE}`,
         'Terminal=false',
         'Type=Application',
@@ -123,7 +123,7 @@ describe('buildVideorcDesktopEntry', () => {
 
   it('quotes a path with spaces and refuses an unrepresentable one', () => {
     expect(desktopEntryValue(entryFor('/home/ana/My Apps/V.AppImage'), 'Exec')).toBe(
-      '"/home/ana/My Apps/V.AppImage" --no-sandbox %U'
+      '"/home/ana/My Apps/V.AppImage" %U'
     )
     // TryExec is a plain string: never quoted, only backslashes escaped.
     expect(desktopEntryValue(entryFor('/home/ana/My Apps/V.AppImage'), 'TryExec')).toBe(
@@ -131,6 +131,11 @@ describe('buildVideorcDesktopEntry', () => {
     )
     expect(desktopEntryValue(entryFor('/a\\b'), 'TryExec')).toBe('/a\\\\b')
     expect(buildVideorcDesktopEntry('/a\nb')).toBeNull()
+  })
+
+  it('leaves the Chromium sandbox to AppRun', () => {
+    // AppRun adds --no-sandbox only where user namespaces are refused.
+    expect(entryFor(APPIMAGE)).not.toContain('--no-sandbox')
   })
 })
 
@@ -154,6 +159,12 @@ describe('decideVideorcDesktopEntry', () => {
 
   it('rewrites a managed entry that points at another AppImage', () => {
     const old = entryFor('/home/ana/Downloads/Videorc-0.14.0-linux-x64.AppImage')
+    expect(decideVideorcDesktopEntry(old, desired)).toEqual({ action: 'write', reason: 'stale' })
+  })
+
+  it('rewrites a managed entry an earlier build wrote with --no-sandbox', () => {
+    const old = desired.replace(`Exec=${APPIMAGE} %U`, `Exec=${APPIMAGE} --no-sandbox %U`)
+    expect(old).toContain('--no-sandbox')
     expect(decideVideorcDesktopEntry(old, desired)).toEqual({ action: 'write', reason: 'stale' })
   })
 
