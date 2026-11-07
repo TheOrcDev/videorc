@@ -134,3 +134,39 @@ diff --git a/out/codeSign/windowsSignAzureManager.js b/out/codeSign/windowsSignA
              const escapedValue = String(value).replace(/'/g, "''");
              return [...res, `-${field}`, `'${escapedValue}'`];
          }, [])
+diff --git a/out/targets/appimage/appImageUtil.js b/out/targets/appimage/appImageUtil.js
+--- a/out/targets/appimage/appImageUtil.js
++++ b/out/targets/appimage/appImageUtil.js
+@@ -167,13 +167,30 @@
+ 
+ isEulaAccepted=1
+ 
++HAVE_NO_SANDBOX=0
++for arg in "\${args[@]}" ; do
++  if [ "$arg" = --no-sandbox ] ; then
++    HAVE_NO_SANDBOX=1
++    break
++  fi
++done
++NO_SANDBOX=
++# Backport of electron-builder #9590 (26.9.0). An AppImage cannot carry a
++# setuid chrome-sandbox, so Chromium needs unprivileged user namespaces. Where
++# they are refused (Ubuntu 24.04's AppArmor default), Chromium aborts before
++# the app starts; start without its sandbox instead. "unshare -Ur true" is the
++# probe; a missing unshare (exit 127) also adds the flag.
++if [ $HAVE_NO_SANDBOX -eq 0 ] && ! unshare -Ur true 2>/dev/null ; then
++  NO_SANDBOX=--no-sandbox
++fi
++
+ atexit()
+ {
+   if [ $isEulaAccepted == 1 ] ; then
+     if [ $NUMBER_OF_ARGS -eq 0 ] ; then
+-      exec "$BIN"
++      exec "$BIN" $NO_SANDBOX
+     else
+-      exec "$BIN" "\${args[@]}"
++      exec "$BIN" $NO_SANDBOX "\${args[@]}"
+     fi
+   fi
+ }
