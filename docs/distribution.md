@@ -137,6 +137,16 @@ restrictions.
 - Packaging tool: Electron Builder
 - Supported candidate target: Ubuntu 24.04 LTS x64 AppImage only
 - Signing: unsigned (no Linux code-signing lane yet)
+- AppImage runtime: the static type2-runtime (`toolsets.appimage: '1.0.2'`
+  in `apps/desktop/electron-builder.yml`). FUSE is linked in and it mounts
+  through `fusermount3`, so stock Ubuntu 24.04 needs no `libfuse2`.
+- Chromium sandbox: an AppImage cannot carry a setuid `chrome-sandbox`, so
+  AppRun probes `unshare -Ur true` and adds `--no-sandbox` only where
+  unprivileged user namespaces are refused (Ubuntu 24.04's AppArmor
+  default). This is a backport of electron-builder #9590 in
+  `patches/app-builder-lib@26.8.1.patch`. The desktop entries still pass
+  `--no-sandbox` themselves (`apps/desktop/src/main/linux-desktop-entry.ts`
+  and the bundled entry).
 - FFmpeg: the SHA-256-pinned LGPL Linux x64 bundle fetched by
   `pnpm ffmpeg:fetch:linux`, including `ffmpeg`, `ffprobe`, license,
   source-offer, and build-config metadata. `libx264` is forbidden.
