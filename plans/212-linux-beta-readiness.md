@@ -3889,3 +3889,137 @@ Linux CI clippy with `--all-targets`, backend tests (4,536 passed, 0 failed,
 23 ignored) and the direct 1080p30 matrix on both backends (OpenH264 level
 4.0, BT.709 TV range, 2 ms tail; VAAPI on renderD128 level 4.0, BT.709 TV
 range, 2 ms tail).
+
+### Ogre test day 2 and main through `05f57709`, 2026-11-06 and 07
+
+The goal stayed the same: test the latest Linux build on Ogre, fix what
+fails and open a PR per fix. Merged on main since the last section:
+
+- #1227: with Clips on, picking a camera Off (or another screen or camera)
+  stopped the buffer-only ring and re-armed it on the old scene before the
+  idle reload ran, so Save scene stayed off. `smoke:scene-presets` timed out
+  on `confirmed Camera Off`. A visual source change now stops the ring, loads
+  the scene, then re-arms. Not Linux-specific.
+- #1230: a take and its stream did not survive a six-second FFmpeg freeze
+  (`smoke:multistream-endurance` session B). The raw recording leg gave up
+  after macOS's 2 s budget and cut a frame partway; Linux now takes the
+  Windows raw contract (10 s without progress, 30 s for a whole frame). The
+  session audio gave up after 5 s, FFmpeg's `apad` then filled the
+  `-shortest` queue and FFmpeg exited 20 s later with ENOSPC; a chunk now
+  waits `OUTPUT_WEDGED_TIMEOUT`, writing stale silence. That ENOSPC came
+  from a filtergraph thread and was reported as a full disk; it no longer
+  is. The endurance smoke now records at the stream's profile on Linux.
+- #1232: two more Clips races. A screen or camera picked while the ring's
+  own `session.start` was in flight, or while the ring sat idle between
+  sessions, never reached the scene. Both now go through #1227's stop, load,
+  re-arm path, and the ring waits on its own count of pending loads. The
+  same PR fixes the scheduled-streams smoke (it asserted `idle` while Clips
+  held its ring between legs), the scene-presets smoke (it read the scene
+  list once right after `save()`, and since plan 210 D3 it framed Smoke B
+  into Smoke A) and the analyzer (FLV and MKV frame counts are held to the
+  video packet span, not the audio tail; an FLV receive failed at 279
+  against an expected 286 with no frame missing).
+- #1233: `pnpm clean:worktrees` failed on Linux before listing anything
+  (`spawnSync lsof ENOENT`; Arch ships no lsof). It reads `/proc` now.
+
+Also on main and merged here without a change from this plan: #1231 (X
+Live moves to the `/2/sources` and `/2/broadcasts` routes), #1191 (Windows
+Record waits for Media Foundation's first frame), #1194 (a superseded
+layout warm-up reports the supersession) and the 0.20.3 release (#1237,
+#1238, #1239). Linux 0.20.3-alpha.1 was published from `a636ad03` with
+physical acceptance owner-waived, not passed.
+
+One conflict: `startReplayBuffer` in `use-studio.tsx`. This branch's side
+is kept; it already holds #1232 and adds the `selectionReady` and
+`superseded` guard from `e12078f6`, which main does not have.
+
+This branch carried the same fixes as commits before main took them:
+`0c133ab8`, `cbd66eb4` and `da88367e` (#1230), `aef81237` and `9fa98f1a`
+(#1232) and `644fc021` (the analyzer part of #1232). `fa713230` is still
+only here: on Linux, `smoke:multistream:vertical` and
+`smoke:captions-dual-orientation` now require the backend's refusal of a
+vertical destination (Linux has no separate vertical encoder, plan 0016),
+check the backend returns to idle and log a SKIP. Any other outcome fails.
+
+Smokes on Ogre after the fixes: `smoke:scheduled-streams` passes. The
+scene-presets smoke passes every step up to the camera pixel check, which
+needs the FaceTime HD camera to see light; the lid is closed.
+
+#### Power loss, 2026-11-06 22:59:58
+
+Ogre lost power with no shutdown, OOM, panic or thermal log, during a
+tsc and eslint gate. After the reboot the battery read 0% on AC (840
+cycles, 71% of design capacity). BD_PROCHOT (MSR 0x1FC bit 0) had been
+cleared since 2026-11-05 to lift the EC's 800 MHz clamp; most likely the
+day's load drained the worn battery and a spike then passed the adapter.
+The reboot restored BD_PROCHOT and it was not cleared again, so Ogre runs
+at 800 MHz under load. Every Ogre timing after this point is at that clock.
+Clearing it again is the owner's call, with that risk.
+
+#### Main's macOS CI and the session audio tests
+
+Of 40 CI runs from 2026-11-04 to 06, on main and PR branches, the macOS
+Rust job failed 14 times. Two were the 15-minute test timeout. The other 12
+each failed a timing-sensitive backend test that passes on rerun:
+
+- `rnnoise_capture_health_stays_raw_while_output_is_suppressed`: 3 runs.
+- `a_source_clock_jump_re_anchors_and_recovers_without_retiring`: 3 runs.
+- `stopping_writes_real_microphone_audio_up_to_the_stop_instant`: 3 runs.
+- `source_iso_stop_flushes_delayed_system_without_future_microphone`,
+  `real_bus_handoffs_preserve_one_pcm_stream_ramps_mute_none_and_cancelled_old_route`,
+  `bridge_waits_for_fresh_compositor_sequence_before_repeating` and
+  `every_shortest_output_takes_the_sessions_bound`: 1 run each.
+
+The RNNoise one is root-caused. RNNoise reads two 10 ms frames past the
+chunk it renders (`DELAY_SAMPLES`, 960). The test runs a 50 ms playout with
+no denoise headroom, so the lookahead has a 30 ms arrival margin. A fixture
+thread late by about 50 ms hands the model zero-filled lookahead; after
+that digital silence RNNoise passes the tone's return at about unity gain
+(peak 0.0010018), and the meter, which truncates, reads 0.001 where the
+test expects less. A single zero frame peaks at most 0.0008323, a fresh
+state at most 0.0008782, so only a late pair fails. Production is not
+affected the same way: Linux plays out at 150 ms and the other platforms
+at 70 ms with the denoise headroom.
+
+#1236 fixes the test, not the product. The test's microphone cases run on a
+fixture gate that holds each render until the microphone has delivered the
+chunk plus `DELAY_SAMPLES`. On Ogre a temporary 80 ms or 150 ms stall before
+the fixture's 40th packet failed 3 of 3 runs each without the gate, with the
+CI signature (`live_peak: 0.0`, `session_peak: 0.001`), and passed 3 of 3
+each with it; 10 of 10 passed with no stall. The other macOS flakes have
+other signatures and stay open.
+
+The Ogre merge gates below also failed
+`rnnoise_paced_stall_recovers_microphone_and_system_without_old_history`
+once (`microphone_owner_present`); it passed 6 of 6 reruns alone.
+
+#### Gates on the merged tree
+
+Run on Ogre at 800 MHz with main through `2e54732f` merged; `05f57709`
+adds only the 0.20.3 release notes, waivers and version.
+
+| Gate                             | Result                            |
+| -------------------------------- | --------------------------------- |
+| format, lint, typecheck          | clean                             |
+| integration tests                | 218 passed                        |
+| script tests                     | 3318 passed, 3 skipped            |
+| `cargo fmt --check --all`        | clean                             |
+| Linux CI clippy, `--all-targets` | clean                             |
+| desktop unit tests               | 7295 passed, 5 failed, 1 skipped  |
+| backend tests                    | 4527 passed, 1 failed, 23 ignored |
+
+The 5 desktop failures are 5 s timeouts in two files: the comments
+snapshot delta test and the IANA zone search in
+`schedule-stream-dialog.test.ts`, with three later tests in that file
+failing behind it. Both files pass alone, 2 of 2. This is host load at
+800 MHz, not a code change.
+
+The backend failure was
+`x_chat::tests::bind_subscribe_read_flow_delivers_a_comment` (`the host
+message is persisted`); it passed 10 of 10 alone. A test race: it waited
+for both messages in memory, stopped the connector and read the stored
+rows once, but delivery ingests a batch before it persists it. #1240 makes
+the test wait for each stored row first, as the Twitch tests already do.
+With a 50 or 200 ms persistence delay injected (scratch, not committed)
+the old test failed 8 of 8 with that message and the new one passed 8 of
+8; with no delay it passed 15 of 15.
