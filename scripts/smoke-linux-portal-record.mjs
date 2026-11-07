@@ -35,7 +35,8 @@ import {
   assessPortalScreenStatus
 } from './lib/linux-portal-capture-gates.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
-import { startLinuxMotionWindow } from './lib/linux-motion-window.mjs'
+import { assessMotionPresentation, startLinuxMotionWindow } from './lib/linux-motion-window.mjs'
+import { probeLinuxSessionLock } from './lib/linux-session-lock.mjs'
 import { packagedSmokeLaunchOptions } from './lib/packaged-smoke-paths.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
@@ -65,6 +66,9 @@ const packagedLaunch = packagedSmokeLaunchOptions({
 })
 
 const video = { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbps: 8000 }
+// Painted at under half the take's rate, the window alone makes the take
+// repeat frames, and the freeze gates would blame the pipeline.
+const motionMinFps = video.fps / 2
 const sources = {
   screenId: PORTAL_MONITOR_SOURCE_ID,
   windowId: null,
@@ -148,6 +152,20 @@ async function waitForLiveScreen(ws, label, deadlineMs) {
   return status
 }
 
+// A portal capture of a locked session records the lock screen, whatever moves
+// behind it, and the compositor keeps painting the motion window under the
+// lock, so its paint rate cannot tell (ogre, 2026-11-07). Ask the session.
+function sessionLockFailure(when) {
+  const lock = probeLinuxSessionLock()
+  step(`session lock ${when}`, lock)
+  if (lock.locked !== true) return null
+  const via = lock.probes.filter((probe) => probe.locked).map((probe) => probe.via)
+  return (
+    `the session was locked ${when} (${via.join(', ')}): the portal captures the lock ` +
+    `screen, so the take cannot show the motion window`
+  )
+}
+
 async function startPortalPreview(ws, label, timeoutMs) {
   const startedAt = Date.now()
   const status = await request(ws, timeoutMs, 'preview.screen.start', {
@@ -166,6 +184,7 @@ if (process.platform !== 'linux') {
 
 let stopApp = async () => {}
 let stopMotion = async () => {}
+let motionSamples = []
 try {
   const launch = await launchDevApp({
     env: {
@@ -209,9 +228,15 @@ try {
 
   // 3. Record from the live portal source, with guaranteed motion on it.
   if (motionEnabled) {
-    const motion = await startLinuxMotionWindow({ timeoutMs: stepTimeoutMs })
+    const locked = sessionLockFailure('before the take')
+    if (locked) fail(locked)
+    const motion = await startLinuxMotionWindow({
+      timeoutMs: stepTimeoutMs,
+      minFps: motionMinFps
+    }).catch((error) => fail(error.message))
     stopMotion = motion.stop
-    step('motion window', { pid: motion.pid })
+    motionSamples = motion.samples
+    step('motion window', { pid: motion.pid, framesPerSecond: motionSamples.at(-1)?.fps ?? null })
     // Let the compositor map and paint it before the take starts.
     await sleep(1000)
   }
@@ -296,8 +321,37 @@ try {
     { width: video.width, height: video.height, recordingMs }
   )
   if (!assessment.ok) fail(assessment.failures.join('; '))
-  if (motionEnabled && quality.verdict.failures.length > 0) {
-    fail(`quality gates with motion on screen: ${quality.verdict.failures.join('; ')}`)
+  if (motionEnabled) {
+    // The freeze gates only speak for the pipeline if the window was moving
+    // on the monitor through the take; say so when it was not.
+    const presentation = assessMotionPresentation(motionSamples, {
+      from: startRequestedAt,
+      to: stopRequestedAt,
+      minFps: motionMinFps
+    })
+    evidence.motionPresentation = {
+      minFps: motionMinFps,
+      takeFps: presentation.fps,
+      samples: motionSamples.map(({ at, fps }) => ({ at: new Date(at).toISOString(), fps })),
+      failures: presentation.failures
+    }
+    step('motion presentation', { minFps: motionMinFps, takeFps: presentation.fps })
+    if (!presentation.ok) {
+      fail(
+        `motion window not presented during the take, so the recording had no motion to ` +
+          `check: ${presentation.failures.join('; ')}; analyzer: ` +
+          `${quality.verdict.failures.join('; ') || 'no failures'}`
+      )
+    }
+    if (quality.verdict.failures.length > 0) {
+      const locked = sessionLockFailure('after the take')
+      const analyzer = quality.verdict.failures.join('; ')
+      fail(
+        locked
+          ? `${locked}; analyzer: ${analyzer}`
+          : `quality gates with motion on screen: ${analyzer}`
+      )
+    }
   }
 
   const previewStopped = await request(ws, stepTimeoutMs, 'preview.screen.stop')
