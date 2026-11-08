@@ -17,7 +17,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import { cloudTestOutputs, cloudUploadPlan } from '@/lib/cloud-test-outputs'
-import { CLOUD_SECTION_FOCUS_EVENT, takeCloudSectionFocus } from '@/lib/cloud-notices'
+import { CLOUD_SECTION_FOCUS_EVENT, takeCloudSectionFocus } from '@/lib/cloud-section-focus'
 import {
   CLOUD_PREMIUM_REASON,
   cloudSectionState,
@@ -153,6 +153,12 @@ export function CloudSection(): ReactElement | null {
             <FieldLabel>If this computer drops, show</FieldLabel>
             <Select
               disabled={disabled}
+              // The trigger shows the choice's name, never its value (plan
+              // 222 U6: it read "default").
+              items={[
+                { value: BRB_CARD, label: 'Be right back card' },
+                ...screens.map((screen) => ({ value: screen.id, label: screen.name }))
+              ]}
               value={settings.holdImageScreenId ?? BRB_CARD}
               onValueChange={(value) =>
                 void setCloudSettings({ holdImageScreenId: value === BRB_CARD ? null : value })

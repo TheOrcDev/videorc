@@ -1,10 +1,5 @@
 import { CloudSection } from './cloud-section'
 
-// The Watchdog section (plan 223 D7) loads with the page's first paint of it;
-// its rows, the QR code and the phone list stay out of the eager bundle.
-const WatchdogSection = lazy(async () => ({
-  default: (await import('./watchdog-section')).WatchdogSection
-}))
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
@@ -72,6 +67,15 @@ import {
 } from '../../../../shared/live-dashboard'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+
+// The Watchdog section (plan 223 D7) loads with the page's first paint of it;
+// its rows, the QR code and the phone list stay out of the eager bundle.
+// Below the imports: the dev server turns `import { lazy }` into a const at
+// that line, so a use above it throws "Cannot access 'lazy' before
+// initialization" and the Livestream page shows its error panel.
+const WatchdogSection = lazy(async () => ({
+  default: (await import('./watchdog-section')).WatchdogSection
+}))
 
 // The Livestream right column (plan 080 S7). Owner, 2026-09-30: "Live stream
 // should be about connecting your accounts and not about reading some tech

@@ -159,7 +159,7 @@ describe('liveDestinationsView through Videorc Cloud', () => {
         {
           targetId: 'videorc-cloud-horizontal',
           label: 'Videorc Cloud',
-          word: 'Be right back · 28 min left',
+          word: 'Be right back',
           tone: 'warn'
         },
         { targetId: 'youtube', label: 'YouTube', word: 'Failed', tone: 'error' }
@@ -269,7 +269,7 @@ describe('the cloud feed under a thin uplink (plan 222 L2)', () => {
         {
           targetId: 'videorc-cloud-horizontal',
           label: 'Videorc Cloud',
-          word: 'Be right back · 25 min left',
+          word: 'Be right back',
           tone: 'warn'
         }
       ]

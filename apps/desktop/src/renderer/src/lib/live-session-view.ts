@@ -86,8 +86,11 @@ export function cloudDestinationProblem(
   switch (cloud.phase) {
     case 'live':
       return null
+    // The countdown is the Stream row's (streamHealthFact), right below:
+    // said twice, the long value squeezed both labels to "Vi…" and "S…"
+    // (plan 222 U6, by eye).
     case 'hold':
-      return row(cloudStreamReading(cloud) ?? cloudPhaseLabel(cloud.phase), 'warn')
+      return row('Be right back', 'warn')
     case 'failed':
       return row(cloudPhaseLabel(cloud.phase), 'error')
     default:

@@ -816,10 +816,6 @@ try {
       tab: 'studio',
       waitFor: '[data-testid="session-destinations-summary"]'
     })
-    await shots.page('livestream-hold', launch.smoke, {
-      tab: 'streaming',
-      waitFor: '[data-testid="technical-details"]'
-    })
   }
   await sleep(Math.max(0, feedCutMs - (Date.now() - cutAtMs)))
   assertReceiversConnected(receivers, 'during the feed cut')
@@ -2442,6 +2438,7 @@ async function prepareCloudSectionShots(smoke) {
     30_000,
     'the renderer back after the onboarding reload'
   )
+  await recordRendererErrors(host)
   await requestSmokeCommand(
     smoke,
     'open-tab',
@@ -2449,7 +2446,9 @@ async function prepareCloudSectionShots(smoke) {
     // Main waits 45 s for the selector (a dev page compiles its lazy chunk
     // on first open); outwait it so a real miss says what the page shows.
     { timeoutMs: 60_000 }
-  )
+  ).catch(async (error) => {
+    throw new Error(`${error.message}; renderer errors: ${await rendererErrors(host)}`)
+  })
   const files = {}
   const theme = () =>
     cdpEvaluate(host, `document.documentElement.classList.contains('dark') ? 'dark' : 'light'`)
@@ -2480,12 +2479,15 @@ async function prepareCloudSectionShots(smoke) {
         30_000,
         'the renderer ready for a screenshot'
       )
+      await recordRendererErrors(host)
       await requestSmokeCommand(
         smokeNow,
         'open-tab',
         { tab, waitFor: waitSelector },
         { timeoutMs: 60_000 }
-      )
+      ).catch(async (error) => {
+        throw new Error(`${error.message}; renderer errors: ${await rendererErrors(host)}`)
+      })
       for (const wanted of ['dark', 'light']) {
         await setTheme(wanted)
         await cdpEvaluate(
@@ -2526,6 +2528,25 @@ async function prepareCloudSectionShots(smoke) {
       await setTheme('dark')
     }
   }
+}
+
+/**
+ * A page that hits its error boundary only says so on screen; React logs the
+ * error through console.error. Record those, and name them if a page shot
+ * fails to open (the smoke's own failure evidence).
+ */
+async function recordRendererErrors(host) {
+  await cdpEvaluate(
+    host,
+    `(() => { if (window.__smokeErrors) return 'ok'; window.__smokeErrors = []; const original = console.error; console.error = (...args) => { window.__smokeErrors.push(args.map((arg) => (arg && arg.stack) || String(arg)).join(' ').slice(0, 2000)); original(...args) }; return 'ok' })()`
+  )
+}
+
+async function rendererErrors(host) {
+  return (
+    (await cdpEvaluate(host, `JSON.stringify(window.__smokeErrors ?? [])`).catch(() => '[]')) ??
+    '[]'
+  )
 }
 
 async function cdpCall(host, method, params) {

@@ -2,15 +2,16 @@ import type { BackendClient } from '@/backendClient'
 
 import type { CloudStatus } from './backend'
 import { CLOUD_TOAST_ID, formatCloudCountdown } from './cloud-toasts'
+import { requestCloudSectionFocus } from './cloud-section-focus'
 import { toast } from './toast'
 import { openWorkspaceTab } from './workspace-navigation'
 
 // Videorc Cloud's rarer notices (plan 222 U1, U5): the once-per-account
 // "Videorc Cloud is on" and the once-per-show "past this month's cloud
 // hours". The Studio provider imports this module only when one is due, so
-// none of it rides in the eager bundle (the renderer asset budget); the
-// Livestream section takes the focus request from here too, so both sides
-// share one module instance.
+// none of it rides in the eager bundle (the renderer asset budget). The
+// focus request it makes lives in `cloud-section-focus.ts`, which the
+// Livestream section imports without this module's app-wide imports.
 
 /**
  * Plan 222 U5 (plan 184 D18): once per show, when it first runs past the
@@ -36,26 +37,6 @@ export const CLOUD_ANNOUNCE_TOAST = {
   title: 'Videorc Cloud is on',
   description: 'Your stream stays on air if this computer drops. Set it up in Livestream.'
 } as const
-
-/**
- * The notice's action asks the Livestream page to bring its Videorc Cloud
- * section into view: a flag the section takes when it mounts, and an event
- * for a page that is already open.
- */
-export const CLOUD_SECTION_FOCUS_EVENT = 'videorc:cloud-section-focus'
-let cloudSectionFocusPending = false
-
-export function requestCloudSectionFocus(): void {
-  cloudSectionFocusPending = true
-  globalThis.dispatchEvent?.(new Event(CLOUD_SECTION_FOCUS_EVENT))
-}
-
-/** True once per request: the section that takes it scrolls itself into view. */
-export function takeCloudSectionFocus(): boolean {
-  const pending = cloudSectionFocusPending
-  cloudSectionFocusPending = false
-  return pending
-}
 
 /** U5: the provider hands every status that runs past the hours here. */
 export function toastCloudAllowancePast(previous: CloudStatus | null, next: CloudStatus): void {
