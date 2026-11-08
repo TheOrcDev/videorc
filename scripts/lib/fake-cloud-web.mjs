@@ -32,9 +32,40 @@ import { capabilitiesDocument } from './fake-transcript-service.mjs'
  * - show tokens `vcs1.<payload>.<sig>` minted with an Ed25519 key whose public
  *   half the agent holds as `VIDEORC_CLOUD_SHOW_PUBLIC_KEY`.
  *
+ * - the lost route (plan 222 D7, L7): `POST /api/cloud/shows/:id/lost`
+ *   asks the node's signed `GET /v1/health` once (8 s) and ends the show
+ *   `node-unreachable` only when the node does not answer and nothing named
+ *   the show in the last 15 s (`LOST_SHOW_SILENCE_MS`); that end is final (a
+ *   node that comes back gets the show in `endShows`, never reopened).
+ *
  * Every call is recorded for the report as method, path and status only.
  * Bearer tokens, show tokens, ingest keys, SRT passphrases and stream keys
  * never reach a log.
+ *
+ * What it does NOT mirror of `videorc-web/lib/cloud/*` (the lane 3 fidelity
+ * diff of 2026-10-21, re-read 2026-11-08 at web `be159d28`). A smoke that
+ * needs one of these needs the real web, or this list shrinks first:
+ *
+ * - the reaper (`reaper.ts`, every minute): a show silent for 5 minutes ends
+ *   `runner-silent` after the same health probe, a show past `expiresAt`
+ *   ends `expired`, and a node silent for 30 s is named. Here nothing ages;
+ *   only the lost route probes a node. (A `runner-silent` show reported lost
+ *   is still finalized `node-unreachable`, as the web does.)
+ * - placement (`placement.ts`): one node, taken heard or not; never
+ *   `cloud-full` from a heartbeat older than 30 s, never a region.
+ * - the hours: `cloud-hours-used-up` with `resetAt` when under 5 minutes are
+ *   left or the overage guard trips; `secondsUsed` never moves here
+ *   (`setCloud` patches the block by hand).
+ * - the cohort (`VIDEORC_CLOUD_USERS`, `VIDEORC_CLOUD_PUBLIC`): the one
+ *   account is always in.
+ * - the reconcile cron (`meter.ts`) and the live `cloud` block from the meter.
+ * - the heartbeat's `capacity {slots, used}` checks and the `cloud_nodes`
+ *   upsert; `drain` is always false.
+ * - the usage report's ranges (seq 0..2^31-1, seconds >= 0 summing to a day,
+ *   `at` required) and its `rejected[]` answer; negatives pass here.
+ * - `phaseSinceAt` on an end, the SRT latency env range check, Next's own
+ *   404/405 shapes (any unknown path answers 404 `not-found` after the
+ *   bearer check).
  */
 
 export const NODE_HEADER_ID = 'x-videorc-node'
@@ -67,6 +98,13 @@ export const SHOW_WINDOW_MS = 60 * 60 * 1000
 /** A show the node stops reporting ends at the next heartbeat once this old. */
 export const FORGOTTEN_SHOW_GRACE_MS = 30_000
 export const AGENT_TIMEOUT_MS = 8_000
+// The lost route (plan 222 D7), as `videorc-web/lib/cloud/shows-route.ts` has
+// it: a heartbeat or usage report that named the show in the last 15 s means
+// the node is alive whatever the web's own probe said. Heartbeats come every
+// 10 s, and the desktop reports only after 20 s of feed loss.
+export const LOST_SHOW_SILENCE_MS = 15_000
+export const RUNNER_SILENT_END_REASON = 'runner-silent'
+export const NODE_UNREACHABLE_END_REASON = 'node-unreachable'
 // SRT (plan 184 C1b), as `videorc-web/lib/cloud/shows.ts` has it: every create
 // sends the node an SRT passphrase and latency (the node refuses a create
 // without the passphrase), and the node's `srt` blocks reach the desktop as
@@ -456,6 +494,49 @@ export function parseCreateShowBody(value) {
   return { kind: value.kind, outputs, holdMaxSeconds, client }
 }
 
+/**
+ * The body of `POST /api/cloud/shows/:id/lost` (plan 222 D7): every field
+ * optional, the web only logs them. Anything of the wrong shape is one
+ * `{ message }`. Pure.
+ * @returns {{ok:true, report:{at:string|null, feedFailedSeconds:number|null, controlLost:boolean|null}}|{ok:false, message:string}}
+ */
+export function parseLostShowReport(value) {
+  const body = value === undefined || value === null ? {} : value
+  if (!isRecord(body)) return { ok: false, message: 'The body must be a JSON object.' }
+  let at = null
+  if (body.at !== undefined && body.at !== null) {
+    if (typeof body.at !== 'string' || Number.isNaN(Date.parse(body.at))) {
+      return { ok: false, message: 'at must be an ISO date.' }
+    }
+    at = body.at
+  }
+  let feedFailedSeconds = null
+  if (body.feedFailedSeconds !== undefined && body.feedFailedSeconds !== null) {
+    if (!Number.isInteger(body.feedFailedSeconds) || body.feedFailedSeconds < 0) {
+      return { ok: false, message: 'feedFailedSeconds must be a whole number of seconds.' }
+    }
+    feedFailedSeconds = body.feedFailedSeconds
+  }
+  let controlLost = null
+  if (body.controlLost !== undefined && body.controlLost !== null) {
+    if (typeof body.controlLost !== 'boolean') {
+      return { ok: false, message: 'controlLost must be true or false.' }
+    }
+    controlLost = body.controlLost
+  }
+  return { ok: true, report: { at, feedFailedSeconds, controlLost } }
+}
+
+/**
+ * The reaper's and the lost route's silence rule (pure): a show nothing
+ * named since `silentBefore` is silent. `lastSeenAt` falls back to
+ * `createdAt`, as the web's `COALESCE` does.
+ */
+export function showSilentSince(show, silentBefore) {
+  const heard = show.lastSeenAt ?? show.createdAt
+  return heard.getTime() < silentBefore.getTime()
+}
+
 /** The show as the desktop and the Live page see it (`serializeCloudShow`). */
 export function serializeShow(show) {
   return {
@@ -705,6 +786,8 @@ export function createFailure(created) {
  * @param {object} [options.allowance] - the `cloud` block (cloudAllowanceBlock).
  * @param {number} [options.srtLatencyMs] - SRT's receive window for every show
  *   (the web's VIDEORC_CLOUD_SRT_LATENCY_MS, 1000 ms by default).
+ * @param {number} [options.agentTimeoutMs] - how long a node-signed call to
+ *   the agent may take (the web's 8 s; the unit tests shorten it).
  */
 export async function startFakeCloudWeb({
   sessionToken,
@@ -712,7 +795,8 @@ export async function startFakeCloudWeb({
   signingKey,
   userId = 'user_cloud_smoke',
   allowance,
-  srtLatencyMs = DEFAULT_SRT_LATENCY_MS
+  srtLatencyMs = DEFAULT_SRT_LATENCY_MS,
+  agentTimeoutMs = AGENT_TIMEOUT_MS
 }) {
   if (!sessionToken || !node?.id || !node?.secret || !node?.agentUrl || !signingKey) {
     throw new Error('The fake cloud web needs a session token, a node and a signing key.')
@@ -738,7 +822,12 @@ export async function startFakeCloudWeb({
     replaysRefused: 0,
     staleHeartbeats: 0,
     /** `VIDEORC_CLOUD_DISABLED`: the rollback switch (`setDisabled`). */
-    disabled: false
+    disabled: false,
+    /**
+     * Every lost report (plan 222 D7): the show, what the desktop said, what
+     * the node's health probe answered and what became of the show.
+     */
+    lostReports: []
   }
   const enabledCloud = allowance ?? cloudAllowanceBlock({ nowMs: Date.now() })
   // While the switch is off the account's block says so, as the web's does.
@@ -774,7 +863,8 @@ export async function startFakeCloudWeb({
         path,
         body,
         nodeId: node.id,
-        secret: node.secret
+        secret: node.secret,
+        timeoutMs: agentTimeoutMs
       })
       state.agentCalls.push({ path, ...asked, status: result.status, ms: Date.now() - started })
       return result
@@ -787,6 +877,32 @@ export async function startFakeCloudWeb({
         ms: Date.now() - started
       })
       return { status: null, json: null }
+    }
+  }
+  // The web's one question to a node outside creates and ends (wire-notes
+  // "What the web asks a node"): a signed, empty GET. Any answer at all, the
+  // health body or an error envelope with any status, is a sign of life.
+  const agentHealth = async () => {
+    const started = Date.now()
+    try {
+      const result = await signedAgentRequest({
+        agentUrl: node.agentUrl,
+        path: '/v1/health',
+        method: 'GET',
+        nodeId: node.id,
+        secret: node.secret,
+        timeoutMs: agentTimeoutMs
+      })
+      state.agentCalls.push({ path: '/v1/health', status: result.status, ms: Date.now() - started })
+      return 'answered'
+    } catch (error) {
+      state.agentCalls.push({
+        path: '/v1/health',
+        status: null,
+        error: error.message,
+        ms: Date.now() - started
+      })
+      return 'unreachable'
     }
   }
 
@@ -880,6 +996,8 @@ export async function startFakeCloudWeb({
           state.usageRejected += 1
           continue
         }
+        // A report names the show: the node is alive (the silence rule).
+        if (!show.endedAt) show.lastSeenAt = now
         // A test show's seconds count toward nothing (C6b).
         if (isTestShow(show)) {
           state.testUsageIgnored.push({ showId: entry.showId, seq: entry.seq })
@@ -1077,6 +1195,65 @@ export async function startFakeCloudWeb({
       show.endedAt = now
       show.endReason = 'host-ended'
       return answer(200, { ok: true })
+    }
+    // Plan 222 D7: the desktop lost its show (control socket gone, feed down
+    // 20 s, `current` still live). As `handleLostCloudShow` does: ask the
+    // node once, end only on its silence, and make that end final.
+    const lostMatch = /^\/api\/cloud\/shows\/([^/]+)\/lost$/.exec(path)
+    if (req.method === 'POST' && lostMatch) {
+      let body
+      try {
+        const raw = (await readRequestBody(req, 16 * 1024)).toString('utf8')
+        body = raw ? JSON.parse(raw) : {}
+      } catch {
+        body = undefined
+      }
+      const showId = decodeURIComponent(lostMatch[1])
+      const show = isShowId(showId) ? state.shows.get(showId) : null
+      if (!show || show.userId !== userId) {
+        return fail(404, 'cloud-show-not-found', 'No such cloud show.')
+      }
+      const parsed = parseLostShowReport(body)
+      if (!parsed.ok) return fail(400, 'invalid-request', parsed.message)
+      const record = {
+        showId,
+        at: now.toISOString(),
+        ...parsed.report,
+        probe: null,
+        probeMs: null,
+        outcome: null,
+        answeredAt: null
+      }
+      state.lostReports.push(record)
+      const done = (outcome) => {
+        record.outcome = outcome
+        record.answeredAt = new Date().toISOString()
+        return answer(200, { show: serializeShow(show) })
+      }
+      // The reaper's runner-silent end is a guess a heartbeat may reopen; the
+      // desktop is about to stream directly, so make the end final.
+      if (show.endedAt && show.endReason === RUNNER_SILENT_END_REASON) {
+        show.endReason = NODE_UNREACHABLE_END_REASON
+        show.endedAt = now
+        return done('finalized-runner-silent')
+      }
+      // Already over: the desktop reads the end and streams directly.
+      if (show.endedAt) return done('already-ended')
+      const probeStarted = Date.now()
+      record.probe = await agentHealth()
+      record.probeMs = Date.now() - probeStarted
+      if (record.probe === 'answered') return done('kept:node-answered')
+      // A heartbeat or usage report that named the show in the last 15 s, or
+      // while the web waited on the node, keeps it: the node is alive.
+      const decidedAt = new Date()
+      if (show.endedAt) return done('already-ended')
+      if (!showSilentSince(show, new Date(decidedAt.getTime() - LOST_SHOW_SILENCE_MS))) {
+        return done('kept:heard-meanwhile')
+      }
+      show.status = 'ended'
+      show.endedAt = decidedAt
+      show.endReason = NODE_UNREACHABLE_END_REASON
+      return done('ended')
     }
     await drain(req)
     state.unknownRoutes += 1

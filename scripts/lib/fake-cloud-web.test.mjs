@@ -7,26 +7,30 @@ import {
   applyHeartbeat,
   capabilitiesWithCloud,
   cloudAllowanceBlock,
+  createFailure,
   decodeNodeSecret,
   encodeNodeSecret,
   evaluateTestShowLimit,
   isIngestKey,
+  isLoopbackHttpAgent,
   isShowId,
+  LOST_SHOW_SILENCE_MS,
   mintShowToken,
   newIngestKey,
   newShowId,
-  createFailure,
-  isLoopbackHttpAgent,
   newShowSigningKey,
   newSrtPassphrase,
   NODE_DIRECTION_NODE_TO_WEB,
   NODE_DIRECTION_WEB_TO_NODE,
+  NODE_UNREACHABLE_END_REASON,
   nodeCanonicalString,
   nodeSignature,
   parseAgentCreateResponse,
   parseCreateShowBody,
+  parseLostShowReport,
   parseSrtBlock,
   showPublicKeyBase64Url,
+  showSilentSince,
   signNodeRequest,
   startFakeCloudWeb,
   verifyNodeRequest,
@@ -1145,6 +1149,238 @@ describe('fake cloud web: the create rate limit (C-W6)', () => {
     } finally {
       await web.close()
       await new Promise((resolveClose) => agent.close(resolveClose))
+    }
+  })
+})
+
+// Plan 222 D7 (L7): the lost route, as `handleLostCloudShow` has it. The
+// fake agent here answers its health, sits silent (a node off the network:
+// the probe times out) or is gone (connection refused).
+describe('fake cloud web: the lost route (plan 222 D7)', () => {
+  it('parses the report as the web does: every field optional, every type checked', () => {
+    assert.deepEqual(parseLostShowReport(undefined), {
+      ok: true,
+      report: { at: null, feedFailedSeconds: null, controlLost: null }
+    })
+    assert.deepEqual(parseLostShowReport({}), {
+      ok: true,
+      report: { at: null, feedFailedSeconds: null, controlLost: null }
+    })
+    assert.deepEqual(
+      parseLostShowReport({
+        at: '2026-11-08T10:00:20.000Z',
+        feedFailedSeconds: 20,
+        controlLost: true
+      }),
+      {
+        ok: true,
+        report: { at: '2026-11-08T10:00:20.000Z', feedFailedSeconds: 20, controlLost: true }
+      }
+    )
+    assert.equal(parseLostShowReport([]).ok, false)
+    assert.equal(parseLostShowReport({ at: 'yesterday' }).ok, false)
+    assert.equal(parseLostShowReport({ feedFailedSeconds: -1 }).ok, false)
+    assert.equal(parseLostShowReport({ feedFailedSeconds: 2.5 }).ok, false)
+    assert.equal(parseLostShowReport({ controlLost: 'yes' }).ok, false)
+    const created = new Date('2026-11-08T10:00:00.000Z')
+    const silentBefore = new Date('2026-11-08T10:00:30.000Z')
+    assert.equal(showSilentSince({ createdAt: created, lastSeenAt: null }, silentBefore), true)
+    assert.equal(
+      showSilentSince(
+        { createdAt: created, lastSeenAt: new Date('2026-11-08T10:00:31.000Z') },
+        silentBefore
+      ),
+      false
+    )
+    assert.equal(LOST_SHOW_SILENCE_MS, 15_000)
+  })
+
+  it('asks the node once and ends the show node-unreachable only on its silence; the end is final', async () => {
+    const secret = Buffer.alloc(32, 9)
+    const { privateKey, publicKeyBase64Url } = newShowSigningKey()
+    const agentState = { mode: 'answer', healthSeen: [], creates: 0 }
+    const hanging = new Set()
+    const agent = createServer(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const rawBody = Buffer.concat(chunks).toString('utf8')
+      if (req.url === '/v1/health') {
+        const verification = verifyNodeRequest({
+          direction: NODE_DIRECTION_WEB_TO_NODE,
+          headers: { get: (name) => req.headers[name] ?? null },
+          method: req.method,
+          nowMs: Date.now(),
+          path: req.url,
+          rawBody,
+          secretFor: (nodeId) => (nodeId === 'local-1' ? secret : null)
+        })
+        agentState.healthSeen.push({ method: req.method, verified: verification.ok, rawBody })
+        if (agentState.mode === 'silent') {
+          // A node off the network: the request never gets an answer.
+          hanging.add(res)
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, nodeId: 'local-1', version: 'test' }))
+        return
+      }
+      if (req.url === '/v1/shows') {
+        agentState.creates += 1
+        const { status, json } = nodeCreateAnswer(JSON.parse(rawBody))
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(json))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    })
+    await new Promise((resolveListen) => agent.listen(0, '127.0.0.1', resolveListen))
+    const agentUrl = `http://127.0.0.1:${agent.address().port}`
+    const web = await startFakeCloudWeb({
+      sessionToken: 'session-token',
+      node: { id: 'local-1', secret, agentUrl },
+      signingKey: privateKey,
+      // The web's 8 s, shortened: the silent node must time out in the test.
+      agentTimeoutMs: 300
+    })
+    const bearer = { authorization: 'Bearer session-token', 'content-type': 'application/json' }
+    const lost = (showId, body) =>
+      fetch(`${web.httpOrigin}/api/cloud/shows/${showId}/lost`, {
+        method: 'POST',
+        headers: bearer,
+        body: body === undefined ? undefined : JSON.stringify(body)
+      })
+    const heartbeat = (shows, atMs = Date.now()) => {
+      const rawBody = JSON.stringify({ nodeId: 'local-1', capacity: { slots: 4, used: 1 }, shows })
+      return fetch(`${web.httpOrigin}/api/cloud/nodes/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...signNodeRequest({
+            direction: NODE_DIRECTION_NODE_TO_WEB,
+            nodeId: 'local-1',
+            path: '/api/cloud/nodes/heartbeat',
+            rawBody,
+            secret,
+            timestampMs: atMs
+          })
+        },
+        body: rawBody
+      })
+    }
+    try {
+      const createResponse = await fetch(`${web.httpOrigin}/api/cloud/shows`, {
+        method: 'POST',
+        headers: bearer,
+        body: JSON.stringify({
+          kind: 'solo',
+          outputs: [
+            {
+              orientation: 'horizontal',
+              width: 1920,
+              height: 1080,
+              fps: 30,
+              videoKbps: 6000,
+              audioKbps: 160
+            }
+          ],
+          holdMaxSeconds: 1800,
+          client: { app: 'desktop', version: '0.21.0' }
+        })
+      })
+      assert.equal(createResponse.status, 201)
+      const showId = (await createResponse.json()).show.id
+      // The node reported it live 20 s ago (a signed timestamp inside the skew).
+      assert.equal((await heartbeat([{ showId, phase: 'live' }], Date.now() - 20_000)).status, 200)
+
+      // The wrong shapes first: no such show, a bad body.
+      assert.equal((await lost('sh_0000000000000000000000', {})).status, 404)
+      const bad = await lost(showId, { feedFailedSeconds: 'twenty' })
+      assert.equal(bad.status, 400)
+      assert.equal((await bad.json()).error.code, 'invalid-request')
+      assert.equal(web.state.lostReports.length, 0)
+
+      // The node answers its health: the show stays, and the desktop hears it live.
+      const kept = await lost(showId, { feedFailedSeconds: 20, controlLost: true })
+      assert.equal(kept.status, 200)
+      const keptBody = await kept.json()
+      assert.equal(keptBody.show.id, showId)
+      assert.equal(keptBody.show.status, 'live')
+      assert.equal(keptBody.show.endReason, null)
+      assert.equal(agentState.healthSeen.length, 1)
+      assert.deepEqual(agentState.healthSeen[0], { method: 'GET', verified: true, rawBody: '' })
+      assert.equal(web.state.lostReports.at(-1).outcome, 'kept:node-answered')
+      assert.equal(web.state.lostReports.at(-1).feedFailedSeconds, 20)
+      assert.equal(web.state.lostReports.at(-1).controlLost, true)
+
+      // The node silent, but a report named the show 2 s ago: heard meanwhile.
+      agentState.mode = 'silent'
+      assert.equal((await heartbeat([{ showId, phase: 'hold' }], Date.now() - 2_000)).status, 200)
+      const heard = await lost(showId, {})
+      assert.equal(heard.status, 200)
+      assert.equal((await heard.json()).show.status, 'hold')
+      assert.equal(web.state.lostReports.at(-1).outcome, 'kept:heard-meanwhile')
+      assert.equal(web.state.lostReports.at(-1).probe, 'unreachable')
+      assert.equal(agentState.healthSeen.length, 2)
+      // The desktop's own view: still a show to resume.
+      assert.equal(
+        (
+          await (
+            await fetch(`${web.httpOrigin}/api/cloud/shows/current`, { headers: bearer })
+          ).json()
+        ).show?.id,
+        showId
+      )
+
+      // The node silent and the show silent for 15 s: ended node-unreachable.
+      assert.equal(
+        (await heartbeat([{ showId, phase: 'hold' }], Date.now() - 16_000)).status,
+        409,
+        'older than the last heartbeat: stale'
+      )
+      // So back-date through the heartbeat the web already applied: wait it out instead.
+      await new Promise((resolveWait) =>
+        setTimeout(resolveWait, LOST_SHOW_SILENCE_MS - 2_000 + 100)
+      )
+      const ended = await lost(showId, {
+        at: new Date().toISOString(),
+        feedFailedSeconds: 21,
+        controlLost: true
+      })
+      assert.equal(ended.status, 200)
+      const endedBody = await ended.json()
+      assert.equal(endedBody.show.status, 'ended')
+      assert.equal(endedBody.show.endReason, NODE_UNREACHABLE_END_REASON)
+      assert.ok(endedBody.show.endedAt)
+      assert.equal(web.state.lostReports.at(-1).outcome, 'ended')
+      assert.equal(agentState.healthSeen.length, 3)
+      assert.deepEqual(
+        await (
+          await fetch(`${web.httpOrigin}/api/cloud/shows/current`, { headers: bearer })
+        ).json(),
+        { show: null }
+      )
+
+      // Final: a node that comes back and reports it live gets it in endShows.
+      agentState.mode = 'answer'
+      const back = await heartbeat([{ showId, phase: 'live' }])
+      assert.equal(back.status, 200)
+      assert.deepEqual((await back.json()).endShows, [showId])
+      assert.equal(web.state.shows.get(showId).endReason, NODE_UNREACHABLE_END_REASON)
+      // A second report answers the end without asking anyone.
+      const again = await lost(showId, {})
+      assert.equal(again.status, 200)
+      assert.equal((await again.json()).show.endReason, NODE_UNREACHABLE_END_REASON)
+      assert.equal(web.state.lostReports.at(-1).outcome, 'already-ended')
+      assert.equal(agentState.healthSeen.length, 3)
+      // The report itself never leaks anything: method, path, status only.
+      const lostCalls = web.state.calls.filter((call) => call.path.endsWith('/lost'))
+      assert.equal(lostCalls.length, 6)
+      assert.deepEqual(Object.keys(lostCalls[0]).sort(), ['at', 'method', 'path', 'status'])
+    } finally {
+      for (const res of hanging) res.destroy()
+      await web.close()
+      await new Promise((resolveClose) => agent.close(() => resolveClose()))
     }
   })
 })
