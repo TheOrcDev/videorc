@@ -3764,10 +3764,13 @@ mod tests {
         }
     }
 
+    /// Every `legs` hook call: the session and the runner's legs, in order.
+    type RecordedLegs = Arc<StdMutex<Vec<(String, Vec<StreamTargetRuntime>)>>>;
+
     struct Harness {
         context: CloudShowContext<FakeWeb, FakeConnector>,
         emitted: Arc<StdMutex<Vec<CloudStatus>>>,
-        legs: Arc<StdMutex<Vec<(String, Vec<StreamTargetRuntime>)>>>,
+        legs: RecordedLegs,
         /// Every value the `remember` hook persisted, in order.
         remembered: Arc<StdMutex<Vec<Option<String>>>>,
     }
@@ -3961,7 +3964,7 @@ mod tests {
         let patch: CloudSettingsPatch = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert_eq!(patch.hold_image_screen_id, None);
         // Persisted JSON never carries a null (the serde-null trap).
-        let value = serde_json::to_value(&CloudSettings::default()).unwrap();
+        let value = serde_json::to_value(CloudSettings::default()).unwrap();
         assert_eq!(value, json!({ "holdMaxSeconds": 1800 }));
     }
 
@@ -5876,17 +5879,19 @@ mod tests {
     /// end keeps the show remembered: the runner may still hold the keys.
     #[test]
     fn an_unconfirmed_end_keeps_the_show_remembered() {
-        let mut runtime = CloudShowRuntime::default();
-        runtime.show = Some(ActiveShow {
-            record: created().show,
-            control: created().control,
-            ingest: None,
-            session_id: Some("session-1".to_string()),
-            destinations: Vec::new(),
-            handed_over: false,
-            hold_image_png_base64: None,
-            resuming: false,
-        });
+        let mut runtime = CloudShowRuntime {
+            show: Some(ActiveShow {
+                record: created().show,
+                control: created().control,
+                ingest: None,
+                session_id: Some("session-1".to_string()),
+                destinations: Vec::new(),
+                handed_over: false,
+                hold_image_png_base64: None,
+                resuming: false,
+            }),
+            ..CloudShowRuntime::default()
+        };
         assert_eq!(
             runtime.take_remembered_change(),
             Some(Some("sh_abc".to_string()))
