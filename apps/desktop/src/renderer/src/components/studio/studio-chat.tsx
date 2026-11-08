@@ -8,6 +8,7 @@ import {
 } from 'react'
 
 import { ChatJumpChip } from '@/components/chat-jump-chip'
+import { ArrivalChip } from '@/components/arrival-chip'
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import {
   COMMENT_ROW_TINT_CLASS,
@@ -430,6 +431,9 @@ function StudioChatRowContent({
       </span>
       <span className="flex shrink-0 items-center gap-1">
         {message.amountText ? <Badge variant="warning">{message.amountText}</Badge> : null}
+        {/* Plan 225 D11: the arrival chip only, nothing else from the
+            community here. */}
+        {message.arrival ? <ArrivalChip arrival={message.arrival} /> : null}
         <HighlightStatus status={highlight} />
         <ChatPlatformIcon className="mr-0" decorative platform={message.platform} />
         {/* The mark's words, for the row button's name only: a hidden node

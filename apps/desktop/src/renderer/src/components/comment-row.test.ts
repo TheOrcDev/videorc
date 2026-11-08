@@ -600,3 +600,38 @@ describe('CommentRow outcome lines', () => {
     expect(markup).toContain('aria-description="Shows it on stream. The stream is not live."')
   })
 })
+
+describe('CommentRow arrival chip (plan 225 D11)', () => {
+  const arrivalRow = (arrival: LiveChatMessage['arrival']): string =>
+    renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message({ arrival }),
+        onHighlight: () => undefined
+      })
+    )
+
+  it('shows one quiet chip inside the row button, from the row alone', () => {
+    const html = arrivalRow({ streams: 14, regular: true, inARow: 5 })
+    expect(html).toContain('data-testid="comment-arrival"')
+    expect(html).toContain('data-arrival="regular"')
+    expect(html).toContain('Regular · 14')
+    // The chip is part of the row's one button: never a nested control.
+    const button = html.slice(html.indexOf('<button'), html.indexOf('</button>'))
+    expect(button).toContain('Regular · 14')
+    expect(button.match(/<button/g)).toHaveLength(1)
+  })
+
+  it('shows the milestone over Back and nothing for a quiet return or a plain row', () => {
+    expect(
+      arrivalRow({
+        streams: 10,
+        regular: true,
+        inARow: 2,
+        awayDays: 40,
+        milestone: { kind: 'streams', value: 10 }
+      })
+    ).toContain('10th stream')
+    expect(arrivalRow({ streams: 2, regular: false, inARow: 1 })).not.toContain('comment-arrival')
+    expect(arrivalRow(undefined)).not.toContain('comment-arrival')
+  })
+})

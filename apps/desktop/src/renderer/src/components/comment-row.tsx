@@ -19,6 +19,7 @@ import {
 } from '@/lib/live-chat-view'
 export { commentCanHighlight } from '@/lib/live-chat-view'
 
+import { ArrivalChip } from '@/components/arrival-chip'
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import {
   CopyIcon,
@@ -785,6 +786,9 @@ function CommentContent({
               First chat
             </Badge>
           ) : null}
+          {/* Plan 225 D11: a returning person's one chip, after the role
+              tags and First chat, from the row's own data. */}
+          {message.arrival ? <ArrivalChip arrival={message.arrival} /> : null}
           {mentioned ? (
             <ChipHint hint="Mentions you">
               <Badge className="shrink-0" data-testid="comment-mention">
