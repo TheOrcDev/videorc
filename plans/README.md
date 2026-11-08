@@ -1,5 +1,20 @@
 # Implementation Plans
 
+- 2026-11-08: [Plan 221](221-premium-worth-paying-for.md), Premium worth
+  paying for. The owner: "currently our premium is not really giving much
+  value to users", then "execute the entire plan and put all to that pr we
+  have". EXECUTING on the three cloud draft PRs (#727, web #85, runner #1):
+  - [Plan 222](222-cloud-solo-shows-for-premium.md): the stream never drops,
+    and you upload once for every platform (plan 184 Phase 1, ported onto
+    main and taken to production).
+  - [Plan 223](223-stream-watchdog.md): a watchdog that sees what viewers
+    see: a muted mic, a stalled picture, a platform gone dark, and chat
+    saying "no sound".
+  - [Plan 224](224-guests-from-a-link.md): guests join from a link. It
+    supersedes plan 184 Phase 2's slices.
+  - [Plan 225](225-know-your-viewers-across-platforms.md): know your
+    viewers across platforms. It absorbs the parked
+    [Plan 183](183-buddy-remembers-your-regulars.md).
 - 2026-11-05: [Plan 218](218-the-stream-holds-its-frame-rate.md), a
   streamer's support bundle (0.18.0): "laggy on YouTube, streaming 1080,
   saving 1440". PLANNED, not started:
