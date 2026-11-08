@@ -45,6 +45,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-segmentation = "1.13"
 uuid = { version = "1.19", features = ["v4"] }
+# Plan 184 C1c: Mozilla's roots, written beside the database as the roots the
+# RTMPS feed to a Videorc Cloud node checks against (OpenSSL's default paths
+# point nowhere on a user's machine).
+webpki-root-certs = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.1"

@@ -3127,6 +3127,7 @@ dependencies = [
  "unicode-segmentation",
  "uuid",
  "videorc-wer-helper",
+ "webpki-root-certs",
  "windows",
  "windows-core",
 ]
@@ -3298,6 +3299,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-root-certs"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

@@ -41,6 +41,7 @@ mod capture_recovery;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
+mod cloud_show;
 mod cohost;
 mod cohost_ack;
 mod cohost_auto_chat;
@@ -739,7 +740,7 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     if account::stored_session_token().is_some()
         && let Some(entitlement_token) = account::stored_entitlement_token()
         && let Err(error) =
-            entitlements::hydrate_account_entitlements_from_token(&entitlement_token)
+            entitlements::hydrate_account_entitlements_from_token(&entitlement_token, None)
     {
         tracing::info!("Stored entitlement token not restored: {error:#}");
     }
@@ -14554,11 +14555,21 @@ fn apply_prepared_account_entitlement_refresh(
             entitlements::clear_account_entitlements()
         }
         PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+            // Plan 185 D2: the plan named beside the tier. The token's own
+            // `plan` claim wins when present; this is the fallback for tokens
+            // minted before the claim existed.
+            let plan = capabilities
+                .plan
+                .as_ref()
+                .and_then(|plan| protocol::EntitlementPlan::parse(&plan.id));
             match capabilities.entitlement_token.as_deref() {
                 // Prefer the signed token: verified locally, persisted for
                 // offline grace until its exp.
                 Some(entitlement_token) => {
-                    match entitlements::hydrate_account_entitlements_from_token(entitlement_token) {
+                    match entitlements::hydrate_account_entitlements_from_token(
+                        entitlement_token,
+                        plan,
+                    ) {
                         Ok(changed) => {
                             account::persist_entitlement_token(entitlement_token);
                             changed
@@ -14570,15 +14581,17 @@ fn apply_prepared_account_entitlement_refresh(
                             );
                             entitlements::hydrate_account_entitlements(
                                 capabilities.entitlement.is_premium,
+                                plan,
                             )
                         }
                     }
                 }
                 // Older web deploy / unconfigured signing key: unsigned
                 // boolean with its short staleness ceiling.
-                None => {
-                    entitlements::hydrate_account_entitlements(capabilities.entitlement.is_premium)
-                }
+                None => entitlements::hydrate_account_entitlements(
+                    capabilities.entitlement.is_premium,
+                    plan,
+                ),
             }
         }
         PreparedAccountEntitlementRefreshOutcome::KeepCached(error) => {
