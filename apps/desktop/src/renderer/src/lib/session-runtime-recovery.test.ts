@@ -144,6 +144,14 @@ describe('session runtime recovery', () => {
     expect(toastSpies.success).toHaveBeenCalledTimes(1)
     expect(toastSpies.warning).toHaveBeenCalledTimes(1)
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    // `unavailable` means X ended the broadcast: X's API gives no playback
+    // URL any more, so there is nothing else to "show".
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'X ended your broadcast',
+      expect.objectContaining({
+        description: expect.stringContaining('Your local recording is unaffected.')
+      })
+    )
   })
 
   it('preserves OAuth callback success and failure notifications in the lazy chunk', () => {
@@ -464,6 +472,30 @@ describe('session audio news (plan 076)', () => {
     )
   })
 
+  it('says the rest of the take is silent when the audio output stops for good', () => {
+    showSessionHealthEvent(healthEvent('audio-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your recording has no sound from here',
+      expect.objectContaining({
+        id: 'audio-output',
+        description: 'audio-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
+  it('says the recording stopped when its encoder stops taking frames (2026-11-03 Iris Xe)', () => {
+    showSessionHealthEvent(healthEvent('recording-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your recording stopped',
+      expect.objectContaining({
+        id: 'recording-output',
+        description: 'recording-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
   it('replaces a frozen-stream warning with the news that it resumed', () => {
     showSessionHealthEvent(healthEvent('stream-output-stalled'), false)
     expect(toastSpies.warning).toHaveBeenCalledWith(
@@ -475,6 +507,46 @@ describe('session audio news (plan 076)', () => {
       'Your stream is moving again',
       expect.objectContaining({ id: 'stream-output' })
     )
+  })
+
+  // Plan 218: a choppy stream and a short connection are live news, each on
+  // one key, so the good news replaces the bad and nothing stacks.
+  it('keeps a choppy-stream warning up until the stream is smooth again', () => {
+    showSessionHealthEvent(healthEvent('stream-delivery-degraded'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Your stream is choppy',
+      expect.objectContaining({
+        id: 'stream-delivery',
+        description: 'stream-delivery-degraded message',
+        duration: Infinity
+      })
+    )
+    showSessionHealthEvent(healthEvent('stream-delivery-recovered', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Your stream is smooth again',
+      expect.objectContaining({ id: 'stream-delivery' })
+    )
+  })
+
+  it('tells the connection story on one key: overflow, step down, floor, back', () => {
+    const cases = [
+      ['stream-leg-overflow', 'warn', 'warning', 'Your connection can’t keep up'],
+      [
+        'stream-bitrate-lowered',
+        'warn',
+        'warning',
+        'Stream quality lowered to fit your connection'
+      ],
+      ['stream-bitrate-floor', 'warn', 'warning', 'Your connection can’t carry this stream'],
+      ['stream-bitrate-restored', 'info', 'success', 'Stream quality is back']
+    ] as const
+    for (const [code, level, variant, title] of cases) {
+      showSessionHealthEvent(healthEvent(code, level), false)
+      expect(toastSpies[variant]).toHaveBeenCalledWith(
+        title,
+        expect.objectContaining({ id: 'stream-uplink', description: `${code} message` })
+      )
+    }
   })
 
   it('says once that a Screen file stopped, and that the Combined recording keeps going', () => {
@@ -538,6 +610,23 @@ describe('session audio news (plan 076)', () => {
     showSessionHealthEvent(healthEvent('screen-capture-restored', 'info'), false)
     expect(toastSpies.success).toHaveBeenCalledWith(
       'Screen capture is back',
+      expect.objectContaining({ id: 'screen-capture' })
+    )
+  })
+
+  it('reports a captured window that is out of sight, and its return, on the screen-capture key', () => {
+    showSessionHealthEvent(healthEvent('screen-window-out-of-sight'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Window out of sight',
+      expect.objectContaining({
+        id: 'screen-capture',
+        duration: 20_000,
+        description: 'screen-window-out-of-sight message'
+      })
+    )
+    showSessionHealthEvent(healthEvent('screen-window-back', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'The window is back',
       expect.objectContaining({ id: 'screen-capture' })
     )
   })
@@ -652,6 +741,18 @@ describe('record+stream notices (plan 174 B-6)', () => {
         priorSessionState: 'recording'
       })
     ).toMatchObject({ activity: 'recording' })
+  })
+
+  it('ends the live stream news with the session (plan 218)', async () => {
+    const { toast } = await import('sonner')
+    showSessionFinished({
+      status: { state: 'idle' as const, sessionId: 'live' },
+      activity: 'live-stream',
+      currentNotice: null,
+      replaceNotice: vi.fn()
+    })
+    expect(toast.dismiss).toHaveBeenCalledWith('stream-delivery')
+    expect(toast.dismiss).toHaveBeenCalledWith('stream-uplink')
   })
 
   it('still announces the saved recording when Go Live ends, and never for stream-only', () => {

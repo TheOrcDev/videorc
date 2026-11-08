@@ -866,3 +866,65 @@ test('classifies a Linux dev Electron tree by ancestry (Linux plan 0020)', () =>
     ]
   )
 })
+
+test('a renderer the zygote has not reaped yet is not a second Electron main (Linux)', async () => {
+  // Sampled on Linux during the lifecycle gate (2026-11-06): the zygote's dead
+  // renderers keep comm `electron` and lose their command line, so they read
+  // as an `electron` without --type=. 834 is a zombie (ps cuts its comm column,
+  // `electron <defunct>`, at 15 characters), 835 is still exiting.
+  const table = parseProcessTable(`
+  800     1 800 20000 node-MainThread node scripts/preview-lifecycle-probe.mjs --gate
+  830   800 800 90000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron .
+  832   830 800  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  833   832 800  5000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+  834   833 800     0 electron <defun [electron] <defunct>
+  835   833 800     0 electron [electron]
+  836   833 800 70000 electron /repo/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron --type=zygote
+    2     0   0     0 kthreadd [kthreadd]
+`)
+
+  const census = await collectProcessCensus({
+    ledgerPaths: [],
+    pgid: 800,
+    readProcessTable: async () => table
+  })
+  assert.equal(census.summary['electron-main']?.count, 1)
+  assert.equal(census.summary['electron-renderer']?.count, 1)
+  assert.deepEqual(census.summary.exited, { count: 2, rssKb: 0 })
+  // A kernel thread prints the same way but is never an exited app process.
+  assert.equal(classifyProcess(table.at(-1)), 'other')
+  // A live process keeps its command line, even with no resident memory yet.
+  assert.equal(
+    classifyProcess({ pid: 9, pgid: 800, rssKb: 0, command: 'electron', args: 'electron .' }),
+    'electron-main'
+  )
+})
+
+test('a checkout under a path that names FFmpeg is still the Electron app (Linux)', async () => {
+  // The process-memory gate on Linux (2026-11-06) ran from a worktree named
+  // `fix-ffmpeg-early-exit`: every Electron process carried that path in its
+  // argv and the census read the app as nine FFmpeg processes and no main.
+  const repo = '/home/u/worktrees/fix-ffmpeg-early-exit'
+  const electron = `${repo}/node_modules/.pnpm/electron@39.8.10/node_modules/electron/dist/electron`
+  const table = parseProcessTable(`
+  900     1 900 20000 node-MainThread node scripts/smoke-process-memory.mjs
+  930   900 900 90000 electron ${electron} .
+  932   930 900  5000 electron ${electron} --type=zygote
+  933   932 900  5000 electron ${electron} --type=zygote
+  936   933 900 70000 electron ${electron} --type=zygote
+  940   930 900 50000 videorc-backend ${repo}/target/debug/videorc-backend
+  950   940 900 30000 ffmpeg ${repo}/vendor/ffmpeg/linux-x64/bin/ffmpeg -f rawvideo -i pipe:0 out.mp4
+  951   940 900  8000 ffprobe ${repo}/vendor/ffmpeg/linux-x64/bin/ffprobe -v error out.mp4
+`)
+
+  const census = await collectProcessCensus({
+    ledgerPaths: [],
+    pgid: 900,
+    readProcessTable: async () => table
+  })
+  assert.equal(census.summary['electron-main']?.count, 1)
+  assert.equal(census.summary['electron-renderer']?.count, 1)
+  assert.equal(census.summary.backend?.count, 1)
+  assert.equal(census.summary.ffmpeg?.count, 1)
+  assert.equal(census.summary.ffprobe?.count, 1)
+})

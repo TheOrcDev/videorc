@@ -1,4 +1,8 @@
-import { GlobalShortcutGate, replaceGlobalShortcutBindings } from './global-shortcut-lifecycle'
+import {
+  GlobalShortcutGate,
+  globalShortcutsUnavailableReason,
+  replaceGlobalShortcutBindings
+} from './global-shortcut-lifecycle'
 import { describe, expect, it, vi } from 'vitest'
 
 import { unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
@@ -134,5 +138,40 @@ describe('global shortcut gate (shortcut recorder suspend)', () => {
     gate.apply([['mic-toggle', 'Cmd+Shift+M']])
     registry.active.get('Cmd+Shift+M')?.()
     expect(dispatch).toHaveBeenCalledWith('mic-toggle')
+  })
+})
+
+describe('global shortcuts on Linux Wayland', () => {
+  it('names Wayland as the reason only where Electron resolved it on Linux', () => {
+    expect(
+      globalShortcutsUnavailableReason({ platform: 'linux', ozonePlatform: 'wayland' })
+    ).toMatch(/^Global shortcuts can't work in this Wayland session: /)
+    expect(
+      globalShortcutsUnavailableReason({ platform: 'linux', ozonePlatform: ' Wayland ' })
+    ).not.toBeNull()
+    expect(globalShortcutsUnavailableReason({ platform: 'linux', ozonePlatform: 'x11' })).toBeNull()
+    expect(globalShortcutsUnavailableReason({ platform: 'linux', ozonePlatform: '' })).toBeNull()
+    expect(
+      globalShortcutsUnavailableReason({ platform: 'darwin', ozonePlatform: 'wayland' })
+    ).toBeNull()
+    expect(globalShortcutsUnavailableReason({ platform: 'win32', ozonePlatform: '' })).toBeNull()
+  })
+
+  it('registers nothing, through the recorder too, and says why instead of claiming each key', () => {
+    const registry = { register: vi.fn(() => true), unregister: vi.fn() }
+    const gate = new GlobalShortcutGate(registry, vi.fn(), 'No key grab here.')
+
+    expect(gate.apply([['record-toggle', 'Control+Shift+R']])).toEqual({
+      registered: {},
+      unavailable: 'No key grab here.'
+    })
+    gate.arm()
+    expect(gate.apply([['record-toggle', 'Control+Shift+X']])).toEqual({
+      registered: {},
+      deferred: true
+    })
+    expect(gate.disarm()).toEqual({ registered: {}, unavailable: 'No key grab here.' })
+    expect(registry.register).not.toHaveBeenCalled()
+    expect(registry.unregister).not.toHaveBeenCalled()
   })
 })

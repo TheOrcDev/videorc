@@ -58,6 +58,8 @@ fn snapshot(session: &str, live: &[(&str, StreamTargetState)]) -> StreamTargetsS
                 state: *state,
                 message: None,
                 redacted_url: None,
+                uplink_overflows: None,
+                uplink_overflow_at: None,
             })
             .collect(),
     }

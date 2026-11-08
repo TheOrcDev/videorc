@@ -186,6 +186,8 @@ pub struct LiveBackgroundGlRenderer {
     shared: Option<Arc<Shared>>,
     failure: Option<Failure>,
     reported_status: Option<LiveBackgroundStatus>,
+    /// The board's ticket for `reported_status` (`LiveBackgroundBoard::withdraw`).
+    reported_ticket: Option<u64>,
     reported_resources: (u32, u64),
 }
 
@@ -197,6 +199,7 @@ impl LiveBackgroundGlRenderer {
             shared: None,
             failure: None,
             reported_status: None,
+            reported_ticket: None,
             reported_resources: (0, 0),
         }
     }
@@ -334,20 +337,26 @@ impl LiveBackgroundGlRenderer {
         self.report_resources((0, 0));
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn holds_resources(&self) -> bool {
         self.shared.is_some()
     }
 
     /// The live background left (or composition stopped): stop the worker and
-    /// clear what this renderer reported.
+    /// clear what this renderer reported. A status left up would outlive the
+    /// run: the idle Linux preview composes nothing, so nothing replaces it
+    /// (fix plan 0007). Cheap when there is nothing to clear.
     pub fn release(&mut self) {
         self.stop_worker();
         self.reported_status = None;
+        if let Some(ticket) = self.reported_ticket.take() {
+            self.board.withdraw(ticket);
+        }
     }
 
     fn report_status(&mut self, status: LiveBackgroundStatus) {
         if self.reported_status.as_ref() != Some(&status) {
-            self.board.report(status.clone());
+            self.reported_ticket = Some(self.board.report(status.clone()));
             self.reported_status = Some(status);
         }
     }
@@ -362,7 +371,7 @@ impl LiveBackgroundGlRenderer {
 
 impl Drop for LiveBackgroundGlRenderer {
     fn drop(&mut self) {
-        self.stop_worker();
+        self.release();
     }
 }
 

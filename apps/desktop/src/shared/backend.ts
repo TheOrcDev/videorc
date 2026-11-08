@@ -1549,9 +1549,8 @@ export interface XPrepareParams {
 
 export interface XPublishParams {
   accountId?: string
+  /** The 19-digit source id from prepare (never the stream key). */
   sourceId: string
-  region: string
-  isLowLatency: boolean
   /** Active capture session — X lifecycle events land in its session log. */
   sessionId?: string
 }
@@ -1596,10 +1595,9 @@ export interface PreparedXStreamSource {
   streamKeyPresent: boolean
   redactedUrl: string
   isStreamActive: boolean
-  recommendedConfiguration?: unknown
-  compatibilityInfo?: unknown
-  /** How prepare picked the source (env-override | reused-name-match | adopted-measured | created). */
+  /** How prepare picked the source (env-override | reused-name-match | created). */
   selection: string
+  /** Idle Videorc-named leftovers deleted during this prepare. */
   deletedRetiredSourceIds: string[]
 }
 
@@ -1612,16 +1610,23 @@ export interface XPublishResult {
   mediaId?: string
   shareUrl: string
   state: string
+  /**
+   * The announcing Post, when X had already created it at Go Live time. X
+   * posts asynchronously and never reports a failed Post; the backend's
+   * state watch logs whether it appeared.
+   */
   tweetId?: string
-  tweetError?: string
-  hlsUrl?: string
-  playableBeforePublish?: boolean
-  prePublishWaitMs?: number
-  compatibilityInfo?: unknown
+  /** X answered 200: the source already had a live broadcast, returned unchanged. */
+  alreadyLive?: boolean
   message: string
 }
 
-/** `streamTargets.x.playback` event — the post-publish watchability probe. */
+/**
+ * `streamTargets.x.playback` event — the post-Go-Live broadcast state watch.
+ * X's `/2/broadcasts` routes expose no playback URL, so `unavailable` now
+ * means X ended the broadcast (TIMED_OUT, ENDED) while the session was still
+ * streaming; `verified` / `pending` are kept for wire compatibility.
+ */
 export interface XPlaybackEvent {
   sessionId?: string | null
   broadcastId: string
@@ -1767,6 +1772,14 @@ export interface StreamTargetRuntime {
   state: StreamTargetState
   message?: string
   redactedUrl?: string
+  /** Plan 218: times this session the leg's FFmpeg fifo overflowed because
+   * the connection could not carry the stream to this destination (each one
+   * skipped seconds of video for its viewers). Additive to `state`: the leg
+   * stays `live`; `warning` keeps meaning "the platform is not receiving".
+   * Absent until the first overflow. */
+  uplinkOverflows?: number
+  /** RFC 3339 time of the latest overflow; absent until the first. */
+  uplinkOverflowAt?: string
 }
 
 export interface StreamTargetsSnapshot {
@@ -3171,6 +3184,41 @@ export interface AudioMeterDeviceProbeResult {
   probes: AudioMeterDeviceProbe[]
 }
 
+/** Plan 218 S2: the live stream's delivery over a rolling 30 s window,
+ * carried on `DiagnosticStats.streamDelivery` while a stream runs. `degraded`
+ * holds while more than 10 % of the stream's frames were skipped before
+ * encode over the window, and clears once it is back under 5 %. */
+export interface StreamDeliveryState {
+  targetFps: number
+  /** Frames the stream encoder produced per second over the window. */
+  deliveredFps: number
+  /** Share of the window's frames skipped before encode, 0 to 100. */
+  dropPercent: number
+  /** How much history the figures cover; 30 once the window is full. */
+  windowSeconds: number
+  degraded: boolean
+  /** RFC 3339 time the current degraded span started. */
+  degradedSince?: string
+  /** Plan 218 S3a: the stream encoder's bitrate right now and as chosen,
+   * when a dedicated stream encoder adapts it (macOS VideoToolbox). */
+  bitrateKbps?: number
+  chosenBitrateKbps?: number
+  /** True while the bitrate sits at its floor (half the chosen bitrate): the
+   * stream will not go lower; fewer destinations is the next step. */
+  atFloor: boolean
+  /** Fifo overflows FFmpeg reported on the session's legs so far; each one
+   * skipped seconds of video for that destination's viewers. */
+  uplinkOverflows: number
+}
+
+/** Plan 218 S2: one destination's fifo overflow count (no URL or key). */
+export interface StreamLegOverflowCount {
+  targetId: string
+  platform: StreamPlatform
+  label: string
+  overflows: number
+}
+
 export interface StreamHealth {
   sessionId: string
   fps?: number
@@ -3404,16 +3452,44 @@ export interface DiagnosticStats {
   streamOutputHeight?: number
   streamOutputFps?: number
   streamOutputBitrateKbps?: number
-  /** Latest measured FFmpeg output bitrate for the active stream. */
+  /** The stream's measured video bitrate over the last encoder window (plan
+   * 218 S2): what the stream encoder produced, audio excluded, comparable to
+   * the chosen stream bitrate. FFmpeg's own progress figure describes its
+   * first output (the recording file; see `recordingMeasuredBitrateKbps`). */
   streamMeasuredBitrateKbps?: number
-  /** Lowest non-zero measured output bitrate observed in this stream session. */
+  /** Lowest non-zero measured stream video bitrate observed this session. */
   streamMeasuredBitrateMinKbps?: number
-  /** Highest non-zero measured output bitrate observed in this stream session. */
+  /** Highest non-zero measured stream video bitrate observed this session. */
   streamMeasuredBitrateMaxKbps?: number
-  /** Cumulative bytes emitted by FFmpeg for this stream process generation. */
+  /** Cumulative encoded video bytes the stream encoder handed to FFmpeg. */
   streamOutputTotalBytes?: number
+  /** FFmpeg's progress bitrate for the recording file, when one is written. */
+  recordingMeasuredBitrateKbps?: number
+  /** FFmpeg's progress `total_size` for the recording file. */
+  recordingOutputTotalBytes?: number
   /** Cumulative frames FFmpeg reports duplicating for this stream process generation. */
   streamDuplicatedFrames?: number
+  /** Plan 218 S2: how the live stream is delivering over a rolling 30 s
+   * window; absent without a stream. Show "Your stream is running at
+   * {deliveredFps} of {targetFps} fps" while `degraded` holds. */
+  streamDelivery?: StreamDeliveryState
+  /** Plan 218 S2: per-destination fifo overflow counts; absent until a leg
+   * overflows. No URLs or keys. */
+  streamLegOverflows?: StreamLegOverflowCount[]
+  /** Plan 218 S2: the session's destinations, for the support bundle. */
+  streamDestinationCount?: number
+  streamDestinationPlatforms?: StreamPlatform[]
+  /** Plan 218 S2: the microphone sync offset the session started with. */
+  microphoneSyncOffsetMs?: number
+  /** Plan 218 S2: the stream writer's own FIFO-write p95 (ms). */
+  encoderBridgeStreamVideoToolboxFifoWriteP95Ms?: number
+  /** Plan 218 S2: p95 age of the stream queue's oldest frame (ms). */
+  encoderBridgeStreamQueueAgeP95Ms?: number
+  /** Plan 218 S2: stream ticks coalesced on the depth / age limit, and which
+   * limit tripped last. */
+  encoderBridgeStreamQueueDepthTrips?: number
+  encoderBridgeStreamQueueAgeTrips?: number
+  encoderBridgeStreamQueueLastTrip?: 'depth' | 'age'
   /** Number of distinct production VideoToolbox output encoders active for the session. */
   encoderBridgeActiveVideoToolboxOutputEncoders: number
   /** Frames/bytes produced by the local-recording VideoToolbox output encoder. */
@@ -4270,9 +4346,9 @@ export interface SessionListItem {
   takeId?: string
   /** Which file of the take this row is (plan 157); absent on ordinary rows. */
   recordingRole?: RecordingRole
-  /** A take Videorc stopped in the middle of (crash, killed backend, power
-   * loss): `recovered` once its MKV became an MP4 on the next start, `failed`
-   * when that did not work. Absent on every other row. */
+  /** A take that ended early (a crash, a killed backend, a power loss, or a
+   * recording that failed mid-take): `recovered` once its MKV became an MP4,
+   * `failed` when that did not work. Absent on every other row. */
   interruptionRecovery?: InterruptionRecovery
 }
 
@@ -4469,6 +4545,29 @@ export interface VirtualCameraStatus {
   message?: string
 }
 
+/** `camera.lowLight.get` (issue #1066). */
+export interface CameraLowLightParams {
+  cameraId: string
+}
+
+/** `camera.lowLight.set` (issue #1066): saved per camera, written to the device now. */
+export interface CameraLowLightSetParams {
+  cameraId: string
+  compensation: boolean
+}
+
+/**
+ * A camera's low-light compensation (issue #1066). On, the camera may drop to
+ * half its frame rate to brighten a dim picture; off (the default), it keeps
+ * its frame rate. `supported` is false off Windows and on cameras without the
+ * control.
+ */
+export interface CameraLowLightState {
+  cameraId: string
+  supported: boolean
+  compensation: boolean
+}
+
 export interface VirtualCameraSetParams {
   on: boolean
 }
@@ -4551,6 +4650,9 @@ export interface RuntimeInfo {
     style: 'clear' | 'material' | null
     styleRequested: 'clear' | 'material'
   }
+  /** Why global shortcuts can't work in this session (Linux on Wayland), in
+   * words Settings shows; absent where they can. */
+  globalShortcutsUnavailable?: string
   isPackaged: boolean
   /** Suppresses first-run setup without changing its persisted record (smokes). */
   firstRunSuppressed: boolean
@@ -5343,6 +5445,9 @@ export interface GlobalShortcutsResult {
   /** Main held the config because the shortcut recorder is armed; it
    * registers on disarm and this result says nothing about conflicts. */
   deferred?: true
+  /** This session can't hold a global shortcut (Linux on Wayland): nothing
+   * was registered, and this says why, as `RuntimeInfo` does. */
+  unavailable?: string
 }
 
 /** A key event main captured for the Settings shortcut recorder (plan 062).

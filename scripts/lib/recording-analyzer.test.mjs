@@ -32,6 +32,7 @@ import {
   avSkewComponents,
   avSkewMs,
   evaluateGates,
+  frameCountDurationSeconds,
   maxConsecutiveRun,
   maxKeyframeInterval,
   normalizeProbe,
@@ -229,6 +230,29 @@ describe('pacingStats', () => {
   it('surfaces a large inter-frame gap', () => {
     const stats = pacingStats([0, 0.033, 0.5, 0.533])
     assert.ok(stats.maxGapMs > 400)
+  })
+})
+
+describe('frameCountDurationSeconds', () => {
+  const pts = Array.from({ length: 279 }, (_, i) => 0.021 + i / 30)
+
+  it('trusts a recorded video stream duration', () => {
+    const probe = { formatDuration: 5.654, video: { duration: 5.633 } }
+    assert.equal(frameCountDurationSeconds(probe, pts, 30), 5.633)
+  })
+
+  it('measures the video packets, not the audio tail, when the container has no stream duration', () => {
+    // The Linux RTMP receive of 2026-11-06: 279 frames, audio to 9.535 s.
+    const probe = { formatDuration: 9.535, video: { duration: null } }
+    const seconds = frameCountDurationSeconds(probe, pts, 30)
+    assert.ok(Math.abs(seconds - 9.3) < 1e-9)
+    assert.equal(Math.round(30 * seconds), 279)
+  })
+
+  it('falls back to the format duration without packets or a frame rate', () => {
+    const probe = { formatDuration: 9.535, video: { duration: null } }
+    assert.equal(frameCountDurationSeconds(probe, [], 30), 9.535)
+    assert.equal(frameCountDurationSeconds(probe, pts, null), 9.535)
   })
 })
 
@@ -868,6 +892,7 @@ describe(
     let leadInZerohole
     let screenonly
     let silenttrack
+    let flvAudioTail
 
     before(async () => {
       dir = mkdtempSync(join(tmpdir(), 'vrc-analyzer-'))
@@ -878,6 +903,7 @@ describe(
       leadInZerohole = join(dir, 'lead-in-zerohole.mp4')
       screenonly = join(dir, 'screenonly.mp4')
       silenttrack = join(dir, 'silenttrack.mp4')
+      flvAudioTail = join(dir, 'flv-audio-tail.flv')
 
       await generate([
         '-f',
@@ -1024,6 +1050,30 @@ describe(
         'aac',
         silenttrack
       ])
+      // An RTMP receive: FLV keeps no stream durations, and the audio runs
+      // 300 ms past the last frame the way a stop drain leaves it.
+      await generate([
+        '-f',
+        'lavfi',
+        '-t',
+        '3',
+        '-i',
+        'testsrc2=size=320x240:rate=30',
+        '-f',
+        'lavfi',
+        '-t',
+        '3.3',
+        '-i',
+        'sine=frequency=440:sample_rate=48000',
+        '-fps_mode',
+        'cfr',
+        ...videoCodecArgs,
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        flvAudioTail
+      ])
     })
 
     after(() => {
@@ -1047,6 +1097,27 @@ describe(
       assert.equal(report.metrics.uniqueFrameRatio, 1)
       assert.equal(report.metrics.freezeCount, 0)
       assert.equal(report.metrics.digitalZeroRunCount, 0)
+    })
+
+    it('counts an FLV against its video, not the audio that outlives it', async () => {
+      const report = await analyzeRecording(flvAudioTail, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        gates: { requireMotion: false, avSyncTargetMs: Infinity, avSyncHardFailMs: Infinity }
+      })
+      assert.ok(report.metrics.durationSeconds > 3.2, `${report.metrics.durationSeconds}`)
+      assert.ok(
+        Math.abs(report.metrics.frameCountDurationSeconds - 3) < 0.05,
+        `${report.metrics.frameCountDurationSeconds}`
+      )
+      assert.equal(report.metrics.observedFrames, 90)
+      assert.equal(report.metrics.expectedFrames, 90)
+      assert.equal(
+        report.verdict.pass,
+        true,
+        `unexpected failures: ${report.verdict.failures.join('; ')}`
+      )
     })
 
     it('WARNS on a mid-take digital-zero hole and FAILS it when required', async () => {

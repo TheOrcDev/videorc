@@ -404,6 +404,15 @@ use crate::audio::{
 use crate::sound_mix::{SoundVoices, VoiceStart};
 
 const WRITE_DEADLINE: Duration = Duration::from_secs(5);
+/// How long one chunk may wait on a FIFO that accepts no PCM before the
+/// output counts as wedged. FFmpeg reads the session audio and the video in
+/// one process, so the audio waits as long as the video writers do (plan
+/// 087). Five seconds ended the audio during a six-second freeze the video
+/// waited out: FFmpeg saw its audio input end, `apad` filled the `-shortest`
+/// queue with silence, and FFmpeg exited about 20 s later with ENOSPC, taking
+/// the recording and the stream with it (ogre, 2026-11-04 and 2026-11-06).
+/// Stop still ends a blocked write at once, and its drain has its own deadline.
+const OUTPUT_WRITE_DEADLINE: Duration = crate::encoder_bridge::OUTPUT_WEDGED_TIMEOUT;
 const EPOCH_DEADLINE: Duration = Duration::from_secs(30);
 static OWNED_WRITERS: AtomicU64 = AtomicU64::new(0);
 
@@ -2069,18 +2078,18 @@ impl SessionAudio {
     pub fn status(&self) -> AudioBusStatus {
         self.handle.status()
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn has_selected_input(&self) -> bool {
         self.status().selected_input
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn captured_frames(&self) -> u64 {
         self.stats().captured_frames()
     }
     pub fn input_state(&self) -> NativeAudioInputState {
         self.stats().input_state()
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn source_loss_after_ms(&self) -> Option<u64> {
         self.stats().source_loss_after_ms()
     }
@@ -2093,7 +2102,7 @@ impl SessionAudio {
             .unwrap_or_else(|p| p.into_inner())
             .owner_present
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn claim_source_loss_event(&self) -> Option<SourceLoss> {
         self.handle
             .shared
@@ -3430,11 +3439,27 @@ struct MixFixtureGateState {
     armed: bool,
     rendered: u64,
     delivered: [u64; 2],
+    /// Frames past the rendered chunk every source must also have sent.
+    lookahead: u64,
     failure: Option<String>,
 }
 
 #[cfg(test)]
 impl MixFixtureGate {
+    /// A microphone-only fixture with noise reduction on: render also waits
+    /// for the model's lookahead, which the bus reads past the chunk.
+    fn microphone_with_denoise_lookahead() -> Self {
+        Self {
+            state: std::sync::Mutex::new(MixFixtureGateState {
+                // No system source feeds this fixture; never wait for one.
+                delivered: [0, u64::MAX],
+                lookahead: crate::microphone_denoise::DELAY_SAMPLES as u64,
+                ..Default::default()
+            }),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
     fn arm(&self) {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).armed = true;
         self.changed.notify_all();
@@ -3480,8 +3505,9 @@ impl MixFixtureGate {
     }
 
     fn permit_packet(&self, end: u64, stop: &AtomicBool) -> io::Result<bool> {
-        // More than the next complete 480-frame chunk plus either fixture's
-        // 512/960-frame packet, but far below the production one-second cap.
+        // More than the next complete 480-frame chunk, the 960-frame noise
+        // reduction lookahead and either fixture's 512/960-frame packet, but
+        // far below the production one-second cap.
         self.wait_for(stop, None, |state| {
             state.armed && end <= state.rendered + 4096
         })
@@ -3512,7 +3538,7 @@ impl MixFixtureGate {
                 && state
                     .delivered
                     .iter()
-                    .all(|end| *end >= cursor + CHUNK_FRAMES as u64)
+                    .all(|end| *end >= cursor + CHUNK_FRAMES as u64 + state.lookahead)
         })?;
         Ok(())
     }
@@ -6953,7 +6979,7 @@ fn write_rendered_chunk(
     mut wait: impl FnMut(),
 ) -> io::Result<WrittenChunk> {
     let started = now();
-    let deadline = started + WRITE_DEADLINE;
+    let deadline = started + OUTPUT_WRITE_DEADLINE;
     let mut bytes = vec![0; samples * 4];
     let mut written = 0;
     let mut stale_from = None;
@@ -7725,7 +7751,7 @@ mod tests {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             || now.get(),
-            || now.set(now.get() + WRITE_DEADLINE),
+            || now.set(now.get() + OUTPUT_WRITE_DEADLINE),
         );
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
         assert!(writer.bytes.is_empty());
@@ -7747,6 +7773,56 @@ mod tests {
         );
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::Interrupted);
         assert!(writer.bytes.is_empty());
+    }
+
+    /// Ogre, 2026-11-06 (`smoke:multistream-endurance` session B): FFmpeg
+    /// frozen for six seconds stopped reading the session audio. The video
+    /// writers waited it out; the audio gave up at five seconds and FFmpeg
+    /// later died on `apad` silence. The chunk now waits as long as the video
+    /// and goes out as stale silence once the reader drains again.
+    #[test]
+    fn a_six_second_freeze_is_waited_out_as_stale_silence() {
+        struct FrozenUntil<'a> {
+            bytes: Vec<u8>,
+            now: &'a std::cell::Cell<Instant>,
+            resume_at: Instant,
+        }
+        impl Write for FrozenUntil<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.now.get() < self.resume_at {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let started = Instant::now();
+        let now = std::cell::Cell::new(started);
+        let settings = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
+        let mut writer = FrozenUntil {
+            bytes: vec![],
+            now: &now,
+            resume_at: started + Duration::from_secs(6),
+        };
+        let written = write_chunk_with_clock(
+            &mut writer,
+            &[0.8; 960],
+            &settings,
+            FoldPlan::one_shot(&[0.8; 960], 2),
+            PeakLimiter::default(),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            || now.get(),
+            || now.set(now.get() + Duration::from_millis(10)),
+        )
+        .expect("a six-second freeze is a stall the session waits out")
+        .written;
+        assert_eq!(writer.bytes.len(), 960 * 4);
+        assert!(written.samples.iter().all(|sample| *sample == 0.0));
+        assert_eq!(written.stale_from, Some(0));
     }
 
     #[test]
@@ -11074,26 +11150,40 @@ mod mix_tests {
             (MicrophoneNoiseSuppression::Rnnoise, 0.0, false, 0.0),
         ] {
             let epoch = Instant::now() + Duration::from_millis(100);
-            let packets = signal_packets(epoch, 0, 48_000, 480, |position| {
+            // A second past the observation, so a gated render never waits
+            // for a packet the fixture does not have.
+            let packets = signal_packets(epoch, 0, 96_000, 480, |position| {
                 let sample =
                     amplitude * (std::f32::consts::TAU * 1000.0 * position as f32 / 48_000.0).sin();
                 (sample, sample)
             });
-            let bus = start_bus(
-                epoch,
-                Some(packets),
-                AudioProcessingSettings {
-                    gain_db,
-                    muted,
-                    noise_suppression: mode,
-                },
-                if amplitude == 0.0 {
-                    system_options()
-                } else {
-                    SessionAudioOptions::default()
-                },
-            )
-            .await;
+            let settings = AudioProcessingSettings {
+                gain_db,
+                muted,
+                noise_suppression: mode,
+            };
+            let bus = if amplitude == 0.0 {
+                start_bus(epoch, Some(packets), settings, system_options()).await
+            } else {
+                // RNNoise reads two 10 ms frames past the chunk it renders. A
+                // fixture thread that sends both late hands the model
+                // zero-filled input, and after that silence it passes the
+                // tone's return at about unity gain, which this meter reads
+                // as 0.001. Render waits for the lookahead instead.
+                let options = SessionAudioOptions::default();
+                let mut observation = MixTestObservation::new(epoch, options.playout_delay);
+                observation.fixture_gate =
+                    Some(Arc::new(MixFixtureGate::microphone_with_denoise_lookahead()));
+                start_bus_observed(
+                    epoch,
+                    Some(packets),
+                    settings,
+                    options,
+                    None,
+                    Some(Arc::new(std::sync::Mutex::new(observation))),
+                )
+                .await
+            };
             if amplitude == 0.0 {
                 let system = bus.session.system_audio();
                 let producer = prepare_system(
@@ -11114,7 +11204,7 @@ mod mix_tests {
             assert!(finalizing.received_capture_frames >= live.received_capture_frames);
             assert!(
                 live.session_peak < 0.001,
-                "processed meter remains quiet: {live:?}"
+                "mode={mode:?}: processed meter remains quiet: {live:?}"
             );
             // Match the observation window. Stop drains later model output,
             // which is not part of the health snapshot asserted above.

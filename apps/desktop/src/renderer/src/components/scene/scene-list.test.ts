@@ -272,7 +272,25 @@ describe('the Scene page scene list (plan 210 D6)', () => {
 
     mocked.core.sceneEditMode = true
     await render()
-    expect(container.querySelector('[data-testid="scene-edit"]')).toBeNull()
+    const held = container.querySelector<HTMLButtonElement>('[data-testid="scene-edit"]')!
+    expect(held.classList.contains('invisible')).toBe(true)
+    expect(held.disabled).toBe(true)
+  })
+
+  // The stage's first grab turns the editor on. A header that lost a button
+  // at that pointerdown would rewrap, scroll the pane and end the gesture.
+  it('keeps the header’s buttons in place when the editor turns on', async () => {
+    const header = (): string[] =>
+      [
+        ...container
+          .querySelector('[data-testid="scene-edit"]')!
+          .parentElement!.querySelectorAll('button')
+      ].map((button) => button.textContent ?? '')
+    await render()
+    const off = header()
+    mocked.core.sceneEditMode = true
+    await render()
+    expect(header()).toEqual(off)
   })
 
   it('still offers Edit scene while recording or live', async () => {

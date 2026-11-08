@@ -1,4 +1,5 @@
 import {
+  globalShortcutEntries,
   globalShortcutLayout,
   isGlobalShortcutAction,
   type GlobalShortcutAction
@@ -198,6 +199,20 @@ export class GlobalShortcutsRegistrar {
         }
         this.lastRegisteredBody = body
         publishRegistration({ ...result?.registered })
+        if (result?.unavailable) {
+          // Nothing registered (Linux on Wayland). Keys someone set would
+          // otherwise do nothing without a word; with none set (the default
+          // Hide screen key alone), Settings says it.
+          const userSet = { ...shortcuts, screenHideToggle: shortcuts.screenHideToggle ?? '' }
+          if (globalShortcutEntries(userSet).some(([, value]) => value?.trim())) {
+            toast.warning("Global shortcuts don't work here", {
+              id: 'global-shortcuts-conflict',
+              description: result.unavailable,
+              action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
+            })
+          }
+          return
+        }
         const failed = Object.entries(result?.registered ?? {})
           .filter(([, ok]) => !ok)
           .map(([action]) => action)

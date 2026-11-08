@@ -16,6 +16,7 @@ import {
   wantedSourceSelection
 } from './capture'
 import { BUILTIN_LAYOUTS } from './layout-framing-memory'
+import { canonicalJson } from './scene-visibility-identity'
 import { BUNDLED_BACKGROUND_MANIFEST } from '../../../shared/background-import'
 import { parseLivePosterAssetId } from '../../../shared/live-background-ids'
 
@@ -204,6 +205,20 @@ export function snapshotBackground(
       ? { fileName: decodeURIComponent(managedAssetPath.split(/[\\/]/).pop() ?? '') }
       : {})
   }
+}
+/**
+ * Whether two backgrounds are one picture in one style. Key order is not
+ * content: the backend's scene replies write a background's keys
+ * alphabetically and the registry writes them in declaration order, so a
+ * plain JSON.stringify comparison never matched a committed picture to its
+ * slot (ogre 2026-11-06: the applied tile stayed "Apply", and a second
+ * click applied it again instead of taking it off).
+ */
+export function sameSceneBackground(
+  a: EffectiveSceneBackground | null | undefined,
+  b: EffectiveSceneBackground | null | undefined
+): boolean {
+  return canonicalJson(snapshotBackground(a)) === canonicalJson(snapshotBackground(b))
 }
 export function normalizeSavedBackground(raw: unknown): SavedSceneBackground | null {
   if (raw === null) return null

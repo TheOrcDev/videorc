@@ -377,9 +377,11 @@ export function showXPlaybackEvent(event: XPlaybackEvent): void {
         'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
     })
   } else {
-    notifyOnce('x-playback', 'error', 'X never showed your stream', {
+    // X's API exposes no playback URL any more: `unavailable` means X ended
+    // the broadcast (usually TIMED_OUT: no video reached X in 5 minutes).
+    notifyOnce('x-playback', 'error', 'X ended your broadcast', {
       description:
-        'Viewers saw a loading spinner. Your local recording is unaffected; the next Go Live uses a replacement source if this repeats.'
+        'X stopped it while Videorc was still streaming, usually because no video reached X. Your local recording is unaffected.'
     })
   }
 }
@@ -449,6 +451,9 @@ export function showSessionFinished({
   currentNotice: SessionRuntimeNotice | null
   replaceNotice: (notice: SessionRuntimeNotice) => void
 }): void {
+  // Plan 218: news about the live stream ends with it.
+  toast.dismiss(STREAM_DELIVERY_TOAST_ID)
+  toast.dismiss(STREAM_UPLINK_TOAST_ID)
   if (currentNotice?.kind === 'microphone-input-lost' && currentNotice.phase !== 'ended') {
     const endedNotice: SessionRuntimeNotice = { ...currentNotice, phase: 'ended' }
     replaceNotice(endedNotice)
@@ -524,6 +529,9 @@ export function showSessionHealthEvent(
 }
 
 const STREAM_OUTPUT_TOAST_ID = 'stream-output'
+/** Plan 218: the stream's frame rate, and what its connection can carry. */
+export const STREAM_DELIVERY_TOAST_ID = 'stream-delivery'
+export const STREAM_UPLINK_TOAST_ID = 'stream-uplink'
 const SCREEN_CAPTURE_TOAST_ID = 'screen-capture'
 
 /**
@@ -539,6 +547,14 @@ function showLiveOutputNews(event: HealthEvent): void {
       description: event.message,
       duration: Infinity
     })
+  } else if (event.code === 'recording-output-failed') {
+    // The recording leg's encoder stopped taking frames mid-take; the backend
+    // ends the take (or keeps a healthy stream on air) and says which.
+    toast.error('Your recording stopped', {
+      id: 'recording-output',
+      description: event.message,
+      duration: Infinity
+    })
   } else if (event.code === 'stream-output-stalled') {
     toast.warning('Your stream is frozen', {
       id: STREAM_OUTPUT_TOAST_ID,
@@ -551,6 +567,47 @@ function showLiveOutputNews(event: HealthEvent): void {
       description: event.message,
       duration: 8_000
     })
+  } else if (event.code === 'stream-delivery-degraded') {
+    // Plan 218: a choppy stream used to be one warning at the start of the
+    // session, in a list nobody reads while live. It stays up until the
+    // stream is smooth again or the session ends.
+    toast.warning('Your stream is choppy', {
+      id: STREAM_DELIVERY_TOAST_ID,
+      description: event.message,
+      duration: Infinity
+    })
+  } else if (event.code === 'stream-delivery-recovered') {
+    toast.success('Your stream is smooth again', {
+      id: STREAM_DELIVERY_TOAST_ID,
+      description: event.message,
+      duration: 8_000
+    })
+  } else if (event.code === 'stream-leg-overflow') {
+    // One key for everything about the connection: an overflow, the step
+    // down it causes, the floor and the way back replace each other.
+    toast.warning('Your connection can’t keep up', {
+      id: STREAM_UPLINK_TOAST_ID,
+      description: event.message,
+      duration: 20_000
+    })
+  } else if (event.code === 'stream-bitrate-lowered') {
+    toast.warning('Stream quality lowered to fit your connection', {
+      id: STREAM_UPLINK_TOAST_ID,
+      description: event.message,
+      duration: 15_000
+    })
+  } else if (event.code === 'stream-bitrate-floor') {
+    toast.warning('Your connection can’t carry this stream', {
+      id: STREAM_UPLINK_TOAST_ID,
+      description: event.message,
+      duration: 30_000
+    })
+  } else if (event.code === 'stream-bitrate-restored') {
+    toast.success('Stream quality is back', {
+      id: STREAM_UPLINK_TOAST_ID,
+      description: event.message,
+      duration: 8_000
+    })
   } else if (event.code === 'screen-capture-stopped') {
     const show = event.level === 'error' ? toast.error : toast.warning
     show('Screen capture stopped', {
@@ -560,6 +617,20 @@ function showLiveOutputNews(event: HealthEvent): void {
     })
   } else if (event.code === 'screen-capture-restored') {
     toast.success('Screen capture is back', {
+      id: SCREEN_CAPTURE_TOAST_ID,
+      description: event.message,
+      duration: 8_000
+    })
+  } else if (event.code === 'screen-window-out-of-sight') {
+    // Plan 219 S1: the captured window is minimized, hidden or on another
+    // desktop. Nothing restarts; the picture holds until it is back.
+    toast.warning('Window out of sight', {
+      id: SCREEN_CAPTURE_TOAST_ID,
+      description: event.message,
+      duration: 20_000
+    })
+  } else if (event.code === 'screen-window-back') {
+    toast.success('The window is back', {
       id: SCREEN_CAPTURE_TOAST_ID,
       description: event.message,
       duration: 8_000
@@ -606,6 +677,13 @@ function showSessionAudioNews(event: HealthEvent): void {
     notifyOnce('audio-output-stalled', 'warning', 'Audio dropped for a moment', {
       description: event.message,
       duration: 12_000
+    })
+  } else if (event.code === 'audio-output-failed') {
+    // Unlike a stall this does not come back: the rest of the take is silent.
+    toast.error('Your recording has no sound from here', {
+      id: 'audio-output',
+      description: event.message,
+      duration: Infinity
     })
   } else if (
     event.code === 'microphone-timeline-recovered' ||

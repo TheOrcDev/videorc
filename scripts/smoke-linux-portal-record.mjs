@@ -15,10 +15,13 @@
 //   VIDEORC_PORTAL_RECORD_MOTION      '0' records the desktop as it is and
 //                                     keeps freeze/repeat findings advisory
 //   VIDEORC_SMOKE_OUTPUT_DIR          evidence + recording directory
+//   VIDEORC_PACKAGED_APP_EXECUTABLE   run a packaged build (linux-unpacked/videorc
+//                                     or an AppImage) instead of the dev app
 //
 // Safe GPU: the encoder defaults to OpenH264. Set VIDEORC_LINUX_H264_ENCODER
 // yourself to exercise VAAPI on a render node the box allows.
 
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -32,7 +35,9 @@ import {
   assessPortalScreenStatus
 } from './lib/linux-portal-capture-gates.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
-import { startLinuxMotionWindow } from './lib/linux-motion-window.mjs'
+import { assessMotionPresentation, startLinuxMotionWindow } from './lib/linux-motion-window.mjs'
+import { probeLinuxSessionLock } from './lib/linux-session-lock.mjs'
+import { packagedSmokeLaunchOptions } from './lib/packaged-smoke-paths.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -54,8 +59,16 @@ const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
   join(resolve(import.meta.dirname, '..'), 'vendor', 'ffmpeg', 'linux-x64', 'bin', 'ffmpeg')
 const ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
+const appExecutable = process.env.VIDEORC_PACKAGED_APP_EXECUTABLE || undefined
+const packagedLaunch = packagedSmokeLaunchOptions({
+  appExecutable,
+  capability: appExecutable ? randomBytes(32).toString('base64url') : undefined
+})
 
 const video = { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbps: 8000 }
+// Painted at under half the take's rate, the window alone makes the take
+// repeat frames, and the freeze gates would blame the pipeline.
+const motionMinFps = video.fps / 2
 const sources = {
   screenId: PORTAL_MONITOR_SOURCE_ID,
   windowId: null,
@@ -139,6 +152,20 @@ async function waitForLiveScreen(ws, label, deadlineMs) {
   return status
 }
 
+// A portal capture of a locked session records the lock screen, whatever moves
+// behind it, and the compositor keeps painting the motion window under the
+// lock, so its paint rate cannot tell (ogre, 2026-11-07). Ask the session.
+function sessionLockFailure(when) {
+  const lock = probeLinuxSessionLock()
+  step(`session lock ${when}`, lock)
+  if (lock.locked !== true) return null
+  const via = lock.probes.filter((probe) => probe.locked).map((probe) => probe.via)
+  return (
+    `the session was locked ${when} (${via.join(', ')}): the portal captures the lock ` +
+    `screen, so the take cannot show the motion window`
+  )
+}
+
 async function startPortalPreview(ws, label, timeoutMs) {
   const startedAt = Date.now()
   const status = await request(ws, timeoutMs, 'preview.screen.start', {
@@ -157,6 +184,7 @@ if (process.platform !== 'linux') {
 
 let stopApp = async () => {}
 let stopMotion = async () => {}
+let motionSamples = []
 try {
   const launch = await launchDevApp({
     env: {
@@ -165,8 +193,11 @@ try {
       // The smoke owns the portal source. The renderer's own screen preview
       // replaced the smoke's live session mid-check (ogre 2026-09-30).
       VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1',
-      VIDEORC_LINUX_H264_ENCODER: encoder
+      VIDEORC_LINUX_H264_ENCODER: encoder,
+      ...packagedLaunch.env
     },
+    packagedSmokeCommandCapability: packagedLaunch.packagedSmokeCommandCapability,
+    spawnSpec: packagedLaunch.spawnSpec,
     timeoutMs: launchTimeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: (line) => {
@@ -197,18 +228,30 @@ try {
 
   // 3. Record from the live portal source, with guaranteed motion on it.
   if (motionEnabled) {
-    const motion = await startLinuxMotionWindow({ timeoutMs: stepTimeoutMs })
+    const locked = sessionLockFailure('before the take')
+    if (locked) fail(locked)
+    const motion = await startLinuxMotionWindow({
+      timeoutMs: stepTimeoutMs,
+      minFps: motionMinFps
+    }).catch((error) => fail(error.message))
     stopMotion = motion.stop
-    step('motion window', { pid: motion.pid })
+    motionSamples = motion.samples
+    step('motion window', { pid: motion.pid, framesPerSecond: motionSamples.at(-1)?.fps ?? null })
     // Let the compositor map and paint it before the take starts.
     await sleep(1000)
   }
-  const { capabilityId } = await requestSmokeCommand(
-    smoke,
-    'authorize-smoke-resource',
-    { kind: 'output-directory', path: outputDirectory },
-    { timeoutMs: stepTimeoutMs }
-  )
+  // A packaged build refuses authorize-smoke-resource; its take lands in the
+  // isolated profile's recordings folder under the output directory instead.
+  const capabilityId = appExecutable
+    ? undefined
+    : (
+        await requestSmokeCommand(
+          smoke,
+          'authorize-smoke-resource',
+          { kind: 'output-directory', path: outputDirectory },
+          { timeoutMs: stepTimeoutMs }
+        )
+      ).capabilityId
   const startRequestedAt = Date.now()
   const started = await request(ws, stepTimeoutMs, 'session.start', {
     sources,
@@ -216,7 +259,7 @@ try {
     output: {
       recordEnabled: true,
       streamEnabled: false,
-      outputDirectoryCapability: capabilityId,
+      ...(capabilityId ? { outputDirectoryCapability: capabilityId } : {}),
       video,
       rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
     }
@@ -278,8 +321,37 @@ try {
     { width: video.width, height: video.height, recordingMs }
   )
   if (!assessment.ok) fail(assessment.failures.join('; '))
-  if (motionEnabled && quality.verdict.failures.length > 0) {
-    fail(`quality gates with motion on screen: ${quality.verdict.failures.join('; ')}`)
+  if (motionEnabled) {
+    // The freeze gates only speak for the pipeline if the window was moving
+    // on the monitor through the take; say so when it was not.
+    const presentation = assessMotionPresentation(motionSamples, {
+      from: startRequestedAt,
+      to: stopRequestedAt,
+      minFps: motionMinFps
+    })
+    evidence.motionPresentation = {
+      minFps: motionMinFps,
+      takeFps: presentation.fps,
+      samples: motionSamples.map(({ at, fps }) => ({ at: new Date(at).toISOString(), fps })),
+      failures: presentation.failures
+    }
+    step('motion presentation', { minFps: motionMinFps, takeFps: presentation.fps })
+    if (!presentation.ok) {
+      fail(
+        `motion window not presented during the take, so the recording had no motion to ` +
+          `check: ${presentation.failures.join('; ')}; analyzer: ` +
+          `${quality.verdict.failures.join('; ') || 'no failures'}`
+      )
+    }
+    if (quality.verdict.failures.length > 0) {
+      const locked = sessionLockFailure('after the take')
+      const analyzer = quality.verdict.failures.join('; ')
+      fail(
+        locked
+          ? `${locked}; analyzer: ${analyzer}`
+          : `quality gates with motion on screen: ${analyzer}`
+      )
+    }
   }
 
   const previewStopped = await request(ws, stepTimeoutMs, 'preview.screen.stop')

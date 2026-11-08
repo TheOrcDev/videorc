@@ -2096,6 +2096,53 @@ pub struct StreamHealth {
     pub created_at: String,
 }
 
+/// Plan 218 S2: the live stream's delivery over a rolling window, emitted
+/// with `diagnostics.stats` while a stream runs. `degraded` is true while
+/// more than 10 % of the stream's frames were skipped before encode over the
+/// last 30 s, and clears once the window is back under 5 %; `degraded_since`
+/// is the RFC 3339 time the current degraded span started. The renderer
+/// shows "Your stream is running at {delivered} of {target} fps" while
+/// `degraded` holds and stays quiet otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDeliveryState {
+    pub target_fps: u32,
+    /// Frames the stream encoder produced per second over the window.
+    pub delivered_fps: f64,
+    /// Share of the window's frames skipped before encode, 0 to 100.
+    pub drop_percent: f64,
+    /// How much history the figures cover; 30 once the window is full.
+    pub window_seconds: f64,
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_since: Option<String>,
+    /// Plan 218 S3a: the stream encoder's bitrate right now and as chosen,
+    /// when a dedicated stream encoder adapts it (macOS VideoToolbox).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_bitrate_kbps: Option<u32>,
+    /// True while the bitrate sits at its floor (half the chosen bitrate):
+    /// the stream will not go lower; fewer destinations is the next step.
+    #[serde(default)]
+    pub at_floor: bool,
+    /// Fifo overflows FFmpeg reported on the session's legs so far: each one
+    /// skipped seconds of video for that destination's viewers.
+    #[serde(default)]
+    pub uplink_overflows: u64,
+}
+
+/// Plan 218 S2: one destination's fifo overflow count for the support
+/// bundle. Carries the platform and label only; never a URL or a key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamLegOverflowCount {
+    pub target_id: String,
+    pub platform: String,
+    pub label: String,
+    pub overflows: u64,
+}
+
 /// The encoder a recording session actually requested. Hardware encoders may still fall
 /// back internally, so this is the requested backend; the final-file analyzer's
 /// codec/encoder tag is the corroborating output-side signal.
@@ -2911,21 +2958,52 @@ pub struct DiagnosticStats {
     pub stream_output_fps: Option<u32>,
     #[serde(default)]
     pub stream_output_bitrate_kbps: Option<u32>,
-    /// Latest measured FFmpeg output bitrate for the active stream.
+    /// The stream's measured video bitrate over the last encoder window
+    /// (plan 218 S2): the bytes the stream encoder produced, not FFmpeg's
+    /// progress figure. FFmpeg reports its first output only: the recording
+    /// file when one is written (see `recording_measured_bitrate_kbps`), and
+    /// nothing at all when that output is an RTMP leg. Audio is not included;
+    /// the chosen stream bitrate it compares against is the video's too.
     #[serde(default)]
     pub stream_measured_bitrate_kbps: Option<f64>,
-    /// Lowest non-zero measured output bitrate observed in this stream session.
+    /// Lowest non-zero measured stream video bitrate observed this session.
     #[serde(default)]
     pub stream_measured_bitrate_min_kbps: Option<f64>,
-    /// Highest non-zero measured output bitrate observed in this stream session.
+    /// Highest non-zero measured stream video bitrate observed this session.
     #[serde(default)]
     pub stream_measured_bitrate_max_kbps: Option<f64>,
-    /// Cumulative bytes emitted by FFmpeg for this stream process generation.
+    /// Cumulative encoded video bytes the stream encoder handed to FFmpeg.
     #[serde(default)]
     pub stream_output_total_bytes: u64,
+    /// FFmpeg's progress bitrate for the recording file, when one is written
+    /// (plan 218 S2). Video plus audio, as the container sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_measured_bitrate_kbps: Option<f64>,
+    /// FFmpeg's progress `total_size` for the recording file.
+    #[serde(default)]
+    pub recording_output_total_bytes: u64,
     /// Cumulative frames FFmpeg reports duplicating for this stream process generation.
     #[serde(default)]
     pub stream_duplicated_frames: u64,
+    /// Plan 218 S2: how the live stream is delivering, over a rolling 30 s
+    /// window, while a stream runs. Replaces the once-per-session
+    /// `stream-output-pressure` notice. Absent without a stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_delivery: Option<StreamDeliveryState>,
+    /// Plan 218 S2: per-destination fifo overflow counts (no URLs or keys),
+    /// so a support bundle names the leg whose connection fell short.
+    /// Absent until a leg overflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_leg_overflows: Option<Vec<StreamLegOverflowCount>>,
+    /// Plan 218 S2: the session's destinations, for the support bundle. The
+    /// count of legs FFmpeg streams to, and their platforms in leg order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_destination_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_destination_platforms: Option<Vec<String>>,
+    /// Plan 218 S2: the microphone sync offset the session started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_sync_offset_ms: Option<i32>,
     /// Number of distinct production VideoToolbox output encoders active for the session.
     #[serde(default)]
     pub encoder_bridge_active_video_toolbox_output_encoders: u64,
@@ -3039,6 +3117,23 @@ pub struct DiagnosticStats {
     /// Stream-leg FIFO enqueue max wait for split-output sessions.
     #[serde(default)]
     pub encoder_bridge_stream_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// Plan 218 S2: the stream writer's own figures, kept apart from the
+    /// recording writer's (the generic fields keep whichever writer reported
+    /// last). P95 time to write one encoded stream access unit into FFmpeg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_video_toolbox_fifo_write_p95_ms: Option<f64>,
+    /// P95 age of the stream queue's oldest frame, sampled every writer tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_queue_age_p95_ms: Option<f64>,
+    /// Stream ticks coalesced because the queue reached its depth limit.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_depth_trips: u64,
+    /// Stream ticks coalesced because the oldest frame reached the age limit.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_age_trips: u64,
+    /// Which limit tripped last: `depth` or `age`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_queue_last_trip: Option<String>,
     pub encoder_bridge_error: Option<String>,
     /// Which encoder the active session actually requested — proves hardware vs software
     /// encode (previously unrecorded).
@@ -4302,6 +4397,35 @@ pub enum CompositorState {
     Failed,
 }
 
+/// `camera.lowLight.get` (issue #1066): which camera to describe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLowLightParams {
+    pub camera_id: String,
+}
+
+/// `camera.lowLight.set` (issue #1066): turn a camera's low-light
+/// compensation on or off. Saved per camera and written to the device now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLowLightSetParams {
+    pub camera_id: String,
+    pub compensation: bool,
+}
+
+/// A camera's low-light compensation (issue #1066). On, the camera may
+/// lengthen exposure past one frame in low light and drop to half its frame
+/// rate; off (the default), it keeps its frame rate and the picture is
+/// darker. `supported` is false where Videorc cannot set it: off Windows,
+/// and on cameras whose driver has no auto-exposure-priority control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraLowLightState {
+    pub camera_id: String,
+    pub supported: bool,
+    pub compensation: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewCameraStartParams {
@@ -4593,9 +4717,9 @@ pub struct SessionListItem {
     /// `combined`, `screen` or `camera` (plan 157); absent on ordinary rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_role: Option<String>,
-    /// A take Videorc stopped in the middle of (crash, killed backend, power
-    /// loss): `recovered` once its MKV was finalized to an MP4 on the next
-    /// start, `failed` when that did not work. Absent on every other row.
+    /// A take that ended early (a crash, a killed backend, a power loss, or a
+    /// recording that failed mid-take): `recovered` once its MKV was finalized
+    /// to an MP4, `failed` when that did not work. Absent on every other row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interruption_recovery: Option<String>,
 }

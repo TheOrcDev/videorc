@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { PreviewSurfaceSceneState, PreviewSurfaceStatus } from '../shared/backend'
 import {
   compositorSceneConflictsWithCommitted,
+  nativePreviewSceneProofWaitSettled,
   nativePreviewStatusProvesSceneRevision
 } from '../shared/native-preview-scene-authority'
 
@@ -191,6 +192,42 @@ describe('native preview compositor scene authority', () => {
         'win32'
       )
     ).toBe(false)
+  })
+
+  it('ends the presented-revision wait at a proof surface, which never reads one back', () => {
+    // Ogre (Linux), 2026-11-06: every picture tile Apply and Remove waited out
+    // the whole proof budget, 3.2 to 4.3 s, before the tile showed the commit.
+    const proofSurface = {
+      state: 'live',
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      sourcePixelsPresent: true,
+      nativePreviewHostKind: 'proof-surface',
+      nativePreviewHostAttached: false
+    } as PreviewSurfaceStatus
+    const inProcess = {
+      state: 'live',
+      transport: 'native-surface',
+      backing: 'cametal-layer',
+      sourcePixelsPresent: true,
+      nativePreviewHostKind: 'in-process',
+      nativePreviewHostAttached: true,
+      nativePreviewPresentedSceneRevision: 11
+    } as PreviewSurfaceStatus
+
+    expect(nativePreviewStatusProvesSceneRevision(proofSurface, 12, 'linux')).toBe(false)
+    expect(nativePreviewSceneProofWaitSettled(proofSurface, 12, 'linux')).toBe(true)
+    expect(nativePreviewSceneProofWaitSettled({ ...proofSurface, state: 'starting' }, 12)).toBe(
+      true
+    )
+    // A presenter that reads its revision back still waits for the commit.
+    expect(nativePreviewSceneProofWaitSettled(inProcess, 12)).toBe(false)
+    expect(
+      nativePreviewSceneProofWaitSettled(
+        { ...inProcess, nativePreviewPresentedSceneRevision: 12 },
+        12
+      )
+    ).toBe(true)
   })
 })
 

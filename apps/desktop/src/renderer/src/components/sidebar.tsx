@@ -2,6 +2,7 @@ import { type AppIcon, SearchIcon, SyncIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { AccountMenu } from '@/components/account-menu'
+import { OwnBuddyIcon } from '@/components/own-buddy-icon'
 import { SectionLabel } from '@/components/section-label'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
@@ -241,7 +242,8 @@ export function Sidebar({
   ): ReactElement => (
     <NavRow
       key={tab.id}
-      icon={tab.icon}
+      // The Buddy row wears the streamer's own Buddy, not the golem.
+      icon={tab.id === 'ai' ? OwnBuddyIcon : tab.icon}
       label={tab.label}
       isActive={active === tab.id}
       triggerId={tab.id}

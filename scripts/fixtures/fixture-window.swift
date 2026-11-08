@@ -19,7 +19,10 @@
 // Signals: SIGUSR1 flashes the whole window white for 200 ms and prints
 // `flash drawn_at_ms=<epoch ms>` when the first white frame is drawn. The
 // probe uses that frame as a clock anchor between its wall clock and the
-// recording's timeline.
+// recording's timeline. SIGUSR2 minimizes the window when it is on screen
+// and restores it when it is minimized, printing `minimized at_ms=<epoch ms>`
+// or `restored at_ms=<epoch ms>` once AppKit has done it (plan 219: a smoke
+// host without an Accessibility grant cannot click the yellow button).
 //
 // stdout, line buffered: `ready pid=<pid> window_number=<CGWindowID>
 // title=<title>` once the window is on screen. The window number is the
@@ -178,6 +181,7 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   var view: FixtureView?
   var timer: Timer?
   var signalSource: DispatchSourceSignal?
+  var sightSignalSource: DispatchSourceSignal?
 
   init(options: FixtureOptions) {
     self.options = options
@@ -226,6 +230,19 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     source.resume()
     signalSource = source
 
+    signal(SIGUSR2, SIG_IGN)
+    let sight = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+    sight.setEventHandler { [weak self] in
+      guard let window = self?.window else { return }
+      if window.isMiniaturized {
+        window.deminiaturize(nil)
+      } else {
+        window.miniaturize(nil)
+      }
+    }
+    sight.resume()
+    sightSignalSource = sight
+
     print(
       "ready pid=\(ProcessInfo.processInfo.processIdentifier) window_number=\(window.windowNumber) title=\(options.title) color=\(options.colorName) frame=\(Int(window.frame.width))x\(Int(window.frame.height))"
     )
@@ -233,6 +250,14 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
   func windowWillClose(_ notification: Notification) {
     NSApp.terminate(nil)
+  }
+
+  func windowDidMiniaturize(_ notification: Notification) {
+    print("minimized at_ms=\(epochMilliseconds())")
+  }
+
+  func windowDidDeminiaturize(_ notification: Notification) {
+    print("restored at_ms=\(epochMilliseconds())")
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
