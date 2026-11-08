@@ -395,6 +395,12 @@ try {
     // The screenshots drive the renderer over CDP (the theme flip and the
     // compositor capture, as scripts/ui-theme-screens.mjs does).
     ...(shotsDir ? { VIDEORC_REMOTE_DEBUG_PORT: '0' } : {}),
+    // Plan 223 C4: the watchdog scenario needs a program with sound, so the
+    // session gets the synthetic 440 Hz tone microphone (as smoke:output-
+    // stall); the default session has no audio and reads as silent.
+    ...(watchdogScenario
+      ? { VIDEORC_CAPTION_CONTRACT_TEST: '1', VIDEORC_LIVE_SOURCE_SWITCH_TEST: '1' }
+      : {}),
     // The thin-uplink phase needs an encode that fills its bitrate: the
     // plain test pattern encodes far under 6 Mbps, so a cap would never be
     // short. Per-frame noise in 32 px blocks follows the target down
@@ -735,6 +741,7 @@ try {
     await request(backend, timeoutMs, 'watchdog.settings.set', {
       checks: { 'mic-muted': { enabled: false } }
     })
+    scenario.quietBeforeMute = !alertsNow().some((alert) => alert.check === 'program-silent')
     const muteAtMs = Date.now()
     await request(backend, timeoutMs, 'audio.processing.update', {
       sessionId: firstSessionId,
@@ -826,6 +833,7 @@ try {
     report.watchdog = scenario
     log(`[watchdog] ${JSON.stringify(scenario)}`)
     const problems = []
+    if (!scenario.quietBeforeMute) problems.push('program-silent was open before the mute')
     if (!silent) problems.push('program-silent never opened on the cloud reading')
     else if (silent.source !== 'cloud')
       problems.push(`program-silent source ${silent.source}, expected cloud`)
@@ -1608,7 +1616,9 @@ function sessionParams(outputDirectoryCapability) {
       ? { preset: 'stream-safe-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
       : { preset: 'tutorial-720p30', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
   return {
-    sources: { testPattern: true },
+    sources: watchdogScenario
+      ? { testPattern: true, microphoneId: 'microphone:coreaudio:4294967295' }
+      : { testPattern: true },
     layout: {
       layoutPreset: 'screen-camera',
       cameraTransformMode: 'preset',
