@@ -10,7 +10,7 @@ import { useMemo, useState, lazy, Suspense, type ReactElement, type ReactNode } 
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { GroupedList, ListRow } from '@/components/list-row'
-import { OfflineAlert } from '@/components/lock-alert'
+import { LockAlert, OfflineAlert } from '@/components/lock-alert'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -40,10 +40,12 @@ import {
   buddyReportView,
   reportSessionChoice,
   reportSessionOptions,
+  type BuddyReportCommunityView,
   type BuddyReportSessionOption,
   type BuddyReportStat,
   type BuddyReportView
 } from '@/lib/buddy-report-view'
+import { lockAlertAction, unlockActionForGate } from '@/lib/lock-view'
 import { cn } from '@/lib/utils'
 
 const SessionMarkersDialog = lazy(async () => ({
@@ -72,7 +74,7 @@ export function BuddyReportCard({
   sessionId: string | null
   onSessionChange: (sessionId: string | null) => void
 }): ReactElement {
-  const { sessions, cohostSettings } = useStudioCore()
+  const { sessions, cohostSettings, cohostGate } = useStudioCore()
   const [markersOpen, setMarkersOpen] = useState(false)
   const newestId = useMemo(() => newestStreamedSessionId(sessions), [sessions])
   const ask = sessionId ?? newestId
@@ -153,7 +155,18 @@ export function BuddyReportCard({
                 <SessionMarkersDialog session={session} onClose={() => setMarkersOpen(false)} />
               </Suspense>
             ) : null}
-            <ReportBody key={shown.sessionId} view={shown} />
+            <ReportBody
+              key={shown.sessionId}
+              summaryLock={
+                cohostGate.allowed
+                  ? null
+                  : {
+                      reason: REPORT_SUMMARY_LOCK_REASON,
+                      action: lockAlertAction(unlockActionForGate(cohostGate))
+                    }
+              }
+              view={shown}
+            />
           </>
         ) : error || offline ? null : loading ? (
           <p className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -210,7 +223,19 @@ function ReportSwitcher({
   )
 }
 
-function ReportBody({ view }: { view: ShownReport }): ReactElement {
+/** Plan 225 D15: why the audience summary is locked (Premium, D6). */
+export const REPORT_SUMMARY_LOCK_REASON =
+  'Buddy writes two sentences about your audience with Premium.'
+
+type SummaryLock = { reason: string; action: Parameters<typeof LockAlert>[0]['action'] }
+
+function ReportBody({
+  view,
+  summaryLock
+}: {
+  view: ShownReport
+  summaryLock: SummaryLock | null
+}): ReactElement {
   return (
     <>
       <StreamLine view={view} />
@@ -222,6 +247,7 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
       ) : (
         <ReportStats stats={view.stats} />
       )}
+      <ReportCommunity community={view.community} summaryLock={summaryLock} />
       <ReportCommands commands={view.commands} />
       {/* Plan 211 D11: what the Buddy said in its bubble, every line, in the
           posts' row: when, why and the words. Nothing went to chat, so no
@@ -503,6 +529,88 @@ function ReportStats({ stats }: { stats: readonly BuddyReportStat[] }): ReactEle
         </div>
       ))}
     </dl>
+  )
+}
+
+/**
+ * Plan 225 D15: who came. One stats row ("12 regulars back", "3 first-timers
+ * stayed 40+ min", "2 comebacks", "1 milestone"), the quiet extras line, the
+ * regulars and milestones by name, then Buddy's two sentences (Premium; a
+ * lock without it, never hidden). Opt-outs are counted, never named.
+ */
+function ReportCommunity({
+  community,
+  summaryLock
+}: {
+  community: BuddyReportCommunityView | null
+  summaryLock: SummaryLock | null
+}): ReactElement | null {
+  if (!community) return null
+  return (
+    <section
+      aria-labelledby="buddy-report-community-heading"
+      className="flex min-w-0 flex-col gap-3"
+      data-slot="buddy-report-community"
+    >
+      <h3 className="text-section text-foreground" id="buddy-report-community-heading">
+        Community
+      </h3>
+      <ReportStats stats={community.stats} />
+      {community.line ? (
+        <p className="text-meta text-muted-foreground" data-slot="buddy-report-community-line">
+          {community.line}
+        </p>
+      ) : null}
+      {summaryLock ? (
+        <LockAlert
+          action={summaryLock.action}
+          data-testid="buddy-report-community-lock"
+          reason={summaryLock.reason}
+        />
+      ) : community.summary ? (
+        <p
+          className="text-sm text-muted-foreground select-text"
+          data-testid="buddy-report-community-summary"
+        >
+          {community.summary}
+        </p>
+      ) : null}
+      <div
+        className={cn(
+          'grid min-w-0 gap-4',
+          community.regulars.length > 0 && community.milestones.length > 0 && 'lg:grid-cols-2'
+        )}
+      >
+        <ReportList
+          id="regulars"
+          items={community.regulars}
+          label="Regulars back"
+          render={(person) => (
+            <ListRow
+              key={person.key}
+              meta={person.streams}
+              statusIcons={person.platforms.map((platform) => (
+                <ChatPlatformIcon key={platform} platform={platform} />
+              ))}
+              title={person.name}
+            />
+          )}
+        />
+        <ReportList
+          id="milestones"
+          items={community.milestones}
+          label="Milestones"
+          render={(entry) => (
+            <ListRow
+              key={entry.key}
+              meta={entry.label}
+              statusIcons={<ChatPlatformIcon platform={entry.platform} />}
+              title={entry.name}
+            />
+          )}
+        />
+      </div>
+    </section>
   )
 }
 

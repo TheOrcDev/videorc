@@ -13,7 +13,9 @@ import type {
   SessionSummary,
   StreamPlatform
 } from './backend'
+import type { CohostReportCommunity } from './backend'
 import { buddyDisplayName } from './buddy-auto-chat-view'
+import { milestoneLabel } from './community-view'
 import { cohostAskersLabel } from './cohost-view'
 import { dayLabel, durationMsLabel } from './format'
 import { CHAT_PLATFORM_LABELS } from './live-chat-view'
@@ -65,6 +67,11 @@ export interface BuddyReportStat {
     | 'promises-open'
     | 'first-timers'
     | 'on-screen'
+    // Plan 225 D15: the Community block's own row.
+    | 'regulars-back'
+    | 'first-timers-stayed'
+    | 'comebacks'
+    | 'milestones'
   value: string
   /** The whole the value is out of ("of 3 first-timers"), shown muted. */
   of?: string
@@ -217,7 +224,20 @@ export type BuddyReportView =
       posts: BuddyReportPostRow[]
       /** Plan 192 D7: null when every greeting went out (or Buddy was off). */
       greetingSkips: BuddyReportGreetingSkipsView | null
+      /** Plan 225 D15: who came; null for an older report or an empty stream. */
+      community: BuddyReportCommunityView | null
     }
+
+/** Plan 225 D15: the report's Community block, ready to draw. */
+export interface BuddyReportCommunityView {
+  stats: BuddyReportStat[]
+  /** "1 new regular · 1 link made · 1 opt-out"; null when all are zero. */
+  line: string | null
+  regulars: { key: string; name: string; platforms: StreamPlatform[]; streams: string }[]
+  milestones: { key: string; name: string; platform: StreamPlatform; label: string }[]
+  /** Premium's two sentences; null until the memory pass writes them. */
+  summary: string | null
+}
 
 export interface BuddyReportViewInput {
   /** The backend's answer; null when no stream exists yet. */
@@ -503,6 +523,79 @@ export function reportGreetingSkips(
   }
 }
 
+// --- Community (plan 225 D15) ---------------------------------------------------
+
+function countWords(count: number, one: string, many: string): string {
+  return `${formatReportCount(count)} ${count === 1 ? one : many}`
+}
+
+/** The Community block, or null for a report without one. */
+export function reportCommunity(
+  community: CohostReportCommunity | undefined
+): BuddyReportCommunityView | null {
+  if (!community) return null
+  const milestones = community.milestones ?? []
+  const extras = [
+    community.newRegulars > 0
+      ? countWords(community.newRegulars, 'new regular', 'new regulars')
+      : null,
+    community.linksMade > 0 ? countWords(community.linksMade, 'link made', 'links made') : null,
+    community.memoriesLearned > 0
+      ? countWords(community.memoriesLearned, 'memory learned', 'memories learned')
+      : null,
+    // Opt-outs are counted, never named (D13).
+    community.optOuts > 0 ? countWords(community.optOuts, 'opt-out', 'opt-outs') : null
+  ].filter((part): part is string => part !== null)
+  return {
+    stats: [
+      {
+        id: 'regulars-back',
+        value: formatReportCount(community.regularsBack),
+        label: 'Regulars back'
+      },
+      {
+        id: 'first-timers-stayed',
+        value: formatReportCount(community.firstTimersStayed),
+        of: formatReportCount(community.firstTimers),
+        label: 'First-timers stayed 40+ min'
+      },
+      { id: 'comebacks', value: formatReportCount(community.comebacks), label: 'Comebacks' },
+      { id: 'milestones', value: formatReportCount(milestones.length), label: 'Milestones' }
+    ],
+    line: extras.length > 0 ? extras.join(' · ') : null,
+    regulars: (community.regulars ?? []).map((person, index) => ({
+      key: `${index}-${person.name}`,
+      name: person.name,
+      platforms: uniquePlatforms(
+        person.platforms && person.platforms.length > 0 ? person.platforms : [person.platform]
+      ),
+      streams: countWords(person.streams, 'stream', 'streams')
+    })),
+    milestones: milestones.map((entry, index) => ({
+      key: `${index}-${entry.name}`,
+      name: entry.name,
+      platform: entry.platform,
+      label: milestoneLabel(entry.milestone)
+    })),
+    summary: community.summary?.trim() || null
+  }
+}
+
+/**
+ * A report Buddy itself never wrote to (plan 225 D15): the community store
+ * folded its block into an otherwise empty report, so the stream still
+ * reads as Buddy-off, with its Community block.
+ */
+function onlyCommunity(report: CohostSessionReport): boolean {
+  return (
+    report.segments === 0 &&
+    (report.posts?.length ?? 0) === 0 &&
+    (report.said?.length ?? 0) === 0 &&
+    report.greetings.skipped === undefined &&
+    report.commands === undefined
+  )
+}
+
 // --- The card ------------------------------------------------------------------
 
 export function buddyReportView({
@@ -529,10 +622,11 @@ export function buddyReportView({
     chat,
     moments: reportMoments(payload.moments)
   }
-  if (!report) {
+  if (!report || onlyCommunity(report)) {
     return {
       ...base,
       kind: 'buddy-off',
+      community: reportCommunity(report?.community),
       stats: [],
       note: {
         title: BUDDY_REPORT_OFF,
@@ -593,7 +687,8 @@ export function buddyReportView({
       at: streamOffsetLabel(post.at, startedAt),
       source: post.source ? POST_SOURCE_LABELS[post.source] : null
     })),
-    greetingSkips: reportGreetingSkips(report.greetings.skipped, name)
+    greetingSkips: reportGreetingSkips(report.greetings.skipped, name),
+    community: reportCommunity(report.community)
   }
 }
 

@@ -3,12 +3,8 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type {
-  CommunityPersonRow,
-  CommunitySuggestion,
-  CommunitySummary,
-  EntitlementUiGate
-} from '@/lib/backend'
+import type { CommunityPersonRow, CommunitySuggestion, CommunitySummary } from '@/lib/backend'
+import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 const client = vi.hoisted(() => ({
   summary: null as CommunitySummary | null,
@@ -181,7 +177,7 @@ describe('Buddy → Community (plan 225 D12)', () => {
       featureId: 'cohost',
       reason: 'Buddy Live is part of Premium.',
       upgradeUrl: 'https://videorc.com/premium'
-    } as EntitlementUiGate
+    } as unknown as EntitlementUiGate
     await mount()
     const premium = container.querySelector('[data-testid="community-premium"]')
     expect(premium?.textContent).toContain('Buddy remembers')
