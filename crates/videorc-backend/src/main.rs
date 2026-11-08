@@ -14739,11 +14739,12 @@ async fn start_session_command(
             // Plan 184 C6b: a running Test cloud yields to the session, which
             // needs the upload and the encoder; a cloud start also waits for
             // the test's show to end (`prepare_session`).
-            if state
-                .cloud_show
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .signal_test_cancel()
+            if session_start_stops_cloud_test(&params)
+                && state
+                    .cloud_show
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .signal_test_cancel()
             {
                 tracing::info!("A session start stops the running Videorc Cloud test.");
             }
@@ -14791,6 +14792,15 @@ async fn start_session_command(
         }
         Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
     }
+}
+
+/// Plan 184 C6b on main: a start that records or streams needs the upload
+/// and the encoder, so a running Test cloud yields to it. Plan 181's
+/// automatic buffer-only start (the clips ring) is neither, and it must not
+/// end a test the streamer clicked: the ring yields to the real start that
+/// follows (`replay_hand_over_pending`), and the test ends on its own.
+fn session_start_stops_cloud_test(params: &protocol::StartSessionParams) -> bool {
+    params.output.record_enabled || params.output.stream_enabled
 }
 
 async fn get_ai_capabilities() -> Result<protocol::AiCapabilities> {
@@ -24515,6 +24525,19 @@ mod tests {
             default_bitrate_kbps: 6_000,
             enabled_target_ids,
         }
+    }
+
+    /// Plan 184 C6b on main: the clips ring's automatic buffer-only start
+    /// leaves a running Test cloud alone; a Record or a Go Live ends it.
+    #[test]
+    fn only_a_start_that_records_or_streams_stops_the_cloud_test() {
+        let go_live = session_params_with_stream_output(true);
+        assert!(session_start_stops_cloud_test(&go_live));
+        let record = session_params_with_stream_output(false);
+        assert!(session_start_stops_cloud_test(&record));
+        let mut buffer_only = session_params_with_stream_output(false);
+        buffer_only.output.record_enabled = false;
+        assert!(!session_start_stops_cloud_test(&buffer_only));
     }
 
     fn session_params_with_stream_output(stream_enabled: bool) -> protocol::StartSessionParams {
