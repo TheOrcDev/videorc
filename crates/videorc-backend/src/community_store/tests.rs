@@ -1276,7 +1276,11 @@ fn memories_and_the_note_ride_the_arrival_only_with_remember_on() {
     assert!(off.memories.is_empty());
     assert!(off.note.is_none());
     let on = lookup_with(true);
-    assert_eq!(on.memories, vec!["Learning Rust", "Collects keyboards"]);
+    // Both were learned in the same second: their order between them is
+    // the store's to choose.
+    let mut remembered = on.memories.clone();
+    remembered.sort();
+    assert_eq!(remembered, vec!["Collects keyboards", "Learning Rust"]);
     assert_eq!(on.note.as_deref(), Some("Friend from the Rust meetup"));
     // Never on the wire or in SQLite: the serialized arrival has no memories.
     let wire = serde_json::to_value(&on).unwrap();
