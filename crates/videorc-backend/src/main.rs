@@ -8866,6 +8866,52 @@ async fn apply_active_screen_output(
             }
         }
     }
+    // Plan 224 D9 (C-G7): in a talk show on air the desktop composes nothing
+    // for the stream; the takeover goes to the runner's `takeover` slot, full
+    // frame, per orientation. Best effort: a refusal is logged, the local
+    // preview still shows the screen below.
+    if cloud_talk_show_live_show_id(state).is_some()
+        && let Some(context) = cloud_context(state)
+    {
+        use cloud_talk::{CloudOverlayOrientation, CloudOverlayRect, CloudOverlaySlot};
+        match active_screen.as_ref() {
+            Some(screen) => match cloud_show::hold_image_png_base64(&screen.image_path) {
+                Ok(png) => {
+                    for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+                        if let Err(problem) = context
+                            .set_overlay(
+                                CloudOverlaySlot::Takeover,
+                                orientation,
+                                &png,
+                                CloudOverlayRect::FULL,
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!("The takeover did not reach Videorc Cloud: {problem}");
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "The takeover image could not be sent to Videorc Cloud: {error:#}"
+                    );
+                }
+            },
+            None => {
+                for orientation in [CloudOverlayOrientation::H, CloudOverlayOrientation::V] {
+                    if let Err(problem) = context
+                        .clear_overlay(CloudOverlaySlot::Takeover, orientation)
+                        .await
+                    {
+                        tracing::debug!(
+                            "The takeover clear did not reach Videorc Cloud: {problem}"
+                        );
+                    }
+                }
+            }
+        }
+    }
     // Standby preview uses the same compositor. Publish the takeover there
     // before changing the authoritative persisted pointer.
     update_compositor_active_screen(state, active_screen).await;
@@ -11611,7 +11657,10 @@ async fn handle_text_message_with_role(
         }
         "cloud.room.close" => match cloud_context(state) {
             Some(context) => match context.close_room(account::stored_session_token()).await {
-                Ok(status) => ServerResponse::ok(command.id, status),
+                Ok(status) => {
+                    live_chat::stop_live_chat(state).await;
+                    ServerResponse::ok(command.id, status)
+                }
                 Err(error) => ServerResponse::error(
                     command.id,
                     "cloud-room-close-failed",
@@ -11803,7 +11852,23 @@ async fn handle_text_message_with_role(
                             .talk_go_live(account::stored_session_token(), destinations, platforms)
                             .await
                         {
-                            Ok(status) => ServerResponse::ok(command.id, status),
+                            Ok(status) => {
+                                // The chat attaches to the show the way it
+                                // attaches to a session: its id is the
+                                // session the renderer's cards name.
+                                if let Some(show_id) =
+                                    status.show.as_ref().map(|show| show.id.clone())
+                                    && let Some(chat) = prepare_session_live_chat(
+                                        state,
+                                        &show_id,
+                                        &params.streaming,
+                                    )
+                                    .await
+                                {
+                                    live_chat::start_live_chat(state, chat).await;
+                                }
+                                ServerResponse::ok(command.id, status)
+                            }
                             Err(error) => ServerResponse::error(
                                 command.id,
                                 "cloud-go-live-failed",
@@ -11820,7 +11885,10 @@ async fn handle_text_message_with_role(
         }
         "cloud.show.legs.end" => match cloud_context(state) {
             Some(context) => match context.legs_end().await {
-                Ok(status) => ServerResponse::ok(command.id, status),
+                Ok(status) => {
+                    live_chat::stop_live_chat(state).await;
+                    ServerResponse::ok(command.id, status)
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "cloud-legs-end-failed", format!("{error:#}"))
                 }
@@ -15177,6 +15245,16 @@ fn cloud_context(state: &AppState) -> Option<AppCloudShowContext> {
         web: std::sync::Arc::new(web),
         connector: std::sync::Arc::new(cloud_show::WsConnector),
     })
+}
+
+/// Plan 224 C-G7: the talk show on air, when cards and takeovers go to the
+/// runner instead of the compositor.
+pub(crate) fn cloud_talk_show_live_show_id(state: &AppState) -> Option<String> {
+    state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .talk_show_live_show_id()
 }
 
 /// Plan 224: this desktop holds a talk show's room.

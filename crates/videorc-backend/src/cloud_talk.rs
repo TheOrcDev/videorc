@@ -864,6 +864,16 @@ impl CloudShowRuntime {
         })
     }
 
+    /// Plan 224 C-G7: the show id while the room is open and on air (its
+    /// destinations were handed over): cards and takeovers go to the runner.
+    pub fn talk_show_live_show_id(&self) -> Option<String> {
+        let talk = self.talk.as_ref()?;
+        if talk.phase != CloudRoomPhase::Open || !talk.live {
+            return None;
+        }
+        self.show.as_ref().map(|show| show.record.id.clone())
+    }
+
     /// The runner's layout as the status shows it, once a `stage.set` landed.
     pub(crate) fn talk_layout_from_runner(&mut self) {
         let Some(room) = self.runner.as_ref().and_then(|runner| runner.room.as_ref()) else {
