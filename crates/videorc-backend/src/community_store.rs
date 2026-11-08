@@ -1203,18 +1203,19 @@ impl Database {
                     params![key, row.session_id, iso(row.at)],
                 )?;
             }
-            if !row.support.is_empty() || row.celebrate.is_some() {
-                if let Some(person) = person_locked(&transaction, &account.person_id)? {
-                    let mut support = person.support.clone();
-                    support.add(&row.support);
-                    let mut milestones = person.milestones.clone();
-                    if let Some(milestone) = row.celebrate {
-                        let key = milestone.key();
-                        if !milestones.contains(&key) {
-                            milestones.push(key);
-                        }
+            if (!row.support.is_empty() || row.celebrate.is_some())
+                && let Some(person) = person_locked(&transaction, &account.person_id)?
+            {
+                let mut support = person.support.clone();
+                support.add(&row.support);
+                let mut milestones = person.milestones.clone();
+                if let Some(milestone) = row.celebrate {
+                    let key = milestone.key();
+                    if !milestones.contains(&key) {
+                        milestones.push(key);
                     }
-                    transaction.execute(
+                }
+                transaction.execute(
                         "UPDATE community_people SET support_json = ?2, milestones_json = ?3, updated_at = ?4 WHERE id = ?1",
                         params![
                             person.id,
@@ -1223,7 +1224,6 @@ impl Database {
                             iso(now)
                         ],
                     )?;
-                }
             }
             if !touched.contains(&account.person_id) {
                 touched.push(account.person_id.clone());

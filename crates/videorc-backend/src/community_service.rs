@@ -1278,7 +1278,7 @@ pub(crate) async fn run_backfill(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cohost::{CohostSettings, CohostTalkMode};
+    use crate::cohost::{CohostAutoChat, CohostSettings, CohostTalkMode};
     use crate::live_chat::{fake_message, try_deliver_messages};
     use crate::protocol::CohostSettingsPatch;
     use tokio::sync::broadcast;
@@ -1343,9 +1343,14 @@ mod tests {
     }
 
     async fn set_talk(state: &AppState, talk: CohostTalkMode) {
-        let mut settings = CohostSettings::default();
-        settings.enabled = true;
-        settings.auto_chat.talk = Some(talk);
+        let settings = CohostSettings {
+            enabled: true,
+            auto_chat: CohostAutoChat {
+                talk: Some(talk),
+                ..CohostAutoChat::default()
+            },
+            ..CohostSettings::default()
+        };
         crate::cohost::set_cohost_settings(
             state,
             CohostSettingsPatch {
@@ -1378,13 +1383,12 @@ mod tests {
                 vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
             )
             .await;
-            assert_eq!(
+            assert!(
                 state
                     .database
                     .community_account_person("twitch:ada")
                     .unwrap()
                     .is_some(),
-                true,
                 "{talk:?}: Ada was learned"
             );
             deliver(
