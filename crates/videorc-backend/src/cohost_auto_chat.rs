@@ -615,7 +615,9 @@ impl AutoChatLane {
                 .arrival
                 .as_ref()
                 .and_then(|arrival| arrival.milestone)
-                .map_or(line.text.as_str(), |milestone| milestone_builtin_text(milestone.kind))
+                .map_or(line.text.as_str(), |milestone| {
+                    milestone_builtin_text(milestone.kind)
+                })
         } else {
             line.text.as_str()
         };

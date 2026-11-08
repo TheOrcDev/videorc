@@ -1043,7 +1043,9 @@ mod tests {
     use chrono::TimeZone;
 
     fn at(iso: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(iso).unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(iso)
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn day(year: i32, month: u32, day: u32) -> DateTime<Utc> {
@@ -1239,8 +1241,14 @@ mod tests {
 
     #[test]
     fn chat_commands_are_exact_any_case_and_trimmed() {
-        assert_eq!(parse_chat_command("  !ForgetMe "), Some(ChatCommand::ForgetMe));
-        assert_eq!(parse_chat_command("!rememberme"), Some(ChatCommand::RememberMe));
+        assert_eq!(
+            parse_chat_command("  !ForgetMe "),
+            Some(ChatCommand::ForgetMe)
+        );
+        assert_eq!(
+            parse_chat_command("!rememberme"),
+            Some(ChatCommand::RememberMe)
+        );
         assert_eq!(parse_chat_command("!UNLINK"), Some(ChatCommand::Unlink));
         assert_eq!(
             parse_chat_command("!link Pixel42"),
@@ -1331,7 +1339,12 @@ mod tests {
         assert_eq!(
             links.claim(
                 "later",
-                claim("twitch:6", StreamPlatform::Twitch, "p6", start + secs(100 + 600))
+                claim(
+                    "twitch:6",
+                    StreamPlatform::Twitch,
+                    "p6",
+                    start + secs(100 + 600)
+                )
             ),
             LinkOutcome::Waiting
         );
@@ -1340,7 +1353,12 @@ mod tests {
         assert_eq!(
             links.claim(
                 "later",
-                claim("youtube:7", StreamPlatform::Youtube, "p6", start + secs(710))
+                claim(
+                    "youtube:7",
+                    StreamPlatform::Youtube,
+                    "p6",
+                    start + secs(710)
+                )
             ),
             LinkOutcome::Ignored
         );
@@ -1377,7 +1395,12 @@ mod tests {
                     talk,
                     &ChatCommand::Link("w".into()),
                     "Ada",
-                    Some(("Ada", StreamPlatform::Twitch, "ada_dev", StreamPlatform::Youtube))
+                    Some((
+                        "Ada",
+                        StreamPlatform::Twitch,
+                        "ada_dev",
+                        StreamPlatform::Youtube
+                    ))
                 ),
                 None
             );
@@ -1392,7 +1415,12 @@ mod tests {
                 CohostTalkMode::Bubble,
                 &ChatCommand::Link("w".into()),
                 "Ada",
-                Some(("Ada", StreamPlatform::Twitch, "ada", StreamPlatform::Youtube))
+                Some((
+                    "Ada",
+                    StreamPlatform::Twitch,
+                    "ada",
+                    StreamPlatform::Youtube
+                ))
             )
             .as_deref(),
             Some("Linked: Ada on Twitch and YouTube.")
@@ -1402,14 +1430,24 @@ mod tests {
                 CohostTalkMode::Bubble,
                 &ChatCommand::Link("w".into()),
                 "Ada",
-                Some(("Ada", StreamPlatform::Twitch, "ada_dev", StreamPlatform::Youtube))
+                Some((
+                    "Ada",
+                    StreamPlatform::Twitch,
+                    "ada_dev",
+                    StreamPlatform::Youtube
+                ))
             )
             .as_deref(),
             Some("Linked: Ada on Twitch and ada_dev on YouTube.")
         );
         // A `!link` still waiting for its pair says nothing.
         assert_eq!(
-            command_bubble_line(CohostTalkMode::Bubble, &ChatCommand::Link("w".into()), "Ada", None),
+            command_bubble_line(
+                CohostTalkMode::Bubble,
+                &ChatCommand::Link("w".into()),
+                "Ada",
+                None
+            ),
             None
         );
     }
@@ -1455,11 +1493,17 @@ mod tests {
         assert!(plain_wire.get("arrival").is_none(), "absent, never null");
         let minimal: ViewerArrival =
             serde_json::from_value(fixture["minimalArrival"].clone()).unwrap();
-        assert_eq!(serde_json::to_value(&minimal).unwrap(), fixture["minimalArrival"]);
+        assert_eq!(
+            serde_json::to_value(&minimal).unwrap(),
+            fixture["minimalArrival"]
+        );
         let settings: CommunitySettings =
             serde_json::from_value(fixture["settings"].clone()).unwrap();
         assert_eq!(settings, CommunitySettings::default());
-        assert_eq!(serde_json::to_value(&settings).unwrap(), fixture["settings"]);
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap(),
+            fixture["settings"]
+        );
         let whole_settings = serde_json::to_value(CohostSettings::default()).unwrap();
         assert_eq!(whole_settings["community"], fixture["settings"]);
         for (key, check) in [

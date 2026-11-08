@@ -1102,12 +1102,14 @@ pub fn arrival_trigger(
         return None;
     }
     let (trigger, line) = match crate::cohost_greetings::arrival_kind(arrival, true) {
-        crate::cohost_greetings::GreetingKind::Milestone => {
-            (BuddyTrigger::Milestone, &auto_chat.greetings.welcomes.milestone)
-        }
-        crate::cohost_greetings::GreetingKind::Comeback => {
-            (BuddyTrigger::Comeback, &auto_chat.greetings.welcomes.comeback)
-        }
+        crate::cohost_greetings::GreetingKind::Milestone => (
+            BuddyTrigger::Milestone,
+            &auto_chat.greetings.welcomes.milestone,
+        ),
+        crate::cohost_greetings::GreetingKind::Comeback => (
+            BuddyTrigger::Comeback,
+            &auto_chat.greetings.welcomes.comeback,
+        ),
         crate::cohost_greetings::GreetingKind::Regular => {
             (BuddyTrigger::Regular, &auto_chat.greetings.welcomes.regular)
         }

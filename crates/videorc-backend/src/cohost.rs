@@ -5254,7 +5254,12 @@ impl CohostSession {
     /// name. With `split`, the spoken words are a name followed by a fact
     /// ("bo got the job"): the longest leading run of words (up to four)
     /// that names a chatter is the name, and the rest is the fact.
-    fn chatter_by_spoken_name(&self, spoken: &str, now: Instant, split: bool) -> Option<SpokenChatter> {
+    fn chatter_by_spoken_name(
+        &self,
+        spoken: &str,
+        now: Instant,
+        split: bool,
+    ) -> Option<SpokenChatter> {
         let raw: Vec<&str> = spoken.split_whitespace().collect();
         if raw.is_empty() {
             return None;
@@ -9103,19 +9108,30 @@ async fn run_wave_command(
                 ),
                 Some(SpokenChatter { key, name, .. }) => {
                     let database = state.database.clone();
-                    let person_id = tokio::task::spawn_blocking(move || database.community_account_person(&key))
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .flatten()
-                        .unwrap_or_default();
+                    let person_id = tokio::task::spawn_blocking(move || {
+                        database.community_account_person(&key)
+                    })
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+                    .unwrap_or_default();
                     crate::community_service::wave_at(state, &person_id, &name).await;
                     (CohostCommandStatus::Done, format!("Waved at {name}."))
                 }
             }
         }
     };
-    record_instant_command(state, scope, CohostCommandKind::Wave, &command.heard, status, message, &ctx).await;
+    record_instant_command(
+        state,
+        scope,
+        CohostCommandKind::Wave,
+        &command.heard,
+        status,
+        message,
+        &ctx,
+    )
+    .await;
 }
 
 /// Plan 225 B5: "Buddy, remember that Bo got the job": the name is told
@@ -9151,13 +9167,17 @@ async fn run_remember_command(
                     CohostCommandStatus::NotFound,
                     format!("No one called {} in chat.", tail.trim()),
                 )),
-                Some(SpokenChatter { key, name, fact, .. }) => {
+                Some(SpokenChatter {
+                    key, name, fact, ..
+                }) => {
                     let database = state.database.clone();
-                    match tokio::task::spawn_blocking(move || database.community_account_person(&key))
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .flatten()
+                    match tokio::task::spawn_blocking(move || {
+                        database.community_account_person(&key)
+                    })
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
                     {
                         Some(person_id) => Ok(RememberNote {
                             person_id,
@@ -9175,7 +9195,16 @@ async fn run_remember_command(
     };
     match note {
         Err((status, message)) => {
-            record_instant_command(state, scope, CohostCommandKind::Remember, &command.heard, status, message, &ctx).await;
+            record_instant_command(
+                state,
+                scope,
+                CohostCommandKind::Remember,
+                &command.heard,
+                status,
+                message,
+                &ctx,
+            )
+            .await;
         }
         Ok(note) => {
             let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
@@ -11228,7 +11257,9 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
                     ..
                 }
             );
-            if !limited || crate::community_service::arrival_reaction_due(&state.community, Instant::now()) {
+            if !limited
+                || crate::community_service::arrival_reaction_due(&state.community, Instant::now())
+            {
                 buddy_events.push(event);
             }
         }
@@ -20812,8 +20843,16 @@ mod tests {
             .database
             .community_record_batch(
                 &[
-                    crate::community_store::CommunityRowFacts::from_message(&ada, &Default::default()).unwrap(),
-                    crate::community_store::CommunityRowFacts::from_message(&bo, &Default::default()).unwrap(),
+                    crate::community_store::CommunityRowFacts::from_message(
+                        &ada,
+                        &Default::default(),
+                    )
+                    .unwrap(),
+                    crate::community_store::CommunityRowFacts::from_message(
+                        &bo,
+                        &Default::default(),
+                    )
+                    .unwrap(),
                 ],
                 chrono::Utc::now(),
             )
@@ -20825,21 +20864,35 @@ mod tests {
         run_detected_command(
             &state,
             &scope,
-            detected(CommandKind::Wave, CommandTarget::Name("ada".into()), "buddy wave at ada", None),
+            detected(
+                CommandKind::Wave,
+                CommandTarget::Name("ada".into()),
+                "buddy wave at ada",
+                None,
+            ),
             true,
         )
         .await;
         let waved = state_command(&state).await;
         assert_eq!(
             (waved.kind, waved.status, waved.message.as_str()),
-            (CohostCommandKind::Wave, CohostCommandStatus::Done, "Waved at Ada.")
+            (
+                CohostCommandKind::Wave,
+                CohostCommandStatus::Done,
+                "Waved at Ada."
+            )
         );
         assert_eq!(crate::community_service::bubble_lines(&state), ["Hey Ada!"]);
         assert_eq!(state.cohost.lock().await.snapshot().auto_chat_sends, 0);
         run_detected_command(
             &state,
             &scope,
-            detected(CommandKind::Wave, CommandTarget::Name("zed".into()), "buddy wave at zed", None),
+            detected(
+                CommandKind::Wave,
+                CommandTarget::Name("zed".into()),
+                "buddy wave at zed",
+                None,
+            ),
             true,
         )
         .await;
@@ -20864,7 +20917,15 @@ mod tests {
         assert_eq!(card.status, CohostCommandStatus::Confirm);
         assert_eq!(card.message, "Remember about Bo Plays: got the job?");
         assert!(card.expires_at.is_some());
-        assert!(state.cohost.lock().await.command_slot_mirror().0.awaiting_answer);
+        assert!(
+            state
+                .cohost
+                .lock()
+                .await
+                .command_slot_mirror()
+                .0
+                .awaiting_answer
+        );
         confirm_command(
             &state,
             crate::protocol::CohostCommandParams {
@@ -20905,7 +20966,10 @@ mod tests {
             true,
         )
         .await;
-        assert_eq!(state_command(&state).await.status, CohostCommandStatus::NotFound);
+        assert_eq!(
+            state_command(&state).await.status,
+            CohostCommandStatus::NotFound
+        );
         run_detected_command(
             &state,
             &scope,
@@ -20928,7 +20992,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(state_command(&state).await.status, CohostCommandStatus::Cancelled);
+        assert_eq!(
+            state_command(&state).await.status,
+            CohostCommandStatus::Cancelled
+        );
         let ada_person = state
             .database
             .community_person(
@@ -22841,7 +22908,12 @@ mod tests {
         }
         let old_settings: OldSettings = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(old_settings.persona.name, "Grum");
-        assert!(old_settings.auto_chat["greetings"]["templates"].as_array().unwrap().is_empty());
+        assert!(
+            old_settings.auto_chat["greetings"]["templates"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         // And the new app reads a block saved by an older one.
         let mut old_json = json.clone();
         for kind in ["regular", "comeback", "milestone"] {
@@ -22852,9 +22924,18 @@ mod tests {
         }
         old_json.as_object_mut().unwrap().remove("community");
         let parsed: CohostSettings = serde_json::from_value(old_json).unwrap();
-        assert_eq!(parsed.auto_chat.greetings.welcomes.regular, WelcomeLine::default());
-        assert_eq!(parsed.auto_chat.greetings.welcomes.milestone, WelcomeLine::default());
-        assert_eq!(parsed.community, crate::community::CommunitySettings::default());
+        assert_eq!(
+            parsed.auto_chat.greetings.welcomes.regular,
+            WelcomeLine::default()
+        );
+        assert_eq!(
+            parsed.auto_chat.greetings.welcomes.milestone,
+            WelcomeLine::default()
+        );
+        assert_eq!(
+            parsed.community,
+            crate::community::CommunitySettings::default()
+        );
         assert_eq!(parsed.persona.name, "Grum");
     }
 

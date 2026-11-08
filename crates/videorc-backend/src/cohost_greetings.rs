@@ -715,7 +715,8 @@ impl TemplateFields {
             .and_then(|arrival| arrival.since.as_deref())
             .and_then(|since| {
                 let (year, month) = since.split_once('-')?;
-                let date = chrono::NaiveDate::from_ymd_opt(year.parse().ok()?, month.parse().ok()?, 1)?;
+                let date =
+                    chrono::NaiveDate::from_ymd_opt(year.parse().ok()?, month.parse().ok()?, 1)?;
                 Some(crate::community::since_label(
                     date.and_hms_opt(0, 0, 0)?.and_utc(),
                 ))

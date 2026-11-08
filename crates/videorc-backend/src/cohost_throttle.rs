@@ -141,9 +141,7 @@ impl AutoChatThrottle {
         // Plan 225 D9: an arrival wave waits 20 s for the regulars behind
         // it, then goes out as one line; nothing is said on the spot.
         if facts.kind.is_arrival_wave() {
-            let due = self
-                .hold_due(&key, now)
-                .max(now + ARRIVAL_COLLAPSE_WINDOW);
+            let due = self.hold_due(&key, now).max(now + ARRIVAL_COLLAPSE_WINDOW);
             self.buckets.insert(
                 key,
                 Bucket {
@@ -421,7 +419,9 @@ mod tests {
         for n in 1..=30 {
             let at = start + Duration::from_millis(n * 300);
             match throttle.offer_greeting(welcome(&format!("Reg{n}"), GreetingKind::Regular), at) {
-                GreetingOffer::Held { due } => assert_eq!(due, start + secs(20) + Duration::from_millis(300)),
+                GreetingOffer::Held { due } => {
+                    assert_eq!(due, start + secs(20) + Duration::from_millis(300))
+                }
                 other => panic!("{other:?}"),
             }
         }
@@ -474,10 +474,19 @@ mod tests {
         assert!(throttle.drain_due(start + secs(14)).is_empty());
         let second = throttle.drain_due(start + secs(15));
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Lee"]);
+        assert_eq!(
+            second[0]
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Lee"]
+        );
         assert!(throttle.drain_due(start + secs(29)).is_empty());
         let third = throttle.drain_due(start + secs(30));
-        assert_eq!(third[0].iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Mo"]);
+        assert_eq!(
+            third[0].iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["Mo"]
+        );
         assert_eq!(throttle.next_due(), None);
         assert_eq!(kind_cooldown(GreetingKind::Milestone), secs(15));
         assert_eq!(kind_cooldown(GreetingKind::Regular), secs(20));

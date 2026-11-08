@@ -1457,7 +1457,10 @@ fn parse_community(words: &[Word], from: usize, end: usize) -> Option<Parsed> {
         "wave" => {
             // "wave at", "wave to", "wave hello to", "wave hi to".
             while after < span.len()
-                && matches!(span[after].text.as_str(), "at" | "to" | "hello" | "hi" | "hey")
+                && matches!(
+                    span[after].text.as_str(),
+                    "at" | "to" | "hello" | "hi" | "hey"
+                )
             {
                 after += 1;
             }
@@ -2193,7 +2196,10 @@ mod tests {
         assert!(detect_one("Buddy, wave", &PLAIN).is_none());
         // Thanks is nothing; a comment sentence keeps the comment grammar.
         assert!(detect_one("thanks buddy", &PLAIN).is_none());
-        assert!(detect_one("Thanks Buddy, that was great", &PLAIN).is_none_or(|c| c.kind == CommandKind::Unknown));
+        assert!(
+            detect_one("Thanks Buddy, that was great", &PLAIN)
+                .is_none_or(|c| c.kind == CommandKind::Unknown)
+        );
         let highlight = detect_one("Buddy, highlight the comment from coders X", &PLAIN).unwrap();
         assert_eq!(highlight.kind, Highlight);
         // The wake word is required.

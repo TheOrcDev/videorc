@@ -10295,7 +10295,9 @@ async fn handle_text_message_with_role(
         }
         // Plan 225: the community store (A5). Every handler runs its store
         // call off the runtime; none touches chat delivery.
-        "cohost.community.summary" => community_rpc(command.id, community_service::summary(state).await),
+        "cohost.community.summary" => {
+            community_rpc(command.id, community_service::summary(state).await)
+        }
         "cohost.community.list" => match serde_json::from_value(command.params) {
             Ok(params) => community_rpc(command.id, community_service::list(state, params).await),
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
@@ -10317,15 +10319,17 @@ async fn handle_text_message_with_role(
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "cohost.community.suggestion.dismiss" => match serde_json::from_value(command.params) {
-            Ok(params) => {
-                community_rpc(command.id, community_service::suggestion_dismiss(state, params).await)
-            }
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::suggestion_dismiss(state, params).await,
+            ),
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "cohost.community.suggestion.accept" => match serde_json::from_value(command.params) {
-            Ok(params) => {
-                community_rpc(command.id, community_service::suggestion_accept(state, params).await)
-            }
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::suggestion_accept(state, params).await,
+            ),
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "cohost.community.forget" => match serde_json::from_value(command.params) {
@@ -10336,9 +10340,10 @@ async fn handle_text_message_with_role(
             community_rpc(command.id, community_service::forget_all(state).await)
         }
         "cohost.community.memory.delete" => match serde_json::from_value(command.params) {
-            Ok(params) => {
-                community_rpc(command.id, community_service::memory_delete(state, params).await)
-            }
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::memory_delete(state, params).await,
+            ),
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "cohost.community.wave" => match serde_json::from_value(command.params) {

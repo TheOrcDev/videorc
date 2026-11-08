@@ -20,18 +20,18 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::cohost::truncate_utf16;
+use crate::cohost_greetings::is_known_bot;
 use crate::community::{
     CommunityAccount, CommunityBackfill, CommunityBackfillState, CommunityLinkEvent,
     CommunityLinkKind, CommunityListFilter, CommunityListPage, CommunityListParams,
-    CommunityListSort, CommunityMemory, CommunityPerson, CommunityPersonParams,
-    CommunityPersonRow, CommunityPersonStatus, CommunitySuggestion, CommunitySuggestionReason,
-    CommunitySummary, CommunitySupport, KnownStream, LIST_LIMIT_MAX, NOTE_MAX_CHARS,
-    OTHER_RETENTION_DAYS, PersonHistory, REGULAR_WINDOW_DAYS, ViewerArrival, ViewerMilestone,
-    YOUTUBE_RETENTION_DAYS, account_key, arrival_facts, away_days, in_a_row, is_regular,
-    platform_has_identity, suggestion_name_key,
+    CommunityListSort, CommunityMemory, CommunityPerson, CommunityPersonParams, CommunityPersonRow,
+    CommunityPersonStatus, CommunitySuggestion, CommunitySuggestionReason, CommunitySummary,
+    CommunitySupport, KnownStream, LIST_LIMIT_MAX, NOTE_MAX_CHARS, OTHER_RETENTION_DAYS,
+    PersonHistory, REGULAR_WINDOW_DAYS, ViewerArrival, ViewerMilestone, YOUTUBE_RETENTION_DAYS,
+    account_key, arrival_facts, away_days, in_a_row, is_regular, platform_has_identity,
+    suggestion_name_key,
 };
-use crate::cohost::truncate_utf16;
-use crate::cohost_greetings::is_known_bot;
 use crate::live_chat::{LiveChatEventDetails, LiveChatEventType, LiveChatMessage};
 use crate::storage::Database;
 use crate::streaming::{StreamPlatform, stream_platform_from_id, stream_platform_id};
@@ -131,15 +131,20 @@ impl CommunityRowFacts {
     /// The facts of one chat row, or `None` for a row the store never
     /// counts: no author id, a platform without identity, a tombstone, a
     /// system row, or the streamer's own row.
-    pub fn from_message(message: &LiveChatMessage, streamer_keys: &HashSet<String>) -> Option<Self> {
+    pub fn from_message(
+        message: &LiveChatMessage,
+        streamer_keys: &HashSet<String>,
+    ) -> Option<Self> {
         let author_id = message.author_id.as_deref()?.trim();
         if author_id.is_empty()
             || !platform_has_identity(message.platform)
             || message.is_deleted
-            || message
-                .author_roles
-                .iter()
-                .any(|role| matches!(role.trim().to_ascii_lowercase().as_str(), "owner" | "broadcaster"))
+            || message.author_roles.iter().any(|role| {
+                matches!(
+                    role.trim().to_ascii_lowercase().as_str(),
+                    "owner" | "broadcaster"
+                )
+            })
         {
             return None;
         }
@@ -175,7 +180,10 @@ impl CommunityRowFacts {
             at,
             counts,
             support: support_of(message),
-            celebrate: message.arrival.as_ref().and_then(|arrival| arrival.milestone),
+            celebrate: message
+                .arrival
+                .as_ref()
+                .and_then(|arrival| arrival.milestone),
         })
     }
 }
@@ -205,13 +213,15 @@ fn support_of(message: &LiveChatMessage) -> CommunitySupport {
             months, gift_count, ..
         }) => {
             support.gifted_subs = u64::from(gift_count.unwrap_or(0));
-            support.sub_months = u64::from(months.unwrap_or(if gift_count.is_some() { 0 } else { 1 }));
+            support.sub_months =
+                u64::from(months.unwrap_or(if gift_count.is_some() { 0 } else { 1 }));
         }
         Some(LiveChatEventDetails::Membership {
             months, gift_count, ..
         }) => {
             support.gifted_subs = u64::from(gift_count.unwrap_or(0));
-            support.sub_months = u64::from(months.unwrap_or(if gift_count.is_some() { 0 } else { 1 }));
+            support.sub_months =
+                u64::from(months.unwrap_or(if gift_count.is_some() { 0 } else { 1 }));
         }
         _ => {}
     }
@@ -562,7 +572,9 @@ fn person_history_locked(conn: &Connection, person: &PersonRow) -> Result<Person
         celebrated: person.milestones.clone(),
         ..Default::default()
     };
-    history.platforms.sort_by_key(|platform| stream_platform_id(*platform));
+    history
+        .platforms
+        .sort_by_key(|platform| stream_platform_id(*platform));
     history.platforms.dedup();
     let mut statement = conn.prepare(
         "SELECT t.session_id, t.first_message_at, t.last_message_at, t.messages, s.started_at
@@ -590,10 +602,18 @@ fn person_history_locked(conn: &Connection, person: &PersonRow) -> Result<Person
         }
         history.messages = history.messages.saturating_add(messages.max(0) as u64);
         if let Some(first_at) = first_at {
-            history.first_seen_at = Some(history.first_seen_at.map_or(first_at, |seen| seen.min(first_at)));
+            history.first_seen_at = Some(
+                history
+                    .first_seen_at
+                    .map_or(first_at, |seen| seen.min(first_at)),
+            );
         }
         if let Some(last_at) = last_at {
-            history.last_seen_at = Some(history.last_seen_at.map_or(last_at, |seen| seen.max(last_at)));
+            history.last_seen_at = Some(
+                history
+                    .last_seen_at
+                    .map_or(last_at, |seen| seen.max(last_at)),
+            );
         }
     }
     Ok(history)
@@ -644,7 +664,10 @@ fn delete_person_locked(conn: &Connection, person_id: &str) -> Result<()> {
         "DELETE FROM community_memories WHERE person_id = ?1",
         params![person_id],
     )?;
-    conn.execute("DELETE FROM community_people WHERE id = ?1", params![person_id])?;
+    conn.execute(
+        "DELETE FROM community_people WHERE id = ?1",
+        params![person_id],
+    )?;
     Ok(())
 }
 
@@ -770,11 +793,12 @@ fn merge_people_locked(
     } else {
         kept.note
     };
-    let status = if kept.status == CommunityPersonStatus::Bot || gone.status == CommunityPersonStatus::Bot {
-        CommunityPersonStatus::Bot
-    } else {
-        CommunityPersonStatus::Normal
-    };
+    let status =
+        if kept.status == CommunityPersonStatus::Bot || gone.status == CommunityPersonStatus::Bot {
+            CommunityPersonStatus::Bot
+        } else {
+            CommunityPersonStatus::Normal
+        };
     conn.execute(
         "UPDATE community_people SET support_json = ?2, milestones_json = ?3, note = ?4,
             best_in_a_row = MAX(best_in_a_row, ?5), status = ?6, updated_at = ?7
@@ -892,7 +916,8 @@ fn open_suggestions_locked(
         {
             continue;
         }
-        let (Some(account_a), Some(account_b)) = (account_locked(conn, &a)?, account_locked(conn, &b)?)
+        let (Some(account_a), Some(account_b)) =
+            (account_locked(conn, &a)?, account_locked(conn, &b)?)
         else {
             // One side is gone (forgotten, pruned): the suggestion is moot.
             conn.execute(
@@ -1054,8 +1079,7 @@ impl Database {
                 out.push(lookup);
                 continue;
             };
-            if person.status != CommunityPersonStatus::Normal
-                || !arrived.insert(person.id.clone())
+            if person.status != CommunityPersonStatus::Normal || !arrived.insert(person.id.clone())
             {
                 out.push(lookup);
                 continue;
@@ -1077,7 +1101,9 @@ impl Database {
                     .iter()
                     .find(|stream| stream.session_id == session_id)
                     .map_or(now, |stream| stream.started_at);
-                with_current.attended.push((session_id.to_string(), started_at));
+                with_current
+                    .attended
+                    .push((session_id.to_string(), started_at));
             }
             let mut streams_with_current = streams.clone();
             if !streams_with_current
@@ -1161,7 +1187,8 @@ impl Database {
                     outcome.new_accounts.push((key.clone(), row.name.clone()));
                     let account = account_locked(&transaction, &key)?
                         .context("the account just inserted is missing")?;
-                    outcome.suggestions_made += suggest_for_account_locked(&transaction, &account, now)?;
+                    outcome.suggestions_made +=
+                        suggest_for_account_locked(&transaction, &account, now)?;
                     account
                 }
             };
@@ -1279,7 +1306,10 @@ impl Database {
             for pair in pairs {
                 let (person_id, platform) = pair?;
                 if let Some(platform) = stream_platform_from_id(&platform) {
-                    platforms_by_person.entry(person_id).or_default().push(platform);
+                    platforms_by_person
+                        .entry(person_id)
+                        .or_default()
+                        .push(platform);
                 }
             }
         }
@@ -1299,7 +1329,9 @@ impl Database {
             row.regular = regulars.contains_key(&row.id);
             let keep = match params.filter {
                 CommunityListFilter::Everyone => row.status != CommunityPersonStatus::Bot,
-                CommunityListFilter::Regulars => row.regular && row.status == CommunityPersonStatus::Normal,
+                CommunityListFilter::Regulars => {
+                    row.regular && row.status == CommunityPersonStatus::Normal
+                }
                 CommunityListFilter::Linked => row.platforms.len() >= 2,
                 CommunityListFilter::Bots => row.status == CommunityPersonStatus::Bot,
             };
@@ -1341,7 +1373,10 @@ impl Database {
             .as_deref()
             .and_then(|cursor| cursor.parse().ok())
             .unwrap_or(0);
-        let limit = params.limit.unwrap_or(LIST_LIMIT_MAX).clamp(1, LIST_LIMIT_MAX);
+        let limit = params
+            .limit
+            .unwrap_or(LIST_LIMIT_MAX)
+            .clamp(1, LIST_LIMIT_MAX);
         let total = people.len();
         let page: Vec<CommunityPersonRow> = people.into_iter().skip(offset).take(limit).collect();
         let next = offset.saturating_add(page.len());
@@ -1361,13 +1396,22 @@ impl Database {
         threshold: u32,
     ) -> Result<CommunityPerson, CommunityError> {
         let conn = self.lock()?;
-        if let Some(person_id) = params.person_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        if let Some(person_id) = params
+            .person_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
             let person = person_locked(&conn, person_id)?.ok_or(CommunityError::NotFound)?;
             return Ok(person_wire_locked(&conn, &person, now, threshold)?);
         }
         let (Some(platform), Some(author_id)) = (
             params.platform,
-            params.author_id.as_deref().map(str::trim).filter(|id| !id.is_empty()),
+            params
+                .author_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty()),
         ) else {
             return Err(CommunityError::Invalid(
                 "personId, or platform and authorId, are required.".to_string(),
@@ -1516,7 +1560,12 @@ impl Database {
             let b = account_locked(&conn, account_b)?.ok_or(CommunityError::NotFound)?;
             (a.person_id, b.person_id)
         };
-        self.community_link(&person_a, &person_b, CommunityLinkKind::SuggestionAccepted, now)
+        self.community_link(
+            &person_a,
+            &person_b,
+            CommunityLinkKind::SuggestionAccepted,
+            now,
+        )
     }
 
     /// "Not the same person" or `!unlink` (D4): the account moves into a new
@@ -1538,7 +1587,8 @@ impl Database {
             // Alone already: nothing to split.
             return Ok(account.person_id);
         }
-        let old_person = person_locked(&transaction, &account.person_id)?.ok_or(CommunityError::NotFound)?;
+        let old_person =
+            person_locked(&transaction, &account.person_id)?.ok_or(CommunityError::NotFound)?;
         let new_person = insert_person_locked(
             &transaction,
             &account.name,
@@ -1554,8 +1604,20 @@ impl Database {
             "UPDATE community_memories SET person_id = ?2, updated_at = ?3 WHERE account_key = ?1",
             params![account_key, new_person, iso(now)],
         )?;
-        insert_link_event_locked(&transaction, &new_person, account_key, CommunityLinkKind::Split, now)?;
-        insert_link_event_locked(&transaction, &old_person.id, account_key, CommunityLinkKind::Split, now)?;
+        insert_link_event_locked(
+            &transaction,
+            &new_person,
+            account_key,
+            CommunityLinkKind::Split,
+            now,
+        )?;
+        insert_link_event_locked(
+            &transaction,
+            &old_person.id,
+            account_key,
+            CommunityLinkKind::Split,
+            now,
+        )?;
         refresh_person_locked(&transaction, &old_person.id)?;
         refresh_person_locked(&transaction, &new_person)?;
         transaction.commit()?;
@@ -1577,7 +1639,12 @@ impl Database {
 
     /// A cancelled `!link` (D4 b): the pair waits for the streamer under
     /// "Links that need you".
-    pub fn community_link_cancelled(&self, account_a: &str, account_b: &str, now: DateTime<Utc>) -> Result<()> {
+    pub fn community_link_cancelled(
+        &self,
+        account_a: &str,
+        account_b: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let conn = self.lock()?;
         let (a, b) = ordered_pair(account_a, account_b);
         conn.execute(
@@ -1594,7 +1661,11 @@ impl Database {
     /// tombstone stays so the account is never learned again. If it was the
     /// person's last account, the person goes with its note, memories and
     /// milestones. Returns the person's name as it was, for the bubble.
-    pub fn community_forget_account(&self, account_key: &str, now: DateTime<Utc>) -> Result<Option<String>> {
+    pub fn community_forget_account(
+        &self,
+        account_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         let Some(account) = account_locked(&transaction, account_key)? else {
@@ -1629,7 +1700,11 @@ impl Database {
     }
 
     /// "Forget Ada…" (D13): every account of the person, as `!forgetme`.
-    pub fn community_forget_person(&self, person_id: &str, now: DateTime<Utc>) -> Result<(), CommunityError> {
+    pub fn community_forget_person(
+        &self,
+        person_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), CommunityError> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         if person_locked(&transaction, person_id)?.is_none() {
@@ -1692,7 +1767,8 @@ impl Database {
                     (platform = 'youtube' AND last_seen_at < ?1)
                     OR (platform != 'youtube' AND last_seen_at < ?2))"
             ))?;
-            let rows = statement.query_map(params![youtube_cutoff, other_cutoff], account_from_row)?;
+            let rows =
+                statement.query_map(params![youtube_cutoff, other_cutoff], account_from_row)?;
             for row in rows {
                 expired.push(row?);
             }
@@ -1888,7 +1964,8 @@ impl Database {
             people: Vec::new(),
             streams: Vec::new(),
         };
-        let mut streams = conn.prepare("SELECT session_id, started_at, platforms_json FROM community_streams")?;
+        let mut streams =
+            conn.prepare("SELECT session_id, started_at, platforms_json FROM community_streams")?;
         for row in streams.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -1936,7 +2013,9 @@ impl Database {
                 "SELECT {ACCOUNT_COLUMNS}, updated_at FROM community_accounts WHERE person_id = ?1"
             ))?;
             let account_rows: Vec<(AccountRow, String)> = accounts
-                .query_map(params![id], |row| Ok((account_from_row(row)?, row.get::<_, String>(10)?)))?
+                .query_map(params![id], |row| {
+                    Ok((account_from_row(row)?, row.get::<_, String>(10)?))
+                })?
                 .collect::<Result<_, _>>()?;
             for (account, updated_at) in account_rows {
                 let mut attendance = conn.prepare(
@@ -1974,7 +2053,9 @@ impl Database {
              WHERE status = 'forgotten' AND person_id NOT IN (SELECT id FROM community_people)"
         ))?;
         let orphan_rows: Vec<(AccountRow, String)> = orphans
-            .query_map([], |row| Ok((account_from_row(row)?, row.get::<_, String>(10)?)))?
+            .query_map([], |row| {
+                Ok((account_from_row(row)?, row.get::<_, String>(10)?))
+            })?
             .collect::<Result<_, _>>()?;
         for (account, updated_at) in orphan_rows {
             file.people.push(ExportPerson {
@@ -2004,9 +2085,16 @@ impl Database {
     /// last-writer-wins by `updated_at`, attendance a union, a forgotten
     /// tombstone wins over everything. Returns `(people, merged)`: people in
     /// the file, and how many met an existing person.
-    pub fn community_import(&self, file: &CommunityExportFile, now: DateTime<Utc>) -> Result<(u32, u32)> {
+    pub fn community_import(
+        &self,
+        file: &CommunityExportFile,
+        now: DateTime<Utc>,
+    ) -> Result<(u32, u32)> {
         if file.version != EXPORT_VERSION {
-            anyhow::bail!("This file was made by a newer Videorc (version {}).", file.version);
+            anyhow::bail!(
+                "This file was made by a newer Videorc (version {}).",
+                file.version
+            );
         }
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
@@ -2252,7 +2340,10 @@ impl Database {
 
     /// Test helper: the person a key belongs to, by status.
     #[cfg(test)]
-    pub(crate) fn community_account_status(&self, key: &str) -> Option<(String, CommunityPersonStatus)> {
+    pub(crate) fn community_account_status(
+        &self,
+        key: &str,
+    ) -> Option<(String, CommunityPersonStatus)> {
         let conn = self.lock().ok()?;
         account_locked(&conn, key)
             .ok()
@@ -2306,7 +2397,11 @@ fn regular_people_locked(
 }
 
 /// `!forgetme` for one account row, inside a transaction.
-fn forget_account_locked(conn: &Connection, account: &AccountRow, now: DateTime<Utc>) -> Result<()> {
+fn forget_account_locked(
+    conn: &Connection,
+    account: &AccountRow,
+    now: DateTime<Utc>,
+) -> Result<()> {
     conn.execute(
         "DELETE FROM community_attendance WHERE account_key = ?1",
         params![account.account_key],

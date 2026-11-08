@@ -153,7 +153,12 @@ const WELCOMED_REMEMBERED: usize = 64;
 
 impl CommunityLane {
     /// A returning person arrived (`message_id` is their arrival row).
-    pub(crate) fn note_arrival(&mut self, entry: CohostWelcomeBack, message_id: String, now: Instant) {
+    pub(crate) fn note_arrival(
+        &mut self,
+        entry: CohostWelcomeBack,
+        message_id: String,
+        now: Instant,
+    ) {
         if self.welcomed.contains(&message_id) {
             return;
         }
@@ -338,8 +343,9 @@ pub(crate) fn lookup_arrivals_blocking(
             (arrivals, None)
         }
         Err(error) => {
-            let log = (!session.store_error_logged)
-                .then(|| format!("Community: the arrival lookup failed; chat goes on without it: {error:#}"));
+            let log = (!session.store_error_logged).then(|| {
+                format!("Community: the arrival lookup failed; chat goes on without it: {error:#}")
+            });
             session.store_error_logged = true;
             (HashMap::new(), log)
         }
@@ -397,7 +403,11 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
             .collect();
         if !rows.is_empty() {
             let database = state.database.clone();
-            match tokio::task::spawn_blocking(move || database.community_record_batch(&rows, Utc::now())).await {
+            match tokio::task::spawn_blocking(move || {
+                database.community_record_batch(&rows, Utc::now())
+            })
+            .await
+            {
                 Ok(Ok(outcome)) => {
                     changed = !outcome.new_accounts.is_empty() || outcome.suggestions_made > 0;
                 }
@@ -463,7 +473,12 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
         let Some(command) = parse_chat_command(&message.message_text) else {
             continue;
         };
-        let Some(author_id) = message.author_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) else {
+        let Some(author_id) = message
+            .author_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
             continue;
         };
         if !platform_has_identity(message.platform) {
@@ -471,10 +486,12 @@ async fn record_delivered_task(state: &AppState, session_id: &str, messages: Vec
         }
         let key = account_key(message.platform, author_id);
         if streamer_keys.contains(&key)
-            || message
-                .author_roles
-                .iter()
-                .any(|role| matches!(role.trim().to_ascii_lowercase().as_str(), "owner" | "broadcaster"))
+            || message.author_roles.iter().any(|role| {
+                matches!(
+                    role.trim().to_ascii_lowercase().as_str(),
+                    "owner" | "broadcaster"
+                )
+            })
         {
             // The streamer's own `!link` does nothing (B2).
             continue;
@@ -524,7 +541,11 @@ async fn run_chat_command(
     match &command {
         ChatCommand::ForgetMe => {
             let forget_key = key.to_string();
-            match tokio::task::spawn_blocking(move || database.community_forget_account(&forget_key, now)).await {
+            match tokio::task::spawn_blocking(move || {
+                database.community_forget_account(&forget_key, now)
+            })
+            .await
+            {
                 Ok(Ok(_)) => {
                     changed = true;
                     line = command_bubble_line(talk, &command, &name, None);
@@ -537,24 +558,34 @@ async fn run_chat_command(
                     );
                 }
                 Ok(Err(error)) => log_store_error_once(state, session_id, &error),
-                Err(error) => state.emit_log("warn", format!("Community: !forgetme failed: {error}")),
+                Err(error) => {
+                    state.emit_log("warn", format!("Community: !forgetme failed: {error}"))
+                }
             }
         }
         ChatCommand::RememberMe => {
             let remember_key = key.to_string();
-            match tokio::task::spawn_blocking(move || database.community_remember_account(&remember_key)).await {
+            match tokio::task::spawn_blocking(move || {
+                database.community_remember_account(&remember_key)
+            })
+            .await
+            {
                 Ok(Ok(true)) => {
                     changed = true;
                     line = command_bubble_line(talk, &command, &name, None);
                 }
                 Ok(Ok(false)) => {}
                 Ok(Err(error)) => log_store_error_once(state, session_id, &error),
-                Err(error) => state.emit_log("warn", format!("Community: !rememberme failed: {error}")),
+                Err(error) => {
+                    state.emit_log("warn", format!("Community: !rememberme failed: {error}"))
+                }
             }
         }
         ChatCommand::Unlink => {
             let unlink_key = key.to_string();
-            match tokio::task::spawn_blocking(move || database.community_unlink(&unlink_key, now)).await {
+            match tokio::task::spawn_blocking(move || database.community_unlink(&unlink_key, now))
+                .await
+            {
                 Ok(Ok(_)) => {
                     changed = true;
                     line = command_bubble_line(talk, &command, &name, None);
@@ -565,17 +596,20 @@ async fn run_chat_command(
                     }
                 }
                 Ok(Err(CommunityError::NotFound)) => {}
-                Ok(Err(error)) => state.emit_log("warn", format!("Community: !unlink failed: {error}")),
+                Ok(Err(error)) => {
+                    state.emit_log("warn", format!("Community: !unlink failed: {error}"))
+                }
                 Err(error) => state.emit_log("warn", format!("Community: !unlink failed: {error}")),
             }
         }
         ChatCommand::Link(word) => {
             let person_key = key.to_string();
-            let person_id = tokio::task::spawn_blocking(move || database.community_account_person(&person_key))
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .flatten();
+            let person_id =
+                tokio::task::spawn_blocking(move || database.community_account_person(&person_key))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
             let Some(person_id) = person_id else {
                 return false;
             };
@@ -630,15 +664,21 @@ async fn run_chat_command(
                                 .note_link_made(link, Instant::now());
                             publish_cohost_state(state).await;
                         }
-                        Ok(Err(error)) => state.emit_log("warn", format!("Community: !link failed: {error}")),
-                        Err(error) => state.emit_log("warn", format!("Community: !link failed: {error}")),
+                        Ok(Err(error)) => {
+                            state.emit_log("warn", format!("Community: !link failed: {error}"))
+                        }
+                        Err(error) => {
+                            state.emit_log("warn", format!("Community: !link failed: {error}"))
+                        }
                     }
                 }
                 LinkOutcome::Cancelled { first, second } => {
                     let database = state.database.clone();
                     let (a, b) = (first.account_key.clone(), second.account_key.clone());
-                    if let Ok(Ok(())) =
-                        tokio::task::spawn_blocking(move || database.community_link_cancelled(&a, &b, now)).await
+                    if let Ok(Ok(())) = tokio::task::spawn_blocking(move || {
+                        database.community_link_cancelled(&a, &b, now)
+                    })
+                    .await
                     {
                         changed = true;
                     }
@@ -711,7 +751,11 @@ pub(crate) async fn wait_for_writes(state: &AppState) {
         if Instant::now() >= deadline {
             return;
         }
-        let _ = tokio::time::timeout(Duration::from_millis(200), state.community.writes_done.notified()).await;
+        let _ = tokio::time::timeout(
+            Duration::from_millis(200),
+            state.community.writes_done.notified(),
+        )
+        .await;
     }
 }
 
@@ -759,7 +803,10 @@ pub async fn summary(state: &AppState) -> Result<CommunitySummary, CommunityErro
     current_summary(state).await
 }
 
-pub async fn list(state: &AppState, params: CommunityListParams) -> Result<CommunityListPage, CommunityError> {
+pub async fn list(
+    state: &AppState,
+    params: CommunityListParams,
+) -> Result<CommunityListPage, CommunityError> {
     let threshold = threshold(state);
     blocking(state, move |database| {
         database
@@ -769,12 +816,21 @@ pub async fn list(state: &AppState, params: CommunityListParams) -> Result<Commu
     .await
 }
 
-pub async fn person(state: &AppState, params: CommunityPersonParams) -> Result<CommunityPerson, CommunityError> {
+pub async fn person(
+    state: &AppState,
+    params: CommunityPersonParams,
+) -> Result<CommunityPerson, CommunityError> {
     let threshold = threshold(state);
-    blocking(state, move |database| database.community_person(&params, Utc::now(), threshold)).await
+    blocking(state, move |database| {
+        database.community_person(&params, Utc::now(), threshold)
+    })
+    .await
 }
 
-async fn person_by_id(state: &AppState, person_id: String) -> Result<CommunityPerson, CommunityError> {
+async fn person_by_id(
+    state: &AppState,
+    person_id: String,
+) -> Result<CommunityPerson, CommunityError> {
     person(
         state,
         CommunityPersonParams {
@@ -785,7 +841,10 @@ async fn person_by_id(state: &AppState, person_id: String) -> Result<CommunityPe
     .await
 }
 
-pub async fn update(state: &AppState, params: CommunityUpdateParams) -> Result<CommunityPerson, CommunityError> {
+pub async fn update(
+    state: &AppState,
+    params: CommunityUpdateParams,
+) -> Result<CommunityPerson, CommunityError> {
     let person_id = params.person_id.trim().to_string();
     if person_id.is_empty() {
         return Err(CommunityError::Invalid("personId is required.".to_string()));
@@ -800,7 +859,10 @@ pub async fn update(state: &AppState, params: CommunityUpdateParams) -> Result<C
 }
 
 /// `cohost.community.link` (D4 a): the streamer's "Same person as…".
-pub async fn link(state: &AppState, params: CommunityLinkParams) -> Result<CommunityPerson, CommunityError> {
+pub async fn link(
+    state: &AppState,
+    params: CommunityLinkParams,
+) -> Result<CommunityPerson, CommunityError> {
     let (a, b) = (
         params.person_id.trim().to_string(),
         params.other_person_id.trim().to_string(),
@@ -820,13 +882,21 @@ pub async fn link(state: &AppState, params: CommunityLinkParams) -> Result<Commu
 
 /// `cohost.community.unlink` (D4): "Not the same person", or the Undo of a
 /// `!link` card.
-pub async fn unlink(state: &AppState, params: CommunityUnlinkParams) -> Result<CommunityUnlinkResult, CommunityError> {
+pub async fn unlink(
+    state: &AppState,
+    params: CommunityUnlinkParams,
+) -> Result<CommunityUnlinkResult, CommunityError> {
     let key = params.account_key.trim().to_string();
     if key.is_empty() {
-        return Err(CommunityError::Invalid("accountKey is required.".to_string()));
+        return Err(CommunityError::Invalid(
+            "accountKey is required.".to_string(),
+        ));
     }
     let undo_key = key.clone();
-    let person_id = blocking(state, move |database| database.community_unlink(&undo_key, Utc::now())).await?;
+    let person_id = blocking(state, move |database| {
+        database.community_unlink(&undo_key, Utc::now())
+    })
+    .await?;
     let mut engine = state.cohost.lock().await;
     let card_left = engine.community.note_unlinked(&key);
     drop(engine);
@@ -837,10 +907,18 @@ pub async fn unlink(state: &AppState, params: CommunityUnlinkParams) -> Result<C
     Ok(CommunityUnlinkResult { person_id })
 }
 
-pub async fn suggestion_dismiss(state: &AppState, params: CommunitySuggestionParams) -> Result<CommunityAccepted, CommunityError> {
-    let (a, b) = (params.account_a.trim().to_string(), params.account_b.trim().to_string());
+pub async fn suggestion_dismiss(
+    state: &AppState,
+    params: CommunitySuggestionParams,
+) -> Result<CommunityAccepted, CommunityError> {
+    let (a, b) = (
+        params.account_a.trim().to_string(),
+        params.account_b.trim().to_string(),
+    );
     if a.is_empty() || b.is_empty() {
-        return Err(CommunityError::Invalid("accountA and accountB are required.".to_string()));
+        return Err(CommunityError::Invalid(
+            "accountA and accountB are required.".to_string(),
+        ));
     }
     blocking(state, move |database| {
         database
@@ -853,23 +931,40 @@ pub async fn suggestion_dismiss(state: &AppState, params: CommunitySuggestionPar
 }
 
 /// "Same person" on a suggestion (D4 c): the two accounts' people join.
-pub async fn suggestion_accept(state: &AppState, params: CommunitySuggestionParams) -> Result<CommunityPerson, CommunityError> {
-    let (a, b) = (params.account_a.trim().to_string(), params.account_b.trim().to_string());
+pub async fn suggestion_accept(
+    state: &AppState,
+    params: CommunitySuggestionParams,
+) -> Result<CommunityPerson, CommunityError> {
+    let (a, b) = (
+        params.account_a.trim().to_string(),
+        params.account_b.trim().to_string(),
+    );
     if a.is_empty() || b.is_empty() {
-        return Err(CommunityError::Invalid("accountA and accountB are required.".to_string()));
+        return Err(CommunityError::Invalid(
+            "accountA and accountB are required.".to_string(),
+        ));
     }
-    let kept = blocking(state, move |database| database.community_suggestion_accept(&a, &b, Utc::now())).await?;
+    let kept = blocking(state, move |database| {
+        database.community_suggestion_accept(&a, &b, Utc::now())
+    })
+    .await?;
     emit_changed(state).await;
     person_by_id(state, kept).await
 }
 
-pub async fn forget(state: &AppState, params: CommunityPersonIdParams) -> Result<CommunityAccepted, CommunityError> {
+pub async fn forget(
+    state: &AppState,
+    params: CommunityPersonIdParams,
+) -> Result<CommunityAccepted, CommunityError> {
     let person_id = params.person_id.trim().to_string();
     if person_id.is_empty() {
         return Err(CommunityError::Invalid("personId is required.".to_string()));
     }
     let id = person_id.clone();
-    blocking(state, move |database| database.community_forget_person(&id, Utc::now())).await?;
+    blocking(state, move |database| {
+        database.community_forget_person(&id, Utc::now())
+    })
+    .await?;
     let mut engine = state.cohost.lock().await;
     let row_left = engine.community.note_waved(&person_id);
     drop(engine);
@@ -882,7 +977,9 @@ pub async fn forget(state: &AppState, params: CommunityPersonIdParams) -> Result
 
 pub async fn forget_all(state: &AppState) -> Result<CommunityAccepted, CommunityError> {
     blocking(state, move |database| {
-        database.community_forget_all().map_err(CommunityError::from)
+        database
+            .community_forget_all()
+            .map_err(CommunityError::from)
     })
     .await?;
     {
@@ -899,13 +996,18 @@ pub async fn forget_all(state: &AppState) -> Result<CommunityAccepted, Community
     Ok(CommunityAccepted { accepted: true })
 }
 
-pub async fn memory_delete(state: &AppState, params: CommunityIdParams) -> Result<CommunityAccepted, CommunityError> {
+pub async fn memory_delete(
+    state: &AppState,
+    params: CommunityIdParams,
+) -> Result<CommunityAccepted, CommunityError> {
     let id = params.id.trim().to_string();
     if id.is_empty() {
         return Err(CommunityError::Invalid("id is required.".to_string()));
     }
     blocking(state, move |database| {
-        database.community_memory_delete(&id).map_err(CommunityError::from)
+        database
+            .community_memory_delete(&id)
+            .map_err(CommunityError::from)
     })
     .await?;
     Ok(CommunityAccepted { accepted: true })
@@ -914,7 +1016,10 @@ pub async fn memory_delete(state: &AppState, params: CommunityIdParams) -> Resul
 /// `cohost.community.wave` (B5, D11): the regular reaction and, in Bubble
 /// mode, "Hey {name}!" in the bubble. Never chat. The person leaves
 /// "Welcome back".
-pub async fn wave(state: &AppState, params: CommunityPersonIdParams) -> Result<CommunityAccepted, CommunityError> {
+pub async fn wave(
+    state: &AppState,
+    params: CommunityPersonIdParams,
+) -> Result<CommunityAccepted, CommunityError> {
     let person_id = params.person_id.trim().to_string();
     if person_id.is_empty() {
         return Err(CommunityError::Invalid("personId is required.".to_string()));
@@ -966,13 +1071,19 @@ pub(crate) async fn append_note(state: &AppState, person_id: &str, fact: &str) {
     })
     .await
     {
-        state.emit_log("warn", format!("Community: could not save the note: {error}"));
+        state.emit_log(
+            "warn",
+            format!("Community: could not save the note: {error}"),
+        );
         return;
     }
     emit_changed(state).await;
 }
 
-pub async fn export(state: &AppState, params: CommunityPathParams) -> Result<CommunityExportResult, CommunityError> {
+pub async fn export(
+    state: &AppState,
+    params: CommunityPathParams,
+) -> Result<CommunityExportResult, CommunityError> {
     let path = params.path.trim().to_string();
     if path.is_empty() {
         return Err(CommunityError::Invalid("path is required.".to_string()));
@@ -991,7 +1102,10 @@ pub async fn export(state: &AppState, params: CommunityPathParams) -> Result<Com
     .await
 }
 
-pub async fn import(state: &AppState, params: CommunityPathParams) -> Result<CommunityImportResult, CommunityError> {
+pub async fn import(
+    state: &AppState,
+    params: CommunityPathParams,
+) -> Result<CommunityImportResult, CommunityError> {
     let path = params.path.trim().to_string();
     if path.is_empty() {
         return Err(CommunityError::Invalid("path is required.".to_string()));
@@ -1046,8 +1160,14 @@ pub(crate) async fn run_prune(state: &AppState) {
                 emit_changed(state).await;
             }
         }
-        Ok(Err(error)) => state.emit_log("warn", format!("Community: the retention prune failed: {error:#}")),
-        Err(error) => state.emit_log("warn", format!("Community: the retention task failed: {error}")),
+        Ok(Err(error)) => state.emit_log(
+            "warn",
+            format!("Community: the retention prune failed: {error:#}"),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Community: the retention task failed: {error}"),
+        ),
     }
 }
 
@@ -1076,7 +1196,10 @@ pub(crate) async fn run_backfill(state: &AppState) {
     {
         Ok(Ok(found)) => found,
         Ok(Err(error)) => {
-            state.emit_log("warn", format!("Community: the backfill could not list sessions: {error:#}"));
+            state.emit_log(
+                "warn",
+                format!("Community: the backfill could not list sessions: {error:#}"),
+            );
             return;
         }
         Err(_) => return,
@@ -1127,7 +1250,9 @@ pub(crate) async fn run_backfill(state: &AppState) {
         progress.cursor = Some(format!("{}|{}", started_at.to_rfc3339(), session_id));
         let database = state.database.clone();
         let saved = progress.clone();
-        let _ = tokio::task::spawn_blocking(move || database.community_save_backfill_progress(&saved)).await;
+        let _ =
+            tokio::task::spawn_blocking(move || database.community_save_backfill_progress(&saved))
+                .await;
         since_report += 1;
         if since_report >= BACKFILL_PROGRESS_EVERY {
             since_report = 0;
@@ -1137,7 +1262,8 @@ pub(crate) async fn run_backfill(state: &AppState) {
     progress.done = true;
     let database = state.database.clone();
     let saved = progress.clone();
-    let _ = tokio::task::spawn_blocking(move || database.community_save_backfill_progress(&saved)).await;
+    let _ = tokio::task::spawn_blocking(move || database.community_save_backfill_progress(&saved))
+        .await;
     state.community.lock().backfill_running = false;
     state.emit_log(
         "info",
@@ -1168,22 +1294,40 @@ mod tests {
     }
 
     async fn start_session(state: &AppState, session_id: &str) -> u64 {
-        state.database.ensure_fake_live_chat_session(session_id).unwrap();
         state
             .database
-            .community_record_stream(session_id, Utc::now(), &[StreamPlatform::Twitch, StreamPlatform::Youtube])
+            .ensure_fake_live_chat_session(session_id)
+            .unwrap();
+        state
+            .database
+            .community_record_stream(
+                session_id,
+                Utc::now(),
+                &[StreamPlatform::Twitch, StreamPlatform::Youtube],
+            )
             .unwrap();
         let generation = {
             let mut coordinator = state.live_chat.lock().await;
             coordinator.start_session(session_id.to_string(), Vec::new());
             coordinator.session_generation()
         };
-        session_started(state, session_id, vec![StreamPlatform::Twitch, StreamPlatform::Youtube]);
+        session_started(
+            state,
+            session_id,
+            vec![StreamPlatform::Twitch, StreamPlatform::Youtube],
+        );
         tokio::task::yield_now().await;
         generation
     }
 
-    fn row(session_id: &str, platform: StreamPlatform, author: &str, name: &str, seq: u32, text: &str) -> LiveChatMessage {
+    fn row(
+        session_id: &str,
+        platform: StreamPlatform,
+        author: &str,
+        name: &str,
+        seq: u32,
+        text: &str,
+    ) -> LiveChatMessage {
         let mut message = fake_message(session_id, platform, None, seq);
         message.author_id = Some(author.to_string());
         message.author_name = name.to_string();
@@ -1192,7 +1336,9 @@ mod tests {
     }
 
     async fn deliver(state: &AppState, generation: u64, messages: Vec<LiveChatMessage>) {
-        try_deliver_messages(state, generation, messages).await.unwrap();
+        try_deliver_messages(state, generation, messages)
+            .await
+            .unwrap();
         wait_for_writes(state).await;
     }
 
@@ -1226,15 +1372,39 @@ mod tests {
             let state = test_state();
             set_talk(&state, talk).await;
             let generation = start_session(&state, "s1").await;
-            deliver(&state, generation, vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")]).await;
+            deliver(
+                &state,
+                generation,
+                vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+            )
+            .await;
             assert_eq!(
-                state.database.community_account_person("twitch:ada").unwrap().is_some(),
+                state
+                    .database
+                    .community_account_person("twitch:ada")
+                    .unwrap()
+                    .is_some(),
                 true,
                 "{talk:?}: Ada was learned"
             );
-            deliver(&state, generation, vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 2, " !ForgetMe ")]).await;
+            deliver(
+                &state,
+                generation,
+                vec![row(
+                    "s1",
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    2,
+                    " !ForgetMe ",
+                )],
+            )
+            .await;
             assert_eq!(
-                state.database.community_account_person("twitch:ada").unwrap(),
+                state
+                    .database
+                    .community_account_person("twitch:ada")
+                    .unwrap(),
                 None,
                 "{talk:?}: Ada is forgotten"
             );
@@ -1244,18 +1414,66 @@ mod tests {
                 assert_eq!(said[0], "Done, Ada. I've forgotten you.");
             }
             let snapshot = state.cohost.lock().await.snapshot();
-            assert_eq!(snapshot.auto_chat_sends, 0, "{talk:?}: nothing reached chat");
+            assert_eq!(
+                snapshot.auto_chat_sends, 0,
+                "{talk:?}: nothing reached chat"
+            );
             assert!(
-                snapshot.utterances.iter().all(|u| u.destination_ids.is_empty()),
+                snapshot
+                    .utterances
+                    .iter()
+                    .all(|u| u.destination_ids.is_empty()),
                 "{talk:?}: no community line names a chat destination"
             );
             // Later chat from the forgotten account changes nothing.
-            deliver(&state, generation, vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 3, "back?")]).await;
-            assert_eq!(state.database.community_account_person("twitch:ada").unwrap(), None);
+            deliver(
+                &state,
+                generation,
+                vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 3, "back?")],
+            )
+            .await;
+            assert_eq!(
+                state
+                    .database
+                    .community_account_person("twitch:ada")
+                    .unwrap(),
+                None
+            );
             // `!rememberme` lifts it.
-            deliver(&state, generation, vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 4, "!rememberme")]).await;
-            deliver(&state, generation, vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 5, "hi again")]).await;
-            assert!(state.database.community_account_person("twitch:ada").unwrap().is_some(), "{talk:?}");
+            deliver(
+                &state,
+                generation,
+                vec![row(
+                    "s1",
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    4,
+                    "!rememberme",
+                )],
+            )
+            .await;
+            deliver(
+                &state,
+                generation,
+                vec![row(
+                    "s1",
+                    StreamPlatform::Twitch,
+                    "ada",
+                    "Ada",
+                    5,
+                    "hi again",
+                )],
+            )
+            .await;
+            assert!(
+                state
+                    .database
+                    .community_account_person("twitch:ada")
+                    .unwrap()
+                    .is_some(),
+                "{talk:?}"
+            );
         }
     }
 
@@ -1273,32 +1491,91 @@ mod tests {
             generation,
             vec![
                 row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
-                row("s1", StreamPlatform::Youtube, "UCada", "ada_dev", 2, "hello from yt"),
+                row(
+                    "s1",
+                    StreamPlatform::Youtube,
+                    "UCada",
+                    "ada_dev",
+                    2,
+                    "hello from yt",
+                ),
             ],
         )
         .await;
-        let twitch = state.database.community_account_person("twitch:ada").unwrap().unwrap();
-        let youtube = state.database.community_account_person("youtube:UCada").unwrap().unwrap();
+        let twitch = state
+            .database
+            .community_account_person("twitch:ada")
+            .unwrap()
+            .unwrap();
+        let youtube = state
+            .database
+            .community_account_person("youtube:UCada")
+            .unwrap()
+            .unwrap();
         assert_ne!(twitch, youtube);
         // The streamer's own `!link` (a broadcaster row) does nothing.
-        let mut own = row("s1", StreamPlatform::Twitch, "me", "Streamer", 3, "!link pixel42");
+        let mut own = row(
+            "s1",
+            StreamPlatform::Twitch,
+            "me",
+            "Streamer",
+            3,
+            "!link pixel42",
+        );
         own.author_roles = vec!["broadcaster".to_string()];
         deliver(&state, generation, vec![own]).await;
         assert_eq!(pending_link_words(&state), 0);
-        deliver(&state, generation, vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 4, "!link pixel42")]).await;
+        deliver(
+            &state,
+            generation,
+            vec![row(
+                "s1",
+                StreamPlatform::Twitch,
+                "ada",
+                "Ada",
+                4,
+                "!link pixel42",
+            )],
+        )
+        .await;
         assert_eq!(pending_link_words(&state), 1);
-        assert!(bubble_lines(&state).is_empty(), "a waiting word says nothing");
-        deliver(&state, generation, vec![row("s1", StreamPlatform::Youtube, "UCada", "ada_dev", 5, "!link Pixel42")]).await;
+        assert!(
+            bubble_lines(&state).is_empty(),
+            "a waiting word says nothing"
+        );
+        deliver(
+            &state,
+            generation,
+            vec![row(
+                "s1",
+                StreamPlatform::Youtube,
+                "UCada",
+                "ada_dev",
+                5,
+                "!link Pixel42",
+            )],
+        )
+        .await;
         assert_eq!(pending_link_words(&state), 0, "the word is single-use");
         assert_eq!(
-            state.database.community_account_person("youtube:UCada").unwrap().unwrap(),
+            state
+                .database
+                .community_account_person("youtube:UCada")
+                .unwrap()
+                .unwrap(),
             twitch,
             "one person now"
         );
-        assert_eq!(bubble_lines(&state), ["Linked: Ada on Twitch and ada_dev on YouTube."]);
+        assert_eq!(
+            bubble_lines(&state),
+            ["Linked: Ada on Twitch and ada_dev on YouTube."]
+        );
         let snapshot = state.cohost.lock().await.snapshot();
         assert_eq!(snapshot.link_made.len(), 1);
-        assert_eq!(snapshot.link_made[0].names, ["Ada".to_string(), "ada_dev".to_string()]);
+        assert_eq!(
+            snapshot.link_made[0].names,
+            ["Ada".to_string(), "ada_dev".to_string()]
+        );
         assert_eq!(snapshot.link_made[0].account_key, "youtube:UCada");
         // Undo: the YouTube account becomes its own person again and the
         // card leaves.
@@ -1341,7 +1618,14 @@ mod tests {
             first,
             vec![
                 row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello"),
-                row("s1", StreamPlatform::Twitch, "nightbot", "Nightbot", 2, "!commands"),
+                row(
+                    "s1",
+                    StreamPlatform::Twitch,
+                    "nightbot",
+                    "Nightbot",
+                    2,
+                    "!commands",
+                ),
             ],
         )
         .await;
@@ -1353,29 +1637,59 @@ mod tests {
             vec![
                 row("s2", StreamPlatform::Twitch, "ada", "Ada", 3, "back again"),
                 row("s2", StreamPlatform::Twitch, "ada", "Ada", 4, "second row"),
-                row("s2", StreamPlatform::Twitch, "newcomer", "New", 5, "first time"),
-                row("s2", StreamPlatform::Twitch, "nightbot", "Nightbot", 6, "!commands"),
+                row(
+                    "s2",
+                    StreamPlatform::Twitch,
+                    "newcomer",
+                    "New",
+                    5,
+                    "first time",
+                ),
+                row(
+                    "s2",
+                    StreamPlatform::Twitch,
+                    "nightbot",
+                    "Nightbot",
+                    6,
+                    "!commands",
+                ),
             ],
         )
         .await;
-        let rows = state.database.list_live_chat_messages_recent("s2", 10).unwrap();
-        let by_seq = |seq: u32| rows.iter().find(|m| m.provider_message_id == format!("fake-{seq}")).unwrap().clone();
+        let rows = state
+            .database
+            .list_live_chat_messages_recent("s2", 10)
+            .unwrap();
+        let by_seq = |seq: u32| {
+            rows.iter()
+                .find(|m| m.provider_message_id == format!("fake-{seq}"))
+                .unwrap()
+                .clone()
+        };
         let arrival = by_seq(3).arrival.expect("Ada's arrival row");
         assert_eq!(arrival.streams, 2);
         assert_eq!(arrival.in_a_row, 2);
         assert!(!arrival.regular);
         assert!(by_seq(4).arrival.is_none(), "later rows stay quiet");
         assert!(by_seq(5).arrival.is_none(), "a first-timer never arrives");
-        assert!(by_seq(5).first_message, "the first-chat marker is untouched");
+        assert!(
+            by_seq(5).first_message,
+            "the first-chat marker is untouched"
+        );
         assert!(by_seq(6).arrival.is_none(), "a bot never arrives");
         let snapshot = state.cohost.lock().await.snapshot();
         assert_eq!(snapshot.welcome_back.len(), 1);
         assert_eq!(snapshot.welcome_back[0].name, "Ada");
         assert_eq!(snapshot.welcome_back[0].arrival.streams, 2);
         let person_id = snapshot.welcome_back[0].person_id.clone();
-        wave(&state, CommunityPersonIdParams { person_id }).await.unwrap();
+        wave(&state, CommunityPersonIdParams { person_id })
+            .await
+            .unwrap();
         assert!(state.cohost.lock().await.snapshot().welcome_back.is_empty());
-        assert_eq!(bubble_lines(&state).last().map(String::as_str), Some("Hey Ada!"));
+        assert_eq!(
+            bubble_lines(&state).last().map(String::as_str),
+            Some("Hey Ada!")
+        );
         // A blocked store (its tables gone) never blocks delivery: the row
         // is delivered without an arrival, and the error is logged once.
         state
@@ -1384,9 +1698,27 @@ mod tests {
             .unwrap()
             .execute_batch("DROP TABLE community_accounts;")
             .unwrap();
-        deliver(&state, second, vec![row("s2", StreamPlatform::Twitch, "late", "Late", 7, "still delivered")]).await;
-        let rows = state.database.list_live_chat_messages_recent("s2", 10).unwrap();
+        deliver(
+            &state,
+            second,
+            vec![row(
+                "s2",
+                StreamPlatform::Twitch,
+                "late",
+                "Late",
+                7,
+                "still delivered",
+            )],
+        )
+        .await;
+        let rows = state
+            .database
+            .list_live_chat_messages_recent("s2", 10)
+            .unwrap();
         assert!(rows.iter().any(|m| m.provider_message_id == "fake-7"));
-        assert!(rows.iter().all(|m| m.provider_message_id != "fake-7" || m.arrival.is_none()));
+        assert!(
+            rows.iter()
+                .all(|m| m.provider_message_id != "fake-7" || m.arrival.is_none())
+        );
     }
 }
