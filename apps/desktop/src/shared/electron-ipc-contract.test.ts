@@ -94,7 +94,7 @@ describe('Electron IPC contract', () => {
     // 169: plan 224 C-G4 adds the talk-show display sources and the media
     // grant (talk-show:display-sources, talk-show:media-grant).
     expect(Object.keys(electronInvokeApiMethods)).toHaveLength(169)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(167)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(169)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
