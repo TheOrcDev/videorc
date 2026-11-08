@@ -1568,7 +1568,11 @@ mod tests {
                 // strict schema refuses them.
                 continue;
             }
-            if bad.get("milestone").is_some_and(|m| m.is_object()) {
+            if bad.get("milestone").is_some_and(|m| m.is_object())
+                || bad.get("platforms").is_some_and(|p| p.is_null())
+            {
+                // An unknown milestone kind, or `null` where a list goes:
+                // refused on both sides.
                 assert!(serde_json::from_value::<ViewerArrival>(bad.clone()).is_err());
             } else {
                 // `null` reads as absent on the way in (serde default), and
