@@ -356,6 +356,8 @@ function smokeEnvValue(env, name) {
  * @param {boolean} [options.launchViaMacosLaunchServices] - launch the exact packaged app
  *   bundle through `open`, preserving its macOS TCC identity.
  * @param {(line:string)=>void} [options.onLine] - called for every stdout/stderr line.
+ * @param {boolean} [options.skipPrebuild] - the caller already ran
+ *   `prebuildDevBackend` (asynchronously), so the synchronous one is skipped.
  * @returns {Promise<{connections:Record<string,object>, process:import('node:child_process').ChildProcess, stop:()=>Promise<void>}>}
  */
 // API origins the backend honours only in debug builds (`cfg!(debug_assertions)`
@@ -413,12 +415,16 @@ export async function launchDevApp({
   onLine,
   packagedSmokeCommandCapability,
   launchViaMacosLaunchServices = false,
+  skipPrebuild = false,
   spawnSpec: requestedSpawnSpec
 } = {}) {
   const fakeOriginRefusal = requestedSpawnSpec ? null : releaseBackendFakeOriginRefusal(env)
   if (fakeOriginRefusal) return Promise.reject(new Error(fakeOriginRefusal))
+  // `skipPrebuild`: the caller built the backend already (`prebuildDevBackend`,
+  // the cloud smoke); the host lock, the memory wait and the live wait still
+  // run.
   await prepareSmokeLaunch({
-    dev: !launchViaMacosLaunchServices && !requestedSpawnSpec,
+    dev: !launchViaMacosLaunchServices && !requestedSpawnSpec && !skipPrebuild,
     env: { ...process.env, ...env },
     onLine
   })
@@ -1129,6 +1135,10 @@ export function appSpawnSpec({
 }
 
 export const DEV_BACKEND_PREBUILD_TIMEOUT_MS = 20 * 60 * 1000
+// A cold `videorc-backend` build after `cargo test` (which leaves the crate
+// with test-only dependency features) took 20 min 05 s on ogre at -j3, so the
+// Linux default leaves room for one full rebuild.
+export const DEV_BACKEND_PREBUILD_TIMEOUT_MS_LINUX = 45 * 60 * 1000
 
 /**
  * The synchronous `cargo build` that runs before a dev-app smoke launch, or
@@ -1138,9 +1148,9 @@ export const DEV_BACKEND_PREBUILD_TIMEOUT_MS = 20 * 60 * 1000
  */
 export function devBackendPrebuildSpec({ env = process.env, platform = process.platform } = {}) {
   if (env?.VIDEORC_SMOKE_SKIP_PREBUILD === '1') return null
-  const timeoutMs = Number(
-    env?.VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS ?? DEV_BACKEND_PREBUILD_TIMEOUT_MS
-  )
+  const defaultTimeoutMs =
+    platform === 'linux' ? DEV_BACKEND_PREBUILD_TIMEOUT_MS_LINUX : DEV_BACKEND_PREBUILD_TIMEOUT_MS
+  const timeoutMs = Number(env?.VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS ?? defaultTimeoutMs)
   // Mirrors the desktop main process: VIDEORC_DEV_BACKEND_PROFILE=release
   // makes `pnpm dev` run the optimized backend (Plan 0005).
   const release = env?.VIDEORC_DEV_BACKEND_PROFILE === 'release'
@@ -1148,8 +1158,7 @@ export function devBackendPrebuildSpec({ env = process.env, platform = process.p
     command: platform === 'win32' ? 'cargo.exe' : 'cargo',
     args: ['build', ...(release ? ['--release'] : []), '-p', 'videorc-backend'],
     cwd: repoRoot,
-    timeoutMs:
-      Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEV_BACKEND_PREBUILD_TIMEOUT_MS
+    timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : defaultTimeoutMs
   }
 }
 
@@ -1213,6 +1222,40 @@ export async function runDevBackendPrebuild(spec, { onLine, env } = {}) {
   if (!failure) {
     onLine?.(`[smoke:prebuild] backend built in ${Math.round((Date.now() - startedAt) / 1000)}s`)
   }
+  return failure
+}
+
+/**
+ * The dev backend prebuild on its own, before a smoke serves anything from its
+ * process: the cloud smokes' fake web is an in-process HTTP server the node
+ * agent heartbeats every 10 s, so the build runs first and each launch then
+ * passes `skipPrebuild: true` (cloud test lane 3 F4). Main's prebuild is
+ * asynchronous already (`runDevBackendPrebuild`); this takes a build slot
+ * for it like `prepareSmokeLaunch` does, and resolves with the failure
+ * message, or `null` when the backend built (or `spec` is null: the caller
+ * opted out with `VIDEORC_SMOKE_SKIP_PREBUILD=1`).
+ *
+ * @param {object} [options]
+ * @param {Record<string,string>} [options.env] - cargo's environment; pass the
+ *   launch's own (`smokeAppEnv(env)`) so the later `cargo run` finds nothing
+ *   to rebuild.
+ * @param {(line:string)=>void} [options.onLine]
+ * @param {ReturnType<typeof devBackendPrebuildSpec>} [options.spec]
+ * @returns {Promise<string|null>}
+ */
+export async function prebuildDevBackend({
+  env = process.env,
+  onLine,
+  spec = devBackendPrebuildSpec({ env: process.env })
+} = {}) {
+  if (!spec) return null
+  let failure = null
+  await withBuildSlot(
+    async () => {
+      failure = await runDevBackendPrebuild(spec, { onLine, env })
+    },
+    { env, log: onLine }
+  )
   return failure
 }
 

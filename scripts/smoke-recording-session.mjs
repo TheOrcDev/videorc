@@ -461,6 +461,32 @@ export function connectBackend(connection, timeoutMs) {
   })
 }
 
+/**
+ * `session.start`, waiting out a pending screen-share request. On Linux the
+ * preview asks the desktop portal for a screen at launch; on a box with no
+ * picker the request ends by itself within seconds, and a start inside that
+ * window is refused with the share-dialog copy (the app's correct answer to a
+ * user). Any other refusal, or one that outlasts `waitMs`, is thrown as is.
+ * `makeParams` runs before every attempt: a refused start still spends its
+ * single-use output-directory capability, so each attempt authorizes anew.
+ */
+export async function startSessionWhenScreenSettles(
+  ws,
+  timeoutMs,
+  makeParams,
+  { waitMs = 30000 } = {}
+) {
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    try {
+      return await request(ws, timeoutMs, 'session.start', await makeParams())
+    } catch (error) {
+      if (!/share dialog/.test(error.message) || Date.now() > deadline) throw error
+      await new Promise((resolveWait) => setTimeout(resolveWait, 1000))
+    }
+  }
+}
+
 export function request(ws, timeoutMs, method, params) {
   const id = `smoke-${Date.now()}-${Math.random().toString(16).slice(2)}`
   return new Promise((resolveRequest, rejectRequest) => {
