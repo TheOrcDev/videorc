@@ -407,7 +407,13 @@ describe('Welcomes (plan 192 S1.3)', () => {
     const titles = [...document.querySelectorAll('[data-slot="buddy-welcome"]')].map(
       (element) => element.querySelector('[data-slot="list-row-button"]')?.textContent
     )
-    expect(titles).toEqual(['First-time chatters', 'Returning chatters'])
+    expect(titles).toEqual([
+      'First-time chatters',
+      'Returning chatters',
+      'Regulars',
+      'Back after a while',
+      'Milestones'
+    ])
     // An older backend sends no welcomes: both on, on their built-in lines.
     expect(welcome('first-time').textContent).toContain('Hi {name}, welcome to the stream!')
     expect(welcome('returning').textContent).toContain('Welcome back, {name}!')

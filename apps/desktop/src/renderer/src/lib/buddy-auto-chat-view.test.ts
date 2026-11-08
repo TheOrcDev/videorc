@@ -250,7 +250,9 @@ describe('built-in greeting lines (plan 192 D1)', () => {
     for (const line of BUDDY_BUILTIN_GREETINGS) {
       const { unknown } = resolveGreetingPreview(line.text, BUDDY_SAMPLE_FIELDS[line.kind])
       expect(unknown).toEqual([])
-      expect([...line.text.matchAll(/\{([a-z]+)\}/g)].map((match) => match[1])).toEqual(['name'])
+      // Plan 225 D9: the milestone line names the milestone too ({nth}).
+      const fields = [...line.text.matchAll(/\{([a-z]+)\}/g)].map((match) => match[1])
+      expect(fields).toEqual(line.kind === 'milestone' ? ['name', 'nth'] : ['name'])
       expect(greetingTemplateWarnings({ kind: line.kind, text: line.text })).toEqual([])
     }
   })
@@ -329,7 +331,10 @@ describe('welcomes (plan 192 D2, S1.1)', () => {
   it('names the two rows word for word and offers only the chat fields', () => {
     expect(BUDDY_WELCOME_TITLES).toEqual({
       'first-time': 'First-time chatters',
-      returning: 'Returning chatters'
+      returning: 'Returning chatters',
+      regular: 'Regulars',
+      comeback: 'Back after a while',
+      milestone: 'Milestones'
     })
     expect(BUDDY_WELCOME_FIELDS.map((entry) => entry.field)).toEqual(['name', 'handle', 'platform'])
   })

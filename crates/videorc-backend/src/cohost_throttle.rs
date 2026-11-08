@@ -20,13 +20,20 @@ const MINUTE: Duration = Duration::from_secs(60);
 /// More than this many same-kind events inside the cooldown collapse.
 pub(crate) const COLLAPSE_THRESHOLD: usize = 3;
 
+/// Plan 225 D9: arrivals of one kind within this long collapse into one
+/// line ("Welcome back, Ada, Bo and Kim!"), so a stream start is one wave.
+pub(crate) const ARRIVAL_COLLAPSE_WINDOW: Duration = Duration::from_secs(20);
+
 /// The cooldown between two greetings of one kind on one destination (D9;
-/// plan 192 S1.2 adds the welcomes: first-time 5 s, returning 10 s).
+/// plan 192 S1.2 adds the welcomes: first-time 5 s, returning 10 s; plan
+/// 225 D9 the arrival kinds: regular and comeback 20 s, milestone 15 s).
 pub(crate) fn kind_cooldown(kind: GreetingKind) -> Duration {
     use CohostActivityTemplateKind as K;
     Duration::from_secs(match kind {
         GreetingKind::FirstTime => 5,
         GreetingKind::Returning => 10,
+        GreetingKind::Regular | GreetingKind::Comeback => 20,
+        GreetingKind::Milestone => 15,
         GreetingKind::Activity(kind) => match kind {
             K::Follow => 10,
             K::Sub | K::Resub | K::SubGift | K::CommunitySubGift | K::Membership => 5,
@@ -131,6 +138,21 @@ impl AutoChatThrottle {
             bucket.events.push(facts);
             return GreetingOffer::Held { due: bucket.due };
         }
+        // Plan 225 D9: an arrival wave waits 20 s for the regulars behind
+        // it, then goes out as one line; nothing is said on the spot.
+        if facts.kind.is_arrival_wave() {
+            let due = self
+                .hold_due(&key, now)
+                .max(now + ARRIVAL_COLLAPSE_WINDOW);
+            self.buckets.insert(
+                key,
+                Bucket {
+                    due,
+                    events: vec![facts],
+                },
+            );
+            return GreetingOffer::Held { due };
+        }
         if cooldown_over && self.admit(&facts.destination_id, now).is_ok() {
             self.kind_last.insert(key, now);
             self.note_sent(&facts.destination_id, now);
@@ -184,7 +206,14 @@ impl AutoChatThrottle {
             let Some(mut bucket) = self.buckets.remove(&key) else {
                 continue;
             };
-            let batch = if bucket.events.len() > COLLAPSE_THRESHOLD {
+            // Plan 225 D9: an arrival wave always goes out as one line; a
+            // milestone never collapses, each gets its own moment.
+            let collapse = match key.1 {
+                GreetingKind::Milestone => false,
+                kind if kind.is_arrival_wave() => bucket.events.len() > 1,
+                _ => bucket.events.len() > COLLAPSE_THRESHOLD,
+            };
+            let batch = if collapse {
                 std::mem::take(&mut bucket.events)
             } else {
                 vec![bucket.events.remove(0)]
@@ -221,6 +250,8 @@ mod tests {
             amount: None,
             reward: None,
             first_message_text: None,
+            arrival: None,
+            avatar_url: None,
         }
     }
 
@@ -236,6 +267,7 @@ mod tests {
         ActivityFacts {
             kind,
             first_message_text: Some("hi".into()),
+            arrival: None,
             ..follow(viewer)
         }
     }
@@ -377,6 +409,79 @@ mod tests {
             )),
             secs(15)
         );
+    }
+
+    /// Plan 225 D9, B4: thirty regulars at a stream start make one wave: one
+    /// collapsed line at +20 s, nothing on the spot; a lone regular's line
+    /// comes at +20 s too.
+    #[test]
+    fn a_thirty_regular_start_is_one_collapsed_line_at_twenty_seconds() {
+        let start = Instant::now();
+        let mut throttle = AutoChatThrottle::default();
+        for n in 1..=30 {
+            let at = start + Duration::from_millis(n * 300);
+            match throttle.offer_greeting(welcome(&format!("Reg{n}"), GreetingKind::Regular), at) {
+                GreetingOffer::Held { due } => assert_eq!(due, start + secs(20) + Duration::from_millis(300)),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(throttle.drain_due(start + secs(19)).is_empty());
+        let released = throttle.drain_due(start + secs(21));
+        assert_eq!(released.len(), 1, "one wave");
+        assert_eq!(released[0].len(), 30, "one collapsed line");
+        assert_eq!(released[0][0].name, "Reg1");
+        assert_eq!(throttle.next_due(), None);
+        // The same people again this stream: nothing.
+        assert_eq!(
+            throttle.offer_greeting(welcome("Reg7", GreetingKind::Regular), start + secs(30)),
+            GreetingOffer::Deduped
+        );
+        // A comeback is its own wave; a regular arriving later starts a new one.
+        assert!(matches!(
+            throttle.offer_greeting(welcome("Back", GreetingKind::Comeback), start + secs(30)),
+            GreetingOffer::Held { .. }
+        ));
+        assert!(matches!(
+            throttle.offer_greeting(welcome("Late", GreetingKind::Regular), start + secs(45)),
+            GreetingOffer::Held { .. }
+        ));
+        let comeback = throttle.drain_due(start + secs(50));
+        assert_eq!(comeback.len(), 1);
+        assert_eq!(comeback[0][0].name, "Back");
+        let late = throttle.drain_due(start + secs(65));
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].len(), 1);
+        assert_eq!(late[0][0].name, "Late");
+    }
+
+    /// Plan 225 D9, B4: milestones never collapse and keep a 15 s gap.
+    #[test]
+    fn milestones_never_collapse_and_keep_fifteen_seconds_apart() {
+        let start = Instant::now();
+        let mut throttle = AutoChatThrottle::default();
+        assert!(matches!(
+            throttle.offer_greeting(welcome("Kim", GreetingKind::Milestone), start),
+            GreetingOffer::SendNow(_)
+        ));
+        match throttle.offer_greeting(welcome("Lee", GreetingKind::Milestone), start + secs(1)) {
+            GreetingOffer::Held { due } => assert_eq!(due, start + secs(15)),
+            other => panic!("{other:?}"),
+        }
+        match throttle.offer_greeting(welcome("Mo", GreetingKind::Milestone), start + secs(2)) {
+            GreetingOffer::Held { due } => assert_eq!(due, start + secs(15)),
+            other => panic!("{other:?}"),
+        }
+        assert!(throttle.drain_due(start + secs(14)).is_empty());
+        let second = throttle.drain_due(start + secs(15));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Lee"]);
+        assert!(throttle.drain_due(start + secs(29)).is_empty());
+        let third = throttle.drain_due(start + secs(30));
+        assert_eq!(third[0].iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Mo"]);
+        assert_eq!(throttle.next_due(), None);
+        assert_eq!(kind_cooldown(GreetingKind::Milestone), secs(15));
+        assert_eq!(kind_cooldown(GreetingKind::Regular), secs(20));
+        assert_eq!(kind_cooldown(GreetingKind::Comeback), secs(20));
     }
 
     /// Plan 192 S1.2: the welcomes keep their own cooldowns and dedupe per

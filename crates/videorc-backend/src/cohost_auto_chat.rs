@@ -30,7 +30,7 @@ use crate::cohost::{
 };
 use crate::cohost_greetings::{
     ActivityFacts, COLLAPSE_NAMED_MAX, GreetingKind, activity_facts, collapse, distinct_names,
-    greeting_platform, resolve_line, resolve_template, welcome_facts,
+    greeting_platform, milestone_builtin_text, resolve_line, resolve_template, welcome_facts_with,
 };
 use crate::cohost_throttle::{AutoChatThrottle, GreetingOffer};
 use crate::live_chat::LiveChatMessage;
@@ -242,6 +242,8 @@ struct Spoken {
     state: CohostUtteranceState,
     trigger: CohostUtteranceTrigger,
     destination_ids: Vec<String>,
+    /// Plan 225 B6: a milestone welcome's card facts.
+    milestone: Option<crate::cohost::CohostUtteranceMilestone>,
 }
 
 /// One greeting written and waiting for the AI's line (plan 192 S2.2): the
@@ -295,9 +297,18 @@ pub(crate) struct AutoChatLane {
     /// A 403 (Premium, consent, disabled) stopped AI greetings for the rest
     /// of the session; the code it came with.
     ai_stopped: Option<String>,
+    /// Plan 225 D9: "Welcome regulars on stream" is off, so an arrival is
+    /// the plain returning welcome. Off by default (the switch is on).
+    arrivals_off: bool,
 }
 
 impl AutoChatLane {
+    /// Plan 225 D9: whether the regular, comeback and milestone welcomes
+    /// answer an arrival (the Community setting "Welcome regulars on stream").
+    pub(crate) fn set_arrivals_on(&mut self, on: bool) {
+        self.arrivals_off = !on;
+    }
+
     /// Follow the live-chat session: a new one starts clean (dedupe,
     /// cooldowns, cards, the skip log). Returns true when the lane was reset.
     pub(crate) fn follow_session(&mut self, session_id: &str) -> bool {
@@ -371,6 +382,7 @@ impl AutoChatLane {
             status,
             at: now_iso.to_string(),
             expires_at: proposed.then(|| iso_after(now, now + PROPOSED_TTL)),
+            milestone: spoken.milestone,
         };
         self.records.push(UtteranceRecord {
             utterance: utterance.clone(),
@@ -482,7 +494,9 @@ impl AutoChatLane {
         let on = talk.speaks() && settings.greetings.enabled;
         let unseen = talk == CohostTalkMode::Bubble && !bubble_visible;
         for message in messages {
-            let Some(facts) = activity_facts(message).or_else(|| welcome_facts(message)) else {
+            let Some(facts) =
+                activity_facts(message).or_else(|| welcome_facts_with(message, !self.arrivals_off))
+            else {
                 continue;
             };
             if self.follow_session(&message.session_id) {
@@ -594,7 +608,18 @@ impl AutoChatLane {
             return;
         };
         let fields = collapse(batch);
-        let (text, _unknown) = resolve_template(&line.text, &fields);
+        // Plan 225 D9: the built-in milestone line names the milestone
+        // (the Nth stream, N in a row, the anniversary).
+        let text = if first.kind == GreetingKind::Milestone && !line.user_written {
+            first
+                .arrival
+                .as_ref()
+                .and_then(|arrival| arrival.milestone)
+                .map_or(line.text.as_str(), |milestone| milestone_builtin_text(milestone.kind))
+        } else {
+            line.text.as_str()
+        };
+        let (text, _unknown) = resolve_template(text, &fields);
         if text.trim().is_empty() {
             self.skip(pass, first.kind, GreetingSkipReason::NoLine, &first.name);
             return;
@@ -611,11 +636,24 @@ impl AutoChatLane {
             CohostTalkMode::Bubble => Vec::new(),
             CohostTalkMode::Off | CohostTalkMode::Suggest => vec![first.destination_id.clone()],
         };
+        // Plan 225 B6: a milestone welcome carries the card's facts (the
+        // person and the milestone, never the message text).
+        let milestone = (first.kind == GreetingKind::Milestone)
+            .then(|| first.arrival.as_ref().and_then(|arrival| arrival.milestone))
+            .flatten()
+            .map(|milestone| crate::cohost::CohostUtteranceMilestone {
+                message_id: first.message_id.clone(),
+                name: first.name.clone(),
+                avatar_url: first.avatar_url.clone(),
+                platform: first.platform,
+                label: milestone.label(),
+            });
         let spoken = Spoken {
             text,
             state: line.state,
             trigger,
             destination_ids,
+            milestone,
         };
         // Plan 192 S2.2: with the AI available for this session, the line
         // waits for its AI version; the record is made when the result lands,
@@ -625,6 +663,7 @@ impl AutoChatLane {
             && self.session_id.as_deref() == Some(ai.session_id.as_str())
             && self.ai_stopped.is_none()
             && greeting_platform(first.platform).is_some()
+            && first.kind.greet_route_supported()
             && self.queue_ai_greeting(ai, batch, fields.others, spoken.clone())
         {
             return;
@@ -890,6 +929,7 @@ impl AutoChatLane {
                 state: candidate.state,
                 trigger,
                 destination_ids,
+                milestone: None,
             },
             None,
             now,
@@ -964,6 +1004,7 @@ impl AutoChatLane {
                 state,
                 trigger,
                 destination_ids: Vec::new(),
+                milestone: None,
             },
             None,
             now,
@@ -994,6 +1035,7 @@ impl AutoChatLane {
                 state,
                 trigger,
                 destination_ids: Vec::new(),
+                milestone: None,
             },
             CohostUtteranceStatus::BubbleOnly,
             None,
