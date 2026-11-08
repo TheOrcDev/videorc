@@ -1392,7 +1392,18 @@ mod runtime {
             // SAFETY: DuplicateOutput receives the same adapter's D3D11
             // device, and the result remains on this media thread.
             let duplication = unsafe { binding.output.DuplicateOutput(device.raw_device()) }
-                .map_err(map_duplication_create_error)?;
+                .map_err(|error| {
+                    let refused = error.code() == windows::Win32::Foundation::E_ACCESSDENIED;
+                    let mut mapped = map_duplication_create_error(error);
+                    if refused {
+                        mapped.detail = format!(
+                            "{} [{}]",
+                            mapped.detail,
+                            duplication_refusal_diagnostics(plan.selection)
+                        );
+                    }
+                    mapped
+                })?;
             Ok(Self {
                 selection: plan.selection,
                 duplication,
@@ -1659,6 +1670,69 @@ mod runtime {
             bytes,
             blend,
         }))
+    }
+
+    /// Where an E_ACCESSDENIED from DuplicateOutput comes from, as far as the
+    /// process can tell: the same request from a fresh factory, output and
+    /// device. Windows refuses Desktop Duplication to every process while
+    /// the display is off or the session is locked (issue #1088, measured
+    /// on a UHD 620 laptop, where FFmpeg's ddagrab is refused alike), so a
+    /// refusal the fresh objects repeat names that; one they do not repeat
+    /// lies in the media device or output.
+    fn duplication_refusal_diagnostics(selection: WindowsDxgiOutputSelection) -> String {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+        };
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+
+        fn fresh_duplicate(selection: WindowsDxgiOutputSelection) -> Result<(), i32> {
+            let attempt = || -> windows::core::Result<()> {
+                let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
+                let mut index = 0;
+                let adapter = loop {
+                    let adapter = unsafe { factory.EnumAdapters1(index) }?;
+                    let descriptor = unsafe { adapter.GetDesc1() }?;
+                    let luid = (u64::from(descriptor.AdapterLuid.HighPart as u32) << 32)
+                        | u64::from(descriptor.AdapterLuid.LowPart);
+                    if luid == selection.adapter_luid.as_u64() {
+                        break adapter;
+                    }
+                    index += 1;
+                };
+                let output: IDXGIOutput1 =
+                    unsafe { adapter.EnumOutputs(selection.output_index) }?.cast()?;
+                let adapter: IDXGIAdapter = adapter.cast()?;
+                let mut device: Option<ID3D11Device> = None;
+                unsafe {
+                    D3D11CreateDevice(
+                        &adapter,
+                        D3D_DRIVER_TYPE_UNKNOWN,
+                        HMODULE::default(),
+                        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                        None,
+                        D3D11_SDK_VERSION,
+                        Some(&mut device),
+                        None,
+                        None,
+                    )
+                }?;
+                let device = device.ok_or_else(|| {
+                    windows::core::Error::from_hresult(windows::Win32::Foundation::E_POINTER)
+                })?;
+                let _duplication = unsafe { output.DuplicateOutput(&device) }?;
+                Ok(())
+            };
+            attempt().map_err(|error| error.code().0)
+        }
+
+        match fresh_duplicate(selection) {
+            Ok(()) => "a fresh factory, output and device were allowed, so the refusal lies in the media device or output".to_string(),
+            Err(code) => format!(
+                "a fresh factory, output and device were refused too ({code:#010x}): Windows refuses Desktop Duplication to every process while the display is off or the session is locked"
+            ),
+        }
     }
 
     fn map_duplication_create_error(error: windows::core::Error) -> WindowsD3d11CaptureError {

@@ -104,11 +104,16 @@ pnpm smoke:hide-screen:windows -- --media cpu  # force the CPU compositor bridge
 ```
 
 The Screen file is a named SKIP: separate source recordings are Mac only.
-When Desktop Duplication refuses the process (`0x80070005`), the session falls
-back to the CPU bridge: those legs are still judged and the D3D11 media path is
-a named SKIP with the code. On the owner's Intel UHD 620 laptop the refusal
-happens from an agent shell and from an ordinary terminal alike, so the D3D11
-path needs a host where `DuplicateOutput` succeeds.
+Keep the display awake and unlocked. While it is off or the session is
+locked, Windows refuses Desktop Duplication to every process (`0x80070005`,
+FFmpeg's `ddagrab` included) and Windows Graphics Capture drops to a few
+frames a second (issue #1088 measured 3.8 asleep, 26 awake on a UHD 620
+laptop). The smoke holds an awake display on for its whole run, the backend
+build included, but cannot wake one. A refused D3D11 media path falls back to
+the CPU bridge: those legs are still judged, the D3D11 path is a named SKIP
+with the code, and the backend's fallback reason says whether a fresh device
+was refused too (then it is the display or the session, not Videorc).
+`-- --probe-capture` stops after the 5 s capture-rate sample.
 
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):

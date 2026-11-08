@@ -26,6 +26,12 @@
 // 0x887A0022, 0x887A0026); a refused D3D11 media path is a named SKIP
 // while the CPU-bridge legs are still judged.
 //
+// The display must be awake (issue #1088): Windows refuses Desktop
+// Duplication to every process while it is off or the session is locked,
+// and Windows Graphics Capture drops to a few frames a second. The smoke
+// holds an awake display on for its whole run (the backend build included)
+// but cannot wake one; the capture sample in the summary shows the rate.
+//
 // Output: `<out>/hide-screen-windows-summary.json` (every number, per-frame
 // features per output) and one line per output. Exit 1 on any FAIL.
 // Never goes live on a real channel.
@@ -34,6 +40,7 @@
 //   --media cpu   forces the CPU compositor and FFmpeg bridge
 //                 (VIDEORC_WINDOWS_D3D11_MEDIA=disabled); auto (default) is
 //                 the shipping choice, and the summary names the path it took.
+//   --probe-capture  stops after the 5 s capture-rate sample.
 //   VIDEORC_SMOKE_TIMEOUT_MS, VIDEORC_SMOKE_RTMP_PORT (13937),
 //   VIDEORC_SMOKE_FFMPEG_PATH, VIDEORC_SMOKE_FFPROBE_PATH
 
@@ -72,6 +79,7 @@ import {
   stopWindowsFixtureWindow,
   windowsFixtureStats
 } from './lib/windows-fixture-window-process.mjs'
+import { holdWindowsDisplayAwake } from './lib/windows-display-awake.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 class SmokeExit extends Error {
@@ -141,6 +149,7 @@ let fixture = null
 let launched = null
 let ws = null
 let exitCode = 0
+let displayAwake = null
 
 try {
   if (process.platform !== 'win32') {
@@ -149,6 +158,15 @@ try {
       'not-windows'
     )
   }
+  // A sleeping display refuses Desktop Duplication to every process and
+  // slows Windows Graphics Capture to a few frames a second; the backend
+  // build alone can outlast the display timeout. This keeps an awake
+  // display on; it cannot wake one that is already off.
+  displayAwake = await holdWindowsDisplayAwake()
+  summary.displayAwake = displayAwake.held
+    ? { held: true }
+    : { held: false, reason: displayAwake.reason ?? null }
+  if (!displayAwake.held) log(`could not hold the display awake: ${displayAwake.reason}`)
   for (const tool of [ffmpegPath, ffprobePath]) {
     try {
       execFileSync(tool, ['-version'], { stdio: 'ignore' })
@@ -219,6 +237,12 @@ try {
   log(
     `screen live ${live.width}x${live.height}, D3D11 texture ${live.d3d11TextureAvailable ?? 'n/a'}`
   )
+  summary.captureSample = await sampleScreenCapture(screen.id, 5000)
+  log(`capture sample ${JSON.stringify(summary.captureSample)}`)
+  if (options.probeOnly) {
+    writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`)
+    throw new SmokeExit(0)
+  }
 
   summary.steps.hide = await step('hide', () => hideStep({ renderer, smoke, screen }))
   if (!summary.steps.hide.ok) exitCode = 1
@@ -245,6 +269,7 @@ try {
   }
   for (const receiver of receivers) await stopReceiver(receiver)
   if (fixture) await stopWindowsFixtureWindow(fixture).catch(() => undefined)
+  displayAwake?.release()
   writeFileSync(join(outputDirectory, 'dev-app.log'), devAppLogLines.join('\n') + '\n')
   writeFileSync(summaryPath, JSON.stringify(summary, null, 2))
   printHuman(summary)
@@ -739,6 +764,33 @@ async function waitForScreenLiveOrSkip(sourceId) {
   throw new Error(`Timed out waiting for ${sourceId} to go live: ${JSON.stringify(last)}`)
 }
 
+/**
+ * The screen source's own cadence over `spanMs` while the fixture animates:
+ * frames published and dropped per second as the backend counts them. A
+ * slow program is then traced to the capture or to what consumes it (a
+ * display that went to sleep slows Windows Graphics Capture to a few frames
+ * a second; issue #1088 measured 3.8 asleep and 26 awake).
+ */
+async function sampleScreenCapture(sourceId, spanMs) {
+  const first = await request(ws, timeoutMs, 'preview.screen.status')
+  const startedAt = Date.now()
+  await sleep(spanMs)
+  const last = await request(ws, timeoutMs, 'preview.screen.status')
+  const seconds = (Date.now() - startedAt) / 1000
+  const rate = (key) =>
+    Number.isFinite(last?.[key]) && Number.isFinite(first?.[key])
+      ? Number(((last[key] - first[key]) / seconds).toFixed(1))
+      : null
+  return {
+    sourceId: last?.sourceId ?? null,
+    sameSource: last?.sourceId === sourceId,
+    seconds: Number(seconds.toFixed(2)),
+    framesPerSecond: rate('framesCaptured'),
+    droppedPerSecond: rate('droppedFrames'),
+    sourceFps: last?.sourceFps ?? null
+  }
+}
+
 async function waitForBackendState(method, predicate, description, waitMs = timeoutMs) {
   const deadline = Date.now() + waitMs
   let last = null
@@ -889,6 +941,7 @@ function parseArgs(argv) {
     // smoke:smart-scenes passes its own arguments through on Windows; the
     // switch count belongs to the macOS-only switches step.
     else if (value === '--switches') index += 1
+    else if (value === '--probe-capture') parsed.probeOnly = true
     else if (value === '--media') {
       parsed.media = values[++index]
       if (!['auto', 'cpu'].includes(parsed.media))

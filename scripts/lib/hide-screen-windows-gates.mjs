@@ -10,9 +10,9 @@ export const WINDOWS_DXGI_SCREEN_ID = /^screen:dxgi:[0-9a-f]+:\d+$/i
 
 /**
  * Desktop Duplication refusals that mean "this process may not read the
- * desktop" rather than "Hide screen is broken": E_ACCESSDENIED (a secure desktop, a
- * service session, and on some hosts every ordinary process: the owner's
- * Intel UHD 620 laptop refuses an interactive terminal too), DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+ * desktop" rather than "Hide screen is broken": E_ACCESSDENIED (the display
+ * is off or the session is locked, when Windows refuses every process, as
+ * issue #1088 measured with FFmpeg's ddagrab; or a service session), DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
  * (another app holds every duplication slot) and DXGI_ERROR_SESSION_DISCONNECTED
  * (a locked or disconnected RDP session).
  */
@@ -27,6 +27,10 @@ const DXGI_REFUSALS = [
     code: '0x887A0026'
   }
 ]
+
+/** What to do about a refusal: the cause is almost always the display. */
+export const DXGI_REFUSAL_HINT =
+  'Windows refuses Desktop Duplication to every process while the display is off or the session is locked: wake and unlock the screen and run again (the smoke keeps an awake display on, but cannot wake one).'
 
 /**
  * The Desktop Duplication refusal named in `text`, or null.
@@ -85,7 +89,7 @@ export function windowsScreenStartSkip(status) {
   const code = dxgiRefusalCode(status.message)
   if (!code) return null
   return {
-    reason: `DXGI Desktop Duplication refused this process (${code}) with the screen ${status.state}: ${status.message}. The smoke needs a host and session where DuplicateOutput succeeds.`,
+    reason: `DXGI Desktop Duplication refused this process (${code}) with the screen ${status.state}: ${status.message}. ${DXGI_REFUSAL_HINT}`,
     flag: `dxgi-refused-${code}`
   }
 }
@@ -117,7 +121,7 @@ export function windowsHideSessionPath(diagnostics) {
     fallbackReason,
     d3d11Skip: code
       ? {
-          reason: `the D3D11 media path fell back because Desktop Duplication refused this process (${code}): ${fallbackReason}. The D3D11 path is unproven on this host; the CPU-bridge legs are still judged.`,
+          reason: `the D3D11 media path fell back because Desktop Duplication refused this process (${code}): ${fallbackReason}. ${DXGI_REFUSAL_HINT} The CPU-bridge legs are still judged.`,
           flag: `d3d11-dxgi-refused-${code}`
         }
       : null
