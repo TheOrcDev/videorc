@@ -10,7 +10,7 @@ import type {
   ViewerSample,
   SessionChatTotals
 } from '@/lib/backend'
-import { formatCloudCountdown } from '@/lib/cloud-view'
+import { formatCloudCountdown } from '@/lib/cloud-show-view'
 import { NO_VALUE, plural } from '@/lib/format'
 import { formatTimecode } from '@/lib/format-time'
 import { formatBitrate } from '@/lib/format-video'

@@ -2,7 +2,7 @@ import type { ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
-import { goesThroughCloud } from '@/lib/cloud-view'
+import { goesThroughCloud } from '@/lib/cloud-show-view'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { platformConnectOptions } from '../../../shared/platform-scopes'
 

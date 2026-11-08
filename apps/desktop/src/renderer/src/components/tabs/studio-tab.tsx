@@ -22,7 +22,7 @@ import {
   useStudioRecordingState
 } from '@/hooks/use-studio'
 import { areEnabledStreamTargetsStartReady } from '@/lib/capture'
-import { cloudResumeNotice } from '@/lib/cloud-view'
+import { cloudResumeNotice } from '@/lib/cloud-show-view'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'

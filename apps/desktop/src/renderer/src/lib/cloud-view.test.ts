@@ -1,25 +1,25 @@
 import { describe, expect, it } from 'vitest'
 
 import type { CloudStatus, CloudTestResult } from './backend'
+import { cloudResumeNotice, formatCloudCountdown, goesThroughCloud } from './cloud-show-view'
 import {
-  CLOUD_TEST_DESCRIPTION,
   cloudFallbackMessage,
   cloudFallbackToast,
-  cloudHoursLine,
   cloudLostToast,
   cloudRestartToast,
-  cloudResumeNotice,
   cloudShowCapToast,
+  formatCloudResetDate
+} from './cloud-toasts'
+import {
+  CLOUD_TEST_DESCRIPTION,
+  cloudHoursLine,
   cloudSectionState,
   cloudTestBlockedReason,
   cloudTestLine,
   cloudTestResultLine,
   cloudTestRowLines,
   cloudTestRunning,
-  formatCloudCountdown,
-  formatCloudResetDate,
-  formatHoldLimit,
-  goesThroughCloud
+  formatHoldLimit
 } from './cloud-view'
 
 function status(overrides: Partial<CloudStatus> = {}): CloudStatus {

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CloudResumeNotice } from '@/components/studio/cloud-resume-notice'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { CloudStatus } from '@/lib/backend'
-import { cloudResumeNotice } from '@/lib/cloud-view'
+import { cloudResumeNotice } from '@/lib/cloud-show-view'
 
 import { CloudSection } from './cloud-section'
 

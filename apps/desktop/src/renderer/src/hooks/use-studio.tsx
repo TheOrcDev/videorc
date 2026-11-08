@@ -80,7 +80,7 @@ import {
   cloudLostToast,
   cloudRestartToast,
   cloudShowCapToast
-} from '@/lib/cloud-view'
+} from '@/lib/cloud-toasts'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
 

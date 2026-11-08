@@ -5,7 +5,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { useStudioCloud } from '@/hooks/use-studio'
-import type { CloudResumeNotice as CloudResumeNoticeCopy } from '@/lib/cloud-view'
+import type { CloudResumeNotice as CloudResumeNoticeCopy } from '@/lib/cloud-show-view'
 import {
   END_LIVESTREAM_LABEL,
   END_LIVESTREAM_TITLE,
