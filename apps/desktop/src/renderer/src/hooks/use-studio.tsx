@@ -14864,6 +14864,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       activeSavedSceneId,
       captureConfig,
+      cloudStatus,
+      talkShowRoomOpen,
       currentStreamOutputTopologyRequestKey,
       deviceList.devices,
       entitlements,
@@ -16181,6 +16183,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [
       takeRecordClickEpochMs,
       activatePreparedYouTubeBroadcasts,
+      commitCloudStatus,
+      setDeviceList,
       activatePreparedXBroadcasts,
       applyRecordingStatus,
       captureConfig,
@@ -16743,6 +16747,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return runStartSession(undefined, undefined, intent)
     },
     [
+      client,
+      commitCloudStatus,
       goLiveConfirmationOpen,
       goLiveConfirmationPending,
       openGoLiveConfirmation,
@@ -17275,6 +17281,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [
     takeRecordClickEpochMs,
     applyRecordingStatus,
+    commitCloudStatus,
     claimPlatformLifecycleOwner,
     clearLiveChatForTerminalSession,
     client,

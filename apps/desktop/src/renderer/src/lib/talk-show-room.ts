@@ -156,7 +156,6 @@ export async function microphoneDeviceIdFor(
 export class TalkShowRoomClient {
   readonly #deps: TalkShowRoomDeps
   #room: Room | null = null
-  #token: CloudRoomTokenAnswer | null = null
   #refreshTimer: number | null = null
   #reconnectTimer: number | null = null
   #reconnectAttempt = 0
@@ -187,7 +186,6 @@ export class TalkShowRoomClient {
     this.#setState('connecting', null)
     const token = await this.#deps.requestToken()
     if (this.#closed) return
-    this.#token = token
     const room = new Room({
       adaptiveStream: true,
       dynacast: true,
@@ -466,11 +464,11 @@ export class TalkShowRoomClient {
   #armTokenRefresh(): void {
     this.#clearRefresh()
     this.#refreshTimer = window.setTimeout(() => {
+      // A refresh keeps the backend's token fresh for the next reconnect;
+      // the SDK keeps its own copy for the running connection.
       void this.#deps
         .requestToken()
-        .then((token) => {
-          this.#token = token
-        })
+        .then(() => {})
         .catch((error: unknown) => {
           console.warn('[talk-show] token refresh failed', messageOf(error))
         })
@@ -506,7 +504,6 @@ export class TalkShowRoomClient {
     try {
       // A fresh token: the old one may be past its 10 minutes.
       const token = await this.#deps.requestToken()
-      this.#token = token
       const room = new Room({
         adaptiveStream: true,
         dynacast: true,
