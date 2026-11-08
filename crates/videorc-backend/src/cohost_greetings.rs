@@ -29,9 +29,9 @@ pub(crate) const COLLAPSE_NAMED_MAX: usize = 3;
 /// greet route's `firstMessageText` cap).
 pub(crate) const FIRST_MESSAGE_TEXT_MAX_UNITS: usize = 200;
 
-/// Chat bots that never get a welcome (plan 192 S1.2), matched on the
-/// lowercased name.
-pub(crate) const KNOWN_BOTS: [&str; 9] = [
+/// Chat bots that never get a welcome (plan 192 S1.2) and never become a
+/// person (plan 225 D1), matched on the lowercased name. One list.
+pub(crate) const KNOWN_BOTS: [&str; 14] = [
     "nightbot",
     "streamelements",
     "streamlabs",
@@ -41,6 +41,11 @@ pub(crate) const KNOWN_BOTS: [&str; 9] = [
     "wizebot",
     "botrixoficial",
     "kickbot",
+    "botisimo",
+    "phantombot",
+    "kofistreambot",
+    "soundalerts",
+    "pokemoncommunitygame",
 ];
 
 /// Every kind a greeting answers (plan 192): the Activity kinds a template
@@ -54,6 +59,13 @@ pub(crate) enum GreetingKind {
     /// The author's first message this stream, having chatted on an
     /// earlier one.
     Returning,
+    /// Plan 225 D9: a regular's arrival (this stream, by the community
+    /// store).
+    Regular,
+    /// Plan 225 D9: back after 30 days or more.
+    Comeback,
+    /// Plan 225 D9: the Nth stream, N in a row, or the anniversary.
+    Milestone,
 }
 
 impl GreetingKind {
@@ -61,11 +73,14 @@ impl GreetingKind {
     /// (`protocol-fixtures/buddy-builtin-greetings.json`); the fixture test
     /// walks it.
     #[cfg(test)]
-    pub(crate) const ALL: [GreetingKind; 16] = {
+    pub(crate) const ALL: [GreetingKind; 19] = {
         use CohostActivityTemplateKind as K;
         [
             GreetingKind::FirstTime,
             GreetingKind::Returning,
+            GreetingKind::Regular,
+            GreetingKind::Comeback,
+            GreetingKind::Milestone,
             GreetingKind::Activity(K::Follow),
             GreetingKind::Activity(K::Sub),
             GreetingKind::Activity(K::Resub),
@@ -90,6 +105,9 @@ impl GreetingKind {
         match self {
             Self::FirstTime => "first-time",
             Self::Returning => "returning",
+            Self::Regular => "regular",
+            Self::Comeback => "comeback",
+            Self::Milestone => "milestone",
             Self::Activity(kind) => match kind {
                 K::Follow => "follow",
                 K::Sub => "sub",
@@ -123,7 +141,7 @@ pub(crate) struct BuiltinGreeting {
 /// The runtime copy of `protocol-fixtures/buddy-builtin-greetings.json`; a
 /// test asserts they are equal, and the TS `BUDDY_BUILTIN_GREETINGS` asserts
 /// the same, so the two never drift.
-pub(crate) const BUILTIN_GREETINGS: [BuiltinGreeting; 16] = {
+pub(crate) const BUILTIN_GREETINGS: [BuiltinGreeting; 19] = {
     use CohostActivityTemplateKind as K;
     use CohostUtteranceState::{Laugh, Talk};
     const fn line(
@@ -140,6 +158,17 @@ pub(crate) const BUILTIN_GREETINGS: [BuiltinGreeting; 16] = {
             Talk,
         ),
         line(GreetingKind::Returning, "Welcome back, {name}!", Talk),
+        line(GreetingKind::Regular, "Welcome back, {name}!", Talk),
+        line(
+            GreetingKind::Comeback,
+            "Look who's back! Good to see you, {name}.",
+            Talk,
+        ),
+        line(
+            GreetingKind::Milestone,
+            "{name}'s {nth} stream with us! Thank you!",
+            Laugh,
+        ),
         line(
             GreetingKind::Activity(K::Follow),
             "Welcome, {name}! Thanks for the follow.",
@@ -244,6 +273,11 @@ pub(crate) struct ActivityFacts {
     /// A welcome's first message, trimmed to what the greet route takes
     /// (plan 192 S2.2); never set on an Activity row.
     pub(crate) first_message_text: Option<String>,
+    /// Plan 225: the arrival facts behind a regular, comeback or milestone
+    /// welcome (`{nth}`, `{row}`, `{away}`, `{since}`); `None` otherwise.
+    pub(crate) arrival: Option<crate::community::ViewerArrival>,
+    /// Plan 225 B6: the author's avatar, for the milestone card.
+    pub(crate) avatar_url: Option<String>,
 }
 
 /// The greeting platform a chat platform maps to; `None` for platforms a
@@ -395,6 +429,8 @@ fn base_facts(message: &LiveChatMessage, name: String) -> ActivityFacts {
         amount: message.amount_text.clone(),
         reward: None,
         first_message_text: None,
+        arrival: None,
+        avatar_url: message.author_avatar_url.clone(),
     }
 }
 
@@ -403,7 +439,37 @@ fn base_facts(message: &LiveChatMessage, name: String) -> ActivityFacts {
 /// is their first row this stream and they chatted on an earlier one. `None`
 /// for everything else: later messages, tombstones, notices, the streamer's
 /// own rows, known bots and names that carry a URL.
+#[cfg(test)]
 pub(crate) fn welcome_facts(message: &LiveChatMessage) -> Option<ActivityFacts> {
+    welcome_facts_with(message, true)
+}
+
+/// The welcome kind an arrival earns (plan 225 D9): the most specific wins,
+/// milestone > comeback > regular > returning. With `arrivals_on` false
+/// ("Welcome regulars on stream" off) every arrival is the plain returning
+/// welcome.
+pub(crate) fn arrival_kind(
+    arrival: &crate::community::ViewerArrival,
+    arrivals_on: bool,
+) -> GreetingKind {
+    if !arrivals_on {
+        GreetingKind::Returning
+    } else if arrival.milestone.is_some() {
+        GreetingKind::Milestone
+    } else if arrival.away_days.is_some() {
+        GreetingKind::Comeback
+    } else if arrival.regular {
+        GreetingKind::Regular
+    } else {
+        GreetingKind::Returning
+    }
+}
+
+/// `welcome_facts`, with plan 225's arrival kinds switched on or off.
+pub(crate) fn welcome_facts_with(
+    message: &LiveChatMessage,
+    arrivals_on: bool,
+) -> Option<ActivityFacts> {
     if message.is_deleted
         || !matches!(
             message.event_type,
@@ -415,6 +481,8 @@ pub(crate) fn welcome_facts(message: &LiveChatMessage) -> Option<ActivityFacts> 
     }
     let kind = if message.first_message {
         GreetingKind::FirstTime
+    } else if let Some(arrival) = &message.arrival {
+        arrival_kind(arrival, arrivals_on)
     } else if message.first_in_session {
         GreetingKind::Returning
     } else {
@@ -431,7 +499,33 @@ pub(crate) fn welcome_facts(message: &LiveChatMessage) -> Option<ActivityFacts> 
     facts.kind = kind;
     let text = truncate_utf16(message.message_text.trim(), FIRST_MESSAGE_TEXT_MAX_UNITS);
     facts.first_message_text = (!text.trim().is_empty()).then(|| text.trim_end().to_string());
+    facts.arrival = message.arrival.clone();
     Some(facts)
+}
+
+/// The built-in milestone line for one milestone (plan 225 D9): the Nth
+/// stream, N in a row, or the anniversary.
+pub(crate) fn milestone_builtin_text(kind: crate::community::ViewerMilestoneKind) -> &'static str {
+    use crate::community::ViewerMilestoneKind as M;
+    match kind {
+        M::Streams => "{name}'s {nth} stream with us! Thank you!",
+        M::Row => "{name} has chatted in {row} streams in a row!",
+        M::Anniversary => "One year since {name}'s first chat here!",
+    }
+}
+
+impl GreetingKind {
+    /// Plan 225: the greet route (web) knows the first-time, returning and
+    /// Activity kinds; the arrival kinds get their line until plan 225 F2
+    /// teaches the route `arrival`.
+    pub(crate) fn greet_route_supported(self) -> bool {
+        !matches!(self, Self::Regular | Self::Comeback | Self::Milestone)
+    }
+
+    /// Plan 225 D9: an arrival kind collapses into one wave within 20 s.
+    pub(crate) fn is_arrival_wave(self) -> bool {
+        matches!(self, Self::Regular | Self::Comeback)
+    }
 }
 
 /// The streamer's own row: an owner or broadcaster role, as the connectors
@@ -565,6 +659,9 @@ pub(crate) fn resolve_line(
     match kind {
         GreetingKind::FirstTime => welcome(&settings.welcomes.first_time),
         GreetingKind::Returning => welcome(&settings.welcomes.returning),
+        GreetingKind::Regular => welcome(&settings.welcomes.regular),
+        GreetingKind::Comeback => welcome(&settings.welcomes.comeback),
+        GreetingKind::Milestone => welcome(&settings.welcomes.milestone),
         GreetingKind::Activity(template_kind) => {
             if let Some(template) =
                 pick_template(&settings.templates, template_kind, platform, choice)
@@ -603,10 +700,29 @@ pub(crate) struct TemplateFields {
     pub(crate) reward: Option<String>,
     pub(crate) names: String,
     pub(crate) others: usize,
+    /// Plan 225 D9: `{nth}` ("10th"), `{streams}`, `{row}`, `{away}` ("3
+    /// weeks") and `{since}` ("March 2026"), empty off an arrival.
+    pub(crate) nth: String,
+    pub(crate) streams: String,
+    pub(crate) row: String,
+    pub(crate) away: String,
+    pub(crate) since: String,
 }
 
 impl TemplateFields {
     pub(crate) fn from_facts(facts: &ActivityFacts) -> Self {
+        let arrival = facts.arrival.as_ref();
+        let since = arrival
+            .and_then(|arrival| arrival.since.as_deref())
+            .and_then(|since| {
+                let (year, month) = since.split_once('-')?;
+                let date =
+                    chrono::NaiveDate::from_ymd_opt(year.parse().ok()?, month.parse().ok()?, 1)?;
+                Some(crate::community::since_label(
+                    date.and_hms_opt(0, 0, 0)?.and_utc(),
+                ))
+            })
+            .unwrap_or_default();
         Self {
             name: facts.name.clone(),
             handle: facts.handle.clone(),
@@ -618,6 +734,20 @@ impl TemplateFields {
             reward: facts.reward.clone(),
             names: facts.name.clone(),
             others: 0,
+            nth: arrival
+                .map(|arrival| crate::community::ordinal(arrival.streams))
+                .unwrap_or_default(),
+            streams: arrival
+                .map(|arrival| arrival.streams.to_string())
+                .unwrap_or_default(),
+            row: arrival
+                .map(|arrival| arrival.in_a_row.to_string())
+                .unwrap_or_default(),
+            away: arrival
+                .and_then(|arrival| arrival.away_days)
+                .map(crate::community::away_label)
+                .unwrap_or_default(),
+            since,
         }
     }
 
@@ -637,6 +767,11 @@ impl TemplateFields {
             } else {
                 self.others.to_string()
             }),
+            "nth" => Some(self.nth.clone()),
+            "streams" => Some(self.streams.clone()),
+            "row" => Some(self.row.clone()),
+            "away" => Some(self.away.clone()),
+            "since" => Some(self.since.clone()),
             _ => None,
         }
     }

@@ -448,6 +448,10 @@ export type BuddyTrigger =
   | 'watch-streak'
   | 'redemption'
   | 'destination-failed'
+  // Plan 225 D9: the arrival triggers.
+  | 'regular'
+  | 'comeback'
+  | 'milestone'
 
 export const BUDDY_TRIGGERS: readonly BuddyTrigger[] = [
   'follow',
@@ -457,7 +461,10 @@ export const BUDDY_TRIGGERS: readonly BuddyTrigger[] = [
   'raid',
   'watch-streak',
   'redemption',
-  'destination-failed'
+  'destination-failed',
+  'regular',
+  'comeback',
+  'milestone'
 ]
 
 /** D14's default reaction per trigger, as a fallback chain: the first id the
@@ -470,7 +477,10 @@ export const BUDDY_TRIGGER_DEFAULT_REACTIONS: Readonly<Record<BuddyTrigger, read
   raid: ['surprised'],
   'watch-streak': ['proud'],
   redemption: ['wink'],
-  'destination-failed': []
+  'destination-failed': [],
+  regular: ['wave', 'proud'],
+  comeback: ['excited', 'wave'],
+  milestone: ['excited', 'proud']
 }
 
 /** A reaction override that turns a trigger's reaction off. */

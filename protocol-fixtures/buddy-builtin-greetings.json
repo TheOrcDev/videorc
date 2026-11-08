@@ -1,9 +1,12 @@
 {
-  "$comment": "Plan 192: Buddy's built-in greeting lines, used when the user has no line of their own for a kind. Rust (cohost_greetings::BUILTIN_GREETINGS) and TS (BUDDY_BUILTIN_GREETINGS) each assert they equal this file. `first-time` and `returning` are the welcomes (greetings.welcomes); the rest are Activity kinds (templates[]).",
+  "$comment": "Plan 192: Buddy's built-in greeting lines, used when the user has no line of their own for a kind. Rust (cohost_greetings::BUILTIN_GREETINGS) and TS (BUDDY_BUILTIN_GREETINGS) each assert they equal this file. `first-time`, `returning`, `regular`, `comeback` and `milestone` are the welcomes (greetings.welcomes; the last three since plan 225); the rest are Activity kinds (templates[]).",
   "version": 1,
   "lines": [
     { "kind": "first-time", "text": "Hi {name}, welcome to the stream!", "state": "talk" },
     { "kind": "returning", "text": "Welcome back, {name}!", "state": "talk" },
+    { "kind": "regular", "text": "Welcome back, {name}!", "state": "talk" },
+    { "kind": "comeback", "text": "Look who's back! Good to see you, {name}.", "state": "talk" },
+    { "kind": "milestone", "text": "{name}'s {nth} stream with us! Thank you!", "state": "laugh" },
     { "kind": "follow", "text": "Welcome, {name}! Thanks for the follow.", "state": "talk" },
     { "kind": "sub", "text": "{name} joined the ranks. Thank you!", "state": "laugh" },
     { "kind": "resub", "text": "{name} is back in the ranks. Thank you!", "state": "laugh" },

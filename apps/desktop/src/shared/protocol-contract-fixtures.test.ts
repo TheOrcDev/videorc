@@ -1251,7 +1251,11 @@ describe('shared high-risk protocol fixture', () => {
         ai: true,
         welcomes: {
           firstTime: { enabled: true, state: 'talk' },
-          returning: { enabled: true, state: 'talk' }
+          returning: { enabled: true, state: 'talk' },
+          // Plan 225 D9: the arrival welcomes, on like the other two.
+          regular: { enabled: true, state: 'talk' },
+          comeback: { enabled: true, state: 'talk' },
+          milestone: { enabled: true, state: 'talk' }
         }
       },
       answers: { enabled: true, cooldownSeconds: 20 },

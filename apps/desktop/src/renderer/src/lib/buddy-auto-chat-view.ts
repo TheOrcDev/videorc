@@ -168,13 +168,20 @@ export const BUDDY_TEMPLATE_KIND_TITLES: Record<CohostActivityTemplateKind, stri
 /** The welcome rows' names (plan 192 S1.3), word for word. */
 export const BUDDY_WELCOME_TITLES: Record<CohostWelcomeKind, string> = {
   'first-time': 'First-time chatters',
-  returning: 'Returning chatters'
+  returning: 'Returning chatters',
+  // Plan 225 D9.
+  regular: 'Regulars',
+  comeback: 'Back after a while',
+  milestone: 'Milestones'
 }
 
 /** Where each welcome lives in `greetings.welcomes`. */
 export const BUDDY_WELCOME_KEYS: Record<CohostWelcomeKind, keyof CohostGreetingWelcomes> = {
   'first-time': 'firstTime',
-  returning: 'returning'
+  returning: 'returning',
+  regular: 'regular',
+  comeback: 'comeback',
+  milestone: 'milestone'
 }
 
 /** The platforms each kind comes from, for the row's hint. */
@@ -184,6 +191,9 @@ export const BUDDY_TEMPLATE_KIND_PLATFORMS: Record<
 > = {
   'first-time': ['twitch', 'youtube', 'kick', 'x'],
   returning: ['twitch', 'youtube', 'kick', 'x'],
+  regular: ['twitch', 'youtube', 'kick', 'x'],
+  comeback: ['twitch', 'youtube', 'kick', 'x'],
+  milestone: ['twitch', 'youtube', 'kick', 'x'],
   follow: ['twitch', 'kick', 'x'],
   sub: ['twitch'],
   resub: ['twitch'],
@@ -218,12 +228,30 @@ export const BUDDY_TEMPLATE_FIELDS: readonly { field: string; hint: string }[] =
   { field: 'amount', hint: 'Money, bits, KICKs or points' },
   { field: 'reward', hint: 'Reward or Power-up title' },
   { field: 'names', hint: 'Everyone in a burst' },
-  { field: 'others', hint: 'How many more in a burst' }
+  { field: 'others', hint: 'How many more in a burst' },
+  // Plan 225 D9: what an arrival knows about the person.
+  { field: 'nth', hint: 'Their stream count, as "10th"' },
+  { field: 'streams', hint: 'Streams chatted in' },
+  { field: 'row', hint: 'Streams in a row' },
+  { field: 'away', hint: 'How long they were away, as "3 weeks"' },
+  { field: 'since', hint: 'Their first chat, as "March 2026"' }
 ]
 
 /** The fields a welcome offers (plan 192 S1.3): a chat row has only these. */
 export const BUDDY_WELCOME_FIELDS: readonly { field: string; hint: string }[] =
   BUDDY_TEMPLATE_FIELDS.filter((entry) => ['name', 'handle', 'platform'].includes(entry.field))
+
+/** The fields a regular, comeback or milestone welcome offers (plan 225 D9):
+ * the chat row's, plus what the community store knows about the person. */
+export const BUDDY_ARRIVAL_FIELDS: readonly { field: string; hint: string }[] =
+  BUDDY_TEMPLATE_FIELDS.filter((entry) =>
+    ['name', 'handle', 'platform', 'nth', 'streams', 'row', 'away', 'since'].includes(entry.field)
+  )
+
+/** Plan 225 D9: the welcomes that carry the arrival fields. */
+export function isArrivalWelcomeKind(kind: CohostWelcomeKind): boolean {
+  return kind === 'regular' || kind === 'comeback' || kind === 'milestone'
+}
 
 const KNOWN_FIELDS = new Set(BUDDY_TEMPLATE_FIELDS.map((entry) => entry.field))
 
@@ -238,11 +266,45 @@ export interface BuddySampleFields {
   count?: number
   amount?: string
   reward?: string
+  /** Plan 225 D9: an arrival's facts. */
+  nth?: string
+  streams?: number
+  row?: number
+  away?: string
+  since?: string
 }
 
 export const BUDDY_SAMPLE_FIELDS: Record<BuddyGreetingKind, BuddySampleFields> = {
   'first-time': { name: 'first_timer', handle: '@first_timer', platform: 'Twitch' },
   returning: { name: 'regular', handle: '@regular', platform: 'YouTube' },
+  regular: {
+    name: 'Ada',
+    handle: '@ada',
+    platform: 'Twitch',
+    nth: '14th',
+    streams: 14,
+    row: 5,
+    since: 'March 2026'
+  },
+  comeback: {
+    name: 'Bo',
+    handle: '@bo',
+    platform: 'Kick',
+    nth: '7th',
+    streams: 7,
+    row: 1,
+    away: '3 weeks',
+    since: 'May 2026'
+  },
+  milestone: {
+    name: 'Kim',
+    handle: '@kim',
+    platform: 'Twitch',
+    nth: '10th',
+    streams: 10,
+    row: 3,
+    since: 'February 2026'
+  },
   follow: { name: 'new_friend', handle: '@new_friend', platform: 'Twitch' },
   sub: { name: 'morgaesis', handle: 'morgaesis', platform: 'Twitch' },
   resub: { name: 'morgaesis', handle: 'morgaesis', platform: 'Twitch', months: 8 },
@@ -300,6 +362,9 @@ export interface BuddyBuiltinGreeting {
 export const BUDDY_BUILTIN_GREETINGS: readonly BuddyBuiltinGreeting[] = [
   { kind: 'first-time', text: 'Hi {name}, welcome to the stream!', state: 'talk' },
   { kind: 'returning', text: 'Welcome back, {name}!', state: 'talk' },
+  { kind: 'regular', text: 'Welcome back, {name}!', state: 'talk' },
+  { kind: 'comeback', text: "Look who's back! Good to see you, {name}.", state: 'talk' },
+  { kind: 'milestone', text: "{name}'s {nth} stream with us! Thank you!", state: 'laugh' },
   { kind: 'follow', text: 'Welcome, {name}! Thanks for the follow.', state: 'talk' },
   { kind: 'sub', text: '{name} joined the ranks. Thank you!', state: 'laugh' },
   { kind: 'resub', text: '{name} is back in the ranks. Thank you!', state: 'laugh' },
@@ -431,6 +496,16 @@ function fieldValue(fields: BuddySampleFields, field: string): string | null {
       return fields.name
     case 'others':
       return ''
+    case 'nth':
+      return fields.nth ?? ''
+    case 'streams':
+      return fields.streams === undefined ? '' : String(fields.streams)
+    case 'row':
+      return fields.row === undefined ? '' : String(fields.row)
+    case 'away':
+      return fields.away ?? ''
+    case 'since':
+      return fields.since ?? ''
     default:
       return null
   }
@@ -517,5 +592,7 @@ export const BUDDY_UTTERANCE_TRIGGER_LABELS: Record<CohostUtteranceTriggerKind, 
   greeting: 'Greeting',
   answer: 'Answer',
   banter: 'Banter',
-  manual: 'Say'
+  manual: 'Say',
+  // Plan 225: a viewer's `!` command answered in the bubble.
+  community: 'Community'
 }

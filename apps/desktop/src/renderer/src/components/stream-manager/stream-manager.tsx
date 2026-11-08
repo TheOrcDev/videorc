@@ -57,6 +57,7 @@ import type {
   CohostUtteranceState,
   CohostWindowBuddy,
   CohostUtterance,
+  CohostUtteranceMilestone,
   CommentHighlightAnchor,
   CommentHighlightState,
   CommentsHistoryStats,
@@ -285,6 +286,8 @@ export interface StreamManagerProps {
   highlightFailure?: { messageId: string; reason: string } | null
   onBackToLive?: () => void
   onHighlight?: (message: LiveChatMessage) => void
+  /** Plan 225 B6: put the milestone card (never the message) on stream. */
+  onHighlightMilestone?: (message: LiveChatMessage, milestone: CohostUtteranceMilestone) => void
   onClear?: () => void
   /** Mark the current moment for a clip (plan 068 D6); shown only on air. */
   markerContext?: import('@/lib/backend').MarkerContext | null
@@ -434,6 +437,7 @@ export function StreamManager({
   highlightFailure = null,
   onBackToLive,
   onHighlight,
+  onHighlightMilestone,
   onClear,
   onMarkClip,
   onClip,
@@ -1029,6 +1033,17 @@ export function StreamManager({
             utterances={shownCohostState?.utterances ?? []}
             onApprove={onCohostUtteranceApprove}
             onDismiss={onCohostUtteranceDismiss}
+            onShowMilestone={
+              onHighlightMilestone
+                ? (utterance) => {
+                    const milestone = utterance.milestone
+                    const message = snapshot.messages.find(
+                      (candidate) => candidate.id === milestone?.messageId
+                    )
+                    if (milestone && message) onHighlightMilestone(message, milestone)
+                  }
+                : undefined
+            }
           />
         ) : null}
       </BuddyCardsArea>

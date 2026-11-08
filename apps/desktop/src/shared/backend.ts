@@ -4952,6 +4952,8 @@ export interface CommentHighlightCommand {
   requestId: string
   sessionId: string
   messageId: string
+  /** Plan 225 B6: draw the milestone card for this row, never its text. */
+  milestone?: CohostUtteranceMilestone
 }
 
 export type CommentHighlightPhase = 'idle' | 'live' | 'failed'
@@ -6416,6 +6418,12 @@ export interface LiveChatMessage {
   reply?: LiveChatReply
   /** The author's first message in the channel (Twitch intro, or unseen in earlier sessions). */
   firstMessage?: boolean
+  /**
+   * A returning person's arrival facts (plan 225 D11): only on the arrival
+   * row, never on a first-timer's, a bot's or the streamer's. Absent, never
+   * null. The chip is pure render from it.
+   */
+  arrival?: ViewerArrival
 }
 
 /** Authoritative live-chat snapshot: provider rows + persisted/buffered messages + unread count. */
@@ -6548,6 +6556,12 @@ export interface CohostSettings {
   persona: CohostPersona
   /** Automatic chat (plan 164 S-A2). Everything off by default. */
   autoChat: CohostAutoChat
+  /**
+   * Know your viewers (plan 225): the community store's switches and the
+   * regular threshold. Absent only from an older backend; the renderer then
+   * reads Rust's defaults (store on, welcomes on, 3 streams).
+   */
+  community?: CommunitySettings
 }
 
 /** The avatar's state images (plan 164 D16). `idle` is required on stream;
@@ -6664,8 +6678,14 @@ export interface CohostCooldownBehaviour {
  * `greetings.welcomes`, never in `templates[]`, so an older app never meets
  * an unknown template kind (S1.1).
  */
-export type CohostWelcomeKind = 'first-time' | 'returning'
-export const COHOST_WELCOME_KINDS: readonly CohostWelcomeKind[] = ['first-time', 'returning']
+export type CohostWelcomeKind = 'first-time' | 'returning' | 'regular' | 'comeback' | 'milestone'
+export const COHOST_WELCOME_KINDS: readonly CohostWelcomeKind[] = [
+  'first-time',
+  'returning',
+  'regular',
+  'comeback',
+  'milestone'
+]
 
 /**
  * One welcome's line (plan 192 S1.1). `text` absent (never null, never
@@ -6679,10 +6699,17 @@ export interface CohostWelcomeLine {
   reaction?: string
 }
 
-/** First-time and returning chatters, each with its own line (plan 192 D2). */
+/**
+ * First-time and returning chatters, each with its own line (plan 192 D2);
+ * plan 225 D9 adds a regular's arrival, a comeback and a milestone. The
+ * three are absent from an older backend (read as on, built-in lines).
+ */
 export interface CohostGreetingWelcomes {
   firstTime: CohostWelcomeLine
   returning: CohostWelcomeLine
+  regular?: CohostWelcomeLine
+  comeback?: CohostWelcomeLine
+  milestone?: CohostWelcomeLine
 }
 
 /**
@@ -6813,6 +6840,8 @@ export interface CohostSettingsPatch {
   persona?: CohostPersona
   /** Replaces the whole block; the backend validates it. */
   autoChat?: CohostAutoChat
+  /** Replaces the whole community block (plan 225); the backend clamps it. */
+  community?: CommunitySettings
 }
 
 // --- Overlay layout (plan 164) ---------------------------------------------
@@ -7317,6 +7346,244 @@ export interface CohostRecap {
   expiresAt: string
 }
 
+// --- Know your viewers across platforms (plan 225) ---------------------------
+
+/** Which milestone an arrival celebrates (plan 225 D8). */
+export type ViewerMilestoneKind = 'streams' | 'row' | 'anniversary'
+export interface ViewerMilestone {
+  kind: ViewerMilestoneKind
+  /** The stream count, the run, or the anniversary's year. */
+  value: number
+}
+
+/**
+ * What a returning person's arrival row carries (plan 225 Wire shape). Every
+ * optional field is absent, never null.
+ */
+export interface ViewerArrival {
+  /** Streams chatted in, including this one. */
+  streams: number
+  regular: boolean
+  /** Only for Back (D7): days since the last chat, 30 or more. */
+  awayDays?: number
+  inARow: number
+  milestone?: ViewerMilestone
+  /** Only when the person has two or more accounts. */
+  platforms?: StreamPlatform[]
+  /** "2026-03", for the hover line. */
+  since?: string
+}
+
+export type CommunityPersonStatus = 'normal' | 'bot' | 'forgotten'
+
+/** Support totals from Activity rows (D2); every zero is absent. */
+export interface CommunitySupport {
+  bits?: number
+  kicks?: number
+  giftedSubs?: number
+  subMonths?: number
+  /** Tips by currency, in micros. */
+  tips?: Record<string, number>
+}
+
+export interface CommunityAccount {
+  accountKey: string
+  platform: StreamPlatform
+  authorId: string
+  name: string
+  handle?: string
+  avatarUrl?: string
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+/** A memory Buddy learned (Premium, D10). */
+export interface CommunityMemory {
+  id: string
+  /** The account whose words taught it. */
+  accountKey: string
+  text: string
+  sessionId?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type CommunitySuggestionReason = 'name' | 'link-cancelled'
+/** "Might be the same person" (D4 c), or a cancelled `!link` (D4 b). */
+export interface CommunitySuggestion {
+  accountA: CommunityAccount
+  accountB: CommunityAccount
+  reason: CommunitySuggestionReason
+  createdAt: string
+}
+
+export type CommunityLinkKind = 'self' | 'manual' | 'split' | 'suggestion-accepted'
+export interface CommunityLinkEvent {
+  id: string
+  accountKey: string
+  kind: CommunityLinkKind
+  at: string
+}
+
+/** `cohost.community.person`: one person in full (D11, D12). */
+export interface CommunityPerson {
+  /** Empty for the zero-count person an unknown account gets. */
+  id: string
+  name: string
+  avatarUrl?: string
+  accounts: CommunityAccount[]
+  streams: number
+  messages: number
+  inARow: number
+  bestInARow: number
+  regular: boolean
+  awayDays?: number
+  firstSeenAt?: string
+  lastSeenAt?: string
+  support: CommunitySupport
+  /** Milestone keys celebrated so far ("streams-10"); absent while empty. */
+  milestones?: string[]
+  note: string
+  status: CommunityPersonStatus
+  memories?: CommunityMemory[]
+  suggestions?: CommunitySuggestion[]
+  linkEvents?: CommunityLinkEvent[]
+  /** The person has a YouTube account: the card shows the retention line. */
+  youtube?: boolean
+}
+
+export interface CommunityPersonRow {
+  id: string
+  name: string
+  avatarUrl?: string
+  platforms: StreamPlatform[]
+  streams: number
+  regular: boolean
+  lastSeenAt?: string
+  status: CommunityPersonStatus
+}
+
+export type CommunityListFilter = 'regulars' | 'everyone' | 'linked' | 'bots'
+export type CommunityListSort = 'streams' | 'recent' | 'name'
+export interface CommunityListParams {
+  query?: string
+  filter?: CommunityListFilter
+  sort?: CommunityListSort
+  cursor?: string
+  /** At most 100. */
+  limit?: number
+}
+export interface CommunityListPage {
+  people: CommunityPersonRow[]
+  nextCursor?: string
+}
+
+export type CommunityBackfillState = 'idle' | 'running' | 'done'
+export interface CommunityBackfill {
+  state: CommunityBackfillState
+  done: number
+  total: number
+}
+
+/** `cohost.community.summary` and the `cohost.community.changed` event. */
+export interface CommunitySummary {
+  people: number
+  regulars: number
+  streams: number
+  newRegularsThisWeek: number
+  linksPending: number
+  backfill: CommunityBackfill
+}
+
+/** `cohost.community.person` takes a person id, or a platform and author id. */
+export interface CommunityPersonParams {
+  personId?: string
+  platform?: StreamPlatform
+  authorId?: string
+  /** The latest name the caller knows, for an unknown account's zero-count person. */
+  name?: string
+}
+export interface CommunityUpdateParams {
+  personId: string
+  /** At most 300 characters; the backend trims it. */
+  note?: string
+  /** `normal` or `bot`; forgetting goes through `cohost.community.forget`. */
+  status?: 'normal' | 'bot'
+}
+export interface CommunityLinkParams {
+  personId: string
+  otherPersonId: string
+}
+export interface CommunityUnlinkParams {
+  accountKey: string
+}
+export interface CommunityUnlinkResult {
+  /** The new person the account moved into. */
+  personId: string
+}
+export interface CommunitySuggestionParams {
+  accountA: string
+  accountB: string
+}
+export interface CommunityPersonIdParams {
+  personId: string
+}
+export interface CommunityIdParams {
+  id: string
+}
+export interface CommunityPathParams {
+  path: string
+}
+export interface CommunityAccepted {
+  accepted: boolean
+}
+export interface CommunityExportResult {
+  people: number
+  bytes: number
+}
+export interface CommunityImportResult {
+  people: number
+  merged: number
+}
+
+/** `cohost.state.welcomeBack[]` (D11): a returning person under "Say hi". */
+export interface CohostWelcomeBack {
+  personId: string
+  authorKey: string
+  name: string
+  platform: StreamPlatform
+  arrival: ViewerArrival
+  firstSeenAt: string
+}
+
+/** `cohost.state.linkMade[]` (D4 b): the "Linked … Undo" card. */
+export interface CohostLinkMade {
+  personId: string
+  names: [string, string]
+  platforms: [StreamPlatform, StreamPlatform]
+  /** The account the Undo splits off. */
+  accountKey: string
+  at: string
+}
+
+/** `cohostSettings.community` (plan 225): every field always present. */
+export interface CommunitySettings {
+  /** Remember my community (the master switch, default on). */
+  enabled: boolean
+  /** Regular after N streams, 2 to 10 (default 3). */
+  regularStreams: number
+  /** Welcome regulars on stream (default on). */
+  welcomeOnStream: boolean
+  /** Show milestone cards automatically (default off). */
+  milestoneCards: boolean
+  /** Buddy remembers (Premium, default off). */
+  remember: boolean
+  /** Community sync (Premium, default off). */
+  sync: boolean
+}
+
+// --- end Know your viewers (plan 225) ---
+
 /** A first-time chatter nobody greeted yet (plan 068 D9). */
 export interface CohostSayHi {
   /** The engine's author key; `cohost.author.greeted` takes it back. */
@@ -7463,6 +7730,10 @@ export type CohostCommandKind =
   // or `refused` says what ran; `confirm` asks for a spoken yes first (D14:
   // going live, ending what runs), answered like any card.
   | 'act'
+  // Plan 225 B5: "wave at {name}" (done at once) and "remember that {name}
+  // {fact}" (a confirm card, then the person's note).
+  | 'wave'
+  | 'remember'
 
 /**
  * Where the latest voice command stands:
@@ -7643,6 +7914,16 @@ export interface CohostState {
   utterances?: CohostUtterance[]
   /** Plan 164 D10: automatic sends this chat session; absent while zero. */
   autoChatSends?: number
+  /**
+   * Plan 225 D11: returning people not waved at or welcomed yet, oldest
+   * first, gone after 15 minutes; absent while empty (never null).
+   */
+  welcomeBack?: CohostWelcomeBack[]
+  /**
+   * Plan 225 D4: links viewers made with `!link`, each with an Undo, for 15
+   * minutes; absent while empty (never null).
+   */
+  linkMade?: CohostLinkMade[]
 }
 
 /**
@@ -7978,7 +8259,7 @@ export interface CohostSayParams {
 }
 
 /** What made the Buddy speak (plan 164 D7). */
-export type CohostUtteranceTriggerKind = 'greeting' | 'answer' | 'banter' | 'manual'
+export type CohostUtteranceTriggerKind = 'greeting' | 'answer' | 'banter' | 'manual' | 'community'
 
 export interface CohostUtteranceTrigger {
   kind: CohostUtteranceTriggerKind
@@ -8008,6 +8289,23 @@ export interface CohostUtterance {
   at: string
   /** Present while `proposed` in Suggest mode: the card leaves then. */
   expiresAt?: string
+  /**
+   * Plan 225 B6: a milestone welcome's card facts (the person and the
+   * milestone, never the message text), so the Stream Manager can put the
+   * milestone card on stream. Absent on every other line (never null).
+   */
+  milestone?: CohostUtteranceMilestone
+}
+
+/** Plan 225 B6: what the milestone card draws. `messageId` is the arrival
+ * row the backend highlights, so its eligibility and 10 s lifetime hold. */
+export interface CohostUtteranceMilestone {
+  messageId: string
+  name: string
+  avatarUrl?: string
+  platform: StreamPlatform
+  /** "10th stream", "5 in a row", "One year". */
+  label: string
 }
 
 /**

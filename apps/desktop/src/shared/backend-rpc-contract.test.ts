@@ -27,7 +27,11 @@ import type {
   StreamOutputTopologyProbeResult,
   StreamTargetsSnapshot,
   VirtualCameraPlatformStep,
-  VirtualCameraStatus
+  VirtualCameraStatus,
+  CohostSettings,
+  CommunityPerson,
+  CommunitySummary,
+  LiveChatMessage
 } from './backend'
 import {
   parseBackendWireMessage,
@@ -3885,3 +3889,125 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
     expectTypeOf<BackendEventMap['virtualCamera.changed']>().toEqualTypeOf<VirtualCameraStatus>()
   })
 })
+
+describe('Know your viewers wire contract (plan 225 A6)', () => {
+  const fixture = JSON.parse(
+    readFileSync(new URL('../../../../protocol-fixtures/community.json', import.meta.url), 'utf8')
+  ) as {
+    arrivalRow: LiveChatMessage
+    plainRow: LiveChatMessage
+    minimalArrival: unknown
+    settings: unknown
+    summary: unknown
+    person: unknown
+    unknownPerson: unknown
+    listPage: unknown
+    listParams: unknown
+    state: unknown
+    rejected: { arrivals: unknown[]; people: unknown[]; linkMade: unknown[] }
+  }
+
+  it('accepts every fixture shape field for field, absent never null', () => {
+    expect(validateBackendRpcResult('cohost.community.summary', fixture.summary)).toEqual(
+      fixture.summary
+    )
+    expect(validateBackendEventPayload('cohost.community.changed', fixture.summary)).toEqual(
+      fixture.summary
+    )
+    for (const person of [fixture.person, fixture.unknownPerson]) {
+      expect(validateBackendRpcResult('cohost.community.person', person)).toEqual(person)
+      expect(validateBackendRpcResult('cohost.community.update', person)).toEqual(person)
+      expect(validateBackendRpcResult('cohost.community.link', person)).toEqual(person)
+    }
+    expect(validateBackendRpcResult('cohost.community.list', fixture.listPage)).toEqual(
+      fixture.listPage
+    )
+    expect(validateBackendRpcParams('cohost.community.list', fixture.listParams)).toEqual(
+      fixture.listParams
+    )
+    expect(validateBackendRpcParams('cohost.community.list', {})).toEqual({})
+    expect(validateBackendEventPayload('cohost.state', fixture.state)).toEqual(fixture.state)
+    expect(validateBackendRpcResult('cohost.status', fixture.state)).toEqual(fixture.state)
+    // The arrival row carries its facts; the plain row has none. Neither
+    // side validates chat rows at runtime, so the fixture types them.
+    expect(fixture.arrivalRow.arrival).toEqual({
+      streams: 14,
+      regular: true,
+      awayDays: 31,
+      inARow: 5,
+      milestone: { kind: 'streams', value: 10 },
+      platforms: ['twitch', 'youtube'],
+      since: '2026-03'
+    })
+    expect('arrival' in fixture.plainRow).toBe(false)
+    const settings = validateBackendRpcResult('cohost.settings.get', {
+      ...(validateBackendRpcResult('cohost.settings.get', fixturesSettingsBase()) as object),
+      community: fixture.settings
+    }) as CohostSettings
+    expect(settings.community).toEqual(fixture.settings)
+    expect(
+      validateBackendRpcParams('cohost.settings.set', { community: fixture.settings })
+    ).toEqual({ community: fixture.settings })
+    expect(validateBackendRpcResult('cohost.community.unlink', { personId: 'p' })).toEqual({
+      personId: 'p'
+    })
+    expect(validateBackendRpcResult('cohost.community.wave', { accepted: true })).toEqual({
+      accepted: true
+    })
+    expect(validateBackendRpcResult('cohost.community.export', { people: 3, bytes: 1024 })).toEqual(
+      { people: 3, bytes: 1024 }
+    )
+  })
+
+  it('rejects a null optional, an unknown kind or status, a one-name link and a stray field', () => {
+    const base = fixture.state as { welcomeBack: { arrival: unknown }[] }
+    for (const bad of fixture.rejected.arrivals) {
+      expect(() =>
+        validateBackendEventPayload('cohost.state', {
+          ...base,
+          welcomeBack: [{ ...base.welcomeBack[0], arrival: bad }]
+        })
+      ).toThrow('cohost.state')
+    }
+    for (const bad of fixture.rejected.people) {
+      expect(() => validateBackendRpcResult('cohost.community.person', bad)).toThrow()
+    }
+    for (const bad of fixture.rejected.linkMade) {
+      expect(() =>
+        validateBackendEventPayload('cohost.state', { ...base, linkMade: [bad] })
+      ).toThrow('cohost.state')
+    }
+    expect(() =>
+      validateBackendRpcResult('cohost.community.summary', {
+        ...(fixture.summary as object),
+        extra: 1
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        community: { ...(fixture.settings as object), regularStreams: 11 }
+      })
+    ).toThrow()
+    expect(() => validateBackendRpcParams('cohost.community.list', { filter: 'friends' })).toThrow()
+  })
+
+  it('types the methods and the event', () => {
+    expectTypeOf<BackendRpcResult<'cohost.community.person'>>().toEqualTypeOf<CommunityPerson>()
+    expectTypeOf<BackendRpcParams<'cohost.community.unlink'>>().toEqualTypeOf<{
+      accountKey: string
+    }>()
+    expectTypeOf<BackendEventMap['cohost.community.changed']>().toEqualTypeOf<CommunitySummary>()
+  })
+})
+
+/** The high-risk fixture's settings, the base every settings check extends. */
+function fixturesSettingsBase(): unknown {
+  return (
+    JSON.parse(
+      readFileSync(
+        new URL('../../../../protocol-fixtures/high-risk-contracts.json', import.meta.url),
+        'utf8'
+      )
+    ) as { cohost: { settings: unknown } }
+  ).cohost.settings
+}

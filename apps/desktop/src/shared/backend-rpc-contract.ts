@@ -50,6 +50,31 @@ import type {
   BuddyMotionSettings,
   BuddyPetSummary,
   BuddyReactionTable,
+  CohostLinkMade,
+  CohostWelcomeBack,
+  CommunityAccepted,
+  CommunityAccount,
+  CommunityExportResult,
+  CommunityIdParams,
+  CommunityImportResult,
+  CommunityLinkEvent,
+  CommunityLinkParams,
+  CommunityListPage,
+  CommunityListParams,
+  CommunityMemory,
+  CommunityPathParams,
+  CommunityPerson,
+  CommunityPersonIdParams,
+  CommunityPersonParams,
+  CommunityPersonRow,
+  CommunitySettings,
+  CommunitySuggestion,
+  CommunitySuggestionParams,
+  CommunitySummary,
+  CommunityUnlinkParams,
+  CommunityUnlinkResult,
+  CommunityUpdateParams,
+  ViewerArrival,
   MigrateHighlightAnchorParams,
   OverlayLayout,
   OverlayItemLayout,
@@ -622,6 +647,28 @@ export interface BackendRpcMethodMap {
   // --- end Buddy pets (plan 168, Phase B) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
+  // --- Know your viewers (plan 225 A5) ---
+  'cohost.community.summary': BackendRpcDefinition<undefined, CommunitySummary>
+  'cohost.community.list': BackendRpcDefinition<CommunityListParams, CommunityListPage>
+  'cohost.community.person': BackendRpcDefinition<CommunityPersonParams, CommunityPerson>
+  'cohost.community.update': BackendRpcDefinition<CommunityUpdateParams, CommunityPerson>
+  'cohost.community.link': BackendRpcDefinition<CommunityLinkParams, CommunityPerson>
+  'cohost.community.unlink': BackendRpcDefinition<CommunityUnlinkParams, CommunityUnlinkResult>
+  'cohost.community.suggestion.dismiss': BackendRpcDefinition<
+    CommunitySuggestionParams,
+    CommunityAccepted
+  >
+  'cohost.community.suggestion.accept': BackendRpcDefinition<
+    CommunitySuggestionParams,
+    CommunityPerson
+  >
+  'cohost.community.forget': BackendRpcDefinition<CommunityPersonIdParams, CommunityAccepted>
+  'cohost.community.forgetAll': BackendRpcDefinition<undefined, CommunityAccepted>
+  'cohost.community.memory.delete': BackendRpcDefinition<CommunityIdParams, CommunityAccepted>
+  'cohost.community.wave': BackendRpcDefinition<CommunityPersonIdParams, CommunityAccepted>
+  'cohost.community.export': BackendRpcDefinition<CommunityPathParams, CommunityExportResult>
+  'cohost.community.import': BackendRpcDefinition<CommunityPathParams, CommunityImportResult>
+  // --- end Know your viewers (plan 225) ---
   // --- Agents (plan 209 S2, S3): renderer and admin ---
   'agents.status': BackendRpcDefinition<undefined, AgentsStatus>
   'agents.enable': BackendRpcDefinition<undefined, AgentsStatus>
@@ -710,6 +757,8 @@ export interface BackendEventMap {
   /** The whole secret-free cloud status, on every change (plan 184). */
   'cloud.state': CloudStatus
   'cohost.report.saved': CohostReportSavedEvent
+  /** Plan 225: the community summary, after anything that changed it. */
+  'cohost.community.changed': CommunitySummary
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
@@ -3138,7 +3187,11 @@ const buddyReactionTableSchema = objectSchema(
     raid: optionalSchema(buddyReactionIdSchema),
     'watch-streak': optionalSchema(buddyReactionIdSchema),
     redemption: optionalSchema(buddyReactionIdSchema),
-    'destination-failed': optionalSchema(buddyReactionIdSchema)
+    'destination-failed': optionalSchema(buddyReactionIdSchema),
+    // Plan 225 D9: the arrival triggers.
+    regular: optionalSchema(buddyReactionIdSchema),
+    comeback: optionalSchema(buddyReactionIdSchema),
+    milestone: optionalSchema(buddyReactionIdSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<BuddyReactionTable>
@@ -3239,7 +3292,14 @@ const cohostAutoChatSchema = objectSchema(
         ai: optionalSchema(booleanSchema),
         welcomes: optionalSchema(
           objectSchema(
-            { firstTime: cohostWelcomeLineSchema, returning: cohostWelcomeLineSchema },
+            {
+              firstTime: cohostWelcomeLineSchema,
+              returning: cohostWelcomeLineSchema,
+              // Plan 225 D9: absent from an older backend, never null.
+              regular: optionalSchema(cohostWelcomeLineSchema),
+              comeback: optionalSchema(cohostWelcomeLineSchema),
+              milestone: optionalSchema(cohostWelcomeLineSchema)
+            },
             { allowUnknown: false }
           )
         )
@@ -3251,6 +3311,19 @@ const cohostAutoChatSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAutoChat>
+// Plan 225: `cohostSettings.community`. Every field is present (serde
+// defaults fill an older row); the threshold is 2 to 10.
+const communitySettingsSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    regularStreams: numberSchema({ integer: true, min: 2, max: 10 }),
+    welcomeOnStream: booleanSchema,
+    milestoneCards: booleanSchema,
+    remember: booleanSchema,
+    sync: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunitySettings>
 const cohostSettingsSchema = objectSchema(
   {
     enabled: booleanSchema,
@@ -3266,7 +3339,10 @@ const cohostSettingsSchema = objectSchema(
     removeConfirm: enumSchema(['confirm', 'countdown']),
     // Plan 164 S-A2: the backend always sends both.
     persona: cohostPersonaSchema,
-    autoChat: cohostAutoChatSchema
+    autoChat: cohostAutoChatSchema,
+    // Plan 225: Rust always sends it; an older backend omits it (absent,
+    // never null).
+    community: optionalSchema(communitySettingsSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettings>
@@ -3283,7 +3359,8 @@ const cohostSettingsPatchSchema = objectSchema(
     wakeWordRequired: optionalSchema(booleanSchema),
     removeConfirm: optionalSchema(enumSchema(['confirm', 'countdown'])),
     persona: optionalSchema(cohostPersonaSchema),
-    autoChat: optionalSchema(cohostAutoChatSchema)
+    autoChat: optionalSchema(cohostAutoChatSchema),
+    community: optionalSchema(communitySettingsSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
@@ -3978,6 +4055,246 @@ const cohostRecapSchema = objectSchema(
   { text: stringSchema({ maxLength: 140 }), at: timestamp, expiresAt: timestamp },
   { allowUnknown: false }
 )
+// --- Know your viewers (plan 225) ---
+// Every optional field is absent, never null; every object is strict.
+const viewerMilestoneSchema = objectSchema(
+  {
+    kind: enumSchema(['streams', 'row', 'anniversary']),
+    value: numberSchema({ integer: true, min: 0, max: 100_000 })
+  },
+  { allowUnknown: false }
+)
+const viewerArrivalSchema = objectSchema(
+  {
+    streams: numberSchema({ integer: true, min: 0, max: 1_000_000 }),
+    regular: booleanSchema,
+    awayDays: optionalSchema(numberSchema({ integer: true, min: 0, max: 100_000 })),
+    inARow: numberSchema({ integer: true, min: 0, max: 1_000_000 }),
+    milestone: optionalSchema(viewerMilestoneSchema),
+    platforms: optionalSchema(
+      arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length })
+    ),
+    since: optionalSchema(stringSchema({ minLength: 7, maxLength: 7 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ViewerArrival>
+const communityPersonStatusSchema = enumSchema(['normal', 'bot', 'forgotten'])
+const communityAccountSchema = objectSchema(
+  {
+    accountKey: boundedString,
+    platform: streamPlatformSchema,
+    authorId: boundedString,
+    name: stringSchema({ maxLength: 512 }),
+    handle: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 })),
+    avatarUrl: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 })),
+    firstSeenAt: timestamp,
+    lastSeenAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityAccount>
+const communitySupportSchema = objectSchema(
+  {
+    bits: optionalSchema(nonNegativeInteger),
+    kicks: optionalSchema(nonNegativeInteger),
+    giftedSubs: optionalSchema(nonNegativeInteger),
+    subMonths: optionalSchema(nonNegativeInteger),
+    tips: optionalSchema(recordSchema(nonNegativeInteger))
+  },
+  { allowUnknown: false }
+)
+const communityMemorySchema = objectSchema(
+  {
+    id: boundedString,
+    accountKey: boundedString,
+    text: stringSchema({ minLength: 1, maxLength: 400 }),
+    sessionId: optionalSchema(boundedString),
+    createdAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityMemory>
+const communitySuggestionSchema = objectSchema(
+  {
+    accountA: communityAccountSchema,
+    accountB: communityAccountSchema,
+    reason: enumSchema(['name', 'link-cancelled']),
+    createdAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunitySuggestion>
+const communityLinkEventSchema = objectSchema(
+  {
+    id: boundedString,
+    accountKey: boundedString,
+    kind: enumSchema(['self', 'manual', 'split', 'suggestion-accepted']),
+    at: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityLinkEvent>
+const communityPersonSchema = objectSchema(
+  {
+    id: stringSchema({ maxLength: 128 }),
+    name: stringSchema({ maxLength: 512 }),
+    avatarUrl: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 })),
+    accounts: arraySchema(communityAccountSchema, { maxLength: 64 }),
+    streams: nonNegativeInteger,
+    messages: nonNegativeInteger,
+    inARow: nonNegativeInteger,
+    bestInARow: nonNegativeInteger,
+    regular: booleanSchema,
+    awayDays: optionalSchema(nonNegativeInteger),
+    firstSeenAt: optionalSchema(timestamp),
+    lastSeenAt: optionalSchema(timestamp),
+    support: communitySupportSchema,
+    milestones: optionalSchema(
+      arraySchema(stringSchema({ minLength: 1, maxLength: 32 }), { maxLength: 64 })
+    ),
+    note: stringSchema({ maxLength: 300 }),
+    status: communityPersonStatusSchema,
+    memories: optionalSchema(arraySchema(communityMemorySchema, { maxLength: 64 })),
+    suggestions: optionalSchema(arraySchema(communitySuggestionSchema, { maxLength: 64 })),
+    linkEvents: optionalSchema(arraySchema(communityLinkEventSchema, { maxLength: 256 })),
+    youtube: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityPerson>
+const communityPersonRowSchema = objectSchema(
+  {
+    id: boundedString,
+    name: stringSchema({ maxLength: 512 }),
+    avatarUrl: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 })),
+    platforms: arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length }),
+    streams: nonNegativeInteger,
+    regular: booleanSchema,
+    lastSeenAt: optionalSchema(timestamp),
+    status: communityPersonStatusSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityPersonRow>
+const communityListParamsSchema = objectSchema(
+  {
+    query: optionalSchema(stringSchema({ maxLength: 200 })),
+    filter: optionalSchema(enumSchema(['regulars', 'everyone', 'linked', 'bots'])),
+    sort: optionalSchema(enumSchema(['streams', 'recent', 'name'])),
+    cursor: optionalSchema(stringSchema({ minLength: 1, maxLength: 64 })),
+    limit: optionalSchema(numberSchema({ integer: true, min: 1, max: 100 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityListParams>
+const communityListPageSchema = objectSchema(
+  {
+    people: arraySchema(communityPersonRowSchema, { maxLength: 100 }),
+    nextCursor: optionalSchema(stringSchema({ minLength: 1, maxLength: 64 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityListPage>
+const communitySummarySchema = objectSchema(
+  {
+    people: nonNegativeInteger,
+    regulars: nonNegativeInteger,
+    streams: nonNegativeInteger,
+    newRegularsThisWeek: nonNegativeInteger,
+    linksPending: nonNegativeInteger,
+    backfill: objectSchema(
+      {
+        state: enumSchema(['idle', 'running', 'done']),
+        done: nonNegativeInteger,
+        total: nonNegativeInteger
+      },
+      { allowUnknown: false }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunitySummary>
+const communityPersonParamsSchema = objectSchema(
+  {
+    personId: optionalSchema(boundedString),
+    platform: optionalSchema(streamPlatformSchema),
+    authorId: optionalSchema(boundedString),
+    name: optionalSchema(stringSchema({ minLength: 1, maxLength: 512 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityPersonParams>
+const communityUpdateParamsSchema = objectSchema(
+  {
+    personId: boundedString,
+    note: optionalSchema(stringSchema({ maxLength: 2000 })),
+    status: optionalSchema(enumSchema(['normal', 'bot']))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityUpdateParams>
+const communityLinkParamsSchema = objectSchema(
+  { personId: boundedString, otherPersonId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityLinkParams>
+const communityUnlinkParamsSchema = objectSchema(
+  { accountKey: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityUnlinkParams>
+const communityUnlinkResultSchema = objectSchema(
+  { personId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityUnlinkResult>
+const communitySuggestionParamsSchema = objectSchema(
+  { accountA: boundedString, accountB: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunitySuggestionParams>
+const communityPersonIdParamsSchema = objectSchema(
+  { personId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityPersonIdParams>
+const communityIdParamsSchema = objectSchema(
+  { id: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityIdParams>
+const communityPathParamsSchema = objectSchema(
+  { path: boundedPath },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityPathParams>
+const communityAcceptedSchema = objectSchema(
+  { accepted: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityAccepted>
+const communityExportResultSchema = objectSchema(
+  { people: nonNegativeInteger, bytes: nonNegativeInteger },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityExportResult>
+const communityImportResultSchema = objectSchema(
+  { people: nonNegativeInteger, merged: nonNegativeInteger },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunityImportResult>
+const cohostWelcomeBackSchema = objectSchema(
+  {
+    personId: boundedString,
+    authorKey: boundedString,
+    name: stringSchema({ minLength: 1, maxLength: 512 }),
+    platform: streamPlatformSchema,
+    arrival: viewerArrivalSchema,
+    firstSeenAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostWelcomeBack>
+/** Exactly two items (the two sides of a link). */
+function pairSchema<T>(item: RuntimeSchema<T>): RuntimeSchema<[T, T]> {
+  return runtimeSchema<[T, T]>('a pair', (value, path) => {
+    const items = arraySchema(item, { maxLength: 2 }).parse(value, path)
+    if (items.length !== 2) {
+      throw new RuntimeSchemaError(path, 'exactly two items')
+    }
+    return items as [T, T]
+  })
+}
+const cohostLinkMadeSchema = objectSchema(
+  {
+    personId: boundedString,
+    names: pairSchema(stringSchema({ minLength: 1, maxLength: 512 })),
+    platforms: pairSchema(streamPlatformSchema),
+    accountKey: boundedString,
+    at: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostLinkMade>
+// --- end Know your viewers (plan 225) ---
 // Plan 068 D9: "Say hi" and the dead-air nudge.
 const cohostSayHiSchema = objectSchema(
   {
@@ -4179,7 +4496,9 @@ const cohostCommandSchema = objectSchema(
       'hide-banners',
       'show-buddy',
       'hide-buddy',
-      'act'
+      'act',
+      'wave',
+      'remember'
     ]),
     status: enumSchema([
       'done',
@@ -4212,7 +4531,7 @@ const cohostUtteranceSchema = objectSchema(
     state: cohostUtteranceStateSchema,
     trigger: objectSchema(
       {
-        kind: enumSchema(['greeting', 'answer', 'banter', 'manual']),
+        kind: enumSchema(['greeting', 'answer', 'banter', 'manual', 'community']),
         eventId: optionalSchema(boundedString),
         messageId: optionalSchema(boundedString)
       },
@@ -4221,7 +4540,20 @@ const cohostUtteranceSchema = objectSchema(
     destinationIds: arraySchema(boundedString, { maxLength: 16 }),
     status: enumSchema(['proposed', 'sent', 'dismissed', 'bubble-only', 'failed']),
     at: timestamp,
-    expiresAt: optionalSchema(timestamp)
+    expiresAt: optionalSchema(timestamp),
+    // Plan 225 B6: absent on every line but a milestone welcome, never null.
+    milestone: optionalSchema(
+      objectSchema(
+        {
+          messageId: boundedString,
+          name: stringSchema({ minLength: 1, maxLength: 512 }),
+          avatarUrl: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 })),
+          platform: streamPlatformSchema,
+          label: stringSchema({ minLength: 1, maxLength: 64 })
+        },
+        { allowUnknown: false }
+      )
+    )
   },
   { allowUnknown: false }
 )
@@ -4278,6 +4610,9 @@ const cohostStateSchema = objectSchema(
     promiseReminder: optionalSchema(cohostPromiseReminderSchema),
     recap: optionalSchema(cohostRecapSchema),
     sayHi: optionalSchema(arraySchema(cohostSayHiSchema, { maxLength: 5 })),
+    // Plan 225 D11, D4: both absent while empty (never null).
+    welcomeBack: optionalSchema(arraySchema(cohostWelcomeBackSchema, { maxLength: 8 })),
+    linkMade: optionalSchema(arraySchema(cohostLinkMadeSchema, { maxLength: 32 })),
     deadAirNudge: optionalSchema(cohostDeadAirNudgeSchema),
     // Plan 140 S3: absent until a command was heard / while both switches are on.
     command: optionalSchema(cohostCommandSchema),
@@ -5919,6 +6254,46 @@ const runtimeContracts = {
     params: undefinedSchema,
     result: nullableSchema(cohostReportPayloadSchema)
   },
+  // --- Know your viewers (plan 225 A5) ---
+  'cohost.community.summary': { params: undefinedSchema, result: communitySummarySchema },
+  'cohost.community.list': { params: communityListParamsSchema, result: communityListPageSchema },
+  'cohost.community.person': { params: communityPersonParamsSchema, result: communityPersonSchema },
+  'cohost.community.update': { params: communityUpdateParamsSchema, result: communityPersonSchema },
+  'cohost.community.link': { params: communityLinkParamsSchema, result: communityPersonSchema },
+  'cohost.community.unlink': {
+    params: communityUnlinkParamsSchema,
+    result: communityUnlinkResultSchema
+  },
+  'cohost.community.suggestion.dismiss': {
+    params: communitySuggestionParamsSchema,
+    result: communityAcceptedSchema
+  },
+  'cohost.community.suggestion.accept': {
+    params: communitySuggestionParamsSchema,
+    result: communityPersonSchema
+  },
+  'cohost.community.forget': {
+    params: communityPersonIdParamsSchema,
+    result: communityAcceptedSchema
+  },
+  'cohost.community.forgetAll': { params: undefinedSchema, result: communityAcceptedSchema },
+  'cohost.community.memory.delete': {
+    params: communityIdParamsSchema,
+    result: communityAcceptedSchema
+  },
+  'cohost.community.wave': {
+    params: communityPersonIdParamsSchema,
+    result: communityAcceptedSchema
+  },
+  'cohost.community.export': {
+    params: communityPathParamsSchema,
+    result: communityExportResultSchema
+  },
+  'cohost.community.import': {
+    params: communityPathParamsSchema,
+    result: communityImportResultSchema
+  },
+  // --- end Know your viewers (plan 225) ---
   // --- Agents (plan 209 S2, S3) ---
   'agents.status': { params: undefinedSchema, result: agentsStatusSchema },
   'agents.enable': { params: undefinedSchema, result: agentsStatusSchema },
@@ -5993,6 +6368,7 @@ const runtimeEventSchemas = {
   'cohost.act.result': cohostActAnswerSchema,
   'cloud.state': cloudStatusSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
+  'cohost.community.changed': communitySummarySchema,
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---

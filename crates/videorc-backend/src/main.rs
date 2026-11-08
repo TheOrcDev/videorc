@@ -52,6 +52,9 @@ mod cohost_library;
 mod cohost_throttle;
 mod color;
 mod comment_highlight;
+mod community;
+mod community_service;
+mod community_store;
 mod compositor;
 mod compositor_synthetic;
 mod device_watch;
@@ -760,6 +763,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     usage_stats::spawn(&state);
     // Plan 187: the Discord go-live announcement (free, off until a webhook is set).
     discord_announce::spawn(&state);
+    // Plan 225: the community store's retention prune (now and daily) and
+    // its one-time, resumable backfill.
+    community_service::spawn_startup_jobs(&state);
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
@@ -5362,6 +5368,17 @@ impl CoalescingEventBuffer {
     }
 }
 
+/// Plan 225: one answer shape for every `cohost.community.*` handler.
+fn community_rpc<T: serde::Serialize>(
+    id: String,
+    result: Result<T, community_store::CommunityError>,
+) -> ServerResponse {
+    match result {
+        Ok(payload) => ServerResponse::ok(id, payload),
+        Err(error) => ServerResponse::error(id, error.code(), error.to_string()),
+    }
+}
+
 fn websocket_event_is_coalescible(event: &str) -> bool {
     matches!(
         event,
@@ -5757,6 +5774,17 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.utterance.approve"
         | "cohost.utterance.dismiss"
         | "cohost.utterance.say"
+        | "cohost.community.update"
+        | "cohost.community.link"
+        | "cohost.community.unlink"
+        | "cohost.community.suggestion.dismiss"
+        | "cohost.community.suggestion.accept"
+        | "cohost.community.forget"
+        | "cohost.community.forgetAll"
+        | "cohost.community.memory.delete"
+        | "cohost.community.wave"
+        | "cohost.community.export"
+        | "cohost.community.import"
         | "clip.mark"
         // Plan 181 S3: answers at once; the save runs on its own task and
         // reports through replay.saved / replay.saveFailed.
@@ -5999,6 +6027,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.get"
         | "cohost.report.get"
         | "cohost.report.latest"
+        | "cohost.community.summary"
+        | "cohost.community.list"
+        | "cohost.community.person"
         | "ai.capabilities.get"
         | "ai.quota.get"
         | "devices.list"
@@ -10289,6 +10320,71 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 225: the community store (A5). Every handler runs its store
+        // call off the runtime; none touches chat delivery.
+        "cohost.community.summary" => {
+            community_rpc(command.id, community_service::summary(state).await)
+        }
+        "cohost.community.list" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::list(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.person" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::person(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.update" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::update(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.link" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::link(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.unlink" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::unlink(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.suggestion.dismiss" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::suggestion_dismiss(state, params).await,
+            ),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.suggestion.accept" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::suggestion_accept(state, params).await,
+            ),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.forget" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::forget(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.forgetAll" => {
+            community_rpc(command.id, community_service::forget_all(state).await)
+        }
+        "cohost.community.memory.delete" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(
+                command.id,
+                community_service::memory_delete(state, params).await,
+            ),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.wave" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::wave(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.export" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::export(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "cohost.community.import" => match serde_json::from_value(command.params) {
+            Ok(params) => community_rpc(command.id, community_service::import(state, params).await),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
         }

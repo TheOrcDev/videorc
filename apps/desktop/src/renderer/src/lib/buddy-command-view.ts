@@ -126,9 +126,11 @@ export function commandChooserView(
 
 export interface CommandConfirmView {
   commandId: string
-  /** A flagged comment to show, or (plan 209 D14) a planned call Buddy asks
-   * about out loud first: 'End the livestream? Say "Buddy, yes".' */
-  kind: 'highlight' | 'act'
+  /** A flagged comment to show, (plan 209 D14) a planned call Buddy asks
+   * about out loud first: 'End the livestream? Say "Buddy, yes".', or (plan
+   * 225 B5) a fact to save to a person's note: "Remember about Bo: got the
+   * job?" */
+  kind: 'highlight' | 'act' | 'remember'
   /** "Buddy flagged this (harassment). Show it anyway?" */
   title: string
   target: (CohostCommandTarget & { platformLabel: string }) | null
@@ -148,7 +150,9 @@ export function commandConfirmView(
   answering = false
 ): CommandConfirmView | null {
   if (!command || command.status !== 'confirm') return null
-  if (command.kind !== 'highlight' && command.kind !== 'act') return null
+  if (command.kind !== 'highlight' && command.kind !== 'act' && command.kind !== 'remember') {
+    return null
+  }
   if (command.operationId) return null
   const target = command.target
     ? { ...command.target, platformLabel: CHAT_PLATFORM_LABELS[command.target.platform] }

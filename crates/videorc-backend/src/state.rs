@@ -1220,6 +1220,9 @@ pub struct AppState {
     /// Live Co-host engine: per-session open questions, flags, mood, and the
     /// tick scheduler. Settings are loaded from `app_settings` at startup.
     pub cohost: crate::cohost::CohostSlot,
+    /// Know your viewers (plan 225): the per-session arrival set, the
+    /// pending `!link` words and the detached store writes.
+    pub community: crate::community_service::CommunitySlot,
     /// The last seconds of live-caption finals for the co-host spotlight lane
     /// (plan 060 S3). A std mutex on purpose: the caption coordinator appends
     /// without ever waiting on the engine's async lock.
@@ -1449,6 +1452,7 @@ impl AppState {
             discord_announce: Arc::default(),
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
+            community: crate::community_service::new_slot(),
             live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),

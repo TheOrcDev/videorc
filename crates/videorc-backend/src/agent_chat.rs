@@ -478,6 +478,7 @@ mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            arrival: None,
         }
     }
 

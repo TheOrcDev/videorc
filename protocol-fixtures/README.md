@@ -98,3 +98,16 @@ compares them with the JSON field for field.
 
 - Rust: `cargo test -p videorc-backend virtual_camera_fixture`
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
+
+## `community.json`
+
+Know your viewers across platforms (plan 225, A6): a chat row with and
+without `arrival`, the smallest arrival, the `cohostSettings.community`
+block, the summary, a full person and the zero-count person an unknown
+account gets, a list page, the `cohost.state` lane (`welcomeBack`,
+`linkMade`), and shapes the renderer must refuse (a `null` optional field, an
+unknown milestone kind or status, a link with one name). Absent fields are
+omitted, never `null`; both sides round-trip every shape field for field.
+
+- Rust: `cargo test -p videorc-backend shared_community_fixture`
+- TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
