@@ -481,6 +481,14 @@ pub enum CommandKind {
     /// "hide", "go away", "leave the screen", "get off stream": the Buddy
     /// itself leaves the stream.
     HideBuddy,
+    /// Plan 225 B5: "wave at {name}", "say hi to {name}": the regular wave
+    /// and "Hey {name}!" in the bubble. The target is the spoken name.
+    Wave,
+    /// Plan 225 B5: "remember that {name} {fact}": the fact goes to the
+    /// person's note after a confirm card. The target carries the whole
+    /// tail ("bo got the job"); the engine splits the name off against this
+    /// stream's chatters.
+    Remember,
 }
 
 impl CommandKind {
@@ -499,6 +507,8 @@ impl CommandKind {
             Self::HideBanners => "hide banners".to_string(),
             Self::ShowBuddy => "show buddy".to_string(),
             Self::HideBuddy => "hide buddy".to_string(),
+            Self::Wave => "wave".to_string(),
+            Self::Remember => "remember".to_string(),
         }
     }
 }
@@ -539,6 +549,10 @@ pub struct DetectedCommand {
     pub heard: String,
     /// The command was addressed with the wake word (or an alias).
     pub wake_word: bool,
+    /// Plan 225 B5: the words after the name of a `Remember` ("got the
+    /// job"), when the grammar could tell them apart; else the engine splits
+    /// the target's tail.
+    pub note: Option<String>,
 }
 
 /// The Buddy engine session the detector serves (plan 140 S2): set when a
@@ -937,6 +951,7 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
                 reason: None,
                 heard,
                 wake_word: newest_has_wake,
+                note: None,
             },
             dedupe: None,
             end: words.len() - 1,
@@ -960,6 +975,7 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
                 reason: None,
                 heard,
                 wake_word: newest_has_wake,
+                note: None,
             },
             dedupe: None,
             end: words.len() - 1,
@@ -990,6 +1006,8 @@ fn scan_commands(
                     | CommandKind::HideBanners
                     | CommandKind::ShowBuddy
                     | CommandKind::HideBuddy
+                    | CommandKind::Wave
+                    | CommandKind::Remember
             )
     };
     let mut unknown: Option<Detection> = None;
@@ -1103,6 +1121,7 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
                 reason: None,
                 heard: text_of(&words[wake..=sentence_end]),
                 wake_word: true,
+                note: None,
             },
             dedupe: None,
             end: sentence_end,
@@ -1123,6 +1142,28 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
     }) {
         return parse_banner_wake(words, wake, from, span_end, newest);
     }
+    // Plan 225 B5: "wave at Ada", "say hi to Ada", "remember that Bo got
+    // the job" are read before the comment grammar and the Buddy's own
+    // presence; "thanks buddy" is none of them and stays what it was.
+    if let Some(parsed) = parse_community(words, from, span_end) {
+        if words[parsed.end].final_index != newest {
+            return WakeOutcome::Nothing;
+        }
+        let dedupe = Some(dedupe_key(&parsed));
+        return WakeOutcome::Command(Detection {
+            command: DetectedCommand {
+                kind: parsed.kind,
+                target: parsed.target,
+                question: false,
+                reason: None,
+                heard: text_of(&words[wake..=parsed.end]),
+                wake_word: true,
+                note: parsed.note,
+            },
+            dedupe,
+            end: parsed.end,
+        });
+    }
     // A sentence about the Buddy itself ("show up", "go away") is read before
     // the comment grammar, which would hear "show up and do something on
     // screen" as a highlight of a viewer called "something".
@@ -1139,6 +1180,7 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
                 reason: None,
                 heard: text_of(&words[wake..=parsed.end]),
                 wake_word: true,
+                note: None,
             },
             dedupe,
             end: parsed.end,
@@ -1158,6 +1200,7 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
                     reason: parsed.reason,
                     heard: text_of(&words[wake..=parsed.end]),
                     wake_word: true,
+                    note: None,
                 },
                 dedupe,
                 end: parsed.end,
@@ -1196,6 +1239,7 @@ fn parse_structured(words: &[Word], verb: usize, newest: u64) -> Option<Detectio
             reason: parsed.reason,
             heard: text_of(&words[verb..=parsed.end]),
             wake_word: false,
+            note: None,
         },
         dedupe,
         end: parsed.end,
@@ -1226,6 +1270,7 @@ fn parse_banner_wake(
                 reason: None,
                 heard: text_of(&words[wake..=parsed.end]),
                 wake_word: true,
+                note: None,
             },
             dedupe,
             end: parsed.end,
@@ -1252,6 +1297,7 @@ fn parse_banner_wake(
             reason: None,
             heard: text_of(span),
             wake_word: true,
+            note: None,
         },
         dedupe: Some(format!("unknown|{}", words[wake].ordinal)),
         end: span_end - 1,
@@ -1329,6 +1375,7 @@ fn parse_banner_command(words: &[Word], from: usize, end: usize) -> Option<Parse
         question: false,
         reason: None,
         end: last,
+        note: None,
     })
 }
 
@@ -1382,6 +1429,98 @@ fn banner_verb_shows(verb: &str, particles: &[&str]) -> Option<bool> {
 /// chat noun, a reason) is never about the Buddy, so "show coders X's
 /// question" and "show bob on screen" stay highlights. The first cue in the
 /// sentence decides; `None` when it holds none.
+/// Plan 225 B5: the community phrases, with the wake word. "wave at
+/// {name}", "wave to {name}", "wave hello to {name}", "say hi to {name}",
+/// "say hello to {name}": a `Wave` at the spoken name. "remember that {name}
+/// {fact}", "remember {name} {fact}": a `Remember` whose target is the whole
+/// tail; the engine tells the name from the fact against this stream's
+/// chatters, since a fact may start with any word. A sentence that points
+/// at a comment keeps the comment grammar.
+fn parse_community(words: &[Word], from: usize, end: usize) -> Option<Parsed> {
+    if from >= end {
+        return None;
+    }
+    let sentence_end = first_sentence_end(words, from, end);
+    let span = &words[from..=sentence_end];
+    // A comment verb before the cue owns the sentence ("highlight bob and
+    // wave").
+    let cue = (0..span.len()).find(|&offset| {
+        let text = span[offset].text.as_str();
+        (text == "wave" || text == "remember" || text == "say")
+            && !span[..offset]
+                .iter()
+                .any(|word| verb_class(&word.text).is_some())
+    })?;
+    let cue_text = span[cue].text.as_str();
+    let mut after = cue + 1;
+    let kind = match cue_text {
+        "wave" => {
+            // "wave at", "wave to", "wave hello to", "wave hi to".
+            while after < span.len()
+                && matches!(span[after].text.as_str(), "at" | "to" | "hello" | "hi" | "hey")
+            {
+                after += 1;
+            }
+            CommandKind::Wave
+        }
+        "say" => {
+            // "say hi to", "say hello to", "say hey to".
+            if after >= span.len() || !matches!(span[after].text.as_str(), "hi" | "hello" | "hey") {
+                return None;
+            }
+            after += 1;
+            if after < span.len() && span[after].text.as_str() == "to" {
+                after += 1;
+            }
+            CommandKind::Wave
+        }
+        _ => {
+            if after < span.len() && span[after].text.as_str() == "that" {
+                after += 1;
+            }
+            CommandKind::Remember
+        }
+    };
+    if after >= span.len() {
+        // "Buddy, wave" alone: still being said.
+        return None;
+    }
+    let tail_start = from + after;
+    let tail_end = from + span.len();
+    let target = match kind {
+        CommandKind::Wave => {
+            let (name, last) = collect_name(words, tail_start, tail_end)?;
+            return Some(Parsed {
+                kind,
+                target: CommandTarget::Name(name),
+                question: false,
+                reason: None,
+                end: last,
+                note: None,
+            });
+        }
+        _ => {
+            let tail: Vec<&str> = words[tail_start..tail_end]
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect();
+            if tail.len() < 2 {
+                // A name alone remembers nothing.
+                return None;
+            }
+            CommandTarget::Name(tail.join(" "))
+        }
+    };
+    Some(Parsed {
+        kind,
+        target,
+        question: false,
+        reason: None,
+        end: tail_end - 1,
+        note: None,
+    })
+}
+
 fn parse_buddy_presence(words: &[Word], from: usize, end: usize) -> Option<Parsed> {
     if from >= end {
         return None;
@@ -1422,6 +1561,7 @@ fn parse_buddy_presence(words: &[Word], from: usize, end: usize) -> Option<Parse
         question: false,
         reason: None,
         end: from + last,
+        note: None,
     })
 }
 
@@ -1579,6 +1719,7 @@ fn unknown_detection(
             reason: None,
             heard: text_of(span),
             wake_word: true,
+            note: None,
         },
         dedupe: Some(format!("unknown|{}", words[wake].ordinal)),
         end: end - 1,
@@ -1594,10 +1735,18 @@ struct Parsed {
     reason: Option<String>,
     /// Index of the last word the command consumed.
     end: usize,
+    /// Plan 225 B5: a `Remember`'s fact, when told apart from the name.
+    note: Option<String>,
 }
 
 fn dedupe_key(parsed: &Parsed) -> String {
-    format!("{:?}|{:?}|{}", parsed.kind, parsed.target, parsed.question)
+    format!(
+        "{:?}|{:?}|{}|{}",
+        parsed.kind,
+        parsed.target,
+        parsed.question,
+        parsed.note.as_deref().unwrap_or("")
+    )
 }
 
 /// Parse one command in `words[from..end]`. With the wake word the verb may
@@ -1678,6 +1827,7 @@ fn parse_command(words: &[Word], from: usize, end: usize, structured: bool) -> O
         question: walk.question,
         reason,
         end: walk.end,
+        note: None,
     })
 }
 
@@ -2009,6 +2159,45 @@ mod tests {
 
     fn detect_one(text: &str, ctx: &DetectContext) -> Option<DetectedCommand> {
         CommandDetector::default().observe_final("client", 1, text, Instant::now(), ctx)
+    }
+
+    /// Plan 225 B5: "wave at", "say hi to" and "remember that" with the
+    /// wake word; "thanks buddy" is still nothing; a comment sentence keeps
+    /// its grammar.
+    #[test]
+    fn community_phrases() {
+        use CommandKind::{Highlight, Remember, Wave};
+        for text in [
+            "Buddy, wave at Ada",
+            "Buddy wave to ada",
+            "Buddy, wave hello to Ada",
+            "Buddy, say hi to Ada",
+            "hey Buddy, say hello to ada please",
+            "Buddy can you wave at Ada",
+        ] {
+            let command = detect_one(text, &PLAIN).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(command.kind, Wave, "{text}");
+            assert_eq!(command.target, name("ada"), "{text}");
+            assert!(command.wake_word, "{text}");
+            assert_eq!(command.note, None);
+        }
+        let remember = detect_one("Buddy, remember that Bo got the job", &PLAIN).unwrap();
+        assert_eq!(remember.kind, Remember);
+        assert_eq!(remember.target, name("bo got the job"));
+        assert_eq!(remember.heard, "buddy remember that bo got the job");
+        let remember = detect_one("Buddy remember coders X likes Rust", &PLAIN).unwrap();
+        assert_eq!(remember.kind, Remember);
+        assert_eq!(remember.target, name("coders x likes rust"));
+        // A name alone, or a bare cue, is still being said.
+        assert!(detect_one("Buddy, remember Bo", &PLAIN).is_none());
+        assert!(detect_one("Buddy, wave", &PLAIN).is_none());
+        // Thanks is nothing; a comment sentence keeps the comment grammar.
+        assert!(detect_one("thanks buddy", &PLAIN).is_none());
+        assert!(detect_one("Thanks Buddy, that was great", &PLAIN).is_none_or(|c| c.kind == CommandKind::Unknown));
+        let highlight = detect_one("Buddy, highlight the comment from coders X", &PLAIN).unwrap();
+        assert_eq!(highlight.kind, Highlight);
+        // The wake word is required.
+        assert!(detect_one("wave at Ada", &PLAIN).is_none());
     }
 
     /// The Buddy itself: "show up" and "go away" with the wake word, read

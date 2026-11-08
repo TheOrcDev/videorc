@@ -206,11 +206,19 @@ function CommandConfirm({
       decline={{ label: 'Cancel', testId: 'command-cancel' }}
       icon={PreviewIcon}
       keys={!view.busy}
-      label={view.kind === 'act' ? 'Buddy asks first' : 'Show this comment on stream?'}
+      label={
+        view.kind === 'act'
+          ? 'Buddy asks first'
+          : view.kind === 'remember'
+            ? 'Remember this?'
+            : 'Show this comment on stream?'
+      }
       primary={
         view.kind === 'act'
           ? { label: 'Yes', testId: 'command-yes' }
-          : { label: 'Show', testId: 'command-show' }
+          : view.kind === 'remember'
+            ? { label: 'Save', testId: 'command-save' }
+            : { label: 'Show', testId: 'command-show' }
       }
       testId="command-confirm"
       timer={view.timer}
