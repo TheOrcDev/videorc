@@ -255,6 +255,13 @@ pub enum CloudFallbackReason {
     /// The web's create rate limit: an account's shows in the last hour.
     CloudShowLimit,
     NotEntitled,
+    /// Plan 222 D5: the stream quality is above what the first nodes carry
+    /// (4K30); the show is never created. Sent once L4 builds the rule.
+    CloudQuality,
+    /// Plan 222 D6: this desktop remembers a show it does not hold, and
+    /// videorc.com could not say whether it is still live. Sent once L3
+    /// builds the rule; today the log line says it.
+    CloudUnchecked,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -361,6 +368,18 @@ pub struct CloudStatus {
     /// The runner restarted during this show (the last time it did).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<CloudRestart>,
+    /// Plan 222 Wire shape: while a show runs past the month's cloud hours,
+    /// how far past (plan 184 D18: the show keeps going). Absent until U5
+    /// sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_past: Option<CloudAllowancePast>,
+}
+
+/// `CloudStatus.allowancePast`: seconds on air past this month's cloud hours.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudAllowancePast {
+    pub seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -427,6 +446,15 @@ pub struct CloudTestResult {
     pub uploads: Vec<CloudTestUpload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_at: Option<String>,
+    /// Plan 222 Wire shape (O5): the node the test reached and its region,
+    /// and the time to the first RTMPS byte accepted. Absent until O5 fills
+    /// them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_ms: Option<u64>,
 }
 
 /// `CloudStatus.test`: the test that runs or the last one that ran.
@@ -459,6 +487,10 @@ pub struct CreateShowRequest {
     pub outputs: Vec<ShowOutputSpec>,
     pub hold_max_seconds: u32,
     pub client: ClientInfo,
+    /// Plan 222 Wire shape (O5): the region the last Test measured as
+    /// fastest, else nothing. Nothing measures it yet, so it is never sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_region: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -497,6 +529,9 @@ pub struct ShowRecord {
     pub created_at: Option<String>,
     #[serde(default)]
     pub expires_at: Option<String>,
+    /// Plan 222 Wire shape (O5): the node's region, `eu` or `us`.
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 impl ShowRecord {
@@ -1203,6 +1238,7 @@ impl CloudShowRuntime {
                 .is_some_and(|failed| failed.direct_fallback),
             test: self.test.clone(),
             restart: self.restart.clone(),
+            allowance_past: None,
         }
     }
 
@@ -2208,6 +2244,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             outputs,
             hold_max_seconds,
             client: client_info(),
+            preferred_region: None,
         };
         let created = match self.web.create_show(&bearer, &request).await {
             Ok(created) => created,
@@ -2942,6 +2979,9 @@ fn test_result_from_api_error(
         time_to_live_ms: None,
         uploads,
         reset_at,
+        node_id: None,
+        region: None,
+        handshake_ms: None,
     }
 }
 
@@ -2998,6 +3038,9 @@ fn test_verdict(input: TestVerdictInput<'_>) -> CloudTestResult {
         time_to_live_ms: input.time_to_live_ms,
         uploads: uploads.clone(),
         reset_at: None,
+        node_id: None,
+        region: None,
+        handshake_ms: None,
     };
     if input.outcomes.iter().any(|outcome| {
         outcome
@@ -3175,6 +3218,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
             time_to_live_ms: None,
             uploads: self.uploads(),
             reset_at: None,
+            node_id: None,
+            region: None,
+            handshake_ms: None,
         }
     }
 
@@ -3238,6 +3284,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
             outputs: self.outputs.clone(),
             hold_max_seconds: self.hold_max_seconds,
             client: client_info(),
+            preferred_region: None,
         };
         let created = match self.create(&request).await? {
             Ok(created) => created,
@@ -3497,6 +3544,7 @@ mod tests {
                 node_id: "eu-hel-1".to_string(),
                 created_at: Some("2026-10-16T10:00:00Z".to_string()),
                 expires_at: Some("2026-10-16T22:30:00Z".to_string()),
+                region: None,
             },
             ingest: vec![ShowIngest {
                 orientation: StreamOutputOrientation::Horizontal,
@@ -4112,6 +4160,8 @@ mod tests {
             CloudFallbackReason::CloudNodeUnreachable,
             CloudFallbackReason::CloudShowLimit,
             CloudFallbackReason::NotEntitled,
+            CloudFallbackReason::CloudQuality,
+            CloudFallbackReason::CloudUnchecked,
         ] {
             let wire = serde_json::to_value(reason).unwrap();
             assert!(
@@ -4124,6 +4174,8 @@ mod tests {
                             | "cloud-node-unreachable"
                             | "cloud-show-limit"
                             | "not-entitled"
+                            | "cloud-quality"
+                            | "cloud-unchecked"
                     )
                 ),
                 "{wire}"
@@ -5823,6 +5875,8 @@ mod tests {
             ingest: None,
             session_id: Some("session-1".to_string()),
             destinations: Vec::new(),
+            handed_over: false,
+            hold_image_png_base64: None,
             resuming: false,
         });
         assert_eq!(
@@ -5840,6 +5894,8 @@ mod tests {
             ingest: None,
             session_id: None,
             destinations: Vec::new(),
+            handed_over: false,
+            hold_image_png_base64: None,
             resuming: false,
         });
         assert_eq!(runtime.take_remembered_change(), None, "the same show");
@@ -5857,6 +5913,7 @@ mod tests {
             outputs: Vec::new(),
             hold_max_seconds: 1800,
             client: info,
+            preferred_region: None,
         })
         .unwrap();
         assert_eq!(wire["client"]["version"], "0.9.143");
