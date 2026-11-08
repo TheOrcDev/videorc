@@ -1406,7 +1406,6 @@ pub(crate) async fn run_memory_jobs(state: &AppState) {
     #[cfg(test)]
     {
         let _ = state;
-        return;
     }
     #[cfg(not(test))]
     {
@@ -1629,6 +1628,9 @@ where
     }
 }
 
+/// One person's chat rows this stream: platform, when, and the text.
+type MemoryRows = Vec<(StreamPlatform, DateTime<Utc>, String)>;
+
 /// What applying an answer needs to know about the request it answers:
 /// each ref's person, their accounts by platform (a new memory lands on
 /// the account whose words taught it) and the memory ids they own.
@@ -1661,7 +1663,7 @@ pub(crate) fn build_memory_request(
     let streamer_keys = database.community_streamer_keys()?;
     let messages = database.list_live_chat_messages(session_id)?;
     // Per account key: (name, platform, at, text), oldest first.
-    let mut by_key: HashMap<String, Vec<(StreamPlatform, DateTime<Utc>, String)>> = HashMap::new();
+    let mut by_key: HashMap<String, MemoryRows> = HashMap::new();
     let mut names: HashMap<String, String> = HashMap::new();
     for message in &messages {
         // A YouTube message never leaves the computer for this (D3, D10).
@@ -1691,8 +1693,7 @@ pub(crate) fn build_memory_request(
     let keys: Vec<String> = by_key.keys().cloned().collect();
     let (person_of, people) = database.community_memory_people(&keys, now, threshold)?;
     // Messages per person, over all their accounts.
-    let mut rows_by_person: HashMap<String, Vec<(StreamPlatform, DateTime<Utc>, String)>> =
-        HashMap::new();
+    let mut rows_by_person: HashMap<String, MemoryRows> = HashMap::new();
     for (key, rows) in by_key {
         let Some(person_id) = person_of.get(&key) else {
             continue;
@@ -1702,7 +1703,7 @@ pub(crate) fn build_memory_request(
             .or_default()
             .extend(rows);
     }
-    let mut ranked: Vec<(String, Vec<(StreamPlatform, DateTime<Utc>, String)>)> = rows_by_person
+    let mut ranked: Vec<(String, MemoryRows)> = rows_by_person
         .into_iter()
         .filter(|(_, rows)| rows.len() >= MEMORY_MESSAGES_MIN)
         .collect();
@@ -1747,7 +1748,7 @@ pub(crate) fn build_memory_request(
         let Some(facts) = people.get(&person_id) else {
             continue;
         };
-        rows.sort_by(|a, b| a.1.cmp(&b.1));
+        rows.sort_by_key(|row| row.1);
         let newest: Vec<CohostMemoryMessage> = rows
             .iter()
             .rev()

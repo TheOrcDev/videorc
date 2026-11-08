@@ -12,8 +12,9 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Popover, PopoverContent } from '@/components/ui/popover'
+import { memoryForgetCopy } from '@/components/community/community-copy'
 import type { CommunityMemory, CommunityPerson } from '@/lib/backend'
-import { forgetCopy, memoryForgetCopy } from '@/lib/community-view'
+import { forgetCopy } from '@/lib/community-view'
 import { toastUserError } from '@/lib/user-error'
 import type { CommunityRelayCall } from '../../../../shared/community-relay'
 

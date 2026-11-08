@@ -3815,7 +3815,7 @@ impl CohostSession {
                     && now.saturating_duration_since(context.last_seen) <= BANTER_VIEWERS_WINDOW
             })
             .collect();
-        recent.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        recent.sort_by_key(|context| std::cmp::Reverse(context.last_seen));
         let viewers: Vec<CohostTickViewer> = recent
             .into_iter()
             .take(COHOST_TICK_BANTER_VIEWERS_MAX)

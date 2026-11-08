@@ -3,8 +3,8 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { DEFAULT_COMMUNITY_SETTINGS } from '@/components/community/community-copy'
 import type { CommunityPersonRow, CommunitySuggestion, CommunitySummary } from '@/lib/backend'
-import { DEFAULT_COMMUNITY_SETTINGS } from '@/lib/community-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 const client = vi.hoisted(() => ({

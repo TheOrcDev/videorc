@@ -7,7 +7,7 @@ import {
   DEFAULT_COMMUNITY_SETTINGS,
   REMEMBER_OFFER_DESCRIPTION,
   REMEMBER_OFFER_TITLE
-} from '@/lib/community-view'
+} from '@/components/community/community-copy'
 import { toastUserError } from '@/lib/user-error'
 
 /**

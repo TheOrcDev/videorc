@@ -1084,6 +1084,7 @@ impl Database {
     /// first-timer, a bot, a forgotten account or the streamer gets none.
     /// `arrived` holds the people already given an arrival this stream, so a
     /// two-account person gets one whichever account chats first.
+    #[allow(clippy::too_many_arguments)]
     pub fn community_lookup_arrivals(
         &self,
         session_id: &str,
@@ -1975,23 +1976,22 @@ impl Database {
                 params![text, at, id, person_id],
             )?;
         }
-        let mut kept: usize = transaction.query_row(
+        let kept: usize = transaction.query_row(
             "SELECT COUNT(*) FROM community_memories WHERE person_id = ?1",
             params![person_id],
             |row| row.get::<_, i64>(0),
         )? as usize;
+        let room = MEMORY_PER_PERSON_MAX
+            .saturating_sub(kept)
+            .min(MEMORY_ADDS_MAX);
         let mut learned = 0u32;
-        for (text, account_key) in adds.iter().take(MEMORY_ADDS_MAX) {
-            if kept >= MEMORY_PER_PERSON_MAX {
-                break;
-            }
+        for (text, account_key) in adds.iter().take(room) {
             transaction.execute(
                 "INSERT INTO community_memories
                  (id, person_id, account_key, text, session_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
                 params![new_id(), person_id, account_key, text, session_id, at],
             )?;
-            kept += 1;
             learned += 1;
         }
         if learned > 0 || !updates.is_empty() || !removes.is_empty() {

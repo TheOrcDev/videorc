@@ -35,13 +35,13 @@ import type {
   CommunitySuggestion,
   StreamPlatform
 } from '@/lib/backend'
+import { memoryForgetCopy } from '@/components/community/community-copy'
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
 import {
   X_SELF_LINK_REASON,
   YOUTUBE_RETENTION_LINE,
   forgetCopy,
   linkEventLabel,
-  memoryForgetCopy,
   personHasX,
   personRowContext,
   personStatsLine,

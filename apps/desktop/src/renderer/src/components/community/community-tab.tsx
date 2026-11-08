@@ -45,10 +45,10 @@ import type {
   CommunitySettings,
   CommunitySuggestion
 } from '@/lib/backend'
+import { DEFAULT_COMMUNITY_SETTINGS } from '@/components/community/community-copy'
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
 import {
   BUDDY_REMEMBERS_LOCK_REASON,
-  DEFAULT_COMMUNITY_SETTINGS,
   COMMUNITY_DISCLOSURE_LINE,
   YOUTUBE_RETENTION_LINE,
   backfillLine,
