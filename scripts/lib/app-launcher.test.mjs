@@ -24,6 +24,7 @@ import {
   macosAppBundlePath,
   macosLaunchServicesAppSpawnSpec,
   performanceAppSpawnSpec,
+  prebuildDevBackend,
   readMacosLaunchServicesAppOwnership,
   resolveMacosLaunchServicesAppPid,
   resolveSmokeAppDirs,
@@ -960,4 +961,46 @@ test('dev backend prebuild failures name the compile race instead of GPU noise',
     error: new Error('spawnSync cargo ENOENT')
   })
   assert.match(missing, /could not start/)
+})
+
+// Cloud test lane 3 F4: the synchronous prebuild blocked the smoke's own
+// event loop, so an in-process HTTP server (the fake cloud web) went deaf.
+test('the async dev backend prebuild keeps the event loop running and names its failures', async () => {
+  const nodeSpec = (script, timeoutMs = 10_000) => ({
+    command: process.execPath,
+    args: ['-e', script],
+    cwd: tmpdir(),
+    timeoutMs
+  })
+  let ticks = 0
+  const ticker = setInterval(() => {
+    ticks += 1
+  }, 20)
+  const lines = []
+  try {
+    const built = await prebuildDevBackend({
+      spec: nodeSpec('console.log("Finished dev profile"); setTimeout(() => {}, 300)'),
+      env: process.env,
+      onLine: (line) => lines.push(line)
+    })
+    assert.equal(built, null)
+    assert.ok(ticks >= 5, `the event loop ticked ${ticks} times while the prebuild ran`)
+    assert.ok(lines.some((line) => line.includes('Finished dev profile')))
+    assert.ok(lines.at(-1).startsWith('[smoke:prebuild] backend built in '))
+  } finally {
+    clearInterval(ticker)
+  }
+
+  const failed = await prebuildDevBackend({
+    spec: nodeSpec('console.error("error[E0425]: cannot find value"); process.exit(101)')
+  })
+  assert.match(failed, /Backend prebuild failed .*exited 101/)
+  assert.match(failed, /E0425/)
+  const timedOut = await prebuildDevBackend({ spec: nodeSpec('setTimeout(() => {}, 10_000)', 200) })
+  assert.match(timedOut, /Backend still compiling after 0s/)
+  const missing = await prebuildDevBackend({
+    spec: { command: 'videorc-no-such-cargo', args: [], cwd: tmpdir(), timeoutMs: 5_000 }
+  })
+  assert.match(missing, /could not start/)
+  assert.equal(await prebuildDevBackend({ spec: null }), null, 'opted out')
 })

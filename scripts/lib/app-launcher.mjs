@@ -311,6 +311,8 @@ function smokeEnvValue(env, name) {
  * @param {boolean} [options.launchViaMacosLaunchServices] - launch the exact packaged app
  *   bundle through `open`, preserving its macOS TCC identity.
  * @param {(line:string)=>void} [options.onLine] - called for every stdout/stderr line.
+ * @param {boolean} [options.skipPrebuild] - the caller already ran
+ *   `prebuildDevBackend` (asynchronously), so the synchronous one is skipped.
  * @returns {Promise<{connections:Record<string,object>, process:import('node:child_process').ChildProcess, stop:()=>Promise<void>}>}
  */
 export function launchDevApp({
@@ -320,6 +322,7 @@ export function launchDevApp({
   onLine,
   packagedSmokeCommandCapability,
   launchViaMacosLaunchServices = false,
+  skipPrebuild = false,
   spawnSpec: requestedSpawnSpec
 } = {}) {
   return new Promise((resolveLaunch, rejectLaunch) => {
@@ -349,7 +352,7 @@ export function launchDevApp({
       mkdirSync(dirname(spawnSpec.appOwnership.path), { recursive: true })
     }
 
-    if (!launchViaMacosLaunchServices && !requestedSpawnSpec) {
+    if (!launchViaMacosLaunchServices && !requestedSpawnSpec && !skipPrebuild) {
       // `pnpm dev` runs `cargo run --quiet`, which prints nothing while the
       // debug backend recompiles (5-7 min on ogre after a pull), so the
       // launch clock used to race the compiler and fail with misleading GPU
@@ -1126,6 +1129,93 @@ function runDevBackendPrebuild(spec, { onLine, env }) {
     onLine?.(`[smoke:prebuild] backend built in ${Math.round((Date.now() - startedAt) / 1000)}s`)
   }
   return failure
+}
+
+/** The prebuild output lines kept for the failure message and the log. */
+const PREBUILD_TAIL_LINES = 200
+
+/**
+ * The same prebuild as `launchDevApp`'s, without blocking the event loop.
+ * A smoke that serves HTTP in its own process (the cloud smokes' fake web,
+ * which the node agent heartbeats every 10 s) keeps answering while cargo
+ * compiles; the synchronous prebuild left it deaf for minutes (cloud test
+ * lane 3 F4). Run it, then launch with `skipPrebuild: true`. Resolves with
+ * the failure message, or `null` when the backend built (or the caller opted
+ * out with `VIDEORC_SMOKE_SKIP_PREBUILD=1`).
+ *
+ * @param {object} [options]
+ * @param {Record<string,string>} [options.env] - cargo's environment; pass the
+ *   launch's own (`smokeAppEnv(env)`) so the later `cargo run` finds nothing
+ *   to rebuild.
+ * @param {(line:string)=>void} [options.onLine]
+ * @param {ReturnType<typeof devBackendPrebuildSpec>} [options.spec]
+ * @returns {Promise<string|null>}
+ */
+export function prebuildDevBackend({
+  env = process.env,
+  onLine,
+  spec = devBackendPrebuildSpec({ env: process.env })
+} = {}) {
+  if (!spec) return Promise.resolve(null)
+  const startedAt = Date.now()
+  const describe = `${spec.command} ${spec.args.join(' ')}`
+  onLine?.(`[smoke:prebuild] ${describe} (timeout ${Math.round(spec.timeoutMs / 1000)}s)`)
+  return new Promise((resolvePrebuild) => {
+    const tail = []
+    const keep = (line) => {
+      tail.push(line)
+      if (tail.length > PREBUILD_TAIL_LINES) tail.shift()
+    }
+    let timedOut = false
+    let settled = false
+    let child
+    const settle = ({ status, signal, error }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      stdout.flush()
+      stderr.flush()
+      for (const line of tail.slice(-20)) {
+        if (line.trim()) onLine?.(`[smoke:prebuild] ${line}`)
+      }
+      const failure = devBackendPrebuildFailure(spec, {
+        status,
+        signal,
+        error: timedOut
+          ? Object.assign(new Error(`${describe} timed out`), { code: 'ETIMEDOUT' })
+          : error,
+        stderrTail: tail
+      })
+      if (!failure) {
+        onLine?.(
+          `[smoke:prebuild] backend built in ${Math.round((Date.now() - startedAt) / 1000)}s`
+        )
+      }
+      resolvePrebuild(failure)
+    }
+    const stdout = createLineBuffer(keep)
+    const stderr = createLineBuffer(keep)
+    const timer = setTimeout(() => {
+      timedOut = true
+      child?.kill('SIGTERM')
+    }, spec.timeoutMs)
+    try {
+      child = spawn(spec.command, spec.args, {
+        cwd: spec.cwd,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+    } catch (error) {
+      settle({ status: null, signal: null, error })
+      return
+    }
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (text) => stdout.write(text))
+    child.stderr.on('data', (text) => stderr.write(text))
+    child.once('error', (error) => settle({ status: null, signal: null, error }))
+    child.once('close', (status, signal) => settle({ status, signal, error: undefined }))
+  })
 }
 
 export function devAppSpawnOptions({ env, platform = process.platform } = {}) {

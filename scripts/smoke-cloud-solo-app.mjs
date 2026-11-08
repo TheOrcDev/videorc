@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer as createTlsServer } from 'node:tls'
 
-import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { launchDevApp, prebuildDevBackend, repoRoot, smokeAppEnv } from './lib/app-launcher.mjs'
 import {
   classifyFeedHandshake,
   dropTimings,
@@ -184,6 +184,12 @@ try {
   // 1. The runner checkout and its binaries.
   const binaries = resolveCloudBinaries()
   log(`runner checkout ${cloudDir} (agent ${binaries.agent})`)
+  // 1b. The desktop backend, before anything in this process listens (cloud
+  //     test lane 3 F4): the dev app's own prebuild ran cargo synchronously,
+  //     which left the fake web hosted here deaf to the node's heartbeats
+  //     for as long as it compiled. Every launch below builds asynchronously
+  //     first (a no-op unless a source changed) and skips that one.
+  await prebuildBackendOrThrow(process.env)
 
   // 2. Ports: every listener is per run, so a running OBS or MediaMTX cannot collide.
   const ports = {
@@ -1030,18 +1036,23 @@ try {
 async function launchApp(env, attempt) {
   const logPath = join(outputDirectory, `app-${attempt}.log`)
   const logFd = openSync(logPath, 'a')
+  const onLine = (line) => {
+    appLines.push(line)
+    try {
+      writeFileSync(logFd, `${line}\n`)
+    } catch {
+      // The log is evidence, never a gate.
+    }
+  }
+  // Asynchronous, with the launch's own environment, so the fake web keeps
+  // answering the node while cargo checks (lane 3 F4).
+  await prebuildBackendOrThrow(smokeAppEnv(env), onLine)
   const launchedApp = await launchDevApp({
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     timeoutMs,
     env,
-    onLine: (line) => {
-      appLines.push(line)
-      try {
-        writeFileSync(logFd, `${line}\n`)
-      } catch {
-        // The log is evidence, never a gate.
-      }
-    }
+    skipPrebuild: true,
+    onLine
   })
   const ws = await connectBackend(launchedApp.connections['backend-ready'], timeoutMs)
   const events = collectEvents(ws)
@@ -1053,6 +1064,12 @@ async function launchApp(env, attempt) {
     collected: events,
     smoke: launchedApp.connections['preview-motion-ready']
   }
+}
+
+/** The dev backend's prebuild without blocking this process (lane 3 F4). */
+async function prebuildBackendOrThrow(env, onLine = log) {
+  const failure = await prebuildDevBackend({ env, onLine })
+  if (failure) throw new Error(failure)
 }
 
 function collectEvents(ws) {
