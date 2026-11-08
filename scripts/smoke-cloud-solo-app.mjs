@@ -1146,8 +1146,9 @@ try {
   report.stop = {
     requestedAt: new Date(stopRequestedAtMs).toISOString(),
     stopMs,
-    webEndCalled: webEndCalled === true,
-    showEndedOnNode: showEndedOnNode === true,
+    // null after a node death: the lost route ended the show (step 11').
+    webEndCalled: webEndCalled === null ? null : webEndCalled === true,
+    showEndedOnNode: showEndedOnNode === null ? null : showEndedOnNode === true,
     runnerExited: runnerExited === true,
     receiversExited: receiversExited === true,
     recordingPath: finalRecording,
@@ -1461,6 +1462,9 @@ function resumeOutputPath(events) {
 
 function sessionParams(outputDirectoryCapability) {
   const timestamp = '2026-10-17T00:00:00.000Z'
+  // The destinations are the two platforms; the node-death variant's direct
+  // receivers stand on the same ports and keys, so they are not a third.
+  const platforms = receivers.filter((receiver) => receiver.phase === 'cloud')
   // One 720p30 encode for the recording and the feed: the stream profile
   // matches the recording, so no second encoder is needed in a debug build.
   // The thin-uplink phase (plan 222 L2) streams the thin-uplink smoke's
@@ -1495,14 +1499,14 @@ function sessionParams(outputDirectoryCapability) {
       // Legacy single-RTMP fields, ignored while `streaming` is present.
       rtmp: {
         preset: 'custom',
-        serverUrl: receivers[0].serverUrl,
-        streamKey: receivers[0].streamKey
+        serverUrl: platforms[0].serverUrl,
+        streamKey: platforms[0].streamKey
       }
     },
     streaming: {
       enabled: true,
       mode: 'multi',
-      targets: receivers.map((receiver) => ({
+      targets: platforms.map((receiver) => ({
         id: receiver.id,
         platform: 'custom',
         label: receiver.label,
@@ -1517,7 +1521,7 @@ function sessionParams(outputDirectoryCapability) {
       })),
       defaultOutputPreset: video.preset,
       defaultBitrateKbps: video.bitrateKbps,
-      enabledTargetIds: receivers.map((receiver) => receiver.id)
+      enabledTargetIds: platforms.map((receiver) => receiver.id)
     }
   }
 }
