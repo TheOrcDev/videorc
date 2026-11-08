@@ -2405,29 +2405,29 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 }
             }
         }
-        if decision != GoLiveDecision::Cloud {
-            if let Some(show_id) = resumable.as_deref() {
-                let Some(bearer) = bearer.as_deref() else {
-                    bail!("Sign in to Videorc to resume the stream.");
-                };
-                if destinations.is_empty() {
-                    bail!("Videorc Cloud needs at least one destination to hand over.");
-                }
-                self.cancel_test().await;
-                match self
-                    .resume_into_session(
-                        session_id,
-                        bearer,
-                        show_id,
-                        Some(destinations.clone()),
-                        hold_image_png_base64.clone(),
-                    )
-                    .await?
-                {
-                    ResumeOutcome::Resumed(outcome) => return Ok(outcome),
-                    // The web or the node confirmed it gone: direct is safe.
-                    ResumeOutcome::ShowGone(_) => {}
-                }
+        if decision != GoLiveDecision::Cloud
+            && let Some(show_id) = resumable.as_deref()
+        {
+            let Some(bearer) = bearer.as_deref() else {
+                bail!("Sign in to Videorc to resume the stream.");
+            };
+            if destinations.is_empty() {
+                bail!("Videorc Cloud needs at least one destination to hand over.");
+            }
+            self.cancel_test().await;
+            match self
+                .resume_into_session(
+                    session_id,
+                    bearer,
+                    show_id,
+                    Some(destinations.clone()),
+                    hold_image_png_base64.clone(),
+                )
+                .await?
+            {
+                ResumeOutcome::Resumed(outcome) => return Ok(outcome),
+                // The web or the node confirmed it gone: direct is safe.
+                ResumeOutcome::ShowGone(_) => {}
             }
         }
         let bearer = match decision {
