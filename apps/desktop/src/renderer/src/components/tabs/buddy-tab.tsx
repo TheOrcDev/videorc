@@ -1,5 +1,5 @@
 import { ChatIcon, ChevronRightIcon } from '@/components/icons'
-import { useState, type ReactElement } from 'react'
+import { lazy, Suspense, useState, type ReactElement } from 'react'
 
 import { CleanCutTab } from '@/components/clean-cut/clean-cut-tab'
 import {
@@ -62,6 +62,9 @@ import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { BUDDY_TABS, type BuddyTabId } from '@/lib/buddy-tabs'
 import { closeBuddyPetCreator, useBuddyPetCreatorOpen } from '@/lib/buddy-pet-creator-nav'
 import { sessionIsLive } from '../../../../shared/capture-state'
+
+// Plan 225 D12: Community is its own chunk, loaded the first time it opens.
+const CommunityTab = lazy(() => import('@/components/community/community-tab'))
 
 /** The tab a deep link lands on, for a page rendered without the shell's tab. */
 function initialTab(
@@ -165,6 +168,13 @@ export function BuddyTab({
         </TabsContent>
         <TabsContent className="flex flex-1 flex-col" value="chat">
           <BuddyChatTab />
+        </TabsContent>
+        <TabsContent className="flex flex-1 flex-col" value="community">
+          {current === 'community' ? (
+            <Suspense fallback={null}>
+              <CommunityTab />
+            </Suspense>
+          ) : null}
         </TabsContent>
         <TabsContent className="flex flex-1 flex-col" value="voice">
           <BuddyVoiceTab onOpenLive={() => selectTab('live')} />

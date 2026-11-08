@@ -1,4 +1,4 @@
-import type { BackendRpcParams, BackendRpcResult } from './backend-rpc-contract'
+import type { BackendRpcMethod, BackendRpcParams, BackendRpcResult } from './backend-rpc-contract'
 import type { CommentsCommandResolution } from './backend'
 
 /**
@@ -38,6 +38,15 @@ export const COMMUNITY_RELAY_TIMEOUT_MS = 15_000
 
 /** One typed call through the relay, for the window's code. */
 export type CommunityRelayCall = <M extends CommunityRelayMethod>(
+  method: M,
+  params: BackendRpcParams<M>
+) => Promise<BackendRpcResult<M>>
+
+/** Every `cohost.community.*` method: the Community tab's own client may call any. */
+export type CommunityMethod = Extract<BackendRpcMethod, `cohost.community.${string}`>
+
+/** One typed call on the Community tab's own client (plan 225 D12). */
+export type CommunityCall = <M extends CommunityMethod>(
   method: M,
   params: BackendRpcParams<M>
 ) => Promise<BackendRpcResult<M>>

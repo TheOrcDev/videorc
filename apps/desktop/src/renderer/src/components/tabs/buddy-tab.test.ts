@@ -244,12 +244,14 @@ async function pressTab(id: BuddyTabId): Promise<void> {
 }
 
 describe('Buddy tab strip (plan 150)', () => {
-  it('lists five tabs like Settings and opens on Live', async () => {
+  it('lists six tabs like Settings and opens on Live', async () => {
     await render()
-    // Plan 174 D7: the page is Buddy, so its first tab is Profile.
+    // Plan 174 D7: the page is Buddy, so its first tab is Profile. Plan 225
+    // D12: Community follows Chat.
     expect(stripTabs().map((tab) => tab.textContent)).toEqual([
       'Profile',
       'Chat',
+      'Community',
       'Voice',
       'Reports',
       'Clean cut'

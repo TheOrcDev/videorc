@@ -115,6 +115,7 @@ const SETTINGS_KEYWORDS: Readonly<Record<SettingsTabId, readonly string[]>> = {
 const BUDDY_KEYWORDS: Readonly<Record<BuddyTabId, readonly string[]>> = {
   live: ['profile', 'persona', 'buddy live', 'status'],
   chat: ['posting', 'suggest', 'bubble', 'moderation'],
+  community: ['regulars', 'viewers', 'people', 'link', 'forget'],
   voice: ['commands', 'speak', 'listen'],
   reports: ['summary', 'stream report'],
   'clean-cut': ['edit', 'export', 'cut', 'recording']
