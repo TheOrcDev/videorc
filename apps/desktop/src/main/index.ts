@@ -13100,15 +13100,19 @@ async function runSmokePreviewMotionCommand(
           if (!popup || !body) return null;
           const box = popup.getBoundingClientRect();
           const inWindow = (rect) => rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= window.innerWidth + 0.5 && rect.bottom <= window.innerHeight + 0.5;
+          // A card taller than the room scrolls: a control below its fold is
+          // still reachable, as long as it sits inside the card's width.
+          const scrolls = popup.scrollHeight > popup.clientHeight + 1;
           const controls = Array.from(popup.querySelectorAll('button, textarea')).filter((element) => element.getBoundingClientRect().width > 0).map((element) => {
             const rect = element.getBoundingClientRect();
-            return { text: element.textContent?.trim() || element.getAttribute('aria-label') || element.tagName, inside: inWindow(rect) && rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5 };
+            return { text: element.textContent?.trim() || element.getAttribute('aria-label') || element.tagName, inside: (inWindow(rect) || scrolls) && rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5 };
           });
           return {
             surface: popup.getAttribute('data-testid') === 'person-card-dialog' ? 'dialog' : 'popover',
             box: { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height },
             window: { width: window.innerWidth, height: window.innerHeight },
             inWindow: inWindow(box),
+            scrolls,
             overflow: body.scrollWidth > body.clientWidth + 1,
             controls,
             text: body.innerText

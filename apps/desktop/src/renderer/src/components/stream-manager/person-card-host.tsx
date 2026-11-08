@@ -110,7 +110,8 @@ export default function PersonCardHost({
             align="start"
             anchor={anchor ?? undefined}
             aria-label={`About ${request?.target.name ?? ''}`}
-            className="w-80"
+            // Never taller than the room the window leaves: the card scrolls.
+            className="max-h-(--available-height) w-80 overflow-y-auto"
             data-testid="person-card-popover"
             side="bottom"
           >
