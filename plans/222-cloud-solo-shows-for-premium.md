@@ -48,7 +48,25 @@ moved: re-read Phase R.
     - `smart-scenes` p95 (inherited host load);
     - `recording-studio` steps 12 to 44, not run under the disk floor.
   - P10 web (#85) and P11 runner (#1): done.
-  - Next: Phase L, U and Y on #727.
+  - Phase L on #727 (2026-11-08, after plan 225 A–B merged in): L2, L3
+    (the desktop half of D7, plus D6's `cloud-unchecked`), L4 and L7 done.
+    L1 (SRT) waits for the cohort (D4); L5 (web) and L6 (runner) were done
+    on #85 and #1. Proof: `pnpm smoke:cloud-solo:node-death` (direct
+    offered 28.07 s after the node died, one lost call ended after an 8.0 s
+    probe, one toast, the next Go Live direct) and
+    `pnpm smoke:cloud-solo:thin-uplink` (3500 kbps: the bitrate stepped
+    down to 4800 of 6000 kbps 24 s after the cap, one overflow naming the
+    feed, platform rows live, the runner's output at the show's settings).
+    Gates: Rust fmt, clippy, 4,757 tests; TS typecheck, lint (one warning
+    main has too), format, 7,327 vitest, 3,162 script tests; `pnpm build`;
+    cloud-solo default, cohost-fake, multistream, stream-leg-eof;
+    recording-studio all 43 steps for the first time on this code: 38
+    green, 5 red (plan 221 Progress names each: three inherited, the host
+    microphone's silence, and two Preview-window oracles that need an A/B
+    against main). The renderer budget is still
+    the owner's STOP: eager gzip 479,409 against 477,000 (the port was
+    479,188; plan 225's eager wiring adds 221).
+  - Next: Phase U and Y on #727; L1 after the cohort.
 - **Priority**: P1. The owner's pick 1 and 2 of five on 2026-11-08 ("the
   stream never drops", "upload once, stream everywhere"). Umbrella: plan 221.
 - **Effort**: XL. About 5 to 7 weeks of agent work in sequence, plus waits
