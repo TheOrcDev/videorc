@@ -40,7 +40,8 @@ vi.mock('@/hooks/use-studio', () => ({
 vi.mock('@/lib/cloud-test-outputs', () => ({
   cloudTestOutputs: () => [
     { orientation: 'horizontal', width: 1920, height: 1080, fps: 60, videoKbps: 6000 }
-  ]
+  ],
+  cloudUploadPlan: () => ({ feedsKbps: [6000], directKbps: 18_000, destinations: 3 })
 }))
 
 function status(overrides: Partial<CloudStatus> = {}): CloudStatus {
@@ -121,6 +122,8 @@ describe('Videorc Cloud section (plan 184 C6)', () => {
     expect(switchMarkup(html)).toContain('aria-checked="true"')
     expect(switchMarkup(html)).not.toContain('aria-disabled="true"')
     expect(html).toContain('9 of 10 cloud hours left · resets Nov 1')
+    // Plan 222 U2: what goes up, under the switch.
+    expect(html).toContain('Uploads once. 6 Mbps for 3 destinations; direct would be 18 Mbps.')
     expect(html).toContain('If this computer drops, show')
     expect(checkedHold(html)).toBe('30 min')
     for (const choice of ['5 min', '15 min', '1 hour']) expect(html).toContain(choice)
@@ -130,6 +133,17 @@ describe('Videorc Cloud section (plan 184 C6)', () => {
     const html = renderSection(status({ settings: { ...status().settings, enabled: false } }))
     expect(switchMarkup(html)).toContain('aria-checked="false"')
     expect(html).not.toContain('End the stream after')
+    // Plan 222 U4: where Go Live goes, and a held show it feeds.
+    expect(html).toContain('Go Live streams directly from this computer.')
+    expect(html).not.toContain('Uploads once')
+    const held = renderSection(
+      status({
+        settings: { ...status().settings, enabled: false },
+        show: { id: 'sh_1', nodeId: 'eu-hel-1', resumable: true }
+      })
+    )
+    expect(held).toContain('A show is live through Videorc Cloud. Go Live feeds it.')
+    expect(held).not.toContain('Go Live streams directly from this computer.')
   })
 
   it('locks every control while a recording or livestream runs', () => {
