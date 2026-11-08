@@ -439,6 +439,7 @@ fn base_facts(message: &LiveChatMessage, name: String) -> ActivityFacts {
 /// is their first row this stream and they chatted on an earlier one. `None`
 /// for everything else: later messages, tombstones, notices, the streamer's
 /// own rows, known bots and names that carry a URL.
+#[cfg(test)]
 pub(crate) fn welcome_facts(message: &LiveChatMessage) -> Option<ActivityFacts> {
     welcome_facts_with(message, true)
 }
