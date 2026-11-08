@@ -54,6 +54,7 @@ import {
   type BuddyActRelayCommand,
   type CohostActAnswer
 } from './buddy-act'
+import { COMMUNITY_RELAY_METHODS, type CommunityRelayCommand } from './community-relay'
 import { isSoundStarterSlug } from './sound-assets'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
@@ -88,6 +89,7 @@ import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-mod
 import {
   arraySchema,
   booleanSchema,
+  boundedJsonValueSchema,
   enumSchema,
   literalSchema,
   nullableSchema,
@@ -221,6 +223,9 @@ export const electronInvokeApiMethods = {
   // Plan 209 S20: `/buddy <words>`, relayed to Studio like `/sound`.
   'comments-window:buddy-act': 'buddyActFromCommentsWindow',
   'comments-window:buddy-act-result-push': 'pushBuddyActResult',
+  // Plan 225 C2: the person card's `cohost.community.*` calls, relayed to Studio.
+  'comments-window:community': 'communityFromCommentsWindow',
+  'comments-window:community-result-push': 'pushCommunityResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:open-buddy-tab': 'openBuddyTabFromCommentsWindow',
@@ -340,6 +345,7 @@ export interface ElectronIpcEventMap {
   'comments-window:sounds': SoundboardSummary | null
   'comments-window:sound-request': SoundRelayCommand
   'comments-window:buddy-act-request': BuddyActRelayCommand
+  'comments-window:community-request': CommunityRelayCommand
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
@@ -397,6 +403,7 @@ export const electronEventChannels = [
   'comments-window:sounds',
   'comments-window:sound-request',
   'comments-window:buddy-act-request',
+  'comments-window:community-request',
   'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
@@ -1546,6 +1553,40 @@ const buddyActResolutionSchema = unionSchema([
     soundStrict
   )
 ])
+// Plan 225 C2: the person card's relay. The method is allowlisted here; the
+// MAIN renderer's backend client validates the params and the result against
+// the strict backend contract, so these stay bounded JSON.
+const communityRelayValueSchema = boundedJsonValueSchema({
+  maxDepth: 12,
+  maxNodes: 20_000,
+  maxTotalStringLength: 512 * 1024
+})
+const communityRelayCommandSchema = objectSchema(
+  {
+    requestId: soundRequestIdSchema,
+    method: enumSchema(COMMUNITY_RELAY_METHODS),
+    params: boundedJsonValueSchema({
+      maxDepth: 4,
+      maxNodes: 64,
+      maxTotalStringLength: 4096
+    })
+  },
+  soundStrict
+) as RuntimeSchema<CommunityRelayCommand>
+const communityRelayResolutionSchema = unionSchema([
+  objectSchema(
+    { requestId: soundRequestIdSchema, ok: literalSchema(true), value: communityRelayValueSchema },
+    soundStrict
+  ),
+  objectSchema(
+    {
+      requestId: soundRequestIdSchema,
+      ok: literalSchema(false),
+      error: stringSchema({ minLength: 1, maxLength: 2000 })
+    },
+    soundStrict
+  )
+])
 const soundRelayCommandSchema = unionSchema([
   objectSchema(
     {
@@ -1664,6 +1705,14 @@ const specificRuntimeInvokeContracts = {
   ),
   'comments-window:buddy-act-result-push': invokeContract(
     tupleSchema([buddyActResolutionSchema]),
+    booleanSchema
+  ),
+  'comments-window:community': invokeContract(
+    tupleSchema([communityRelayCommandSchema]),
+    communityRelayValueSchema
+  ),
+  'comments-window:community-result-push': invokeContract(
+    tupleSchema([communityRelayResolutionSchema]),
     booleanSchema
   ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
@@ -2100,6 +2149,7 @@ const specificRuntimeEventSchemas = {
   'comments-window:sounds': soundboardSummaryOrNullSchema,
   'comments-window:sound-request': soundRelayCommandSchema,
   'comments-window:buddy-act-request': buddyActRelayCommandSchema,
+  'comments-window:community-request': communityRelayCommandSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,

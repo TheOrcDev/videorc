@@ -126,6 +126,9 @@ const api: VideorcApi = {
   buddyActFromCommentsWindow: (command) => invoke('comments-window:buddy-act', command),
   onBuddyActRequest: (callback) => subscribe('comments-window:buddy-act-request', callback),
   pushBuddyActResult: (resolution) => invoke('comments-window:buddy-act-result-push', resolution),
+  communityFromCommentsWindow: (command) => invoke('comments-window:community', command),
+  onCommunityRequest: (callback) => subscribe('comments-window:community-request', callback),
+  pushCommunityResult: (resolution) => invoke('comments-window:community-result-push', resolution),
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),

@@ -37,6 +37,7 @@ import { applyCohostState } from '@/lib/cohost-state'
 import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { DEFAULT_TWITCH_GIF_MODE, type TwitchGifMode } from '../../shared/chat-gif'
 import type { CommandAnswer } from '@/components/stream-manager/command-cards'
+import type { CommunityRelayCall } from '../../shared/community-relay'
 
 /** A Buddy action before main's request id (distributive, one per kind). */
 type BuddyActionBody = CohostBuddyActionCommand extends infer Command
@@ -620,6 +621,14 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
+  // The person card (plan 225 C2): an allowlisted `cohost.community.*` call
+  // through main to the Studio, which owns the backend socket.
+  const communityCall = useCallback<CommunityRelayCall>((method, params) => {
+    const ask = window.videorc?.communityFromCommentsWindow
+    if (!ask) return Promise.reject(new Error('Stream Manager is disconnected.'))
+    return ask({ requestId: crypto.randomUUID(), method, params }) as never
+  }, [])
+
   // The Buddy's own actions (plan 164 S-C4): the Say box and the Show on
   // stream switch. Not chat commands, so no session is required; the Say box
   // names the live session when there is one so the line can also be posted
@@ -875,6 +884,7 @@ function CommentsWindowApp(): ReactElement {
           onCohostAuthorGreeted={(entry) =>
             void sendCohostAction('author-greeted')(entry.authorKey)
           }
+          communityCall={communityCall}
           onCohostEnable={(enabled) => setBuddyLive(enabled)}
           onCohostEnableConsent={() => setBuddyConsentAsked(true)}
           onCohostListenOn={turnListeningOn}

@@ -1,5 +1,6 @@
 import type {
   CommunityPerson,
+  LiveChatMessage,
   CommunityPersonRow,
   CommunitySupport,
   CommunitySummary,
@@ -178,6 +179,10 @@ export function supportLine(support: CommunitySupport | undefined): string | nul
 export const YOUTUBE_RETENTION_LINE =
   "YouTube viewers are remembered for 30 days after they chat (YouTube's rules)."
 
+/** Why "Buddy remembers" is locked without Premium (D6). */
+export const BUDDY_REMEMBERS_LOCK_REASON =
+  'Buddy remembers what your regulars tell it with Premium.'
+
 /** Why the manual link refuses an X account (D4 a). */
 export const X_SELF_LINK_REASON = 'X viewers link themselves with !link'
 
@@ -262,4 +267,32 @@ export function linkEventLabel(kind: 'self' | 'manual' | 'split' | 'suggestion-a
     case 'suggestion-accepted':
       return 'Linked from a suggestion'
   }
+}
+
+/** Platforms whose chat carries an author id Videorc can remember (D1). */
+const IDENTITY_PLATFORMS: ReadonlySet<StreamPlatform> = new Set(['youtube', 'twitch', 'kick', 'x'])
+
+/**
+ * The person a chat row is about, for "About {name}" and the right-click
+ * menu (D11): only a viewer's row with an author id on a platform with
+ * identity, never the streamer's own (the streamer is never a person, D1).
+ */
+export function chatRowPerson(
+  message: Pick<
+    LiveChatMessage,
+    'platform' | 'authorId' | 'authorName' | 'authorRoles' | 'eventType'
+  >
+): { platform: StreamPlatform; authorId: string; name: string } | null {
+  const authorId = message.authorId?.trim()
+  if (!authorId || !IDENTITY_PLATFORMS.has(message.platform)) return null
+  if (message.eventType === 'system' || message.eventType === 'moderation') return null
+  if (
+    message.authorRoles.some((role) => {
+      const value = role.trim().toLowerCase()
+      return value === 'owner' || value === 'broadcaster'
+    })
+  ) {
+    return null
+  }
+  return { platform: message.platform, authorId, name: message.authorName.trim() || 'this viewer' }
 }

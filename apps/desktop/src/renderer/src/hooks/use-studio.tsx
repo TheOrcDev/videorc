@@ -7806,38 +7806,48 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let moderation: typeof chatModerationRef.current = null
     let stopCohostCommandRelay: (() => void) | null = null
     let stopBuddyActRelay: (() => void) | null = null
+    let stopCommunityRelay: (() => void) | null = null
     const moderationBacklog: ModerationOperation[] = []
     void import('@/lib/chat-moderation-relay')
-      .then(({ startChatModerationRelay, startCohostCommandRelay, startBuddyActRelay }) => {
-        if (!generationIsCurrent()) return
-        // Plan 140, S6 part B: the Stream Manager's answers to Buddy's cards.
-        stopCohostCommandRelay = startCohostCommandRelay({
-          client: nextClient,
-          sessionId: () => liveChatSnapshotRef.current.sessionId,
-          commit: commitCohostState
-        })
-        // Plan 209 S20: `/buddy <words>` from the Stream Manager.
-        stopBuddyActRelay = startBuddyActRelay({
-          client: nextClient,
-          consent: () => buddyActGateRef.current.consent,
-          entitled: () => buddyActGateRef.current.entitled
-        })
-        moderation = startChatModerationRelay({
-          client: nextClient,
-          sessionId: () => liveChatSnapshotRef.current.sessionId,
-          publish: (moderationOperations) => {
-            const snapshot = liveChatSnapshotRef.current
-            if (!snapshot.sessionId) return
-            void publishLiveCommentsSnapshot({
-              mode: { kind: 'live' },
-              snapshot,
-              moderationOperations
-            })
-          }
-        })
-        chatModerationRef.current = moderation
-        for (const operation of moderationBacklog.splice(0)) moderation.feed(operation)
-      })
+      .then(
+        ({
+          startChatModerationRelay,
+          startCohostCommandRelay,
+          startBuddyActRelay,
+          startCommunityRelay
+        }) => {
+          if (!generationIsCurrent()) return
+          // Plan 140, S6 part B: the Stream Manager's answers to Buddy's cards.
+          stopCohostCommandRelay = startCohostCommandRelay({
+            client: nextClient,
+            sessionId: () => liveChatSnapshotRef.current.sessionId,
+            commit: commitCohostState
+          })
+          // Plan 209 S20: `/buddy <words>` from the Stream Manager.
+          stopBuddyActRelay = startBuddyActRelay({
+            client: nextClient,
+            consent: () => buddyActGateRef.current.consent,
+            entitled: () => buddyActGateRef.current.entitled
+          })
+          // Plan 225 C2: the person card in the Stream Manager.
+          stopCommunityRelay = startCommunityRelay({ client: nextClient })
+          moderation = startChatModerationRelay({
+            client: nextClient,
+            sessionId: () => liveChatSnapshotRef.current.sessionId,
+            publish: (moderationOperations) => {
+              const snapshot = liveChatSnapshotRef.current
+              if (!snapshot.sessionId) return
+              void publishLiveCommentsSnapshot({
+                mode: { kind: 'live' },
+                snapshot,
+                moderationOperations
+              })
+            }
+          })
+          chatModerationRef.current = moderation
+          for (const operation of moderationBacklog.splice(0)) moderation.feed(operation)
+        }
+      )
       .catch(() => undefined)
     const bufferLiveChatBootstrapEvent = (event: LiveChatBootstrapEvent): void => {
       if (liveChatBootstrapComplete) {
@@ -9453,6 +9463,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       moderation?.dispose()
       stopCohostCommandRelay?.()
       stopBuddyActRelay?.()
+      stopCommunityRelay?.()
       if (chatModerationRef.current === moderation) chatModerationRef.current = null
       moderationBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {

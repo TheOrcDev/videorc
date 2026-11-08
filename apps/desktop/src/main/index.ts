@@ -270,6 +270,7 @@ import type {
   StarterSoundFile
 } from '../shared/sound-commands'
 import { BUDDY_ACT_RESULT_TIMEOUT_MS, type CohostActAnswer } from '../shared/buddy-act'
+import { COMMUNITY_RELAY_TIMEOUT_MS } from '../shared/community-relay'
 import {
   SOUND_IMPORT_EXTENSIONS,
   STARTER_SOUNDS_MANIFEST,
@@ -17840,6 +17841,27 @@ app.whenReady().then(async () => {
     )
   })
   secureIpcHandle('comments-window:buddy-act-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
+  // The person card (plan 225 C2): the same relay. The MAIN renderer owns
+  // the backend socket and makes the allowlisted `cohost.community.*` call;
+  // the contract already refused any other method.
+  secureIpcHandle('comments-window:community', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only Stream Manager can ask about a person here.'))
+    }
+    return commentsCommandBroker.request<unknown>(
+      command.requestId,
+      () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:community-request', command)
+        return true
+      },
+      COMMUNITY_RELAY_TIMEOUT_MS
+    )
+  })
+  secureIpcHandle('comments-window:community-result-push', (event, resolution) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
     return commentsCommandBroker.resolve(resolution)
   })

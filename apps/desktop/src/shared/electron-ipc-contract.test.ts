@@ -87,8 +87,10 @@ describe('Electron IPC contract', () => {
     // watchdog:idle (the idle time for still-there) and
     // comments-window:watchdog-fix (a fix pressed in the Stream Manager's
     // alert card, relayed to the Studio).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(163)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(163)
+    // 165: plan 225 C2 adds comments-window:community and its result push
+    // (the person card's calls, relayed to the Studio).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(165)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(165)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -1652,4 +1654,23 @@ it('delivers saved-scene actions through the validated global shortcut event', (
   for (const value of ['scene:', `scene:${'a'.repeat(129)}`, 'unknown']) {
     expect(() => validateElectronEventPayload('global-shortcuts:triggered', value)).toThrow()
   }
+})
+
+describe('the person card relay (plan 225 C2)', () => {
+  it('lets only the allowlisted community methods through', async () => {
+    const { validateElectronInvokeArgs } = await import('./electron-ipc-contract')
+    const ok = { requestId: 'r1', method: 'cohost.community.person', params: { personId: 'p1' } }
+    expect(validateElectronInvokeArgs('comments-window:community', [ok])).toEqual([ok])
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:community', [
+        { ...ok, method: 'cohost.community.forgetAll' }
+      ])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:community', [{ ...ok, method: 'liveChat.send' }])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:community', [{ ...ok, extra: 1 }])
+    ).toThrow()
+  })
 })

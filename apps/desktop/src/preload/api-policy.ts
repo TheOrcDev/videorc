@@ -48,6 +48,8 @@ export const AUXILIARY_API_KEYS = {
     'soundFromCommentsWindow',
     // `/buddy <words>` (plan 209 S20): ask, never answer or push.
     'buddyActFromCommentsWindow',
+    // The person card (plan 225 C2): ask, never answer or push.
+    'communityFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
     // Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5).

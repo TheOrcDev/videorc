@@ -635,3 +635,45 @@ describe('CommentRow arrival chip (plan 225 D11)', () => {
     expect(arrivalRow(undefined)).not.toContain('comment-arrival')
   })
 })
+
+describe('About {name} (plan 225 D11)', () => {
+  const ids = (items: { id: string }[]): string[] => items.map((item) => item.id)
+  const menuFor = (overrides: Partial<LiveChatMessage>) =>
+    commentRowMenu({
+      message: message(overrides),
+      highlightable: true,
+      highlightPhase: 'idle',
+      onHighlight: () => undefined,
+      onAbout: () => undefined
+    })
+
+  it('offers the person card for a viewer, after Reply and before Copy', () => {
+    const items = commentRowMenu({
+      message: message(),
+      highlightable: true,
+      highlightPhase: 'idle',
+      onHighlight: () => undefined,
+      onReply: () => undefined,
+      onAbout: () => undefined
+    })
+    expect(ids(items)).toEqual(['show', 'reply', 'about', 'copy'])
+    expect(items.find((item) => item.id === 'about')?.label).toBe('About Ada Lovelace')
+  })
+
+  it('never for the streamer, a system line, an account without an id or Custom RTMP', () => {
+    expect(ids(menuFor({ authorRoles: ['owner'] }))).not.toContain('about')
+    expect(ids(menuFor({ eventType: 'system' }))).not.toContain('about')
+    expect(ids(menuFor({ authorId: undefined }))).not.toContain('about')
+    expect(ids(menuFor({ platform: 'custom' }))).not.toContain('about')
+    expect(
+      ids(
+        commentRowMenu({
+          message: message(),
+          highlightable: true,
+          highlightPhase: 'idle',
+          onHighlight: () => undefined
+        })
+      )
+    ).not.toContain('about')
+  })
+})

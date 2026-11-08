@@ -22,6 +22,7 @@ export { commentCanHighlight } from '@/lib/live-chat-view'
 import { ArrivalChip } from '@/components/arrival-chip'
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import {
+  AccountIcon,
   CopyIcon,
   DeleteIcon,
   ExternalLinkIcon,
@@ -61,6 +62,7 @@ import { copyChatLink, copyChatText, openChatLink } from '@/lib/chat-link-action
 import { chatLinksIn, splitLinks, type ChatLinkPiece } from '@/lib/chat-links'
 import { noticeViewerWords } from '@/lib/chat-notice'
 import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
+import { chatRowPerson } from '@/lib/community-view'
 import { cn } from '@/lib/utils'
 import { X_VERIFIED_LABEL, X_VERIFIED_URL } from '@/lib/x-mark'
 
@@ -919,13 +921,16 @@ export function commentRowMenu({
   onHighlight,
   onReply,
   onRemoveFromChat,
-  removeFromChatReason = null
+  removeFromChatReason = null,
+  onAbout
 }: {
   message: LiveChatMessage
   highlightable: boolean
   highlightPhase: CommentHighlightPhase
   onHighlight?: (message: LiveChatMessage) => void
   onReply?: (message: LiveChatMessage) => void
+  /** "About {name}" (plan 225 D11): the person card, for a viewer's row. */
+  onAbout?: (message: LiveChatMessage) => void
   onRemoveFromChat?: (message: LiveChatMessage) => void
   /** Why the row cannot be removed right now: the item is offered disabled. */
   removeFromChatReason?: string | null
@@ -943,6 +948,16 @@ export function commentRowMenu({
       : []),
     ...(onReply && (message.eventType === 'message' || message.eventType === 'paid')
       ? [{ id: 'reply', label: 'Reply', icon: SendIcon, onSelect: () => onReply(message) }]
+      : []),
+    ...(onAbout && chatRowPerson(message)
+      ? [
+          {
+            id: 'about',
+            label: `About ${message.authorName.trim()}`,
+            icon: AccountIcon,
+            onSelect: () => onAbout(message)
+          }
+        ]
       : []),
     ...commentLinkMenuItems(message),
     {
@@ -981,6 +996,7 @@ export function CommentRow({
   onReply,
   onRemoveFromChat,
   removeFromChatReason = null,
+  onAbout,
   tabIndex = 0,
   ref,
   style,
@@ -1010,6 +1026,8 @@ export function CommentRow({
   /** Why Remove from chat is off for this row (plan 174 H-11): the item
    * stays, disabled, with the fix on hover. */
   removeFromChatReason?: string | null
+  /** ⋯ "About {name}" (plan 225 D11): opens the person card. */
+  onAbout?: (message: LiveChatMessage) => void
   /** The list's roving focus (plan 174 S3.16a, H-7): 0 on the active row,
    * -1 on every other. The row's ⋯ follows it. */
   tabIndex?: number
@@ -1054,7 +1072,8 @@ export function CommentRow({
     onHighlight,
     onReply,
     onRemoveFromChat,
-    removeFromChatReason
+    removeFromChatReason,
+    onAbout
   })
 
   return (
