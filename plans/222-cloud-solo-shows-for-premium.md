@@ -385,7 +385,8 @@ touching `recording.rs` (now 52,826 lines; the branch's is 41,876).
   systemd unit.
 - `docs/wire-notes.md:351-352` still says `GET /v1/health` is "Not used
   yet". The web's reaper uses it now (O4 fixes the note).
-- `docs/spike-runner-2026-10.md:176-200`, "What waits for a Hetzner box":
+- `docs/spike-runner-2026-10.md:176-200`, "What waits for a Hetzner box"
+  (a VM-host box since 2026-11-08, plan 184 D9):
   x264 vs NVENC per box, S0d costs, the lossy leg, RTMPS from the real
   desktop on a real node, the 12 h cap in real time, TLS with a real
   certificate. "Known gaps": the decoder respawns every 250 ms to 1 s during
@@ -465,11 +466,38 @@ A1 keeps it as a soak metric.
   page's current text didn't render to a fetch (UNVERIFIED direct),
   secondary sources agree ([Restream](https://support.restream.io/en/articles/4798898-stream-to-a-facebook-group),
   [Upstream](https://upstream.so/live-streaming-limits/)).
-- **Hetzner locations.** Dedicated (Robot) servers exist in Falkenstein,
-  Nuremberg and Helsinki only; Ashburn (VA), Hillsboro (OR) and Singapore
-  are cloud-only, and "you cannot order dedicated root servers" there
-  ([locations](https://docs.hetzner.com/cloud/general/locations/)). A US
-  node is a cloud server with metered traffic, or another provider (D8).
+- **Hetzner** (dropped by the owner on 2026-11-08; plan 184 D9).
+  Dedicated servers were in Falkenstein, Nuremberg and Helsinki only. The
+  US and Singapore sites were cloud-only
+  ([locations](https://docs.hetzner.com/cloud/general/locations/)).
+- **Neon is the backend, not the media host.** Neon Functions run JS/TS
+  on Node.js 24 only. They accept HTTP, SSE and WebSockets only (no RTMPS,
+  SRT or UDP), have a fixed 2048 MiB of memory, may be evicted and
+  restarted, and share a 100-concurrency account cap.
+  - They run in us-east-2, us-east-1, eu-central-1 and ap-southeast-1
+    ([overview](https://neon.com/docs/compute/functions/overview),
+    [limits](https://neon.com/docs/compute/functions/reference/runtime-limits)).
+  - Paid plans include 500 GB of public transfer per project per month,
+    shared by every Neon product. The rate past it is in plan 185
+    ([plans](https://neon.com/docs/introduction/plans)).
+  - Object Storage credentials are scoped to a branch with read or write.
+    There is no key-prefix scope, and `expires_at` isn't enforced
+    ([authentication](https://neon.com/docs/storage/authentication)).
+  - The full list is in plan 184 Outside facts.
+- **The VM host** (plan 184 D9; the owner confirms the provider).
+  DigitalOcean CPU-Optimized droplets, the recommended host:
+  - dedicated vCPUs, and a monthly outbound transfer allowance per droplet,
+    pooled across the team, with inbound free;
+  - per-second billing;
+  - FRA1, NYC1 to NYC3 and SGP1, next to Neon's regions;
+  - UDP rules in Cloud Firewalls, for SRT (D4);
+  - an API and `doctl` for I1
+    ([droplets](https://www.digitalocean.com/pricing/droplets),
+    [bandwidth](https://docs.digitalocean.com/products/droplets/details/pricing/),
+    [regions](https://docs.digitalocean.com/platform/regional-availability/),
+    [firewalls](https://docs.digitalocean.com/products/networking/firewalls/details/limits/)).
+  - The alternatives (OVHcloud, Vultr, Fly.io) are in plan 184 Outside
+    facts. Prices are in plan 185.
 - **Grafana Cloud Free**: 10k metric series, 50 GB logs, 50 GB traces,
   14-day retention, 3 users, community support
   ([pricing](https://grafana.com/pricing/)). Enough for two nodes (I4).
@@ -589,10 +617,15 @@ A1 keeps it as a soak metric.
   every show's first-frame time and hold count by region (O5). Add a US
   node when either holds for two weeks: more than a quarter of cloud
   shows start from US accounts, or the US median Test RTT is over 120 ms
-  with more than one unexplained hold per show-hour. Hetzner's US sites
-  are cloud-only with metered traffic (Outside facts), so the US node is a
-  cloud server there or a bare-metal box elsewhere; the owner picks the
-  provider when the data says so.
+  with more than one unexplained hold per show-hour.
+  - Until 2026-11-08 this said: Hetzner's US sites are cloud-only with
+    metered traffic, so the US node is a cloud server there or a
+    bare-metal box elsewhere.
+  - Since the owner dropped Hetzner (plan 184 D9), the US node is the
+    same VM type as the EU node, in the host's US datacenter: NYC on
+    DigitalOcean, the recommended host (owner to confirm). It sits near
+    Neon's us-east-1 (Outside facts). It's the same shape, so adding it is
+    a placement change, not a new kind of node.
 - Why: RTMPS over TCP at 6 Mbps works at 150 ms RTT; what hurts is loss
   recovery on a long path, which SRT (D4) addresses before a second
   region does. One region keeps I1 to I5 to one shape for the first
@@ -631,7 +664,7 @@ every Rust `Option` with `skip_serializing_if = "Option::is_none"`:
 - **`cloud.selftest.run`** result gains `"nodeId"`, `"region"` and
   `"handshakeMs"` (the time to the first RTMPS byte accepted) for the Test
   row's description: "Videorc Cloud works from here. Upload 6.1 of 6 Mbps ·
-  Helsinki, 48 ms."
+  Frankfurt, 48 ms."
 - **`CloudFallbackReason`** (`cloud_show.rs:233`, mirrored in
   `backend-rpc-contract.ts` and `backend.ts`) gains `cloud-quality` (D5)
   and `cloud-unchecked` (D6). Neither enum has shipped, so this is
@@ -905,17 +938,27 @@ hunk and say so in the commit message.
 
 Every slice names the owner's exact ask. Nothing here needs the desktop.
 
-- **I1. Nodes.** Owner: open a Hetzner account, add the orchestrator's SSH
-  key, and order one dedicated server in Falkenstein or Nuremberg (the
-  type S0a could not decide without a box; start with the CPU class, an
-  AX-series box, so x264 is measured first). A second box follows I6's
-  numbers, before the cohort. Agent: `ops/provision.sh` (Debian or Ubuntu
-  LTS, firewall: 22 from an allowlist, 1936/TCP RTMPS, 8890/UDP SRT,
-  9443/TCP control, 80/443 for ACME only; chrony; unattended security
-  updates only while drained), MediaMTX 1.21.3 pinned, a pinned GPL FFmpeg
-  with x264, the agent's systemd unit from `deploy/systemd/`, and
-  `ops/check-node` (ports listening, MediaMTX hook answering, certificate
-  valid, agent heartbeat accepted).
+- **I1. Nodes.** Changed 2026-11-08 (plan 184 D9). It was a Hetzner
+  dedicated server (an AX-series box in Falkenstein or Nuremberg).
+  - Owner: open an account on the VM host (DigitalOcean recommended, owner
+    to confirm), make an API token limited to droplets, firewalls and
+    reserved IPs where the host allows custom scopes (UNVERIFIED), and add
+    the orchestrator's SSH key.
+  - Agent: create one CPU-Optimized node (8 dedicated vCPUs) in FRA1
+    through the host's API, so x264 is measured first. Give it a reserved
+    IP. A second node follows I6's numbers, before the cohort.
+  - Agent: `ops/provision.sh` installs:
+    - Debian or Ubuntu LTS;
+    - the host's cloud firewall plus the node's own, with the same rules:
+      22 from an allowlist, 1936/TCP RTMPS, 8890/UDP SRT, 9443/TCP
+      control, and 80/443 for ACME only;
+    - chrony, and unattended security updates only while drained;
+    - MediaMTX 1.21.3 pinned, and a pinned GPL FFmpeg with x264;
+    - the agent's systemd unit from `deploy/systemd/`;
+    - `ops/check-node`: ports listening, the MediaMTX hook answering, the
+      certificate valid, and the agent's heartbeat accepted.
+  - Only the VM-creation step calls the host's API, so changing hosts
+    touches one file.
   - Done when a fresh box passes `ops/check-node` from the script alone.
 - **I2. Node agent in production shape.** The agent already registers,
   heartbeats, supervises, drains and ships usage (plan 184 Progress, I2).
@@ -926,9 +969,13 @@ Every slice names the owner's exact ask. Nothing here needs the desktop.
 - **I3. Deploys.** GitHub Actions in the private `videorc-cloud` repo
   (Actions are off in the other private repo; the owner turns them on
   here): build `videorc-runner` and `videorc-node-agent` for Linux x64 on a
-  tag, upload to a private R2 bucket (the release tooling already speaks
-  R2), `ops/deploy.sh <tag>` drains, installs, restarts. Owner: enable
-  Actions, create the bucket and its token as repo secrets.
+  tag, upload to a private bucket on Neon Object Storage, in a Neon
+  project of its own. The desktop release origin moved to Neon Object
+  Storage in #380, and Neon is the backend (plan 184 D9). The node gets a
+  `storage:read` key for that project only, because Neon keys can't be
+  limited to a prefix. This was a private R2 bucket until 2026-11-08.
+  `ops/deploy.sh <tag>` drains, installs and restarts. Owner: enable
+  Actions, create the bucket and its keys as repo secrets.
   - Done when a tag deploys to the node and `GET /v1/health` reports the
     new version.
 - **I4. Watching.** Grafana Cloud Free (plan 184 decision; 10k series and
@@ -943,8 +990,10 @@ Every slice names the owner's exact ask. Nothing here needs the desktop.
   hand the agent a write token.
   - Done when a kill of the runner on the node pages the owner's phone
     within 2 minutes and the show's hold shows on a dashboard.
-- **I5. DNS and TLS.** Owner: create `eu-fsn-1.live.videorc.com` (and the
-  second node's name) as plain A/AAAA records at the registrar, DNS-only,
+- **I5. DNS and TLS.** Owner: create `eu-fra-1.live.videorc.com` (and the
+  second node's name; `eu-fsn-1` while the node was to be Hetzner's
+  Falkenstein) as plain A/AAAA records on the node's reserved IP at the
+  registrar, DNS-only,
   never behind Cloudflare's proxy ([[videorc-spain-laliga-cloudflare-block]]).
   Agent: ACME (lego or certbot) on the node for the node's name, a deploy
   hook that writes the chain where MediaMTX and the agent read it and
@@ -983,8 +1032,9 @@ Every slice names the owner's exact ask. Nothing here needs the desktop.
   - Done when each step has its date and the numbers it was judged on
     (shows, hold minutes, holds per show-hour, fallbacks by reason).
 - **O3. Support runbook** (private `videorc-cloud/docs/runbook.md`). One
-  page per incident: a node is down (drain, DNS to the spare, end shows
-  that can't resume); a runner crash loop (stop the agent's restarts,
+  page per incident: a node is down (drain, move the reserved IP or DNS
+  to the spare, end shows that can't resume; on the VM host a replacement
+  node comes from `ops/provision.sh` through the host's API); a runner crash loop (stop the agent's restarts,
   collect the state file, end the show); videorc.com is down (nothing to
   do, the reaper asks the node first); the certificate expired (renew by
   hand, reload); "my viewers see Be right back and I'm live" (the feed
@@ -1263,11 +1313,17 @@ Stop and ask the owner when:
    wait for the period end with no refund, and should only a full refund of
    the current charge end a plan? Recommended: yes to both, after a Creem
    test-mode run shows which webhooks fire.
-6. **The first node**: one CPU box (AX class) in Falkenstein or Nuremberg
-   now, a second before the cohort? Recommended: yes. The GPU question
-   waits for I6's numbers.
+6. **The first node**: one CPU node now (CPU-Optimized, 8 dedicated
+   vCPUs, in FRA1 on the VM host), a second before the cohort?
+   Recommended: yes. The GPU question waits for I6's numbers.
+   - Was an AX-class box in Falkenstein or Nuremberg. Changed 2026-11-08:
+     the owner dropped Hetzner (plan 184 D9).
+   - **Which VM host** is still the owner's to confirm. Recommended:
+     DigitalOcean. The alternatives are OVHcloud, Vultr and Fly.io.
 7. **A US node**: on D8's two-week measurement, or now? Recommended: on
-   the measurement. Hetzner's US sites are cloud-only.
+   the measurement. On the VM host it is the same node type in NYC (D8).
+   Until 2026-11-08 the note here was that Hetzner's US sites are
+   cloud-only.
 8. **The beta cohort**: 10 to 20 Premium accounts you name, two weeks,
    before `VIDEORC_CLOUD_PUBLIC`? Recommended: yes.
 9. **Premium's hour allowance**: the figure lives in plan 185 D9 and
@@ -1301,9 +1357,10 @@ Stop and ask the owner when:
   Phases I/O and Y run in parallel with L and U.
 - **Verification**: the Phase P list once at the end of the port, then the
   slice's smoke per slice, then `smoke:local-gates` once before the cohort.
-- **Blockers**: a Hetzner account and SSH access (I1); DNS records (I5); a
-  Grafana Cloud stack (I4); Actions and an R2 bucket for the private repo
-  (I3); the owner's YouTube answer (Y1); the owner's charging decision
+- **Blockers**: a VM-host account, its API token and SSH access (I1;
+  DigitalOcean recommended, owner to confirm; was a Hetzner account until
+  2026-11-08); DNS records (I5); a Grafana Cloud stack (I4); Actions and a
+  Neon Object Storage bucket for the private repo (I3; was R2); the owner's YouTube answer (Y1); the owner's charging decision
   (L5); the owner's go for any real live test (A3). Never invent
   credentials. Parallel Rust compiles: at most 2 or 3; check `df -h` and
   swap before dispatch ([[videorc-parallel-executor-compile-thrash]]).
