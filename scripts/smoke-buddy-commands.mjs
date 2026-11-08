@@ -297,6 +297,42 @@ async function runPremiumScenario(profile) {
     )
     pass(`A2 clear: ${cleared.command.message}`)
 
+    // Plan 225 B5: "Buddy, wave at coders X" waves at a chatter of this
+    // stream: the card says so at once, and nothing reaches chat.
+    phase('A2b: "Buddy, wave at coders X."')
+    const waveSince = Date.now()
+    const mainBeforeWave = laneMessages(events, MAIN_LANE).length
+    await say(events, ['Buddy, wave at coders X.'])
+    const waved = await waitForCommand(
+      events,
+      (command) => command.kind === 'wave' && command.status === 'done',
+      'the wave command',
+      waveSince
+    )
+    expect(
+      waved.command.message === 'Waved at coders_x.' &&
+        waved.command.heard === 'buddy wave at coders x',
+      `The wave should name the chatter: ${JSON.stringify(waved.command)}`
+    )
+    await sleep(1_000)
+    expect(
+      laneMessages(events, MAIN_LANE).length === mainBeforeWave,
+      'A wave must never post to chat.'
+    )
+    const unknownSince = Date.now()
+    await say(events, ['Buddy, wave at nobody here.'])
+    const nobody = await waitForCommand(
+      events,
+      (command) => command.kind === 'wave' && command.status === 'not-found',
+      'the wave at an unknown name',
+      unknownSince
+    )
+    expect(
+      nobody.command.message === 'No nobody here in chat.',
+      `An unknown name is not found: ${JSON.stringify(nobody.command)}`
+    )
+    pass(`A2b wave: ${waved.command.message} (${waved.at - waveSince} ms); unknown name not found`)
+
     // 3. "This one" removal of the flagged comment, confirmed by voice.
     phase('A3: "This one is toxic. Remove it from our chat." then "Yes."')
     const removeSince = Date.now()

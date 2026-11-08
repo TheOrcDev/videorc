@@ -196,7 +196,10 @@ try {
         VIDEORC_APP_DATA_DIR: appDataDir,
         VIDEORC_DATABASE_PATH: join(appDataDir, 'videorc.sqlite3'),
         VIDEORC_SECRETS_PATH: secretsPath,
-        VIDEORC_SMOKE_STATE_DIR: stateRoot
+        VIDEORC_SMOKE_STATE_DIR: stateRoot,
+        // Plan 225 B6: the second fake session is every fake author's 2nd
+        // stream; this debug-only seam makes it a milestone too.
+        VIDEORC_SMOKE_COMMUNITY_MILESTONE_STREAMS: '2'
       }
     }),
     stdio: ['ignore', 'pipe', 'pipe']
@@ -694,6 +697,7 @@ try {
       `${IDLE_PROOF_MS / 1000} s idle without a tick.`
   )
 
+  await runCommunityScenario({ startedAt })
   await runConsentScenario({ ready, startedAt })
   await runSpotlightScenario({ ready, startedAt })
 } finally {
@@ -886,6 +890,172 @@ function waitForBackendReady(child, deadlineMs) {
 // The debug idle-caption seam exercises consent without starting a second
 // recording. Real requests reach the local fakes; response barriers expose
 // admitted work before the preference changes, rather than relying on sleeps.
+// Plan 225 (Know your viewers), Phase B: a second fake session on the same
+// Twitch lane. Its authors chatted in the first session, so each one's first
+// row is an arrival (streams 2, in a row 2) the delivery path marks without
+// waiting on the store; in Suggest mode the welcomes are cards, the 2nd-stream
+// milestone (the debug seam above) carries the milestone card's facts and
+// never the message text; the store answers the community RPCs; and nothing
+// Buddy decided reached chat (the lane counts zero sends).
+async function runCommunityScenario({ startedAt }) {
+  const phase = (label) =>
+    console.log(
+      `[cohost-smoke +${((Date.now() - startedAt) / 1000).toFixed(1)}s] community: ${label}`
+    )
+  const communitySessionId = `${sessionId}-community`
+  const events = collectEvents(backend)
+  try {
+    phase('settings: Suggest mode, so welcomes are cards')
+    const current = await request(backend, timeoutMs, 'cohost.settings.get', {})
+    expect(
+      current.community?.enabled === true && current.community.regularStreams === 3,
+      `The community block should be on by default: ${JSON.stringify(current.community)}`
+    )
+    const suggest = await request(backend, timeoutMs, 'cohost.settings.set', {
+      autoChat: { ...current.autoChat, talk: 'suggest' }
+    })
+    expect(suggest.autoChat.talk === 'suggest', 'Suggest mode did not apply.')
+    const before = await request(backend, timeoutMs, 'cohost.community.summary', {})
+    expect(
+      before.people >= 3 && before.streams >= 1,
+      `The first session should have filled the store: ${JSON.stringify(before)}`
+    )
+
+    phase('liveChat.start: the same Twitch lane, every author back')
+    const lane = {
+      platform: 'twitch',
+      targetId: 'cohost-main',
+      count: 6,
+      intervalMs: 300,
+      send: 'sent'
+    }
+    await request(backend, timeoutMs, 'liveChat.start', {
+      sessionId: communitySessionId,
+      destinations: [
+        { platform: lane.platform, targetId: lane.targetId, read: 'ready', write: 'ready' }
+      ],
+      fakes: [lane]
+    })
+    await request(backend, timeoutMs, 'cohost.start', {
+      sessionId: communitySessionId,
+      consentToProcessChat: true,
+      streamTitle: STREAM_TITLE
+    })
+    const arrivalRow = await waitForEvent(
+      events,
+      'liveChat.message',
+      (message) =>
+        message.sessionId === communitySessionId &&
+        message.authorName === 'Test Viewer 0' &&
+        Boolean(message.arrival),
+      "Test Viewer 0's arrival row",
+      20_000
+    )
+    expect(
+      arrivalRow.arrival.streams === 2 &&
+        arrivalRow.arrival.inARow === 2 &&
+        arrivalRow.arrival.regular === false &&
+        arrivalRow.arrival.milestone?.kind === 'streams' &&
+        arrivalRow.arrival.milestone.value === 2 &&
+        !('awayDays' in arrivalRow.arrival) &&
+        !('platforms' in arrivalRow.arrival),
+      `The arrival should count the second stream and the milestone, with absent fields omitted: ${JSON.stringify(arrivalRow.arrival)}`
+    )
+    const laterRows = events.list.filter(
+      (entry) =>
+        entry.event === 'liveChat.message' &&
+        entry.payload.sessionId === communitySessionId &&
+        entry.payload.authorName === 'Test Viewer 0'
+    )
+    expect(
+      laterRows.filter((entry) => entry.payload.arrival).length <= 1,
+      'Only one row per person carries the arrival.'
+    )
+
+    phase('the milestone welcome is a card with the milestone facts')
+    const milestoneState = await waitForEvent(
+      events,
+      'cohost.state',
+      (state) =>
+        (state.utterances ?? []).some(
+          (utterance) =>
+            utterance.trigger.kind === 'greeting' &&
+            utterance.status === 'proposed' &&
+            utterance.milestone?.messageId === arrivalRow.id
+        ),
+      'the milestone welcome card for Test Viewer 0',
+      30_000
+    )
+    const milestone = milestoneState.utterances.find(
+      (utterance) => utterance.milestone?.messageId === arrivalRow.id
+    )
+    expect(
+      milestone.milestone.name === 'Test Viewer 0' &&
+        milestone.milestone.label === '2nd stream' &&
+        milestone.milestone.platform === 'twitch' &&
+        milestone.text.includes('2nd stream') &&
+        !milestone.text.includes(arrivalRow.messageText),
+      `The milestone card should name the person and the milestone, never the message: ${JSON.stringify(milestone)}`
+    )
+    expect(
+      (milestoneState.autoChatSends ?? 0) === 0,
+      `Nothing Buddy decided may reach chat on its own: ${JSON.stringify({ sends: milestoneState.autoChatSends })}`
+    )
+
+    phase('the community RPCs answer from the store')
+    const person = await request(backend, timeoutMs, 'cohost.community.person', {
+      platform: 'twitch',
+      authorId: arrivalRow.authorId
+    })
+    expect(
+      person.id &&
+        person.streams >= 2 &&
+        person.accounts.length === 1 &&
+        person.status === 'normal',
+      `cohost.community.person should know Test Viewer 0: ${JSON.stringify(person)}`
+    )
+    const page = await request(backend, timeoutMs, 'cohost.community.list', {
+      filter: 'everyone',
+      sort: 'streams',
+      limit: 10
+    })
+    expect(
+      page.people.some((row) => row.id === person.id && row.streams >= 2),
+      `cohost.community.list should list the person: ${JSON.stringify(page)}`
+    )
+    const unknown = await request(backend, timeoutMs, 'cohost.community.person', {
+      platform: 'kick',
+      authorId: 'never-chatted',
+      name: 'Stranger'
+    })
+    expect(
+      unknown.id === '' && unknown.streams === 0 && unknown.name === 'Stranger',
+      `An unknown account is a zero-count person, not an error: ${JSON.stringify(unknown)}`
+    )
+    const summary = await request(backend, timeoutMs, 'cohost.community.summary', {})
+    expect(
+      summary.streams >= 2 &&
+        summary.people >= 3 &&
+        ['idle', 'running', 'done'].includes(summary.backfill.state),
+      `The summary should count both streams: ${JSON.stringify(summary)}`
+    )
+
+    phase('stop')
+    await request(backend, timeoutMs, 'cohost.stop', {})
+    await request(backend, timeoutMs, 'liveChat.stop', {})
+    await request(backend, timeoutMs, 'cohost.settings.set', {
+      autoChat: { ...current.autoChat, talk: current.autoChat.talk ?? 'bubble' }
+    })
+    console.log(
+      `Community scenario PASS: an arrival on the first row only (streams 2, in a row 2, 2nd-stream milestone), ` +
+        `a proposed milestone card with the person's facts and no message text, zero sends, ` +
+        `person/list/summary answered from the store.`
+    )
+  } finally {
+    events.close()
+  }
+}
+
 async function runConsentScenario({ ready, startedAt }) {
   const consentSessionId = `consent-${randomUUID()}`
   const events = collectEvents(backend)
