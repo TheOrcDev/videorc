@@ -4122,6 +4122,9 @@ export interface AiCapabilities {
    * servers omit the block: Generate stays off. */
   cohost?: {
     tick?: number
+    /** Plan 225 D10: 1 when this user may call the memory route; the
+     * desktop keeps queued passes for later otherwise. */
+    memory?: number
     avatar?: {
       enabled: boolean
       remainingToday: number
@@ -7728,6 +7731,8 @@ export interface CommunitySettings {
   milestoneCards: boolean
   /** Buddy remembers (Premium, default off). */
   remember: boolean
+  /** D10: the one-time "Let Buddy remember…" card was answered. */
+  rememberOffered: boolean
   /** Community sync (Premium, default off). */
   sync: boolean
 }

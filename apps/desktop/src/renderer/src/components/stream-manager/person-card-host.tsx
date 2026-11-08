@@ -12,8 +12,8 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Popover, PopoverContent } from '@/components/ui/popover'
-import type { CommunityPerson } from '@/lib/backend'
-import { forgetCopy } from '@/lib/community-view'
+import type { CommunityMemory, CommunityPerson } from '@/lib/backend'
+import { forgetCopy, memoryForgetCopy } from '@/lib/community-view'
 import { toastUserError } from '@/lib/user-error'
 import type { CommunityRelayCall } from '../../../../shared/community-relay'
 
@@ -50,6 +50,11 @@ export default function PersonCardHost({
   onClose: () => void
 }): ReactElement {
   const [forgetting, setForgetting] = useState<CommunityPerson | null>(null)
+  // D10: a memory's forget question, the same way: outside the popover.
+  const [memoryForget, setMemoryForget] = useState<{
+    person: CommunityPerson
+    memory: CommunityMemory
+  } | null>(null)
   const [busy, setBusy] = useState(false)
   const open = request !== null
   const narrow = typeof window !== 'undefined' && window.innerWidth < PERSON_CARD_DIALOG_BELOW_PX
@@ -91,9 +96,16 @@ export default function PersonCardHost({
         setForgetting(person)
         onClose()
       }}
+      onMemoryForgetRequest={(person, memory) => {
+        setMemoryForget({ person, memory })
+        onClose()
+      }}
     />
   ) : null
   const forget = forgetting ? forgetCopy(forgetting.name) : null
+  const memoryCopy = memoryForget
+    ? memoryForgetCopy(memoryForget.person.name, memoryForget.memory.text)
+    : null
 
   return (
     <>
@@ -144,6 +156,30 @@ export default function PersonCardHost({
                 toastUserError(
                   error,
                   { action: 'forget', object: forgetting.name },
+                  { id: 'community-card' }
+                )
+            )
+            .finally(() => setBusy(false))
+        }}
+      />
+      <ConfirmDialog
+        confirmDisabled={busy}
+        confirmLabel={busy ? 'Forgetting…' : (memoryCopy?.confirm ?? 'Forget memory')}
+        description={memoryCopy?.description ?? ''}
+        open={memoryForget !== null}
+        testId="person-memory-forget"
+        title={memoryCopy?.title ?? ''}
+        onCancel={() => setMemoryForget(null)}
+        onConfirm={() => {
+          if (!memoryForget) return
+          setBusy(true)
+          call('cohost.community.memory.delete', { id: memoryForget.memory.id })
+            .then(
+              () => setMemoryForget(null),
+              (error: unknown) =>
+                toastUserError(
+                  error,
+                  { action: 'forget', object: 'that memory' },
                   { id: 'community-card' }
                 )
             )

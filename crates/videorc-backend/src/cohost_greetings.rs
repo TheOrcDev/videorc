@@ -515,11 +515,21 @@ pub(crate) fn milestone_builtin_text(kind: crate::community::ViewerMilestoneKind
 }
 
 impl GreetingKind {
-    /// Plan 225: the greet route (web) knows the first-time, returning and
-    /// Activity kinds; the arrival kinds get their line until plan 225 F2
-    /// teaches the route `arrival`.
+    /// Plan 225 F4: every kind may ask the greet route; an arrival kind
+    /// rides as `returning` with its `arrival` facts (F2 taught the route
+    /// those), and its line stays the fallback.
     pub(crate) fn greet_route_supported(self) -> bool {
-        !matches!(self, Self::Regular | Self::Comeback | Self::Milestone)
+        true
+    }
+
+    /// The route's `kind` for this greeting: the arrival kinds (regular,
+    /// comeback, milestone) are the route's `returning` plus `arrival`; a
+    /// numbered milestone reaches the model only through the fallback line.
+    pub(crate) fn greet_route_kind(self) -> &'static str {
+        match self {
+            Self::Regular | Self::Comeback | Self::Milestone => Self::Returning.wire(),
+            other => other.wire(),
+        }
     }
 
     /// Plan 225 D9: an arrival kind collapses into one wave within 20 s.

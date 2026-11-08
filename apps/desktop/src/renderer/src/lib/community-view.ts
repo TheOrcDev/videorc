@@ -1,5 +1,6 @@
 import type {
   CommunityPerson,
+  CommunitySettings,
   LiveChatMessage,
   CommunityPersonRow,
   CommunitySupport,
@@ -182,6 +183,34 @@ export const YOUTUBE_RETENTION_LINE =
 /** Why "Buddy remembers" is locked without Premium (D6). */
 export const BUDDY_REMEMBERS_LOCK_REASON =
   'Buddy remembers what your regulars tell it with Premium.'
+
+/** Rust's defaults (plan 225 Wire shape), for an older backend's settings. */
+export const DEFAULT_COMMUNITY_SETTINGS: CommunitySettings = {
+  enabled: true,
+  regularStreams: 3,
+  welcomeOnStream: true,
+  milestoneCards: false,
+  remember: false,
+  rememberOffered: false,
+  sync: false
+}
+
+/** D10: the one-time offer, after the first stream regulars came to. */
+export const REMEMBER_OFFER_TITLE = 'Let Buddy remember what your regulars tell it?'
+export const REMEMBER_OFFER_DESCRIPTION =
+  'After a stream, Buddy reads what your regulars said about themselves and keeps a few short memories, so next time it can ask how the borrow checker is treating them. You see and delete every memory. YouTube chat is never read for this.'
+
+/** "Forget this memory?": the confirm's title and its one sentence (D10). */
+export function memoryForgetCopy(
+  name: string,
+  text: string
+): { title: string; description: string; confirm: string } {
+  return {
+    title: 'Forget this memory?',
+    description: `Buddy stops remembering “${text}” about ${name}. It can learn it again from a later stream.`,
+    confirm: 'Forget memory'
+  }
+}
 
 /** Why the manual link refuses an X account (D4 a). */
 export const X_SELF_LINK_REASON = 'X viewers link themselves with !link'

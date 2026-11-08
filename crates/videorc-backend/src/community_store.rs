@@ -28,9 +28,9 @@ use crate::community::{
     CommunityListSort, CommunityMemory, CommunityPerson, CommunityPersonParams, CommunityPersonRow,
     CommunityPersonStatus, CommunitySuggestion, CommunitySuggestionReason, CommunitySummary,
     CommunitySupport, KnownStream, LIST_LIMIT_MAX, NOTE_MAX_CHARS, OTHER_RETENTION_DAYS,
-    PersonHistory, REGULAR_WINDOW_DAYS, ViewerArrival, ViewerMilestone, YOUTUBE_RETENTION_DAYS,
-    account_key, arrival_facts, away_days, in_a_row, is_regular, platform_has_identity,
-    suggestion_name_key,
+    PersonHistory, REGULAR_WINDOW_DAYS, VIEWER_MEMORIES_MAX, ViewerArrival, ViewerMilestone,
+    YOUTUBE_RETENTION_DAYS, account_key, arrival_facts, away_days, in_a_row, is_regular,
+    platform_has_identity, suggestion_name_key,
 };
 use crate::live_chat::{LiveChatEventDetails, LiveChatEventType, LiveChatMessage};
 use crate::storage::Database;
@@ -228,6 +228,33 @@ fn support_of(message: &LiveChatMessage) -> CommunitySupport {
     support
 }
 
+/// A queued memory pass (D10, F3): one per stream that ended with "Buddy
+/// remembers" on, retried for a week.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunityMemoryJob {
+    pub session_id: String,
+    pub created_at: DateTime<Utc>,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+}
+
+/// One person of a memory pass, as the store knows them (D10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunityMemoryPersonFacts {
+    pub name: String,
+    pub regular: bool,
+    pub streams: u32,
+    /// The live accounts: key and platform.
+    pub accounts: Vec<(String, StreamPlatform)>,
+    pub memories: Vec<CommunityMemory>,
+    pub note: String,
+}
+
+/// Memories a pass may add per person, and keep in all (plan 183 D14).
+pub const MEMORY_ADDS_MAX: usize = 2;
+pub const MEMORY_PER_PERSON_MAX: usize = 8;
+
 /// The arrival lookup's answer for one fresh account (B1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrivalLookup {
@@ -395,9 +422,23 @@ pub(crate) fn create_community_schema(conn: &Connection) -> Result<()> {
             session_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
-            last_error TEXT
+            last_error TEXT,
+            last_attempt_at TEXT
         );",
     )?;
+    // A store from before the memory pass (Phase A) lacks the column.
+    let has_last_attempt = conn
+        .prepare("PRAGMA table_info(community_memory_jobs)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "last_attempt_at");
+    if !has_last_attempt {
+        conn.execute(
+            "ALTER TABLE community_memory_jobs ADD COLUMN last_attempt_at TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1051,6 +1092,7 @@ impl Database {
         arrived: &mut HashSet<String>,
         now: DateTime<Utc>,
         threshold: u32,
+        remember: bool,
     ) -> Result<Vec<ArrivalLookup>> {
         let conn = self.lock()?;
         let streams = known_streams_locked(&conn)?;
@@ -1122,6 +1164,20 @@ impl Database {
             // read the history before it.
             let mut facts = arrival_facts(&with_current, streams_count, run, now, threshold);
             facts.away_days = away_days(&before, now);
+            if remember {
+                // D10: with "Buddy remembers" on, the newest memories and
+                // the streamer's note ride the arrival for one delivery
+                // (never the wire), so the greet and the tick can use them.
+                let mut memories = memories_locked(&conn, &person.id)?;
+                memories.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                facts.memories = memories
+                    .into_iter()
+                    .take(VIEWER_MEMORIES_MAX)
+                    .map(|memory| memory.text)
+                    .collect();
+                let note = person.note.trim();
+                facts.note = (!note.is_empty()).then(|| note.to_string());
+            }
             lookup.arrival = Some(facts);
             out.push(lookup);
         }
@@ -1745,6 +1801,207 @@ impl Database {
     pub fn community_memory_delete(&self, id: &str) -> Result<bool> {
         let conn = self.lock()?;
         Ok(conn.execute("DELETE FROM community_memories WHERE id = ?1", params![id])? > 0)
+    }
+
+    // --- The memory pass (D10, F3) -------------------------------------------------
+
+    /// A stream ended with "Buddy remembers" on: one pass is owed for it.
+    /// Queued once per session; a second call is a no-op.
+    pub fn community_memory_job_enqueue(&self, session_id: &str, now: DateTime<Utc>) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO community_memory_jobs (session_id, created_at, attempts)
+             VALUES (?1, ?2, 0)",
+            params![session_id, iso(now)],
+        )?;
+        Ok(())
+    }
+
+    /// The queued passes, oldest first.
+    pub fn community_memory_jobs(&self) -> Result<Vec<CommunityMemoryJob>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT session_id, created_at, attempts, last_error, last_attempt_at
+             FROM community_memory_jobs ORDER BY created_at ASC, session_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        let mut jobs = Vec::new();
+        for row in rows {
+            let (session_id, created_at, attempts, last_error, last_attempt_at) = row?;
+            let Some(created_at) = parse_at(&created_at) else {
+                continue;
+            };
+            jobs.push(CommunityMemoryJob {
+                session_id,
+                created_at,
+                attempts: u32::try_from(attempts.max(0)).unwrap_or(u32::MAX),
+                last_error,
+                last_attempt_at: last_attempt_at.as_deref().and_then(parse_at),
+            });
+        }
+        Ok(jobs)
+    }
+
+    /// A pass was tried and did not finish: count the attempt and keep why.
+    pub fn community_memory_job_attempted(
+        &self,
+        session_id: &str,
+        error: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE community_memory_jobs
+             SET attempts = attempts + 1, last_error = ?2, last_attempt_at = ?3
+             WHERE session_id = ?1",
+            params![session_id, error, iso(now)],
+        )?;
+        Ok(())
+    }
+
+    /// The pass finished, or is dropped (its session is gone, or it is
+    /// older than the retry window).
+    pub fn community_memory_job_delete(&self, session_id: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM community_memory_jobs WHERE session_id = ?1",
+            params![session_id],
+        )? > 0)
+    }
+
+    /// Test helper: age a queued pass.
+    #[cfg(test)]
+    pub(crate) fn community_memory_job_backdate(
+        &self,
+        session_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE community_memory_jobs SET created_at = ?2, last_attempt_at = NULL
+             WHERE session_id = ?1",
+            params![session_id, iso(created_at)],
+        )?;
+        Ok(())
+    }
+
+    /// The people behind these account keys, for a memory pass: each live,
+    /// normal person once (a bot, a forgotten account or an account the
+    /// store never met is left out), with their live accounts, what Buddy
+    /// knows and the streamer's note. Returns the key → person map and the
+    /// people by id.
+    pub fn community_memory_people(
+        &self,
+        keys: &[String],
+        now: DateTime<Utc>,
+        threshold: u32,
+    ) -> Result<(
+        HashMap<String, String>,
+        HashMap<String, CommunityMemoryPersonFacts>,
+    )> {
+        let conn = self.lock()?;
+        let mut by_key = HashMap::new();
+        let mut people: HashMap<String, CommunityMemoryPersonFacts> = HashMap::new();
+        for key in keys {
+            let Some(account) = account_locked(&conn, key)? else {
+                continue;
+            };
+            if account.status == CommunityPersonStatus::Forgotten {
+                continue;
+            }
+            let Some(person) = person_locked(&conn, &account.person_id)? else {
+                continue;
+            };
+            if person.status != CommunityPersonStatus::Normal {
+                continue;
+            }
+            by_key.insert(key.clone(), person.id.clone());
+            if people.contains_key(&person.id) {
+                continue;
+            }
+            let history = person_history_locked(&conn, &person)?;
+            let accounts = live_accounts_locked(&conn, &person.id)?
+                .into_iter()
+                .map(|account| (account.account_key, account.platform))
+                .collect();
+            let facts = CommunityMemoryPersonFacts {
+                name: person.name.clone(),
+                regular: is_regular(&history, now, threshold),
+                streams: history.streams(),
+                accounts,
+                memories: memories_locked(&conn, &person.id)?,
+                note: person.note.clone(),
+            };
+            people.insert(person.id.clone(), facts);
+        }
+        Ok((by_key, people))
+    }
+
+    /// A pass's answer for one person (D10): forget what the person
+    /// contradicted, rewrite what changed, then add what is new, at most
+    /// two new and eight in all. Only this person's own memory ids count;
+    /// a new memory records the account whose words taught it. Returns how
+    /// many were added.
+    pub fn community_memories_apply(
+        &self,
+        person_id: &str,
+        session_id: &str,
+        adds: &[(String, String)],
+        updates: &[(String, String)],
+        removes: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<u32> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let at = iso(now);
+        for id in removes {
+            transaction.execute(
+                "DELETE FROM community_memories WHERE id = ?1 AND person_id = ?2",
+                params![id, person_id],
+            )?;
+        }
+        for (id, text) in updates {
+            transaction.execute(
+                "UPDATE community_memories SET text = ?1, updated_at = ?2
+                 WHERE id = ?3 AND person_id = ?4",
+                params![text, at, id, person_id],
+            )?;
+        }
+        let mut kept: usize = transaction.query_row(
+            "SELECT COUNT(*) FROM community_memories WHERE person_id = ?1",
+            params![person_id],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let mut learned = 0u32;
+        for (text, account_key) in adds.iter().take(MEMORY_ADDS_MAX) {
+            if kept >= MEMORY_PER_PERSON_MAX {
+                break;
+            }
+            transaction.execute(
+                "INSERT INTO community_memories
+                 (id, person_id, account_key, text, session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![new_id(), person_id, account_key, text, session_id, at],
+            )?;
+            kept += 1;
+            learned += 1;
+        }
+        if learned > 0 || !updates.is_empty() || !removes.is_empty() {
+            transaction.execute(
+                "UPDATE community_people SET updated_at = ?2 WHERE id = ?1",
+                params![person_id, at],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(learned)
     }
 
     /// The daily and at-start prune (D3, A4), per account clock: a YouTube

@@ -27,6 +27,8 @@ pub const REGULAR_STREAMS_DEFAULT: u32 = 3;
 pub const REGULAR_STREAMS_MIN: u32 = 2;
 pub const REGULAR_STREAMS_MAX: u32 = 10;
 pub const REGULAR_WINDOW_DAYS: i64 = 90;
+/// Memories that ride an arrival into the greet and tick context (D10).
+pub const VIEWER_MEMORIES_MAX: usize = 3;
 /// "Back": the person's last chat was this long ago or longer (D7).
 pub const BACK_AFTER_DAYS: i64 = 30;
 /// YouTube accounts are remembered this long after their last chat (D3,
@@ -114,6 +116,16 @@ pub struct ViewerArrival {
     /// "2026-03", for the hover line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
+    /// Plan 225 D10: what Buddy remembers of the person (the newest
+    /// [`VIEWER_MEMORIES_MAX`]), read beside the arrival for one delivery
+    /// when "Buddy remembers" is on. Never on the wire and never in SQLite:
+    /// the greet and tick context read it here; the card fetches memories
+    /// on open.
+    #[serde(skip)]
+    pub memories: Vec<String>,
+    /// The streamer's note, the same way (the tick's `viewers` only).
+    #[serde(skip)]
+    pub note: Option<String>,
 }
 
 /// A person's status (D1, D13).
@@ -568,6 +580,10 @@ pub struct CommunitySettings {
     /// Buddy remembers (Premium, D10, default OFF).
     #[serde(default)]
     pub remember: bool,
+    /// D10: the "Let Buddy remember…" card was answered (Turn on or Not
+    /// now), so it is never offered twice.
+    #[serde(default)]
+    pub remember_offered: bool,
     /// Community sync (Premium, D5, default OFF).
     #[serde(default)]
     pub sync: bool,
@@ -589,6 +605,7 @@ impl Default for CommunitySettings {
             welcome_on_stream: true,
             milestone_cards: false,
             remember: false,
+            remember_offered: false,
             sync: false,
         }
     }
@@ -811,6 +828,8 @@ pub fn arrival_facts(
         milestone,
         platforms,
         since: history.first_seen_at.map(since_month),
+        memories: Vec::new(),
+        note: None,
     }
 }
 
@@ -1323,6 +1342,8 @@ mod tests {
                 milestone: None,
                 platforms: vec![StreamPlatform::Twitch, StreamPlatform::Youtube],
                 since: Some("2026-03".into()),
+                memories: Vec::new(),
+                note: None,
             }
         );
         let one = PersonHistory {
@@ -1725,6 +1746,7 @@ mod tests {
                 "welcomeOnStream": true,
                 "milestoneCards": false,
                 "remember": false,
+                "rememberOffered": false,
                 "sync": false
             })
         );
@@ -1741,6 +1763,8 @@ mod tests {
             milestone: None,
             platforms: Vec::new(),
             since: None,
+            memories: Vec::new(),
+            note: None,
         };
         let mut arrivals: Vec<ReportArrival> = (0..12)
             .map(|index| ReportArrival {

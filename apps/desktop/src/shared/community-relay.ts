@@ -17,6 +17,7 @@ export const COMMUNITY_RELAY_METHODS = [
   'cohost.community.suggestion.accept',
   'cohost.community.suggestion.dismiss',
   'cohost.community.forget',
+  'cohost.community.memory.delete',
   'cohost.community.wave'
 ] as const
 

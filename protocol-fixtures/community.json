@@ -52,6 +52,7 @@
     "welcomeOnStream": true,
     "milestoneCards": false,
     "remember": false,
+    "rememberOffered": false,
     "sync": false
   },
   "summary": {

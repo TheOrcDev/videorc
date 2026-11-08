@@ -33,12 +33,13 @@ use crate::cohost_greetings::{
     greeting_platform, milestone_builtin_text, resolve_line, resolve_template, welcome_facts_with,
 };
 use crate::cohost_throttle::{AutoChatThrottle, GreetingOffer};
+use crate::community::VIEWER_MEMORIES_MAX;
 use crate::live_chat::LiveChatMessage;
 use crate::protocol::{CohostReportGreetingsSkipped, CohostReportPostSource};
 use crate::streaming::stream_platform_id;
 use crate::videorc_api::{
-    COHOST_GREET_ITEMS_MAX, CohostApiError, CohostApiErrorKind, CohostGreetItem,
-    CohostGreetRequest, CohostGreetResponse, CohostTickPersona,
+    COHOST_GREET_ITEMS_MAX, COHOST_MEMORY_TEXT_MAX_CHARS, CohostApiError, CohostApiErrorKind,
+    CohostGreetItem, CohostGreetRequest, CohostGreetResponse, CohostTickArrival, CohostTickPersona,
 };
 
 /// A proposed card the streamer did not act on leaves after this long.
@@ -724,7 +725,7 @@ impl AutoChatLane {
         let item_id = format!("g-{}", self.seq);
         pending.request.items.push(CohostGreetItem {
             id: item_id.clone(),
-            kind: first.kind.wire().to_string(),
+            kind: first.kind.greet_route_kind().to_string(),
             platform: first.platform,
             names,
             others: others as u64,
@@ -734,6 +735,21 @@ impl AutoChatLane {
             amount: non_empty(first.amount.as_deref()),
             reward: non_empty(first.reward.as_deref()),
             first_message_text: non_empty(first.first_message_text.as_deref()),
+            // Plan 225 D10: how often the viewer comes and what Buddy
+            // remembers them saying (at most 3 of at most 100), on a
+            // returning person's welcome only; absent, the request is
+            // byte-identical to plan 192's.
+            arrival: first.arrival.as_ref().map(CohostTickArrival::from_viewer),
+            memories: first.arrival.as_ref().and_then(|arrival| {
+                let memories: Vec<String> = arrival
+                    .memories
+                    .iter()
+                    .map(|memory| truncate_utf16(memory.trim(), COHOST_MEMORY_TEXT_MAX_CHARS))
+                    .filter(|memory| !memory.is_empty())
+                    .take(VIEWER_MEMORIES_MAX)
+                    .collect();
+                (!memories.is_empty()).then_some(memories)
+            }),
             fallback_line,
         });
         pending.batches.push(PendingGreeting {
@@ -2415,6 +2431,85 @@ mod tests {
         );
         assert!(pass.greet.is_none());
         assert_eq!(pass.bubble.len(), 1);
+    }
+
+    /// Plan 225 D10: a returning person's welcome carries how often they
+    /// come and what Buddy remembers (at most 3, blanks dropped, never the
+    /// note); a first-timer's carries neither, so plan 192's body stands.
+    #[test]
+    fn a_returning_welcome_carries_arrival_and_memories_and_a_first_timer_neither() {
+        let start = Instant::now();
+        let bubble = bare_settings(CohostTalkMode::Bubble);
+        let mut lane = AutoChatLane::default();
+        let mut back = chat_row("Bo", false, true);
+        back.arrival = Some(crate::community::ViewerArrival {
+            streams: 9,
+            regular: true,
+            away_days: None,
+            in_a_row: 3,
+            milestone: None,
+            platforms: Vec::new(),
+            since: Some("2026-03".to_string()),
+            memories: vec![
+                "Plays on Kick at night".to_string(),
+                "   ".to_string(),
+                "Learning Rust".to_string(),
+                "Collects keyboards".to_string(),
+                "A fifth, never sent".to_string(),
+            ],
+            note: Some("never sent on a greet".to_string()),
+        });
+        // An arrival wave may be held for its collapse window (D9): the
+        // greeting then leaves on the drain, once, still one item.
+        let first = lane.note_activity(&bubble, Some(&ai()), true, &[back], start, &now_iso());
+        let pending = match first.greet {
+            Some(pending) => pending,
+            None => {
+                let due = first.schedule.expect("a held arrival wave is scheduled");
+                lane.drain(&bubble, Some(&ai()), true, due, &now_iso())
+                    .greet
+                    .expect("the drained wave asks the AI once")
+            }
+        };
+        assert_eq!(
+            pending.request.items.len(),
+            1,
+            "one welcome for one arrival"
+        );
+        let body = serde_json::to_value(&pending.request).unwrap();
+        assert_eq!(
+            body["items"][0]["kind"], "returning",
+            "a regular is the route's returning"
+        );
+        assert_eq!(
+            body["items"][0]["arrival"],
+            serde_json::json!({ "regular": true, "streams": 9 })
+        );
+        assert_eq!(
+            body["items"][0]["memories"],
+            serde_json::json!([
+                "Plays on Kick at night",
+                "Learning Rust",
+                "Collects keyboards"
+            ])
+        );
+        assert!(body["items"][0].get("note").is_none());
+        assert!(!body.to_string().contains("never sent"));
+        let mut lane = AutoChatLane::default();
+        let pending = lane
+            .note_activity(
+                &bubble,
+                Some(&ai()),
+                true,
+                &[chat_row("Ana", true, true)],
+                start,
+                &now_iso(),
+            )
+            .greet
+            .unwrap();
+        let body = serde_json::to_value(&pending.request).unwrap();
+        assert!(body["items"][0].get("arrival").is_none());
+        assert!(body["items"][0].get("memories").is_none());
     }
 
     /// The greet route is strict: only its four platforms are asked, and

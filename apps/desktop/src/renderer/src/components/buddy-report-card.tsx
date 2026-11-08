@@ -28,6 +28,10 @@ import {
 } from '@/components/ui/select'
 import { useBuddyReport } from '@/hooks/use-buddy-report'
 import { useStudioCore } from '@/hooks/use-studio'
+
+// Plan 225 D10: the one-time "Let Buddy remember…" offer lives in the
+// Community chunk; Reports loads it only when the block renders.
+const RememberOffer = lazy(() => import('@/components/community/remember-offer'))
 import type { ClipMomentSource } from '@/lib/backend'
 import {
   capReportList,
@@ -247,7 +251,17 @@ function ReportBody({
       ) : (
         <ReportStats stats={view.stats} />
       )}
-      <ReportCommunity community={view.community} summaryLock={summaryLock} />
+      <ReportCommunity
+        community={view.community}
+        offer={
+          view.community ? (
+            <Suspense fallback={null}>
+              <RememberOffer regularsCame={view.community.regularsBack > 0} />
+            </Suspense>
+          ) : null
+        }
+        summaryLock={summaryLock}
+      />
       <ReportCommands commands={view.commands} />
       {/* Plan 211 D11: what the Buddy said in its bubble, every line, in the
           posts' row: when, why and the words. Nothing went to chat, so no
@@ -540,9 +554,12 @@ function ReportStats({ stats }: { stats: readonly BuddyReportStat[] }): ReactEle
  */
 function ReportCommunity({
   community,
+  offer,
   summaryLock
 }: {
   community: BuddyReportCommunityView | null
+  /** D10: the one-time "Let Buddy remember…" card, under the summary. */
+  offer?: ReactNode
   summaryLock: SummaryLock | null
 }): ReactElement | null {
   if (!community) return null
@@ -575,6 +592,7 @@ function ReportCommunity({
           {community.summary}
         </p>
       ) : null}
+      {offer}
       <div
         className={cn(
           'grid min-w-0 gap-4',

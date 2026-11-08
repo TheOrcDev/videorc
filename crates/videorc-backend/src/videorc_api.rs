@@ -58,6 +58,30 @@ pub(crate) const COHOST_GREET_TIMEOUT: std::time::Duration =
 const COHOST_GREET_PATH: &str = "/api/ai/cohost/greet";
 /// Greetings one greet request may carry (the route's `items` cap).
 pub(crate) const COHOST_GREET_ITEMS_MAX: usize = 6;
+/// Plan 225 D10: the memory route's server budget is 20 s and its
+/// `maxDuration` 30; the pass runs after the stream, so the client waits
+/// for the whole of it.
+// The real runner is compiled out of unit tests (they drive a fake), so
+// the route's client is unused there.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) const COHOST_MEMORY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(32);
+const COHOST_MEMORY_PATH: &str = "/api/ai/cohost/memory";
+pub(crate) const COHOST_MEMORY_PROMPT_VERSION: u32 = 1;
+/// The memory route's caps (zod strict; a bigger body is `invalid-request`).
+pub(crate) const COHOST_MEMORY_MAX_BODY_BYTES: usize = 128 * 1024;
+pub(crate) const COHOST_MEMORY_PEOPLE_MAX: usize = 15;
+pub(crate) const COHOST_MEMORY_MESSAGES_MAX: usize = 20;
+pub(crate) const COHOST_MEMORY_MESSAGE_MAX_CHARS: usize = 200;
+pub(crate) const COHOST_MEMORY_TEXT_MAX_CHARS: usize = 100;
+pub(crate) const COHOST_MEMORY_ADDS_MAX: usize = 2;
+pub(crate) const COHOST_MEMORY_NOTE_MAX_CHARS: usize = 300;
+pub(crate) const COHOST_MEMORY_SUMMARY_MAX_CHARS: usize = 280;
+pub(crate) const COHOST_MEMORY_NAME_MAX_CHARS: usize = 120;
+/// Tick v5 (plan 225 D10): the people behind a batch, at most 10 (5 on
+/// banter), each with at most 3 memories.
+pub(crate) const COHOST_TICK_VIEWERS_MAX: usize = 10;
+pub(crate) const COHOST_TICK_BANTER_VIEWERS_MAX: usize = 5;
+pub(crate) const COHOST_TICK_VIEWER_NAME_MAX_CHARS: usize = 160;
 /// The server rejects a larger body (checked on content-length bytes) as
 /// `invalid-request`; the engine trims candidates until the JSON fits.
 pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
@@ -271,6 +295,48 @@ pub struct CohostTickRequest {
     /// a normal tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<CohostTickIntent>,
+    /// v5 (plan 225 D10): read-only context about the people behind this
+    /// batch (at most 10; the first 5 on banter): how often they come, what
+    /// Buddy remembers them saying and the streamer's note. Absent below v5
+    /// and when there is nothing to say, so a v4 body stays byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewers: Option<Vec<CohostTickViewer>>,
+}
+
+/// v5 (plan 225 D10), and the greet route's `arrival`: how often a
+/// returning person comes. The same three facts on both routes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickArrival {
+    pub regular: bool,
+    pub streams: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub away_days: Option<u32>,
+}
+
+impl CohostTickArrival {
+    pub fn from_viewer(arrival: &crate::community::ViewerArrival) -> Self {
+        Self {
+            regular: arrival.regular,
+            streams: arrival.streams,
+            away_days: arrival.away_days,
+        }
+    }
+}
+
+/// v5: one person behind the batch (plan 225 D10). `memories` holds at
+/// most 3 of at most 100 characters, `note` at most 300; the note is the
+/// streamer's own words and travels read-only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickViewer {
+    pub name: String,
+    pub platform: StreamPlatform,
+    pub regular: bool,
+    pub streams: u32,
+    pub memories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// v4: the persona the prompt speaks as (plan 164).
@@ -338,6 +404,14 @@ pub struct CohostTickMessage {
     /// v3: the author's first message in the channel. Absent on v1/v2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_message: Option<bool>,
+    /// v5 (plan 225 D10): a returning person's arrival row carries how
+    /// often they come. Absent below v5 and on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival: Option<CohostTickArrival>,
+    /// The author's account key (`platform:author_id`), for the engine's
+    /// own bookkeeping of who is behind a batch (`viewers`). Never sent.
+    #[serde(skip)]
+    pub author_key: Option<String>,
 }
 
 /// Every v2 field is optional and absent means its default, so a v1 body
@@ -669,7 +743,121 @@ pub struct CohostGreetItem {
     /// Welcomes only: the viewer's first message, at most 200.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_message_text: Option<String>,
+    /// Plan 225 D10 (Premium): how often the viewer comes, on a welcome of
+    /// a returning person. Absent, the request is byte-identical to plan
+    /// 192's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival: Option<CohostTickArrival>,
+    /// Plan 225 D10 (Premium): what Buddy remembers them saying in earlier
+    /// streams, at most 3 of at most 100; the model may use one, never
+    /// word for word. Absent without "Buddy remembers".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memories: Option<Vec<String>>,
     pub fallback_line: String,
+}
+
+// --- Buddy memory wire types (plan 225 D10; field names are load-bearing) ---
+
+/// `POST /api/ai/cohost/memory`: one pass after a stream, for the people
+/// who chatted (never a YouTube message, never a bot, never anyone
+/// forgotten). Strict on the server and at most 128 KB.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryRequest {
+    pub prompt_version: u32,
+    pub client_version: String,
+    /// The live-chat session id.
+    pub session_client_id: String,
+    pub consent_to_process_chat: bool,
+    /// The route takes `null` for both.
+    pub persona: Option<CohostTickPersona>,
+    pub stream_title: Option<String>,
+    pub counts: CohostMemoryCounts,
+    /// 1 to 15, by message count.
+    pub people: Vec<CohostMemoryPerson>,
+}
+
+/// The stream's Community counts, for the audience summary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryCounts {
+    pub regulars_back: u32,
+    pub first_timers: u32,
+    pub first_timers_stayed: u32,
+    pub comebacks: u32,
+}
+
+/// One person of the pass: their newest messages this stream (1 to 20,
+/// each at most 200 characters, from Twitch, X or Kick only), what Buddy
+/// already knows (at most 8) and the streamer's note (read-only).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryPerson {
+    /// Unique in the request, at most 80.
+    pub r#ref: String,
+    pub name: String,
+    pub platforms: Vec<StreamPlatform>,
+    pub regular: bool,
+    pub streams: u32,
+    pub messages: Vec<CohostMemoryMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memories: Option<Vec<CohostMemoryKnown>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryMessage {
+    pub at: String,
+    pub platform: StreamPlatform,
+    pub text: String,
+}
+
+/// A memory the desktop already holds, by its id; the answer updates or
+/// removes it by that id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryKnown {
+    pub id: String,
+    pub text: String,
+}
+
+/// The route's 200: one entry per person in request order (an entry for a
+/// ref the request did not send is ignored), the two-sentence summary when
+/// there is one, the model and its usage. Item-wise tolerant like the tick.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryResponse {
+    #[serde(default, deserialize_with = "lenient_items")]
+    pub people: Vec<CohostMemoryPersonResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub usage: Option<CohostTickUsage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryPersonResult {
+    pub r#ref: String,
+    #[serde(default)]
+    pub add: Vec<CohostMemoryAdd>,
+    #[serde(default)]
+    pub update: Vec<CohostMemoryKnown>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// A new memory and the platform of the message that taught it, so it
+/// lands on the right account (a split returns it there, D4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMemoryAdd {
+    pub text: String,
+    pub platform: StreamPlatform,
 }
 
 /// A missing id means "use the fallback". Item-wise tolerant like the tick
@@ -2012,6 +2200,50 @@ impl VideorcApiClient {
                 CohostApiError::malformed_response(
                     status.as_u16(),
                     format!("Could not read Buddy's greet response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    /// One memory pass (plan 225 D10): the people who chatted and what Buddy
+    /// should add, rewrite or forget about them, plus the audience summary.
+    /// Same auth and failure mapping as the greet; the job decides what each
+    /// class means (a 403 or a 429 keeps the pass queued for later, anything
+    /// else retries sooner).
+    #[cfg_attr(test, allow(dead_code))]
+    pub async fn post_cohost_memory(
+        &self,
+        bearer_token: &str,
+        request: &CohostMemoryRequest,
+    ) -> std::result::Result<CohostMemoryResponse, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(COHOST_MEMORY_PATH))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(COHOST_MEMORY_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, COHOST_MEMORY_TIMEOUT))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return response.json().await.map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read Buddy's memory response: {error}"),
                 )
             });
         }
@@ -3622,6 +3854,86 @@ mod tests {
         assert_eq!(off.cohost.unwrap().greet, Some(0));
     }
 
+    /// Plan 225 D10: the memory request matches the route's zod shape
+    /// (`persona` and `streamTitle` null, never absent; optionals absent,
+    /// never null) and the response tolerates a bad person and unknown keys.
+    #[test]
+    fn cohost_memory_wire_shapes_match_the_route_and_tolerate_bad_items() {
+        let request = CohostMemoryRequest {
+            prompt_version: COHOST_MEMORY_PROMPT_VERSION,
+            client_version: "videorc-desktop/0.21.0".to_string(),
+            session_client_id: "s1".to_string(),
+            consent_to_process_chat: true,
+            persona: None,
+            stream_title: None,
+            counts: CohostMemoryCounts {
+                regulars_back: 2,
+                first_timers: 1,
+                first_timers_stayed: 0,
+                comebacks: 1,
+            },
+            people: vec![CohostMemoryPerson {
+                r#ref: "p1".to_string(),
+                name: "Bo".to_string(),
+                platforms: vec![StreamPlatform::Twitch, StreamPlatform::Kick],
+                regular: true,
+                streams: 9,
+                messages: vec![CohostMemoryMessage {
+                    at: "2026-11-08T18:00:00.000Z".to_string(),
+                    platform: StreamPlatform::Kick,
+                    text: "hi".to_string(),
+                }],
+                memories: Some(vec![CohostMemoryKnown {
+                    id: "m1".to_string(),
+                    text: "Learning Rust".to_string(),
+                }]),
+                note: None,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({
+                "promptVersion": 1,
+                "clientVersion": "videorc-desktop/0.21.0",
+                "sessionClientId": "s1",
+                "consentToProcessChat": true,
+                "persona": null,
+                "streamTitle": null,
+                "counts": { "regularsBack": 2, "firstTimers": 1, "firstTimersStayed": 0, "comebacks": 1 },
+                "people": [{
+                    "ref": "p1",
+                    "name": "Bo",
+                    "platforms": ["twitch", "kick"],
+                    "regular": true,
+                    "streams": 9,
+                    "messages": [{ "at": "2026-11-08T18:00:00.000Z", "platform": "kick", "text": "hi" }],
+                    "memories": [{ "id": "m1", "text": "Learning Rust" }]
+                }]
+            })
+        );
+        let response: CohostMemoryResponse = serde_json::from_value(serde_json::json!({
+            "people": [
+                { "ref": "p1", "add": [{ "text": "Plays on Kick at night", "platform": "kick" }], "remove": ["m1"] },
+                { "ref": 7 },
+                "junk"
+            ],
+            "summary": "Two came back.",
+            "model": "fake",
+            "extra": true
+        }))
+        .unwrap();
+        assert_eq!(
+            response.people.len(),
+            1,
+            "a bad person is dropped on its own"
+        );
+        assert_eq!(response.people[0].add[0].platform, StreamPlatform::Kick);
+        assert_eq!(response.people[0].update, Vec::new());
+        assert_eq!(response.people[0].remove, vec!["m1".to_string()]);
+        assert_eq!(response.summary.as_deref(), Some("Two came back."));
+        assert_eq!(COHOST_MEMORY_PATH, "/api/ai/cohost/memory");
+    }
+
     /// Plan 192: the greet request matches the route's zod shape (camelCase,
     /// absent optionals, `persona` nullable) and the response tolerates a
     /// bad line, a missing mood and unknown keys.
@@ -3651,6 +3963,8 @@ mod tests {
                     amount: None,
                     reward: None,
                     first_message_text: Some("hey!".to_string()),
+                    arrival: None,
+                    memories: None,
                     fallback_line: "Hi Ana and Bo and 4 others, welcome to the stream!".to_string(),
                 },
                 CohostGreetItem {
@@ -3665,6 +3979,8 @@ mod tests {
                     amount: Some("500 Diamonds".to_string()),
                     reward: Some("Hydrate".to_string()),
                     first_message_text: None,
+                    arrival: None,
+                    memories: None,
                     fallback_line: "Thanks for redeeming, Cy!".to_string(),
                 },
             ],

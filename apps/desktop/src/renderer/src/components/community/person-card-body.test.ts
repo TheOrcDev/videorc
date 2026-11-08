@@ -107,6 +107,56 @@ async function mount(
 const text = (): string => container.textContent ?? ''
 
 describe('the person card (plan 225 D11)', () => {
+  // Plan 225 D10: every memory can be forgotten; the card asks, then calls
+  // the delete and reads the person again.
+  it('forgets one memory after asking, through the delete call', async () => {
+    const remembered: CommunityPerson = {
+      ...ada,
+      memories: [
+        {
+          id: 'm1',
+          accountKey: 'twitch:t1',
+          text: 'Learning Rust',
+          createdAt: '2026-11-01T18:00:00Z',
+          updatedAt: '2026-11-01T18:00:00Z'
+        }
+      ]
+    }
+    const call = vi.fn(async (method: string) => {
+      if (method === 'cohost.community.person') return remembered
+      if (method === 'cohost.community.memory.delete') return { accepted: true }
+      throw new Error(`unexpected ${method}`)
+    })
+    await act(async () => {
+      root.render(
+        createElement(PersonCardBody, {
+          call: call as unknown as CommunityRelayCall,
+          memoryLock: null,
+          target: { platform: 'twitch', authorId: 't1', name: 'Ada' }
+        })
+      )
+    })
+    expect(text()).toContain('Learning Rust')
+    const forget = container.querySelector<HTMLButtonElement>(
+      '[data-testid="person-card-memory-forget"]'
+    )
+    expect(forget?.getAttribute('aria-label')).toBe('Forget “Learning Rust”')
+    await act(async () => forget?.click())
+    expect(document.body.textContent).toContain('Forget this memory?')
+    expect(document.body.textContent).toContain(
+      'Buddy stops remembering “Learning Rust” about Ada.'
+    )
+    expect(call).not.toHaveBeenCalledWith('cohost.community.memory.delete', expect.anything())
+    const confirm = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="person-memory-forget-confirm"]'
+    )
+    await act(async () => confirm?.click())
+    expect(call).toHaveBeenCalledWith('cohost.community.memory.delete', { id: 'm1' })
+    expect(call.mock.calls.filter(([method]) => method === 'cohost.community.person').length).toBe(
+      2
+    )
+  })
+
   it('loads the person on open by the row account and shows the card lines', async () => {
     const call = await mount(ada)
     expect(call).toHaveBeenCalledWith('cohost.community.person', {

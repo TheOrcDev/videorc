@@ -27,6 +27,7 @@ import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Spinner } from '@/components/ui/spinner'
 import { Textarea } from '@/components/ui/textarea'
 import type {
+  CommunityMemory,
   CommunityAccount,
   CommunityPerson,
   CommunityPersonParams,
@@ -40,6 +41,7 @@ import {
   YOUTUBE_RETENTION_LINE,
   forgetCopy,
   linkEventLabel,
+  memoryForgetCopy,
   personHasX,
   personRowContext,
   personStatsLine,
@@ -90,6 +92,7 @@ export function PersonCardBody({
   showLinkHistory = false,
   startIn = 'card',
   onForgetRequest,
+  onMemoryForgetRequest,
   onClose,
   onChanged
 }: {
@@ -109,6 +112,11 @@ export function PersonCardBody({
    * the alert dialog outlives the popover. Absent: the card asks itself.
    */
   onForgetRequest?: (person: CommunityPerson) => void
+  /**
+   * D10: the forget question for one memory, handed to the host the same
+   * way. Absent: the card asks itself.
+   */
+  onMemoryForgetRequest?: (person: CommunityPerson, memory: CommunityMemory) => void
   onClose?: () => void
   /** Something about the community changed (a list may refresh). */
   onChanged?: () => void
@@ -119,6 +127,7 @@ export function PersonCardBody({
   const [view, setView] = useState<'card' | 'link'>(startIn)
   const [waved, setWaved] = useState(false)
   const [forgetOpen, setForgetOpen] = useState(false)
+  const [memoryForget, setMemoryForget] = useState<CommunityMemory | null>(null)
   const params = personParams(target)
   const paramsKey = JSON.stringify(params)
 
@@ -279,11 +288,31 @@ export function PersonCardBody({
         {memoryLock ? (
           <div data-testid="person-card-memory-lock">{memoryLock}</div>
         ) : (person.memories ?? []).length > 0 ? (
-          <ul className="flex flex-col gap-1 text-xs text-foreground">
+          <ul
+            className="flex flex-col gap-1 text-xs text-foreground"
+            data-testid="person-card-memory-list"
+          >
             {(person.memories ?? []).map((memory) => (
-              <li key={memory.id} className="flex gap-1.5">
+              <li key={memory.id} className="flex items-start gap-1.5">
                 <SparkleIcon aria-hidden className="mt-0.5 size-3 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 break-words select-text">{memory.text}</span>
+                <span className="min-w-0 flex-1 break-words select-text">{memory.text}</span>
+                {/* D10: every memory can be forgotten; it asks first. */}
+                <Button
+                  aria-label={`Forget “${memory.text}”`}
+                  className="-my-1 shrink-0 text-muted-foreground"
+                  data-testid="person-card-memory-forget"
+                  disabled={busy !== null}
+                  size="icon-xs"
+                  type="button"
+                  variant="ghost"
+                  onClick={() =>
+                    onMemoryForgetRequest
+                      ? onMemoryForgetRequest(person, memory)
+                      : setMemoryForget(memory)
+                  }
+                >
+                  <DeleteIcon aria-hidden />
+                </Button>
               </li>
             ))}
           </ul>
@@ -372,6 +401,30 @@ export function PersonCardBody({
         <span className="flex-1" />
         <KebabMenu items={menu} label={`More for ${name}`} />
       </div>
+      {onMemoryForgetRequest ? null : (
+        <ConfirmDialog
+          confirmDisabled={busy === 'memory'}
+          confirmLabel={busy === 'memory' ? 'Forgetting…' : memoryForgetCopy(name, '').confirm}
+          description={memoryForget ? memoryForgetCopy(name, memoryForget.text).description : ''}
+          open={memoryForget !== null}
+          testId="person-memory-forget"
+          title={memoryForgetCopy(name, '').title}
+          onCancel={() => setMemoryForget(null)}
+          onConfirm={() => {
+            const memory = memoryForget
+            if (!memory) return
+            void run(
+              'memory',
+              () => call('cohost.community.memory.delete', { id: memory.id }),
+              'that memory',
+              () => {
+                setMemoryForget(null)
+                load()
+              }
+            )
+          }}
+        />
+      )}
       {onForgetRequest ? null : (
         <ConfirmDialog
           confirmDisabled={busy === 'forget'}

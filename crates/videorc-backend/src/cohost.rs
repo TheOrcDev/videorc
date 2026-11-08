@@ -60,12 +60,14 @@ use crate::storage::Database;
 use crate::streaming::{StreamPlatform, stream_platform_label};
 use crate::twitch_chat::gif_title;
 use crate::videorc_api::{
-    COHOST_COMMAND_MAX_CANDIDATES, COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError,
-    CohostApiErrorKind, CohostCommandCandidate, CohostCommandRequest, CohostCommandResponse,
-    CohostGreetRequest, CohostGreetResponse, CohostSpotlightCandidate, CohostSpotlightRequest,
-    CohostSpotlightResponse, CohostTickIntent, CohostTickMessage, CohostTickMood,
-    CohostTickOpenPromise, CohostTickOpenQuestion, CohostTickPersona, CohostTickPromise,
-    CohostTickQuestion, CohostTickRequest, CohostTickResponse, VideorcApiClient,
+    COHOST_COMMAND_MAX_CANDIDATES, COHOST_MEMORY_NOTE_MAX_CHARS, COHOST_MEMORY_TEXT_MAX_CHARS,
+    COHOST_SPOTLIGHT_MAX_BODY_BYTES, COHOST_TICK_BANTER_VIEWERS_MAX,
+    COHOST_TICK_VIEWER_NAME_MAX_CHARS, COHOST_TICK_VIEWERS_MAX, CohostApiError, CohostApiErrorKind,
+    CohostCommandCandidate, CohostCommandRequest, CohostCommandResponse, CohostGreetRequest,
+    CohostGreetResponse, CohostSpotlightCandidate, CohostSpotlightRequest, CohostSpotlightResponse,
+    CohostTickArrival, CohostTickIntent, CohostTickMessage, CohostTickMood, CohostTickOpenPromise,
+    CohostTickOpenQuestion, CohostTickPersona, CohostTickPromise, CohostTickQuestion,
+    CohostTickRequest, CohostTickResponse, CohostTickViewer, VideorcApiClient,
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
@@ -76,10 +78,15 @@ pub const COHOST_REPORT_SAVED_EVENT: &str = "cohost.report.saved";
 /// step down `COHOST_PROMPT_VERSION_LADDER` (3 → 2 → 1) until it ends
 /// (server rollback); a rejected v1 tick is a real failure.
 pub const COHOST_PROMPT_VERSION: u32 = 3;
-pub const COHOST_PROMPT_VERSION_LADDER: [u32; 4] = [4, 3, 2, 1];
+pub const COHOST_PROMPT_VERSION_LADDER: [u32; 5] = [5, 4, 3, 2, 1];
 /// Persona, per-question `addressed`/`mood` and banter (plan 164 S-D3): a
 /// session starts on it only when `/capabilities` reported `cohost.tick: 4`.
 pub(crate) const COHOST_PROMPT_VERSION_PERSONA_MIN: u32 = 4;
+/// Plan 225 D10: v5 adds `arrival` on a message and `viewers` on the
+/// request; a v4 body stays byte-identical.
+pub(crate) const COHOST_PROMPT_VERSION_VIEWERS_MIN: u32 = 5;
+/// Banter (v5) names at most five regulars who chatted this recently.
+const BANTER_VIEWERS_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// `rules` ride every version from v2 on, whatever the pinned version.
 const COHOST_PROMPT_VERSION_RULES_MIN: u32 = 2;
 /// Transcript, summary, promises, recap, on-topic (plan 068 D7).
@@ -2332,6 +2339,47 @@ struct CohostSession {
     /// Plan 164 S-D4: a banter request is outstanding (it shares the tick's
     /// `in_flight`, so the two never overlap).
     banter_in_flight: bool,
+    /// Plan 225 D10 (v5): what the tick's `viewers` may say about each
+    /// author of this session, by account key: the arrival facts and, with
+    /// "Buddy remembers" on, the memories and the note that rode the
+    /// arrival row. Per session, like everything else here.
+    viewer_context: HashMap<String, TickViewerContext>,
+}
+
+/// Plan 225 D10: one author's context for the tick's `viewers` (v5).
+#[derive(Debug, Clone)]
+struct TickViewerContext {
+    name: String,
+    platform: StreamPlatform,
+    regular: bool,
+    streams: u32,
+    memories: Vec<String>,
+    note: Option<String>,
+    /// When the engine last noted a row of theirs (banter's 10 minutes).
+    last_seen: Instant,
+}
+
+impl TickViewerContext {
+    fn wire(&self) -> CohostTickViewer {
+        CohostTickViewer {
+            name: truncate_utf16(self.name.trim(), COHOST_TICK_VIEWER_NAME_MAX_CHARS),
+            platform: self.platform,
+            regular: self.regular,
+            streams: self.streams,
+            memories: self
+                .memories
+                .iter()
+                .map(|memory| truncate_utf16(memory.trim(), COHOST_MEMORY_TEXT_MAX_CHARS))
+                .filter(|memory| !memory.is_empty())
+                .take(crate::community::VIEWER_MEMORIES_MAX)
+                .collect(),
+            note: self
+                .note
+                .as_deref()
+                .map(|note| truncate_utf16(note.trim(), COHOST_MEMORY_NOTE_MAX_CHARS))
+                .filter(|note| !note.is_empty()),
+        }
+    }
 }
 
 /// What the engine remembers about one chat row it noted.
@@ -3246,6 +3294,7 @@ impl CohostSession {
             answer_candidates: Vec::new(),
             offered_answers: HashSet::new(),
             banter_in_flight: false,
+            viewer_context: HashMap::new(),
         }
     }
 
@@ -3585,6 +3634,27 @@ impl CohostSession {
             let Some(mapped) = tick_message_from_chat(message) else {
                 continue;
             };
+            // Plan 225 D10: an arrival row teaches the engine who this is
+            // (and what Buddy remembers, when that is on); any later row of
+            // theirs only refreshes when they were last seen.
+            if let Some(key) = mapped.author_key.as_deref() {
+                if let Some(arrival) = &message.arrival {
+                    self.viewer_context.insert(
+                        key.to_string(),
+                        TickViewerContext {
+                            name: mapped.author.clone(),
+                            platform: message.platform,
+                            regular: arrival.regular,
+                            streams: arrival.streams,
+                            memories: arrival.memories.clone(),
+                            note: arrival.note.clone(),
+                            last_seen: now,
+                        },
+                    );
+                } else if let Some(context) = self.viewer_context.get_mut(key) {
+                    context.last_seen = now;
+                }
+            }
             self.remember_id(
                 &message.id,
                 KnownMessage {
@@ -3645,6 +3715,19 @@ impl CohostSession {
                 message.first_message = None;
             }
         }
+        // v5 (plan 225 D10): `arrival` and `viewers` ride only on v5; a v4
+        // body (and below) stays byte-identical to what those desktops send.
+        let speaks_v5 = self.speaks_v5();
+        if !speaks_v5 {
+            for message in &mut messages {
+                message.arrival = None;
+            }
+        }
+        let viewers = if speaks_v5 {
+            self.tick_viewers(&messages)
+        } else {
+            None
+        };
         let dropped_messages = std::mem::take(&mut self.dropped);
         // v1 fallback: no `rules` key at all, so the body stays byte-identical
         // to what a v1 desktop sends. From v2 on the rules always ride.
@@ -3701,7 +3784,44 @@ impl CohostSession {
             open_promises,
             persona: self.tick_persona(settings),
             intent: None,
+            viewers,
         }
+    }
+
+    /// v5 (plan 225 D10): the people behind this batch the engine knows
+    /// something about, in batch order, each once, at most ten. `None` when
+    /// there is nothing to say, so the key stays absent.
+    fn tick_viewers(&self, messages: &[CohostTickMessage]) -> Option<Vec<CohostTickViewer>> {
+        let mut seen = HashSet::new();
+        let viewers: Vec<CohostTickViewer> = messages
+            .iter()
+            .filter_map(|message| message.author_key.as_deref())
+            .filter(|key| seen.insert((*key).to_string()))
+            .filter_map(|key| self.viewer_context.get(key))
+            .take(COHOST_TICK_VIEWERS_MAX)
+            .map(TickViewerContext::wire)
+            .collect();
+        (!viewers.is_empty()).then_some(viewers)
+    }
+
+    /// Banter (v5): at most five regulars who chatted in the last ten
+    /// minutes, the most recent first, so the line may nod to one by name.
+    fn banter_viewers(&self, now: Instant) -> Option<Vec<CohostTickViewer>> {
+        let mut recent: Vec<&TickViewerContext> = self
+            .viewer_context
+            .values()
+            .filter(|context| {
+                context.regular
+                    && now.saturating_duration_since(context.last_seen) <= BANTER_VIEWERS_WINDOW
+            })
+            .collect();
+        recent.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        let viewers: Vec<CohostTickViewer> = recent
+            .into_iter()
+            .take(COHOST_TICK_BANTER_VIEWERS_MAX)
+            .map(TickViewerContext::wire)
+            .collect();
+        (!viewers.is_empty()).then_some(viewers)
     }
 
     /// v4 (plan 164 S-D3): the persona rides only on v4; a v3 body stays
@@ -3715,6 +3835,10 @@ impl CohostSession {
 
     fn speaks_v4(&self) -> bool {
         self.prompt_version >= COHOST_PROMPT_VERSION_PERSONA_MIN
+    }
+
+    fn speaks_v5(&self) -> bool {
+        self.prompt_version >= COHOST_PROMPT_VERSION_VIEWERS_MIN
     }
 
     /// A banter request (plan 164 S-D4): the v4 tick shape with
@@ -3747,6 +3871,11 @@ impl CohostSession {
             open_promises: None,
             persona: self.tick_persona(settings),
             intent: Some(CohostTickIntent::Banter),
+            viewers: if self.speaks_v5() {
+                self.banter_viewers(now)
+            } else {
+                None
+            },
         }
     }
 
@@ -6577,6 +6706,17 @@ pub(crate) fn tick_message_from_chat(message: &LiveChatMessage) -> Option<Cohost
         text,
         at: message.published_at.clone(),
         first_message: Some(message.first_message),
+        // Plan 225 D10 (v5): the arrival facts on the arrival row, and the
+        // account key behind every row for the engine's `viewers`.
+        arrival: message.arrival.as_ref().map(CohostTickArrival::from_viewer),
+        author_key: message
+            .author_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| {
+                !id.is_empty() && crate::community::platform_has_identity(message.platform)
+            })
+            .map(|id| crate::community::account_key(message.platform, id)),
     })
 }
 
@@ -6731,10 +6871,13 @@ impl CohostEngine {
         self.web_greet_version = version;
     }
 
-    /// The tick contract a new session starts on: v4 only when the web
-    /// reported it, else the pinned v3 (sent exactly as before).
+    /// The tick contract a new session starts on: v5 when the web reported
+    /// it (plan 225), v4 when it reported 4, else the pinned v3 (sent
+    /// exactly as before).
     fn initial_prompt_version(&self) -> u32 {
-        if self.web_tick_version >= Some(COHOST_PROMPT_VERSION_PERSONA_MIN) {
+        if self.web_tick_version >= Some(COHOST_PROMPT_VERSION_VIEWERS_MIN) {
+            COHOST_PROMPT_VERSION_VIEWERS_MIN
+        } else if self.web_tick_version >= Some(COHOST_PROMPT_VERSION_PERSONA_MIN) {
             COHOST_PROMPT_VERSION_PERSONA_MIN
         } else {
             COHOST_PROMPT_VERSION
@@ -10962,6 +11105,9 @@ where
             .filter(|title| !title.is_empty()),
         Instant::now(),
     );
+    // Plan 225 D10: the memory pass after this stream needs the consent
+    // this session was started with.
+    crate::community_service::note_cohost_consent(state, &session_id, consent);
     engine.scheduler = Some(spawn_scheduler(state.clone(), generation));
     engine.spotlight_scheduler = Some(spawn_spotlight_scheduler(state.clone(), generation));
     let listen = engine.settings.listen;
@@ -22301,6 +22447,89 @@ mod tests {
             .unwrap();
         assert_eq!(prepared.request.prompt_version, 3);
         assert_eq!(prepared.request.persona, None);
+    }
+
+    /// Plan 225 D10: v5 carries the arrival on the arrival row and the
+    /// people behind the batch; a v4 body (and a rollback to it) never does.
+    #[test]
+    fn a_v5_web_sends_arrival_and_viewers_and_a_v4_body_never_does() {
+        let start = Instant::now();
+        let mut rows = messages("session-1", 0..5);
+        rows[0].arrival = Some(crate::community::ViewerArrival {
+            streams: 14,
+            regular: true,
+            away_days: Some(31),
+            in_a_row: 5,
+            milestone: None,
+            platforms: Vec::new(),
+            since: Some("2026-03".to_string()),
+            memories: vec!["Learning Rust".to_string()],
+            note: Some("From the Rust meetup".to_string()),
+        });
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Off, Some(5), start);
+        engine.note_messages(&rows);
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 5);
+        let body = serde_json::to_value(&prepared.request).unwrap();
+        assert_eq!(
+            body["messages"][0]["arrival"],
+            serde_json::json!({ "regular": true, "streams": 14, "awayDays": 31 })
+        );
+        assert!(body["messages"][1].get("arrival").is_none());
+        assert!(
+            body["messages"][0].get("authorKey").is_none(),
+            "the account key never rides the wire"
+        );
+        assert_eq!(
+            body["viewers"],
+            serde_json::json!([{
+                "name": "Viewer 0",
+                "platform": "twitch",
+                "regular": true,
+                "streams": 14,
+                "memories": ["Learning Rust"],
+                "note": "From the Rust meetup"
+            }]),
+            "one entry per person the engine knows something about"
+        );
+        // The web rolled back: the retried body is a v4 desktop's, byte for byte.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(
+                400,
+                "prompt-version-unsupported",
+                "promptVersion 5 is not supported."
+            )),
+            start + Duration::from_secs(2),
+            "2026-08-22T10:00:02Z",
+        ));
+        let retried = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(11))
+            .unwrap();
+        assert_eq!(retried.request.prompt_version, 4);
+        let body = serde_json::to_value(&retried.request).unwrap();
+        assert!(body.get("viewers").is_none());
+        assert!(
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| message.get("arrival").is_none())
+        );
+        assert!(body.get("persona").is_some(), "v4 keeps the persona");
+        // A web that speaks v4 never sees a v5 key, whatever the rows carry.
+        let (mut engine, generation) = running_engine_with(CohostTalkMode::Off, Some(4), start);
+        engine.note_messages(&rows);
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 4);
+        let body = serde_json::to_value(&prepared.request).unwrap();
+        assert!(body.get("viewers").is_none());
+        assert!(body["messages"][0].get("arrival").is_none());
     }
 
     #[test]

@@ -48,6 +48,7 @@ import type {
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
 import {
   BUDDY_REMEMBERS_LOCK_REASON,
+  DEFAULT_COMMUNITY_SETTINGS,
   COMMUNITY_DISCLOSURE_LINE,
   YOUTUBE_RETENTION_LINE,
   backfillLine,
@@ -62,16 +63,9 @@ import { platformLabel } from '@/lib/platform-copy'
 import { toast } from '@/lib/toast'
 import { toastUserError } from '@/lib/user-error'
 import { CommunityPreview } from '@/components/community/community-preview'
+import { RememberOffer } from '@/components/community/remember-offer'
 
-/** Rust's defaults (plan 225 Wire shape), for an older backend's settings. */
-export const DEFAULT_COMMUNITY_SETTINGS: CommunitySettings = {
-  enabled: true,
-  regularStreams: 3,
-  welcomeOnStream: true,
-  milestoneCards: false,
-  remember: false,
-  sync: false
-}
+export { DEFAULT_COMMUNITY_SETTINGS }
 
 const FILTERS: { value: CommunityListFilter; label: string }[] = [
   { value: 'regulars', label: 'Regulars' },
@@ -174,6 +168,8 @@ function CommunityOverview({ community }: { community: CommunityClientState }): 
           />
         </div>
       ) : null}
+      {/* D10: offered once, after the first stream regulars came to. */}
+      <RememberOffer regularsCame={(summary?.regulars ?? 0) > 0} />
     </PanelSection>
   )
 }

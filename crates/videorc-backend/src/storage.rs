@@ -1815,6 +1815,20 @@ impl Database {
     /// Fake chat is an explicit test/smoke transport. Give it a real session
     /// row so inbound comments and outbound operations exercise the same
     /// SQLite foreign-key/persistence path as production sessions.
+    /// Whether the session row still exists (a deleted session takes its
+    /// queued work with it, plan 225 D10).
+    pub fn session_exists(&self, session_id: &str) -> Result<bool> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn ensure_fake_live_chat_session(&self, session_id: &str) -> Result<()> {
         if self
             .lock()?
@@ -4263,7 +4277,8 @@ impl Database {
         }))
     }
 
-    #[cfg(test)]
+    /// Every row of a session, oldest first (the memory pass reads a
+    /// stream's chat after it ends, plan 225 D10; tests read it back).
     pub fn list_live_chat_messages(&self, session_id: &str) -> Result<Vec<LiveChatMessage>> {
         let conn = self.lock()?;
         self.live_chat_messages_for_session_locked(&conn, session_id)
@@ -8803,7 +8818,6 @@ impl Database {
         Ok(count.max(0) as u64)
     }
 
-    #[cfg(test)]
     fn live_chat_messages_for_session_locked(
         &self,
         conn: &Connection,

@@ -15255,6 +15255,8 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Plan 192 D4: and whether the greet route is on (the AI writes the
     // greetings). Signed out reads as unknown; absent reads as off.
     let mut greet_version: Option<Option<u32>> = None;
+    // Plan 225 D10: and whether the memory route is on (queued passes run).
+    let mut memory_version: Option<Option<u32>> = None;
     // Plan 170 D9: the same read turns the account Buddy library on or off.
     let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
     // Plan 209 S19: and whether Buddy's tool planner may be asked
@@ -15288,6 +15290,16 @@ async fn refresh_account_entitlements(state: &AppState) {
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
                         Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.greet))
                     }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                memory_version = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => Some(
+                        capabilities
+                            .cohost
+                            .as_ref()
+                            .and_then(|cohost| cohost.memory),
+                    ),
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
                 buddy_act = match &prepared.outcome {
@@ -15345,6 +15357,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     }
     if let Some(greet) = greet_version {
         cohost::set_greet_capability(state, greet).await;
+    }
+    if let Some(memory) = memory_version {
+        community_service::set_memory_capability(state, memory);
     }
     if let Some(library) = buddy_library {
         cohost_library::set_capability(state, library).await;

@@ -6933,6 +6933,11 @@ pub struct AiCapabilitiesCohost {
     /// Older servers omit it: the AI never writes greetings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub greet: Option<u32>,
+    /// Plan 225 D10: the memory route (`/api/ai/cohost/memory`) version; 1
+    /// when it is on, 0 when switched off or Buddy is off for the user.
+    /// Older servers omit it: queued memory passes wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<AiCapabilitiesAvatar>,
     /// Pet creation (plan 168, Phase F): on, and this month's creations.

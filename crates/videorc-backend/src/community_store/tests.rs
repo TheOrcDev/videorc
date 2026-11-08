@@ -92,6 +92,7 @@ fn lookup(
             &mut arrived,
             now,
             3,
+            false,
         )
         .unwrap()
         .remove(0)
@@ -403,6 +404,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             &mut arrived,
             now,
             3,
+            false,
         )
         .unwrap();
     let kim = lookups[0].arrival.clone().expect("Kim returns");
@@ -439,6 +441,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
                     &mut again,
                     now,
                     3,
+                    false,
                 )
                 .unwrap()[0]
                 .arrival
@@ -484,6 +487,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             &mut arrived,
             later,
             3,
+            false,
         )
         .unwrap();
     let arrival = first[0].arrival.clone().unwrap();
@@ -500,6 +504,7 @@ fn arrivals_come_for_returning_people_only_with_the_milestone_and_back() {
             &mut arrived,
             later,
             3,
+            false,
         )
         .unwrap();
     assert!(
@@ -1216,5 +1221,87 @@ fn a_stream_counts_its_first_timers_and_those_who_stayed_forty_minutes() {
     assert_eq!(
         database.community_session_first_timers("nope").unwrap(),
         (0, 0)
+    );
+}
+
+/// D10: with "Buddy remembers" on, the newest three memories and the
+/// streamer's note ride the arrival (for one delivery, never the wire);
+/// off, the arrival carries neither.
+#[test]
+fn memories_and_the_note_ride_the_arrival_only_with_remember_on() {
+    let database = Database::open_in_memory_for_tests();
+    stream_with(
+        &database,
+        "s1",
+        day(2026, 10, 1),
+        &[(StreamPlatform::Twitch, "1", "Ada")],
+    );
+    let ada = person_of(&database, StreamPlatform::Twitch, "1");
+    let at = day(2026, 10, 2);
+    let adds = [
+        ("Learning Rust".to_string(), "twitch:1".to_string()),
+        ("Collects keyboards".to_string(), "twitch:1".to_string()),
+    ];
+    assert_eq!(
+        database
+            .community_memories_apply(&ada.id, "s1", &adds, &[], &[], at)
+            .unwrap(),
+        2
+    );
+    database
+        .community_update(&ada.id, Some("Friend from the Rust meetup"), None, at)
+        .unwrap();
+    database
+        .community_record_stream("s2", day(2026, 11, 8), &[StreamPlatform::Twitch])
+        .unwrap();
+    let streamer = HashSet::new();
+    let lookup_with = |remember: bool| {
+        let mut arrived = HashSet::new();
+        database
+            .community_lookup_arrivals(
+                "s2",
+                &[(StreamPlatform::Twitch, "1".to_string())],
+                &streamer,
+                &mut arrived,
+                day(2026, 11, 8),
+                3,
+                remember,
+            )
+            .unwrap()
+            .remove(0)
+            .arrival
+            .unwrap()
+    };
+    let off = lookup_with(false);
+    assert!(off.memories.is_empty());
+    assert!(off.note.is_none());
+    let on = lookup_with(true);
+    assert_eq!(on.memories, vec!["Learning Rust", "Collects keyboards"]);
+    assert_eq!(on.note.as_deref(), Some("Friend from the Rust meetup"));
+    // Never on the wire or in SQLite: the serialized arrival has no memories.
+    let wire = serde_json::to_value(&on).unwrap();
+    assert!(wire.get("memories").is_none() && wire.get("note").is_none());
+    // The cap holds: two new and eight in all per person.
+    let more: Vec<(String, String)> = (0..5)
+        .map(|index| (format!("Fact {index}"), "twitch:1".to_string()))
+        .collect();
+    assert_eq!(
+        database
+            .community_memories_apply(&ada.id, "s2", &more, &[], &[], at)
+            .unwrap(),
+        2,
+        "at most two new per pass"
+    );
+    for _ in 0..3 {
+        database
+            .community_memories_apply(&ada.id, "s2", &more, &[], &[], at)
+            .unwrap();
+    }
+    assert_eq!(
+        person_of(&database, StreamPlatform::Twitch, "1")
+            .memories
+            .len(),
+        8,
+        "at most eight in all"
     );
 }

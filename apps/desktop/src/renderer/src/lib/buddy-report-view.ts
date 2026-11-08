@@ -230,6 +230,8 @@ export type BuddyReportView =
 
 /** Plan 225 D15: the report's Community block, ready to draw. */
 export interface BuddyReportCommunityView {
+  /** Regulars who chatted this stream (the D10 offer needs to know). */
+  regularsBack: number
   stats: BuddyReportStat[]
   /** "1 new regular · 1 link made · 1 opt-out"; null when all are zero. */
   line: string | null
@@ -547,6 +549,7 @@ export function reportCommunity(
     community.optOuts > 0 ? countWords(community.optOuts, 'opt-out', 'opt-outs') : null
   ].filter((part): part is string => part !== null)
   return {
+    regularsBack: community.regularsBack,
     stats: [
       {
         id: 'regulars-back',

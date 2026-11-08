@@ -861,6 +861,7 @@
         "welcomeOnStream": false,
         "milestoneCards": true,
         "remember": false,
+        "rememberOffered": false,
         "sync": false
       }
     },
@@ -909,6 +910,7 @@
         "welcomeOnStream": true,
         "milestoneCards": false,
         "remember": false,
+        "rememberOffered": false,
         "sync": false
       }
     },

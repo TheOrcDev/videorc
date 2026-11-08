@@ -843,6 +843,20 @@ function waitForState(observed, predicate, label, deadlineMs = 60_000) {
   })
 }
 
+/** Poll `fetch` every 250 ms until `predicate` holds, or fail after `deadlineMs`. */
+async function waitFor(fetch, predicate, deadlineMs, label) {
+  const startedAt = Date.now()
+  let last
+  while (Date.now() - startedAt < deadlineMs) {
+    last = await fetch()
+    if (predicate(last)) return last
+    await sleep(250)
+  }
+  throw new Error(
+    `Timed out after ${deadlineMs}ms waiting for ${label}: ${JSON.stringify(last)?.slice(0, 400)}`
+  )
+}
+
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 }
@@ -921,7 +935,21 @@ async function runCommunityScenario({ startedAt }) {
       `The first session should have filled the store: ${JSON.stringify(before)}`
     )
 
-    phase('liveChat.start: the same Twitch lane, every author back')
+    // Plan 225 F3 to F5: the web now speaks tick v5 and the memory route,
+    // and the streamer turned "Buddy remembers" on. The capability read
+    // happens on `account.refresh`, so the next session starts on v5.
+    phase('capabilities: tick v5 and the memory route; Buddy remembers on')
+    fake.setCapabilities({ tick: 5, memory: 1 })
+    await request(backend, timeoutMs, 'account.refresh', {})
+    const remembering = await request(backend, timeoutMs, 'cohost.settings.set', {
+      community: { ...current.community, remember: true }
+    })
+    expect(
+      remembering.community?.remember === true,
+      `Buddy remembers did not switch on: ${JSON.stringify(remembering.community)}`
+    )
+
+    phase('liveChat.start: the same Twitch lane, every author back, plus a YouTube lane')
     const lane = {
       platform: 'twitch',
       targetId: 'cohost-main',
@@ -929,12 +957,26 @@ async function runCommunityScenario({ startedAt }) {
       intervalMs: 300,
       send: 'sent'
     }
+    // A YouTube lane chats too: its rows must never reach the memory pass.
+    const youtubeLane = {
+      platform: 'youtube',
+      targetId: 'cohost-memory-yt',
+      count: 4,
+      intervalMs: 300,
+      send: 'sent'
+    }
     await request(backend, timeoutMs, 'liveChat.start', {
       sessionId: communitySessionId,
       destinations: [
-        { platform: lane.platform, targetId: lane.targetId, read: 'ready', write: 'ready' }
+        { platform: lane.platform, targetId: lane.targetId, read: 'ready', write: 'ready' },
+        {
+          platform: youtubeLane.platform,
+          targetId: youtubeLane.targetId,
+          read: 'ready',
+          write: 'ready'
+        }
       ],
-      fakes: [lane]
+      fakes: [lane, youtubeLane]
     })
     await request(backend, timeoutMs, 'cohost.start', {
       sessionId: communitySessionId,
@@ -1040,16 +1082,125 @@ async function runCommunityScenario({ startedAt }) {
       `The summary should count both streams: ${JSON.stringify(summary)}`
     )
 
+    phase('tick v5: the arrival rides its row and the people behind the batch ride the request')
+    const v5 = await waitFor(
+      () =>
+        fake.state.requests.find(
+          (record) =>
+            record.body.sessionClientId === communitySessionId &&
+            record.body.promptVersion === 5 &&
+            record.status === 200 &&
+            (record.body.messages ?? []).some((message) => message.arrival)
+        ) ?? null,
+      (record) => record !== null,
+      30_000,
+      'a v5 tick carrying an arrival row'
+    )
+    const arrivalMessage = v5.body.messages.find((message) => message.arrival)
+    expect(
+      arrivalMessage.arrival.streams === 2 &&
+        arrivalMessage.arrival.regular === false &&
+        !('awayDays' in arrivalMessage.arrival),
+      `The tick's arrival should carry the facts, absent fields omitted: ${JSON.stringify(arrivalMessage.arrival)}`
+    )
+    expect(
+      Array.isArray(v5.body.viewers) &&
+        v5.body.viewers.length >= 1 &&
+        v5.body.viewers.every(
+          (viewer) =>
+            viewer.platform === 'twitch' &&
+            Array.isArray(viewer.memories) &&
+            viewer.memories.length === 0 &&
+            !('note' in viewer)
+        ),
+      `The tick's viewers should name the batch's people with no memories yet: ${JSON.stringify(v5.body.viewers)}`
+    )
+    expect(
+      fake.state.requests.every(
+        (record) => record.body.sessionClientId !== communitySessionId || record.status === 200
+      ),
+      `Every v5 tick must pass the fake's contract: ${JSON.stringify(fake.state.requests.filter((record) => record.status !== 200).map((record) => record.code))}`
+    )
+
     phase('stop')
     await request(backend, timeoutMs, 'cohost.stop', {})
     await request(backend, timeoutMs, 'liveChat.stop', {})
+
+    phase('the memory pass: once, after the stream, never a YouTube message, applied to the store')
+    const pass = await waitFor(
+      () => fake.state.memoryRequests[0] ?? null,
+      (record) => record !== null,
+      30_000,
+      'the memory pass request'
+    )
+    const body = pass.body
+    expect(
+      pass.status === 200 &&
+        body.promptVersion === 1 &&
+        body.consentToProcessChat === true &&
+        body.sessionClientId === communitySessionId &&
+        typeof body.counts === 'object',
+      `The memory pass should be the route's shape: ${JSON.stringify({ status: pass.status, code: pass.code })}`
+    )
+    expect(
+      body.people.length >= 1 &&
+        body.people.every(
+          (person) =>
+            person.messages.length >= 2 &&
+            person.messages.every((message) => message.platform === 'twitch') &&
+            !person.platforms.includes('youtube')
+        ),
+      `The pass should carry the Twitch people who chatted twice and nothing from YouTube: ${JSON.stringify(body.people)}`
+    )
+    expect(
+      !JSON.stringify(body).includes('youtube') &&
+        !JSON.stringify(body).includes('cohost-memory-yt'),
+      'A YouTube message or account must never reach the memory route.'
+    )
+    expect(fake.state.memoryRequests.length === 1, 'One pass per stream.')
+    const rememberedPerson = await waitFor(
+      () =>
+        request(backend, timeoutMs, 'cohost.community.person', {
+          platform: 'twitch',
+          authorId: arrivalRow.authorId
+        }),
+      (found) => (found.memories ?? []).length === 1,
+      10_000,
+      "Test Viewer 0's memory from the pass"
+    )
+    expect(
+      rememberedPerson.memories[0].text.startsWith('Said: ') &&
+        rememberedPerson.memories[0].accountKey === `twitch:${arrivalRow.authorId}`,
+      `The memory should be the fake's line on the Twitch account: ${JSON.stringify(rememberedPerson.memories)}`
+    )
+    const remembered = await request(backend, timeoutMs, 'cohost.report.get', {
+      sessionId: communitySessionId
+    })
+    expect(
+      typeof remembered.report?.community?.summary === 'string' &&
+        remembered.report.community.summary.length > 0 &&
+        remembered.report.community.summary.length <= 280 &&
+        remembered.report.community.memoriesLearned >= 1,
+      `The report should carry the pass's summary and what was learned: ${JSON.stringify(remembered.report?.community)}`
+    )
+    const afterPass = await request(backend, timeoutMs, 'cohost.status', {})
+    expect(
+      (afterPass.autoChatSends ?? 0) === 0,
+      `Nothing of this may reach chat: ${JSON.stringify({ sends: afterPass.autoChatSends })}`
+    )
+
+    // Back to how the later scenarios expect the web: tick v3, no memory.
+    fake.setCapabilities({ tick: 3, memory: 0 })
+    await request(backend, timeoutMs, 'account.refresh', {})
     await request(backend, timeoutMs, 'cohost.settings.set', {
-      autoChat: { ...current.autoChat, talk: current.autoChat.talk ?? 'bubble' }
+      autoChat: { ...current.autoChat, talk: current.autoChat.talk ?? 'bubble' },
+      community: { ...current.community, remember: false }
     })
     console.log(
       `Community scenario PASS: an arrival on the first row only (streams 2, in a row 2, 2nd-stream milestone), ` +
         `a proposed milestone card with the person's facts and no message text, zero sends, ` +
-        `person/list/summary answered from the store.`
+        `person/list/summary answered from the store, a v5 tick with the arrival and the viewers, ` +
+        `and one memory pass after the stream (Twitch only, applied to the person and the report).`
     )
   } finally {
     events.close()

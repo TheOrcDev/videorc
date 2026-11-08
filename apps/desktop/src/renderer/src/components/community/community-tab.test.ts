@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CommunityPersonRow, CommunitySuggestion, CommunitySummary } from '@/lib/backend'
+import { DEFAULT_COMMUNITY_SETTINGS } from '@/lib/community-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 const client = vi.hoisted(() => ({
@@ -194,6 +195,49 @@ describe('Buddy → Community (plan 225 D12)', () => {
           element.getAttribute('aria-disabled') === 'true' || element.hasAttribute('data-disabled')
       )
     ).toBe(true)
+  })
+
+  // Plan 225 D10: "Let Buddy remember…" is offered once, after a stream
+  // regulars came to, to a streamer who can turn it on.
+  it('offers Buddy remembers once regulars came, and Turn on flips the switch', async () => {
+    client.summary = {
+      people: 12,
+      regulars: 2,
+      streams: 3,
+      newRegularsThisWeek: 1,
+      linksPending: 0,
+      backfill: { state: 'done', done: 3, total: 3 }
+    }
+    await mount()
+    expect(text()).toContain('Let Buddy remember what your regulars tell it?')
+    const on = container.querySelector<HTMLButtonElement>('[data-testid="community-remember-on"]')
+    await act(async () => on?.click())
+    expect(studio.patch).toHaveBeenCalledWith({
+      community: { ...DEFAULT_COMMUNITY_SETTINGS, remember: true, rememberOffered: true }
+    })
+  })
+
+  it('never offers Buddy remembers without regulars, and Not now only keeps the answer', async () => {
+    await mount()
+    expect(container.querySelector('[data-testid="community-remember-offer"]')).toBeNull()
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    client.summary = {
+      people: 12,
+      regulars: 2,
+      streams: 3,
+      newRegularsThisWeek: 1,
+      linksPending: 0,
+      backfill: { state: 'done', done: 3, total: 3 }
+    }
+    await mount()
+    const later = container.querySelector<HTMLButtonElement>(
+      '[data-testid="community-remember-later"]'
+    )
+    await act(async () => later?.click())
+    expect(studio.patch).toHaveBeenCalledWith({
+      community: { ...DEFAULT_COMMUNITY_SETTINGS, remember: false, rememberOffered: true }
+    })
   })
 
   it('asks before forgetting everyone, then forgets', async () => {

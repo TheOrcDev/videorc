@@ -3347,6 +3347,7 @@ const communitySettingsSchema = objectSchema(
     welcomeOnStream: booleanSchema,
     milestoneCards: booleanSchema,
     remember: booleanSchema,
+    rememberOffered: booleanSchema,
     sync: booleanSchema
   },
   { allowUnknown: false }
