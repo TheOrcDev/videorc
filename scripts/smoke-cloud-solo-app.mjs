@@ -2446,7 +2446,9 @@ async function prepareCloudSectionShots(smoke) {
     smoke,
     'open-tab',
     { tab: 'streaming', waitFor: '[data-testid="cloud-test"]' },
-    { timeoutMs: 30_000 }
+    // Main waits 45 s for the selector (a dev page compiles its lazy chunk
+    // on first open); outwait it so a real miss says what the page shows.
+    { timeoutMs: 60_000 }
   )
   const files = {}
   const theme = () =>
@@ -2482,7 +2484,7 @@ async function prepareCloudSectionShots(smoke) {
         smokeNow,
         'open-tab',
         { tab, waitFor: waitSelector },
-        { timeoutMs: 30_000 }
+        { timeoutMs: 60_000 }
       )
       for (const wanted of ['dark', 'light']) {
         await setTheme(wanted)
