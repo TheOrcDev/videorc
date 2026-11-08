@@ -697,7 +697,7 @@ try {
       `${IDLE_PROOF_MS / 1000} s idle without a tick.`
   )
 
-  await runCommunityScenario({ startedAt })
+  await runCommunityScenario({ ready, startedAt })
   await runConsentScenario({ ready, startedAt })
   await runSpotlightScenario({ ready, startedAt })
 } finally {
@@ -889,7 +889,7 @@ function waitForBackendReady(child, deadlineMs) {
     })
     child.stderr.on('data', (chunk) => {
       for (const line of chunk.split(/\r?\n/)) {
-        if (/WARN|ERROR/.test(line)) console.log(`[backend stderr] ${line}`)
+        if (/WARN|ERROR|panic/.test(line)) console.log(`[backend stderr] ${line}`)
       }
     })
     child.on('error', (error) => finish(rejectReady, error))
@@ -911,13 +911,20 @@ function waitForBackendReady(child, deadlineMs) {
 // milestone (the debug seam above) carries the milestone card's facts and
 // never the message text; the store answers the community RPCs; and nothing
 // Buddy decided reached chat (the lane counts zero sends).
-async function runCommunityScenario({ startedAt }) {
+async function runCommunityScenario({ ready, startedAt }) {
   const phase = (label) =>
     console.log(
       `[cohost-smoke +${((Date.now() - startedAt) / 1000).toFixed(1)}s] community: ${label}`
     )
   const communitySessionId = `${sessionId}-community`
   const events = collectEvents(backend)
+  // The capability read is main's (`account.refresh`): the admin connection.
+  const admin = await connectBackend(
+    { ...ready, token: ready.adminToken, adminToken: undefined },
+    timeoutMs
+  )
+  // The backend's `log` events ride the admin socket.
+  const adminEvents = collectEvents(admin)
   try {
     phase('settings: Suggest mode, so welcomes are cards')
     const current = await request(backend, timeoutMs, 'cohost.settings.get', {})
@@ -940,7 +947,7 @@ async function runCommunityScenario({ startedAt }) {
     // happens on `account.refresh`, so the next session starts on v5.
     phase('capabilities: tick v5 and the memory route; Buddy remembers on')
     fake.setCapabilities({ tick: 5, memory: 1 })
-    await request(backend, timeoutMs, 'account.refresh', {})
+    await request(admin, timeoutMs, 'account.refresh', {})
     const remembering = await request(backend, timeoutMs, 'cohost.settings.set', {
       community: { ...current.community, remember: true }
     })
@@ -988,9 +995,10 @@ async function runCommunityScenario({ startedAt }) {
       'liveChat.message',
       (message) =>
         message.sessionId === communitySessionId &&
+        message.platform === 'twitch' &&
         message.authorName === 'Test Viewer 0' &&
         Boolean(message.arrival),
-      "Test Viewer 0's arrival row",
+      "Test Viewer 0's Twitch arrival row",
       20_000
     )
     expect(
@@ -1007,6 +1015,7 @@ async function runCommunityScenario({ startedAt }) {
       (entry) =>
         entry.event === 'liveChat.message' &&
         entry.payload.sessionId === communitySessionId &&
+        entry.payload.platform === 'twitch' &&
         entry.payload.authorName === 'Test Viewer 0'
     )
     expect(
@@ -1103,12 +1112,14 @@ async function runCommunityScenario({ startedAt }) {
         !('awayDays' in arrivalMessage.arrival),
       `The tick's arrival should carry the facts, absent fields omitted: ${JSON.stringify(arrivalMessage.arrival)}`
     )
+    // The tick's viewers may come from any chat platform (only the memory
+    // route leaves YouTube out); nobody has a memory yet.
     expect(
       Array.isArray(v5.body.viewers) &&
-        v5.body.viewers.length >= 1 &&
+        v5.body.viewers.some((viewer) => viewer.platform === 'twitch') &&
         v5.body.viewers.every(
           (viewer) =>
-            viewer.platform === 'twitch' &&
+            ['twitch', 'youtube'].includes(viewer.platform) &&
             Array.isArray(viewer.memories) &&
             viewer.memories.length === 0 &&
             !('note' in viewer)
@@ -1122,17 +1133,60 @@ async function runCommunityScenario({ startedAt }) {
       `Every v5 tick must pass the fake's contract: ${JSON.stringify(fake.state.requests.filter((record) => record.status !== 200).map((record) => record.code))}`
     )
 
+    // The checks above are event-driven and finish within a second of the
+    // start; the memory pass wants people who chatted twice, so the Twitch
+    // lane must have delivered all six rows (two per author) before the stop.
+    phase('the Twitch lane finishes: every author chatted twice')
+    await waitFor(
+      async () =>
+        events.list.filter(
+          (entry) =>
+            entry.event === 'liveChat.message' &&
+            entry.payload?.sessionId === communitySessionId &&
+            entry.payload?.platform === 'twitch'
+        ).length,
+      (count) => count >= lane.count,
+      20_000,
+      'the Twitch lane delivering every row'
+    )
+
     phase('stop')
     await request(backend, timeoutMs, 'cohost.stop', {})
     await request(backend, timeoutMs, 'liveChat.stop', {})
 
     phase('the memory pass: once, after the stream, never a YouTube message, applied to the store')
-    const pass = await waitFor(
-      () => fake.state.memoryRequests[0] ?? null,
-      (record) => record !== null,
-      30_000,
-      'the memory pass request'
-    )
+    // The backend says what it did with the pass on its `log` events.
+    const communityLog = () =>
+      [...events.list, ...adminEvents.list]
+        .filter(
+          (entry) => entry.event === 'log' && /Community:|memory/.test(entry.payload?.message ?? '')
+        )
+        .map((entry) => `${entry.payload.level}: ${entry.payload.message}`)
+    let pass
+    try {
+      pass = await waitFor(
+        () => fake.state.memoryRequests[0] ?? null,
+        (record) => record !== null,
+        30_000,
+        'the memory pass request'
+      )
+    } catch (error) {
+      console.log(`[cohost-smoke] backend community log:\n  ${communityLog().join('\n  ')}`)
+      const after = await request(backend, timeoutMs, 'cohost.settings.get', {})
+      console.log(
+        `[cohost-smoke] community settings after the stop: ${JSON.stringify(after.community)}`
+      )
+      console.log(
+        `[cohost-smoke] last log events: ${JSON.stringify(
+          adminEvents.list
+            .filter((entry) => entry.event === 'log')
+            .slice(-12)
+            .map((entry) => entry.payload?.message)
+        )}`
+      )
+      throw error
+    }
+    console.log(`[cohost-smoke] backend community log:\n  ${communityLog().join('\n  ')}`)
     const body = pass.body
     expect(
       pass.status === 200 &&
@@ -1191,7 +1245,7 @@ async function runCommunityScenario({ startedAt }) {
 
     // Back to how the later scenarios expect the web: tick v3, no memory.
     fake.setCapabilities({ tick: 3, memory: 0 })
-    await request(backend, timeoutMs, 'account.refresh', {})
+    await request(admin, timeoutMs, 'account.refresh', {})
     await request(backend, timeoutMs, 'cohost.settings.set', {
       autoChat: { ...current.autoChat, talk: current.autoChat.talk ?? 'bubble' },
       community: { ...current.community, remember: false }
@@ -1203,6 +1257,8 @@ async function runCommunityScenario({ startedAt }) {
         `and one memory pass after the stream (Twitch only, applied to the person and the report).`
     )
   } finally {
+    adminEvents.close()
+    admin.close()
     events.close()
   }
 }

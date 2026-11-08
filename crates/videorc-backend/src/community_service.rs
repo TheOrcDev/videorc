@@ -333,13 +333,32 @@ pub(crate) fn session_started(state: &AppState, session_id: &str, platforms: Vec
 /// session's detached store writes have landed.
 pub(crate) fn session_ended(state: &AppState) {
     let ended = state.community.lock().session.take();
+    state.emit_log(
+        "info",
+        format!(
+            "Community: the chat session ended ({}).",
+            ended
+                .as_ref()
+                .map_or("no stream was being followed".to_string(), |ended| {
+                    format!("stream {}", ended.session_id)
+                })
+        ),
+    );
     let state = state.clone();
     tokio::spawn(async move {
         state.cohost.lock().await.community.clear();
         if let Some(ended) = ended {
             let session_id = ended.session_id.clone();
             let consented = ended.consented;
+            state.emit_log(
+                "info",
+                format!("Community: writing the report block for {session_id}."),
+            );
             write_report_community(&state, ended).await;
+            state.emit_log(
+                "info",
+                format!("Community: the report block for {session_id} is settled."),
+            );
             // D10: the memory pass, after the report's counts are in.
             enqueue_memory_pass(&state, &session_id, consented).await;
         }
@@ -357,6 +376,13 @@ async fn write_report_community(state: &AppState, ended: SessionCommunity) {
         return;
     }
     wait_for_pending_writes(state, REPORT_WRITES_WAIT).await;
+    state.emit_log(
+        "info",
+        format!(
+            "Community: the store writes for {} have landed.",
+            ended.session_id
+        ),
+    );
     let database = state.database.clone();
     let session_id = ended.session_id.clone();
     let saved_session_id = session_id.clone();
@@ -1368,7 +1394,16 @@ fn memory_job_backoff(attempts: u32) -> chrono::Duration {
 /// consented Buddy session ran, then try the queue.
 async fn enqueue_memory_pass(state: &AppState, session_id: &str, consented: bool) {
     let settings = settings_snapshot(&state.database, &state.community);
-    if !settings.enabled || !settings.remember || !consented {
+    if !settings.enabled || !settings.remember {
+        return;
+    }
+    if !consented {
+        state.emit_log(
+            "info",
+            format!(
+                "Community: no memory pass for {session_id}: no Buddy session with consent ran."
+            ),
+        );
         return;
     }
     let database = state.database.clone();
@@ -1378,7 +1413,13 @@ async fn enqueue_memory_pass(state: &AppState, session_id: &str, consented: bool
     })
     .await
     {
-        Ok(Ok(())) => run_memory_jobs(state).await,
+        Ok(Ok(())) => {
+            state.emit_log(
+                "info",
+                format!("Community: the memory pass for {session_id} is queued."),
+            );
+            run_memory_jobs(state).await
+        }
         Ok(Err(error)) => state.emit_log(
             "warn",
             format!("Community: could not queue the memory pass: {error:#}"),
@@ -1410,6 +1451,10 @@ pub(crate) async fn run_memory_jobs(state: &AppState) {
     #[cfg(not(test))]
     {
         let Some(token) = crate::account::stored_session_token() else {
+            state.emit_log(
+                "info",
+                "Community: the memory passes wait: not signed in.".to_string(),
+            );
             return;
         };
         run_memory_jobs_with(state, crate::cohost::premium_entitled(), |request| {
@@ -1510,10 +1555,21 @@ where
             continue;
         }
         let settings = settings_snapshot(&state.database, &state.community);
-        if !settings.enabled || !settings.remember || !premium {
-            continue;
-        }
-        if state.community.lock().web_memory_version.unwrap_or(0) < 1 {
+        let web_on = state.community.lock().web_memory_version.unwrap_or(0) >= 1;
+        let held = if !settings.enabled || !settings.remember {
+            Some("Buddy remembers is off")
+        } else if !premium {
+            Some("Premium is needed")
+        } else if !web_on {
+            Some("the web has no memory route yet")
+        } else {
+            None
+        };
+        if let Some(why) = held {
+            state.emit_log(
+                "info",
+                format!("Community: the memory pass for {session_id} waits: {why}."),
+            );
             continue;
         }
         let built = {
@@ -1533,6 +1589,12 @@ where
                 let _ =
                     tokio::task::spawn_blocking(move || database.community_memory_job_delete(&id))
                         .await;
+                state.emit_log(
+                    "info",
+                    format!(
+                        "Community: the memory pass for {session_id} has nothing to learn from (nobody chatted twice off YouTube)."
+                    ),
+                );
                 continue;
             }
             Ok(Err(error)) => {
@@ -1687,11 +1749,22 @@ pub(crate) fn build_memory_request(
             .or_default()
             .push((facts.platform, facts.at, text));
     }
+    tracing::info!(
+        "Community: the memory pass for {session_id} read {} row(s), {} off YouTube from {} account(s).",
+        messages.len(),
+        by_key.values().map(Vec::len).sum::<usize>(),
+        by_key.len()
+    );
     if by_key.is_empty() {
         return Ok(None);
     }
     let keys: Vec<String> = by_key.keys().cloned().collect();
     let (person_of, people) = database.community_memory_people(&keys, now, threshold)?;
+    tracing::info!(
+        "Community: the memory pass for {session_id} knows {} of those account(s) as {} person(s).",
+        person_of.len(),
+        people.len()
+    );
     // Messages per person, over all their accounts.
     let mut rows_by_person: HashMap<String, MemoryRows> = HashMap::new();
     for (key, rows) in by_key {
@@ -3203,5 +3276,33 @@ mod tests {
         let split = person_at(&state, StreamPlatform::Kick, "9");
         assert_eq!(split.memories.len(), 1);
         assert_eq!(split.memories[0].text, "Streams on Kick at night");
+    }
+
+    /// The smoke's fake Twitch lane: six rows from three authors (`seq % 3`),
+    /// through the real delivery path, then the builder must see each of
+    /// them twice.
+    #[tokio::test]
+    async fn the_memory_request_sees_the_fake_lane_authors_twice() {
+        let state = test_state();
+        remember_on(&state);
+        let generation = start_session(&state, "s-lane").await;
+        note_cohost_consent(&state, "s-lane", true);
+        let rows: Vec<LiveChatMessage> = (0..6)
+            .map(|seq| fake_message("s-lane", StreamPlatform::Twitch, Some("cohost-main"), seq))
+            .collect();
+        deliver(&state, generation, rows).await;
+        wait_for_writes(&state).await;
+        let built = build_memory_request(&state.database, "s-lane", Utc::now(), 3)
+            .unwrap()
+            .expect("three authors chatted twice");
+        let (request, plan) = built;
+        assert_eq!(request.people.len(), 3, "{:?}", request.people);
+        assert!(
+            request
+                .people
+                .iter()
+                .all(|person| person.messages.len() == 2)
+        );
+        assert_eq!(plan.people.len(), 3);
     }
 }
