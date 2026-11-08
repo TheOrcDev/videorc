@@ -1,4 +1,4 @@
-// Plan 190 S9: live backgrounds end to end through the dev app (macOS).
+// Plan 190 S9: live backgrounds end to end through the dev app (macOS, Linux).
 //
 // For each case (Silk at 1080p30, Plasma Wave at 4K30, Liquid Chrome at
 // 1080p60) the smoke puts the live background on the preview, checks the
@@ -20,6 +20,16 @@
 // fall to the poster fails, so run it on a quiet host (it is load-sensitive). With VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1 (debug
 // builds) every case must draw the still poster instead: status `still` with
 // reason `forced` and a static ring.
+//
+// Linux (fix plan 0007): the idle preview's live background is the proof
+// surface's WebGL2 canvas, and the idle CPU compositor composes no pixels, so
+// it reports none (docs/live-backgrounds.md, Linux "Lifecycle"). The preview
+// check reads the proof surface instead, and requires the idle compositor to
+// report nothing. A poster there passes only for a host Chromium the launch
+// ran without a GPU (`software-gpu`/`no-gpu` under VIDEORC_DISABLE_GPU=1).
+// The take is the compositor's (its GLES thread on the pinned render node):
+// every status sample must name the case (`forced` when forced), and once it
+// stops the idle compositor must report no live background again.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
@@ -28,9 +38,19 @@ import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import {
+  afterTakeLiveBackgroundState,
+  chromiumGpuDisabled,
+  compositorDrawsNoLiveBackground,
+  idlePreviewLiveBackgroundReporter,
+  liveBackgroundSampleMismatches,
+  proofSurfaceLiveBackgroundVerdict,
+  sceneCarriesBackground,
+  smokeMicrophoneId
+} from './lib/live-background-smoke.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
-import { connectBackend, request } from './smoke-recording-session.mjs'
+import { connectBackend, request, sessionSelectsMicrophone } from './smoke-recording-session.mjs'
 
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
@@ -43,6 +63,7 @@ const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const forced = process.env.VIDEORC_LIVE_BACKGROUND_FORCE_STILL === '1'
+const idleReporter = idlePreviewLiveBackgroundReporter(process.platform)
 
 /** Plan 190 "Performance budget": the background's own p95 on an M-series Mac. */
 const BUDGET_MS = { 1080: 1.5, 2160: 3.0 }
@@ -203,47 +224,11 @@ try {
     const label = caseLabel(testCase)
     const background = liveBackground(testCase)
     await applyPreview(background, testCase)
-    let appliedAt = Date.now()
-    const expected = forced ? 'still' : 'shader'
-    let seen
-    let reapplied = 0
-    await waitFor(
-      async () => {
-        seen = await status()
-        // The previous case's background can still be reporting for a moment
-        // (plan 194's cases run back to back): wait for this one's id too.
-        if (
-          seen.liveBackground?.rendering === expected &&
-          seen.liveBackground?.id === testCase.id
-        ) {
-          return true
-        }
-        // Until the preview first shows the app's own committed scene, main's
-        // first-frame watchdog re-commits that scene over this smoke's
-        // (`resync-scene`), and the compositor loses the live background.
-        // Put it back (the recording below passes its scene explicitly).
-        if (!seen.liveBackground && Date.now() - appliedAt > 1500 && reapplied < 5) {
-          reapplied += 1
-          console.log(`${testCase.id}: the app displaced the preview scene; applying again`)
-          await applyPreview(background, testCase)
-          appliedAt = Date.now()
-        }
-        return false
-      },
-      () =>
-        `${testCase.id} to render as ${expected}; last ${JSON.stringify({
-          liveBackground: seen?.liveBackground,
-          programs: seen?.framePipeline?.liveBackgroundPrograms,
-          scratchBytes: seen?.framePipeline?.liveBackgroundScratchBytes,
-          backend: seen?.backend,
-          framesRendered: seen?.framesRendered,
-          sceneRevision: seen?.sceneRevision,
-          sceneSources: seen?.sceneSources?.map((source) => [source.kind, source.id, source.state])
-        })}`
-    )
-    const live = (await status()).liveBackground
-    assert.equal(live.id, testCase.id)
-    if (forced) assert.equal(live.reason, 'forced', 'a forced still names its reason')
+    if (idleReporter === 'proof-surface') {
+      await waitForProofSurfaceLiveBackground(testCase, background)
+    } else {
+      await waitForIdleCompositorLiveBackground(testCase, background)
+    }
 
     const scene = await request(ws, timeoutMs, 'scene.get')
     const capability = await requestSmokeCommand(
@@ -298,6 +283,45 @@ try {
       await stopRtmpListener(listener)
     }
     const path = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120000 })
+    if (idleReporter === 'proof-surface') {
+      // Composition stopped: the GLES thread stops and takes the take's status
+      // down while the scene keeps the live background. The idle preview is
+      // the proof surface's again. A scene the app re-committed without the
+      // background clears any status by itself: put this one back and judge
+      // the status with the background in the scene.
+      let idle
+      let state
+      let appliedAt = Date.now()
+      let reapplied = 0
+      // Evidence: whether the take's status was seen outliving it (`stale`).
+      const states = []
+      await waitFor(
+        async () => {
+          idle = await status()
+          state = afterTakeLiveBackgroundState(idle, background.assetId)
+          if (states.at(-1) !== state) states.push(state)
+          if (state === 'displaced' && Date.now() - appliedAt > 1500 && reapplied < 5) {
+            reapplied += 1
+            console.log(
+              `${label}: the app displaced the preview scene after the take; applying again`
+            )
+            await applyPreview(background, testCase)
+            appliedAt = Date.now()
+          }
+          return state === 'clear'
+        },
+        () =>
+          `${label}: the stopped take to leave no live background in status; last ${JSON.stringify({
+            states,
+            liveBackground: idle?.liveBackground,
+            programs: idle?.framePipeline?.liveBackgroundPrograms,
+            scratchBytes: idle?.framePipeline?.liveBackgroundScratchBytes
+          })}`
+      )
+      console.log(
+        `${label}: after the take the scene keeps the background and status none (${states.join(' -> ')}; re-applied ${reapplied}x)`
+      )
+    }
 
     // The guard may halve the internal size on a busy host (it still moves);
     // falling back to the poster mid-recording fails. A record-and-stream
@@ -322,6 +346,19 @@ try {
       assert(
         allowed.includes(sample.liveBackground?.rendering),
         `${label}: the live background left ${allowed.join('/')} mid-recording: ${JSON.stringify(sample.liveBackground)}`
+      )
+    }
+    if (idleReporter === 'proof-surface') {
+      // The idle Linux preview has no compositor report to name the case: the
+      // take's run is where its id (and a forced still's reason) is checked.
+      const mismatched = liveBackgroundSampleMismatches(samples.slice(firstReported), {
+        id: testCase.id,
+        forced
+      })
+      assert.equal(
+        mismatched.length,
+        0,
+        `${label}: status named another live background: ${JSON.stringify(mismatched.map((sample) => sample.liveBackground))}`
       )
     }
     const halved = samples.filter((sample) => sample.liveBackground?.rendering === 'half').length
@@ -355,11 +392,137 @@ try {
       ffprobePath,
       intendedFps: testCase.fps,
       expectAudio: true,
+      microphoneAvailable: sessionSelectsMicrophone({
+        microphoneId: smokeMicrophoneId(process.platform)
+      }),
       gates: { requireMotion: false }
     })
     assert(quality.verdict.pass, `${path}: ${quality.verdict.failures.join('; ')}`)
     if (target) verifyStream(path, target.receivedPath, testCase, label)
     console.log(`Live background case OK: ${label}`)
+  }
+
+  /** macOS: the idle preview's compositor draws the live background and reports it. */
+  async function waitForIdleCompositorLiveBackground(testCase, background) {
+    let appliedAt = Date.now()
+    const expected = forced ? 'still' : 'shader'
+    let seen
+    let reapplied = 0
+    await waitFor(
+      async () => {
+        seen = await status()
+        // The previous case's background can still be reporting for a moment
+        // (plan 194's cases run back to back): wait for this one's id too.
+        if (
+          seen.liveBackground?.rendering === expected &&
+          seen.liveBackground?.id === testCase.id
+        ) {
+          return true
+        }
+        // Until the preview first shows the app's own committed scene, main's
+        // first-frame watchdog re-commits that scene over this smoke's
+        // (`resync-scene`), and the compositor loses the live background.
+        // Put it back (the recording below passes its scene explicitly).
+        if (!seen.liveBackground && Date.now() - appliedAt > 1500 && reapplied < 5) {
+          reapplied += 1
+          console.log(`${testCase.id}: the app displaced the preview scene; applying again`)
+          await applyPreview(background, testCase)
+          appliedAt = Date.now()
+        }
+        return false
+      },
+      () =>
+        `${testCase.id} to render as ${expected}; last ${JSON.stringify({
+          liveBackground: seen?.liveBackground,
+          programs: seen?.framePipeline?.liveBackgroundPrograms,
+          scratchBytes: seen?.framePipeline?.liveBackgroundScratchBytes,
+          backend: seen?.backend,
+          framesRendered: seen?.framesRendered,
+          sceneRevision: seen?.sceneRevision,
+          sceneSources: seen?.sceneSources?.map((source) => [source.kind, source.id, source.state])
+        })}`
+    )
+    const live = (await status()).liveBackground
+    assert.equal(live.id, testCase.id)
+    if (forced) assert.equal(live.reason, 'forced', 'a forced still names its reason')
+  }
+
+  /**
+   * Linux (fix plan 0007): the proof surface draws the idle preview's live
+   * background and reports it; the idle compositor composes no pixels and
+   * reports none. A poster passes only when the launch turned Chromium's GPU
+   * off (this host's SwiftShader), and holds no canvas.
+   */
+  async function waitForProofSurfaceLiveBackground(testCase, background) {
+    const gpuDisabled = chromiumGpuDisabled(process.env)
+    let appliedAt = Date.now()
+    let reapplied = 0
+    let inspected
+    let seen
+    let verdict = null
+    await waitFor(
+      async () => {
+        inspected = await requestSmokeCommand(
+          smoke,
+          'inspect-native-preview-live-background',
+          {},
+          { timeoutMs }
+        )
+        verdict = proofSurfaceLiveBackgroundVerdict(inspected?.liveBackground, testCase, {
+          gpuDisabled
+        })
+        if (verdict) return true
+        seen = await status()
+        // Only a scene without this background was displaced; a surface that
+        // is still starting keeps the background in the scene.
+        if (
+          !sceneCarriesBackground(seen, background.assetId) &&
+          Date.now() - appliedAt > 1500 &&
+          reapplied < 5
+        ) {
+          reapplied += 1
+          console.log(`${testCase.id}: the app displaced the preview scene; applying again`)
+          await applyPreview(background, testCase)
+          appliedAt = Date.now()
+        }
+        return false
+      },
+      () =>
+        `${testCase.id} on the proof surface; last ${JSON.stringify({
+          inspected,
+          sceneRevision: seen?.sceneRevision,
+          sceneSources: seen?.sceneSources?.map((source) => [source.kind, source.id, source.state])
+        })}`
+    )
+    const live = inspected.liveBackground
+    assert.notEqual(
+      verdict,
+      'failed',
+      `${testCase.id}: the proof surface shows the poster (gpu ${gpuDisabled ? 'off' : 'on'}): ${JSON.stringify(live)}`
+    )
+    assert.equal(
+      inspected.canvasCount,
+      verdict === 'shader' ? 1 : 0,
+      `${testCase.id}: the proof surface's canvases: ${JSON.stringify(inspected)}`
+    )
+    if (verdict === 'host-still') {
+      console.log(
+        `${testCase.id}: the proof surface shows the poster (${live.reason}: ${live.detail ?? 'n/a'}); this host's Chromium runs without a GPU, so the idle preview cannot move here. The take below checks the shader.`
+      )
+    } else {
+      console.log(`${testCase.id}: the proof surface draws the shader (${live.renderer ?? 'n/a'})`)
+    }
+    await waitFor(
+      async () => compositorDrawsNoLiveBackground((seen = await status())),
+      () =>
+        `the idle compositor to report no live background (it composes no pixels on Linux); last ${JSON.stringify(
+          {
+            liveBackground: seen?.liveBackground,
+            programs: seen?.framePipeline?.liveBackgroundPrograms,
+            scratchBytes: seen?.framePipeline?.liveBackgroundScratchBytes
+          }
+        )}`
+    )
   }
 
   /**
@@ -479,7 +642,7 @@ function liveBackground({ id, look }) {
 
 function sessionParams(outputDirectoryCapability, testCase, target) {
   const params = {
-    sources: { testPattern: true, microphoneId: 'microphone:coreaudio:4294967295' },
+    sources: { testPattern: true, microphoneId: smokeMicrophoneId(process.platform) },
     layout: LAYOUT,
     output: {
       recordEnabled: true,
@@ -655,7 +818,10 @@ function grayTimeline(path, rect, { size = 16, fps = 2 } = {}) {
     ],
     { encoding: null, maxBuffer: 64 * 1024 * 1024 }
   )
-  assert(result.status === 0, `${path}: ffmpeg failed: ${result.stderr?.toString() ?? ''}`)
+  assert(
+    result.status === 0,
+    `${path}: ffmpeg failed (status ${result.status}, signal ${result.signal}, ${result.error?.message ?? 'spawned'}): ${result.stderr?.toString() ?? ''}`
+  )
   const frameBytes = size * size
   const frames = []
   for (let offset = 0; offset + frameBytes <= result.stdout.length; offset += frameBytes) {

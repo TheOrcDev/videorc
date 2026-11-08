@@ -31,6 +31,7 @@ mod buddy_pet;
 mod buddy_pet_store;
 mod buddy_sprite;
 mod camera_capture;
+mod camera_low_light;
 mod captions;
 mod capture_health;
 mod capture_input;
@@ -5847,7 +5848,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screen.hide"
         | "screen.show"
         | "virtualCamera.set"
-        | "virtualCamera.platform.report" => Some(DEFAULT_MUTATION_POLICY),
+        | "virtualCamera.platform.report"
+        | "camera.lowLight.set" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.source.switch" => Some(Mutation {
             max_execution_age: live_source_switch::SOURCE_SWITCH_EXECUTION_TIMEOUT,
@@ -6047,6 +6049,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "recording.status"
         | "screen.privacy.get"
         | "virtualCamera.status"
+        // Issue #1066: reads the camera control; never waits behind a set.
+        | "camera.lowLight.get"
         | "stream.targets.snapshot" => Some(Observation),
 
         "screens.active" => Some(DEFAULT_MUTATION_POLICY),
@@ -13918,6 +13922,38 @@ async fn handle_text_message_with_role(
                         params.message,
                     ),
                 ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Issue #1066: a camera's low-light compensation, saved per camera.
+        "camera.lowLight.get" => {
+            match serde_json::from_value::<protocol::CameraLowLightParams>(command.params) {
+                // A failed read is an error the renderer retries, never
+                // "no control".
+                Ok(params) => match camera_low_light::get(state, params.camera_id).await {
+                    Ok(low_light) => ServerResponse::ok(command.id, low_light),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "camera-low-light-unavailable", error)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "camera.lowLight.set" => {
+            match serde_json::from_value::<protocol::CameraLowLightSetParams>(command.params) {
+                Ok(params) => {
+                    match camera_low_light::set(state, params.camera_id, params.compensation).await
+                    {
+                        Ok(low_light) => ServerResponse::ok(command.id, low_light),
+                        Err(error) => {
+                            ServerResponse::error(command.id, "camera-low-light-failed", error)
+                        }
+                    }
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -23819,7 +23855,8 @@ mod tests {
         assert!(
             older["error"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("superseded"))
+                .is_some_and(|message| message.contains("superseded")),
+            "older warm-up must fail as superseded: {older}"
         );
         assert!(started.elapsed() < Duration::from_millis(1_500));
 
@@ -24036,7 +24073,10 @@ mod tests {
         assert!(
             stale
                 .error
-                .is_some_and(|error| error.message.contains("superseded"))
+                .as_ref()
+                .is_some_and(|error| error.message.contains("superseded")),
+            "the stale warm-up must fail as superseded: {:?}",
+            stale.error
         );
         let final_scene = request_for_test(&state, "final-scene", "scene.get", json!({})).await;
         let final_scene = final_scene.payload.expect("final scene");

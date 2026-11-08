@@ -3735,6 +3735,49 @@ it('keeps a live camera that sends no video (plan 216 D2)', () => {
   ).toThrow()
 })
 
+describe('Camera low-light compensation wire contract (issue #1066)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/camera-low-light.json', import.meta.url),
+      'utf8'
+    )
+  ) as {
+    getParams: unknown
+    setParams: unknown
+    keepsFrameRate: unknown
+    compensating: unknown
+    unsupported: unknown
+    rejectedParams: unknown[]
+    rejectedSetParams: unknown[]
+    rejectedStates: unknown[]
+  }
+
+  it('accepts the fixture params and states, field for field', () => {
+    expect(validateBackendRpcParams('camera.lowLight.get', fixture.getParams)).toEqual(
+      fixture.getParams
+    )
+    expect(validateBackendRpcParams('camera.lowLight.set', fixture.setParams)).toEqual(
+      fixture.setParams
+    )
+    for (const state of [fixture.keepsFrameRate, fixture.compensating, fixture.unsupported]) {
+      expect(validateBackendRpcResult('camera.lowLight.get', state)).toEqual(state)
+      expect(validateBackendRpcResult('camera.lowLight.set', state)).toEqual(state)
+    }
+  })
+
+  it('rejects an empty id, a missing or null flag and a forged field', () => {
+    for (const bad of fixture.rejectedParams) {
+      expect(() => validateBackendRpcParams('camera.lowLight.get', bad)).toThrow()
+    }
+    for (const bad of fixture.rejectedSetParams) {
+      expect(() => validateBackendRpcParams('camera.lowLight.set', bad)).toThrow()
+    }
+    for (const bad of fixture.rejectedStates) {
+      expect(() => validateBackendRpcResult('camera.lowLight.get', bad)).toThrow()
+    }
+  })
+})
+
 describe('Videorc Camera wire contract (plan 214 A4)', () => {
   const fixture = JSON.parse(
     readFileSync(

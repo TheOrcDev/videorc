@@ -128,4 +128,23 @@ describe('cameraLowFrameRateLine', () => {
       'Your camera is sending 12 of 30 fps. More light usually helps.'
     )
   })
+
+  it('names the switch when low-light compensation is what lowers the rate', () => {
+    expect(
+      cameraLowFrameRateLine(
+        'HP HD Camera',
+        { fps: 11.4, expectedFps: 30 },
+        { lowLightCompensation: true }
+      )
+    ).toBe(
+      'HP HD Camera is sending 11 of 30 fps. Turning off Low-light compensation can bring it back to 30 fps.'
+    )
+    expect(
+      cameraLowFrameRateLine(
+        'HP HD Camera',
+        { fps: 11.4, expectedFps: 30 },
+        { lowLightCompensation: false }
+      )
+    ).toBe('HP HD Camera is sending 11 of 30 fps. More light usually helps.')
+  })
 })

@@ -3439,11 +3439,27 @@ struct MixFixtureGateState {
     armed: bool,
     rendered: u64,
     delivered: [u64; 2],
+    /// Frames past the rendered chunk every source must also have sent.
+    lookahead: u64,
     failure: Option<String>,
 }
 
 #[cfg(test)]
 impl MixFixtureGate {
+    /// A microphone-only fixture with noise reduction on: render also waits
+    /// for the model's lookahead, which the bus reads past the chunk.
+    fn microphone_with_denoise_lookahead() -> Self {
+        Self {
+            state: std::sync::Mutex::new(MixFixtureGateState {
+                // No system source feeds this fixture; never wait for one.
+                delivered: [0, u64::MAX],
+                lookahead: crate::microphone_denoise::DELAY_SAMPLES as u64,
+                ..Default::default()
+            }),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
     fn arm(&self) {
         self.state.lock().unwrap_or_else(|p| p.into_inner()).armed = true;
         self.changed.notify_all();
@@ -3489,8 +3505,9 @@ impl MixFixtureGate {
     }
 
     fn permit_packet(&self, end: u64, stop: &AtomicBool) -> io::Result<bool> {
-        // More than the next complete 480-frame chunk plus either fixture's
-        // 512/960-frame packet, but far below the production one-second cap.
+        // More than the next complete 480-frame chunk, the 960-frame noise
+        // reduction lookahead and either fixture's 512/960-frame packet, but
+        // far below the production one-second cap.
         self.wait_for(stop, None, |state| {
             state.armed && end <= state.rendered + 4096
         })
@@ -3521,7 +3538,7 @@ impl MixFixtureGate {
                 && state
                     .delivered
                     .iter()
-                    .all(|end| *end >= cursor + CHUNK_FRAMES as u64)
+                    .all(|end| *end >= cursor + CHUNK_FRAMES as u64 + state.lookahead)
         })?;
         Ok(())
     }
@@ -11133,26 +11150,40 @@ mod mix_tests {
             (MicrophoneNoiseSuppression::Rnnoise, 0.0, false, 0.0),
         ] {
             let epoch = Instant::now() + Duration::from_millis(100);
-            let packets = signal_packets(epoch, 0, 48_000, 480, |position| {
+            // A second past the observation, so a gated render never waits
+            // for a packet the fixture does not have.
+            let packets = signal_packets(epoch, 0, 96_000, 480, |position| {
                 let sample =
                     amplitude * (std::f32::consts::TAU * 1000.0 * position as f32 / 48_000.0).sin();
                 (sample, sample)
             });
-            let bus = start_bus(
-                epoch,
-                Some(packets),
-                AudioProcessingSettings {
-                    gain_db,
-                    muted,
-                    noise_suppression: mode,
-                },
-                if amplitude == 0.0 {
-                    system_options()
-                } else {
-                    SessionAudioOptions::default()
-                },
-            )
-            .await;
+            let settings = AudioProcessingSettings {
+                gain_db,
+                muted,
+                noise_suppression: mode,
+            };
+            let bus = if amplitude == 0.0 {
+                start_bus(epoch, Some(packets), settings, system_options()).await
+            } else {
+                // RNNoise reads two 10 ms frames past the chunk it renders. A
+                // fixture thread that sends both late hands the model
+                // zero-filled input, and after that silence it passes the
+                // tone's return at about unity gain, which this meter reads
+                // as 0.001. Render waits for the lookahead instead.
+                let options = SessionAudioOptions::default();
+                let mut observation = MixTestObservation::new(epoch, options.playout_delay);
+                observation.fixture_gate =
+                    Some(Arc::new(MixFixtureGate::microphone_with_denoise_lookahead()));
+                start_bus_observed(
+                    epoch,
+                    Some(packets),
+                    settings,
+                    options,
+                    None,
+                    Some(Arc::new(std::sync::Mutex::new(observation))),
+                )
+                .await
+            };
             if amplitude == 0.0 {
                 let system = bus.session.system_audio();
                 let producer = prepare_system(
@@ -11173,7 +11204,7 @@ mod mix_tests {
             assert!(finalizing.received_capture_frames >= live.received_capture_frames);
             assert!(
                 live.session_peak < 0.001,
-                "processed meter remains quiet: {live:?}"
+                "mode={mode:?}: processed meter remains quiet: {live:?}"
             );
             // Match the observation window. Stop drains later model output,
             // which is not part of the health snapshot asserted above.

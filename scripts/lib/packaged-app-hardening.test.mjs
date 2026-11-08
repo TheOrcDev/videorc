@@ -10,6 +10,7 @@ import {
   BUILD_FLAGS_ASAR_PATH,
   FUSE_STATE,
   REQUIRED_FUSES,
+  appImageDesktopEntryProblems,
   buildFlagsProblems,
   builderFuseConfigProblems,
   describeFuseWire,
@@ -154,5 +155,50 @@ describe('packaged build flags', () => {
       resourcesDirForApp('/r/win-unpacked/Videorc.exe', 'win32'),
       resolve('/r/win-unpacked/resources')
     )
+  })
+})
+
+describe('AppImage desktop entry', () => {
+  const entry = (exec) =>
+    ['[Desktop Entry]', 'Name=Videorc', `Exec=${exec}`, 'Type=Application', ''].join('\n')
+
+  it('passes an entry that leaves the sandbox to AppRun', () => {
+    assert.deepEqual(appImageDesktopEntryProblems(entry('AppRun %U')), [])
+    assert.deepEqual(appImageDesktopEntryProblems(entry('AppRun --enable-logging %U')), [])
+  })
+
+  it('fails an entry that turns the sandbox off, a missing Exec or a missing file', () => {
+    assert.match(
+      appImageDesktopEntryProblems(entry('AppRun --no-sandbox %U'))[0],
+      /--no-sandbox turns the Chromium sandbox off/
+    )
+    assert.match(
+      appImageDesktopEntryProblems(entry('AppRun --no-sandbox %U').replace(/\n/g, '\r\n'))[0],
+      /--no-sandbox/
+    )
+    assert.match(appImageDesktopEntryProblems('[Desktop Entry]\nName=Videorc\n')[0], /no Exec line/)
+    assert.match(appImageDesktopEntryProblems(null)[0], /no videorc\.desktop/)
+  })
+
+  it('reads Exec only from the [Desktop Entry] group', () => {
+    const text = [
+      '[Desktop Entry]',
+      'Exec=AppRun %U',
+      '[Desktop Action safe]',
+      'Exec=AppRun --no-sandbox %U',
+      ''
+    ].join('\n')
+    assert.deepEqual(appImageDesktopEntryProblems(text), [])
+  })
+
+  it('electron-builder.yml uses a toolset runtime, whose bundled entry runs AppRun %U', () => {
+    // The patched AppImageTarget keeps --no-sandbox in the entry only on the 0.0.0 runtime.
+    const config = loadYaml(
+      readFileSync(join(repoRoot, 'apps/desktop/electron-builder.yml'), 'utf8')
+    )
+    assert.ok(config.toolsets?.appimage)
+    assert.notEqual(String(config.toolsets.appimage), '0.0.0')
+    assert.equal(config.linux?.executableArgs, undefined)
+    assert.equal(config.appImage?.executableArgs, undefined)
   })
 })

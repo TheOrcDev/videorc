@@ -119,7 +119,19 @@ export function sameCameraLowFrameRate(
   return Math.round(a.fps) === Math.round(b.fps) && a.expectedFps === b.expectedFps
 }
 
-/** "C920 is sending 15 of 30 fps. More light usually helps." */
-export function cameraLowFrameRateLine(name: string | undefined, low: CameraLowFrameRate): string {
-  return `${name?.trim() || 'Your camera'} is sending ${Math.round(low.fps)} of ${Math.round(low.expectedFps)} fps. More light usually helps.`
+/**
+ * "C920 is sending 15 of 30 fps. More light usually helps." With low-light
+ * compensation on (issue #1066), the camera may be trading frames for exposure
+ * on purpose, so the line names the switch that can bring the rate back.
+ */
+export function cameraLowFrameRateLine(
+  name: string | undefined,
+  low: CameraLowFrameRate,
+  options?: { lowLightCompensation?: boolean }
+): string {
+  const expected = Math.round(low.expectedFps)
+  const sending = `${name?.trim() || 'Your camera'} is sending ${Math.round(low.fps)} of ${expected} fps.`
+  return options?.lowLightCompensation
+    ? `${sending} Turning off Low-light compensation can bring it back to ${expected} fps.`
+    : `${sending} More light usually helps.`
 }

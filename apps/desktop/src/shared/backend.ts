@@ -4545,6 +4545,29 @@ export interface VirtualCameraStatus {
   message?: string
 }
 
+/** `camera.lowLight.get` (issue #1066). */
+export interface CameraLowLightParams {
+  cameraId: string
+}
+
+/** `camera.lowLight.set` (issue #1066): saved per camera, written to the device now. */
+export interface CameraLowLightSetParams {
+  cameraId: string
+  compensation: boolean
+}
+
+/**
+ * A camera's low-light compensation (issue #1066). On, the camera may drop to
+ * half its frame rate to brighten a dim picture; off (the default), it keeps
+ * its frame rate. `supported` is false off Windows and on cameras without the
+ * control.
+ */
+export interface CameraLowLightState {
+  cameraId: string
+  supported: boolean
+  compensation: boolean
+}
+
 export interface VirtualCameraSetParams {
   on: boolean
 }

@@ -17,9 +17,9 @@
 //      runs (the Notes window stays closed), the composer says so, and
 //      Activity shows the refusals as Buddy's.
 //   3. `/buddy move yourself to the top left` through `move_on_scene` (plan
-//      209 S11b): Buddy's rect lands top left. SKIPPED with a message while
-//      the catalog has no `move_on_scene` (the orchestrator re-runs it after
-//      PR B merges).
+//      209 S11b): Buddy's rect lands top left and the composer says so.
+//      SKIPPED with a message while the catalog has no `move_on_scene` (the
+//      orchestrator re-runs it after PR B merges).
 //   4. By voice, while recording: "Buddy, stop the recording." The planner
 //      answers `stop`; Buddy asks 'Stop the recording? Say "Buddy, yes".'
 //      and the recording runs on through a bare "Yes." (review fix 17: a yes
@@ -384,6 +384,9 @@ try {
           value: horizontal
         }
       })
+      // The rect moves before Buddy's answer comes back, and the composer
+      // refuses the next /buddy until it does: wait for it, as steps 1-2 do.
+      await composerSays('Moved Buddy to the top left.', 'what Buddy did')
       results.push(`3 move_on_scene: Buddy at ${JSON.stringify(rect)}`)
       log('step 3: /buddy moved Buddy to the top left')
     }

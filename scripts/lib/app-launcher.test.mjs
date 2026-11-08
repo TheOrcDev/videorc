@@ -59,7 +59,9 @@ const SMOKE_ENV_KEYS = [
   'VIDEORC_SMOKE_PRINT_BACKEND_READY',
   'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
   'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN',
-  'VIDEORC_SMOKE_TRASH_DIR'
+  'VIDEORC_SMOKE_TRASH_DIR',
+  'VIDEORC_PACKAGED_SMOKE_TEST',
+  'XDG_DATA_HOME'
 ]
 
 test('macOS real-source launch uses the exact app bundle through LaunchServices', () => {
@@ -452,6 +454,41 @@ test('smokeAppEnv keeps the smoke Trash stand-in inside the run, never inherited
           VIDEORC_SMOKE_TRASH_DIR: '/Users/someone/.Trash'
         }),
       /VIDEORC_SMOKE_TRASH_DIR must be inside/
+    )
+  })
+})
+
+test('smokeAppEnv keeps a packaged Linux run out of the user desktop entries', () => {
+  withCleanSmokeEnv(() => {
+    process.env.XDG_DATA_HOME = '/home/someone/.local/share'
+    const stateDir = '/tmp/videorc-current-smoke'
+    const packaged = { VIDEORC_SMOKE_STATE_DIR: stateDir, VIDEORC_PACKAGED_SMOKE_TEST: '1' }
+
+    assert.equal(
+      smokeAppEnv(packaged, { platform: 'linux' }).XDG_DATA_HOME,
+      resolve(stateDir, 'app-data/xdg-data')
+    )
+    // The dev app (pnpm) and other platforms keep the shell's value.
+    assert.equal(
+      smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: stateDir }, { platform: 'linux' }).XDG_DATA_HOME,
+      '/home/someone/.local/share'
+    )
+    assert.equal(
+      smokeAppEnv(packaged, { platform: 'darwin' }).XDG_DATA_HOME,
+      '/home/someone/.local/share'
+    )
+    assert.equal(
+      smokeAppEnv({ ...packaged, XDG_DATA_HOME: resolve(stateDir, 'xdg') }, { platform: 'linux' })
+        .XDG_DATA_HOME,
+      resolve(stateDir, 'xdg')
+    )
+    assert.throws(
+      () =>
+        smokeAppEnv(
+          { ...packaged, XDG_DATA_HOME: '/home/someone/.local/share' },
+          { platform: 'linux' }
+        ),
+      /XDG_DATA_HOME must be inside/
     )
   })
 })
