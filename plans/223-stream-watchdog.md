@@ -25,7 +25,12 @@
 
 ## Status
 
-- **Status**: PLANNED 2026-11-08. Nothing built.
+- **Status**: EXECUTING 2026-11-08. Phase A (A1 to A8), Phase B (B1, the
+  desktop half of B2, B3), C3 and C4 (the desktop reads the runner's
+  `program` block; Reconnect goes through the runner) and D2 (the desktop
+  sends the push) are built on the desktop cloud branch (`plan-184-videorc-
+  cloud`, draft #727). See "Progress" at the end. A9 (the Kick live test)
+  and D3 (the phone acceptance) wait for the owner.
 - **Priority**: P1. Part of the 2026-11-08 "Premium worth paying for" set
   (umbrella plan 221; this is feature 3 of 5).
 - **Effort**: L. Five phases. Phase A (the desktop watchdog) is about a week
@@ -1232,3 +1237,25 @@ Stop and report when:
   acceptance); plan 222 for Phase C and D's web work landing beside the
   cloud routes; Windows `AppUserModelId` for notifications is UNVERIFIED in
   the installer config; X and Kick polling rate limits are UNVERIFIED.
+
+## Progress
+
+| Slice | State |
+| --- | --- |
+| A1 the alert store and the runner | **Done** 2026-11-08. `crates/videorc-backend/src/watchdog/{mod,alerts,settings,checks}.rs`; the tick rides the session's `audio.levels` task once a second; RPCs `watchdog.alerts.list`, `watchdog.alert.acknowledge`, `watchdog.alert.snooze`, `watchdog.settings.get/set`, `watchdog.idle.report`, `watchdog.phone.devices`; event `watchdog.alerts`; health events through `emit_health_event`; `protocol-fixtures/watchdog.json` round-trips on both sides. |
+| A2 audio checks | **Done**. `mic-muted` from the bus's applied mute (the takeover and music guards), `program-silent` from the master reading, `no-voice` from the post-gain microphone (−45 dBFS), the 1064 silence watchdog adopted as `mic-silent` (notice copy unchanged). Deviation: while the microphone is muted and the mute check is on, `program-silent` folds into the mic card from the start, so the mute's own threshold is never preempted by the 20 s silence clock. |
+| A3 picture-stopped | **Done**. From `stream-output-stalled`/`-resumed` and the `compositor-render` latch; `screen-delivery` alone never opens it and only adds "The screen hasn't changed either." |
+| A4 destinations and platform health | **Done**. `destination-down` with the 20 s clock, the all-down fold and the honest direct-leg copy (D8); YouTube `configurationIssues` read from the same `part=status` body (the plan 094 breaker untouched, a unit test proves it); X `ENDED` from the viewer poll; Kick's miss counter behind `watchdog::KICK_LIVENESS_ALERTS = false` (A9 flips it). The fake YouTube API gains `controls.configurationIssues`. |
+| A5 the card and the Studio | **Done**. `components/studio/watchdog-alert-card.tsx` (lazy) inside `SessionNotices`; the Stream fact row names the top alert; toasts keyed `watchdog:<check>[:<target>]` with the fix as the action, the clearing toast replaces them; fixes run through the Studio's own actions (`micUnmute`, `takeoverHide`, the pages, `cloud.show.reconnectDestination`). Everything new is in a lazy chunk (`lib/watchdog-surface.ts`); the eager Studio keeps the list and three small effects. |
+| A6 the chip, the section, the history | **Done**. `data-testid="session-alert"` beside ON AIR with the card on hover (a fix pressed there is relayed to the Studio through main; Got it and Snooze stay in the Studio); the Watchdog section on the Livestream page (every check, Alert me after, System notifications, Phone with the QR and the device count, AI reads chat); the Alerts list from `watchdog-*` health events. Deviation: the Library has no session-details panel, so the list lives on Health beside "Log of this recording", which already shows the session's log. |
+| A7 notifications and the black measurement | **Done**. `main/watchdog-notify.ts` (pure decision + ledger, tests) behind `watchdog:notify`; the click brings the Studio forward and never runs the fix; Windows gets `app.setAppUserModelId` at ready. D10: the 64×36 sample runs on the watchdog's tick task (once a second) against the stream leg's frame store (the split stream store on macOS record+stream, else the primary), not on the compositor's frame thread, so the compositor's own p95 is untouched; the sample's cost is the luma bench in `watchdog/luma.rs` (numbers in the PR). `picture-black` ships on the desktop with the dark-takeover guard (the takeover's own PNG luma at activation: 16 to 47 suppresses, under 16 is black and alarms). |
+| A8 the smoke | **Done**. `pnpm smoke:stream-watchdog` (`scripts/smoke-stream-watchdog-app.mjs`): the settings round trip, mute → fold → acknowledge → clear, the grey takeover guard, the black takeover, the FIFO-pause stall (macOS), one sink down → fold → back, the B3 chat scenarios, the leak scan, Stop. |
+| A9 Kick measurement | Waits for the owner (a live Kick test). The flag stays off. |
+| B1 phrase tables | **Done**. `watchdog/chat_signals.rs`, fourteen languages, one positive and one negative each; wired after chat delivery in `live_chat.rs`; the streamer's own lines (`broadcaster`) and deleted rows never count. |
+| B2 the AI read (desktop half) | **Done**. `VideorcApiClient::post_watchdog_chat` to `POST /api/ai/watchdog/chat` (text, platform, a per-call author index; never ids or names), at most once every 2 min per stream, only after a candidate, Premium and the switch; the desktop's threshold is 0.7 on the raw probabilities; a 401/403 stops the stream's reads. Buddy may say the card's title in its bubble, never a post. |
+| B3 the chat smoke | **Done**, in `smoke:stream-watchdog`. |
+| C3 the desktop reads the runner | **Done**. `RunnerState.program` and `CloudStatus.program` (`CloudProgram`, every field optional), the contract and fixture; the checks dedupe both sources into one card with the cloud detail and the hold guard; `cloud.show.reconnectDestination { targetId }` sends `destinations.set` with the one id (C2's upsert). |
+| C4 the cloud smoke scenario | **Done**: `VIDEORC_CLOUD_SOLO_WATCHDOG=1 pnpm smoke:cloud-solo`. Deviation: the runner has no dev env to shorten the 20-failure cap, so the leg scenario drives a `reconnecting` leg (the upsert restarts reconnecting legs too), not a `failed` one. |
+| D2 the desktop sends | **Done**. `watchdog/push.rs` builds the body (a count and a class for `chat-says`, never words; no URL, no key); `VideorcApiClient::post_alert_notify` on open and clear of critical and warning alerts, off without Premium or the switch; one session-log line per stream on failure, never a toast; `GET /api/alerts/devices` behind `watchdog.phone.devices` for the section's "Alerts reach {n} devices". |
+| D3 owner acceptance | Waits for the owner's phone. |
+
