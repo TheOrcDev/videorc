@@ -2368,7 +2368,12 @@ export type WindowsD3d11CaptureBackend =
   | 'windows-graphics-capture-monitor'
   | 'legacy-ffmpeg'
 
-export type WindowsD3d11CursorMode = 'embedded' | 'separate' | 'excluded-wgc' | 'disabled-fallback'
+export type WindowsD3d11CursorMode =
+  | 'embedded'
+  | 'separate'
+  | 'excluded-wgc'
+  | 'embedded-wgc'
+  | 'disabled-fallback'
 
 /** Scalar-only diagnostics. No COM pointer, texture/shared handle, or HWND is wire-safe. */
 export interface WindowsD3d11MediaDiagnostics {
@@ -2383,6 +2388,12 @@ export interface WindowsD3d11MediaDiagnostics {
   generation?: number
   captureBackend?: WindowsD3d11CaptureBackend
   cursorMode?: WindowsD3d11CursorMode
+  /**
+   * Why captureBackend is not the Desktop Duplication the session asked for
+   * while the D3D11 path stays live, e.g. a hybrid-graphics laptop capturing
+   * through Windows Graphics Capture. Absent when the requested backend opened.
+   */
+  captureRouteReason?: string
   cursorRequested: boolean
   cursorPixelsSource?: string
   cursorExclusionGuaranteed: boolean

@@ -1921,6 +1921,28 @@ describe('backend RPC contract', () => {
       })
     )
     expect(validateBackendRpcResult('diagnostics.stats', switchedCapture)).toEqual(switchedCapture)
+    // Issue #906: a hybrid-graphics laptop captures the monitor through
+    // Windows Graphics Capture with the cursor drawn by Windows and names why.
+    const hybridRoute = {
+      ...diagnostics,
+      windowsD3d11Media: {
+        ...windowsD3d11Media,
+        captureBackend: 'windows-graphics-capture-monitor',
+        cursorMode: 'embedded-wgc',
+        cursorPixelsSource: 'wgc-surface',
+        captureRouteReason: 'd3d11-capture-desktop-duplication-cross-adapter'
+      }
+    }
+    expect(validateBackendRpcResult('diagnostics.stats', hybridRoute)).toEqual(hybridRoute)
+    expect(() =>
+      validateBackendRpcResult('diagnostics.stats', {
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          captureRouteReason: ''
+        }
+      })
+    ).toThrow('captureRouteReason')
 
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {

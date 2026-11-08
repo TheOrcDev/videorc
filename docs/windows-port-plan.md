@@ -467,7 +467,18 @@ app in exile.
 - **dshow camera format negotiation** is messier than AVFoundation's format
   matrix; expect device-specific quirks.
 - **ddagrab + multi-GPU laptops** (Optimus): adapter selection needs an
-  explicit flag and a fallback.
+  explicit flag and a fallback. **Resolved for the D3D11 media path
+  (issue #906, 2026-11-08):** on a hybrid laptop DXGI lists the panel under
+  the GPU the session runs on while the other GPU drives it, and
+  `IDXGIOutput1::DuplicateOutput` answers `DXGI_ERROR_UNSUPPORTED`. The
+  capture worker names that
+  `d3d11-capture-desktop-duplication-cross-adapter` (only when the host has
+  two or more hardware adapters) and opens the same monitor through Windows
+  Graphics Capture on the same D3D11 device with the cursor drawn by Windows
+  (`cursorMode: embedded-wgc`), so the compositor and the encoder keep their
+  adapter. The diagnostics carry the route in `captureRouteReason`; the
+  session never drops to the legacy FFmpeg bridge for this case. The legacy
+  `ddagrab` preview on such a laptop is still the slow path.
 - **Dev loop friction:** one developer on macOS, app behavior on Windows —
   budget for remote-access tooling to the Windows box (SSH + screenshots or
   Parsec) so the judge-by-eye loop stays tight.

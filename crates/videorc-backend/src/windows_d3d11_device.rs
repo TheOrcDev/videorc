@@ -2254,6 +2254,15 @@ mod runtime {
                 Self::WindowsGraphicsCapture { capture, .. } => capture.diagnostics(),
             }
         }
+
+        /// The plan this runtime opened with, which differs from the one the
+        /// session asked for when Desktop Duplication fell back to WGC.
+        fn plan(&self) -> WindowsD3d11CapturePlan {
+            match self {
+                Self::DesktopDuplication { plan, .. }
+                | Self::WindowsGraphicsCapture { plan, .. } => *plan,
+            }
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -2415,7 +2424,10 @@ mod runtime {
         plan: WindowsD3d11CapturePlan,
         owner: CaptureOwner<CaptureInput, CaptureOutput, WindowsD3d11Error>,
         diagnostics: WindowsD3d11CaptureDiagnostics,
-        opened_diagnostics: Arc<Mutex<Option<WindowsD3d11CaptureDiagnostics>>>,
+        /// The plan and diagnostics of the capture that opened on the worker.
+        /// The plan can differ from `plan` (Desktop Duplication → WGC).
+        opened_diagnostics:
+            Arc<Mutex<Option<(WindowsD3d11CapturePlan, WindowsD3d11CaptureDiagnostics)>>>,
         panic_notified: bool,
         starting: Option<SyncSender<Result<WindowsD3d11CaptureSession, WindowsD3d11Error>>>,
         started_at: Instant,
@@ -4443,15 +4455,50 @@ mod runtime {
                 let device = factory();
                 let capture = match plan.backend {
                     WindowsD3d11CaptureBackend::DesktopDuplication => {
-                        WindowsD3d11CaptureRuntime::DesktopDuplication {
-                            plan,
-                            capture: WindowsD3d11DesktopDuplicationCapture::create(&device, plan)
+                        match WindowsD3d11DesktopDuplicationCapture::create(&device, plan) {
+                            Ok(capture) => WindowsD3d11CaptureRuntime::DesktopDuplication {
+                                plan,
+                                capture,
+                                state: WindowsD3d11DesktopDuplicationState::new(
+                                    plan.generation,
+                                    plan.cursor_requested,
+                                )
                                 .map_err(map_capture_error)?,
-                            state: WindowsD3d11DesktopDuplicationState::new(
-                                plan.generation,
-                                plan.cursor_requested,
-                            )
-                            .map_err(map_capture_error)?,
+                            },
+                            Err(error) => {
+                                // Issue #906: on a hybrid-graphics laptop the
+                                // panel is enumerated under the GPU the session
+                                // runs on, but another GPU drives it, and
+                                // DuplicateOutput refuses. Windows Graphics
+                                // Capture reads the same monitor through the
+                                // desktop compositor on the same device, so the
+                                // compositor and encoder keep their adapter.
+                                let Some(fallback_plan) =
+                                    plan.wgc_cursor_embedded_fallback(&error)
+                                else {
+                                    return Err(map_capture_error(error));
+                                };
+                                tracing::warn!(
+                                    "Desktop Duplication could not open {}: {error}; capturing it through Windows Graphics Capture with the cursor drawn by Windows",
+                                    plan.selection.screen_id()
+                                );
+                                let capture =
+                                    WindowsD3d11WgcMonitorCapture::create(&device, fallback_plan)
+                                        .map_err(|wgc_error| {
+                                            map_capture_error(WindowsD3d11CaptureError {
+                                                reason: wgc_error.reason,
+                                                detail: format!(
+                                                    "{error}; Windows Graphics Capture could not replace it: {}",
+                                                    wgc_error.detail
+                                                ),
+                                            })
+                                        })?;
+                                WindowsD3d11CaptureRuntime::WindowsGraphicsCapture {
+                                    plan: fallback_plan,
+                                    capture,
+                                    next_sequence: 1,
+                                }
+                            }
                         }
                     }
                     WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor => {
@@ -4464,8 +4511,10 @@ mod runtime {
                     }
                 };
 
+                // The plan that actually opened, so the owner reports the
+                // backend that runs rather than the one it asked for.
                 *worker_diagnostics.lock().unwrap_or_else(|p| p.into_inner()) =
-                    Some(capture.diagnostics());
+                    Some((capture.plan(), capture.diagnostics()));
                 Ok(CaptureWorker {
                     capture,
                     device,
@@ -4660,12 +4709,13 @@ mod runtime {
         let mut retire = false;
         if let Some(capture) = runtime.capture.as_mut() {
             if let Some(opened) = capture.owner.take_open_result() {
-                if let Some(diagnostics) = capture
+                if let Some((plan, diagnostics)) = capture
                     .opened_diagnostics
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .take()
                 {
+                    capture.plan = plan;
                     capture.diagnostics = diagnostics;
                 }
                 let response = opened.and_then(|()| {

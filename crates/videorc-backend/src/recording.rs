@@ -20370,6 +20370,7 @@ fn windows_d3d11_live_diagnostics(
             CursorMode::Embedded => crate::protocol::WindowsD3d11CursorMode::Embedded,
             CursorMode::Separate => crate::protocol::WindowsD3d11CursorMode::Separate,
             CursorMode::ExcludedWgc => crate::protocol::WindowsD3d11CursorMode::ExcludedWgc,
+            CursorMode::EmbeddedWgc => crate::protocol::WindowsD3d11CursorMode::EmbeddedWgc,
             CursorMode::DisabledFallback => {
                 crate::protocol::WindowsD3d11CursorMode::DisabledFallback
             }
@@ -20456,6 +20457,10 @@ fn windows_d3d11_live_diagnostics(
             .or_else(|| snapshot.pump.capture_cleanup_pending.then(|| "Previous capture is still closing; output continues on the committed source".into()))
             .or_else(|| (snapshot.pump.capture_upload_frames > 0).then(|| "Live capture replacement uses the existing preview BGRA upload route".into()))
             .or(capture_fallback),
+        capture_route_reason: capture
+            .filter(|_| !snapshot.pump.capture_route_bgra)
+            .and_then(|diagnostics| diagnostics.duplication_fallback_reason)
+            .map(|reason| reason.as_str().to_string()),
     }
 }
 

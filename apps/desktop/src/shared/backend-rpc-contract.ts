@@ -2233,8 +2233,9 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
       ])
     ),
     cursorMode: optionalSchema(
-      enumSchema(['embedded', 'separate', 'excluded-wgc', 'disabled-fallback'])
+      enumSchema(['embedded', 'separate', 'excluded-wgc', 'embedded-wgc', 'disabled-fallback'])
     ),
+    captureRouteReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
     cursorRequested: booleanSchema,
     cursorPixelsSource: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
     cursorExclusionGuaranteed: booleanSchema,
