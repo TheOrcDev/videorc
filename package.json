@@ -177,6 +177,7 @@
     "smoke:system-audio": "node scripts/smoke-system-audio-app.mjs",
     "smoke:soundboard": "node scripts/smoke-soundboard-app.mjs",
     "smoke:output-stall": "node scripts/smoke-output-stall-app.mjs",
+    "smoke:stream-watchdog": "node scripts/smoke-stream-watchdog-app.mjs",
     "smoke:backend-single-instance": "node scripts/smoke-backend-single-instance.mjs",
     "smoke:backend-resilience": "node scripts/smoke-backend-resilience.mjs",
     "smoke:command-lanes": "node scripts/smoke-command-lanes.mjs",

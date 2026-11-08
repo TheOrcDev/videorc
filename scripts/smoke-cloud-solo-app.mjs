@@ -146,6 +146,7 @@ const rollbackWhileDead = process.env.VIDEORC_CLOUD_SOLO_ROLLBACK === '1'
 const thinUplinkKbps = Math.max(0, Number(process.env.VIDEORC_CLOUD_SOLO_THIN_UPLINK_KBPS ?? 0))
 const thinUplinkWaitMs = Number(process.env.VIDEORC_CLOUD_SOLO_THIN_UPLINK_WAIT_MS ?? 150_000)
 // Plan 222 L3: the node dies in place of the computer (header, 11).
+const watchdogScenario = process.env.VIDEORC_CLOUD_SOLO_WATCHDOG === '1'
 const nodeDeath = process.env.VIDEORC_CLOUD_SOLO_NODE_DEATH === '1'
 if (nodeDeath && thinUplinkKbps > 0) {
   console.error(
@@ -708,6 +709,137 @@ try {
   )
   await sleep(afterResumeMs)
   assertReceiversConnected(receivers, 'after the feed cut resume')
+
+  // 10'. Plan 223 C4: the watchdog on a cloud show. With the muted-mic check
+  //      off (it would own the card), the mic is muted for 25 s: the runner's
+  //      `audioSilentSeconds` climbs and the desktop opens `program-silent`
+  //      with source cloud (the cloud reading wins the detail, D9); the tone
+  //      returns and it clears. Then one receiver is killed: the runner's
+  //      leg goes `reconnecting`, the desktop opens `destination-down` with
+  //      Reconnect, the receiver comes back and Reconnect (`destinations.set`
+  //      with the one id, C2's upsert) brings the leg to `connecting` then
+  //      `live`; the other receiver's connection is never closed.
+  if (watchdogScenario) {
+    const scenario = {
+      silentOpenedAfterSeconds: null,
+      silentSource: null,
+      silentDetail: null,
+      silentCleared: false,
+      legDownOpened: false,
+      legDownFix: null,
+      reconnectAccepted: false,
+      legBackLive: false,
+      otherReceiverKept: false
+    }
+    const alertsNow = () => collected.watchdog.at(-1)?.alerts ?? []
+    await request(backend, timeoutMs, 'watchdog.settings.set', {
+      checks: { 'mic-muted': { enabled: false } }
+    })
+    const muteAtMs = Date.now()
+    await request(backend, timeoutMs, 'audio.processing.update', {
+      sessionId: firstSessionId,
+      microphoneGainDb: 0,
+      microphoneMuted: true
+    })
+    log('[watchdog] microphone muted for 25 s: the runner should read a silent program')
+    const silent = await waitFor(
+      () => alertsNow().find((alert) => alert.check === 'program-silent') ?? null,
+      40_000,
+      'the desktop to open program-silent from the cloud reading'
+    ).catch(() => null)
+    if (silent) {
+      scenario.silentOpenedAfterSeconds = secondsBetween(muteAtMs, Date.now())
+      scenario.silentSource = silent.source
+      scenario.silentDetail = silent.detail
+      log(
+        `[watchdog] program-silent open ${scenario.silentOpenedAfterSeconds} s after the mute (source ${silent.source}: ${silent.detail})`
+      )
+    }
+    await sleep(Math.max(0, 25_000 - (Date.now() - muteAtMs)))
+    const silentCloudSeconds = collected.cloudStates
+      .filter((entry) => entry.atMs >= muteAtMs)
+      .map((entry) => entry.status?.program?.audioSilentSeconds ?? 0)
+      .reduce((max, value) => Math.max(max, value), 0)
+    await request(backend, timeoutMs, 'audio.processing.update', {
+      sessionId: firstSessionId,
+      microphoneGainDb: 0,
+      microphoneMuted: false
+    })
+    scenario.silentCleared = await waitFor(
+      () => (alertsNow().some((alert) => alert.check === 'program-silent') ? null : true),
+      20_000,
+      'program-silent to clear once the tone is back'
+    )
+      .then(() => true)
+      .catch(() => false)
+    await request(backend, timeoutMs, 'watchdog.settings.set', {
+      checks: { 'mic-muted': { enabled: true } }
+    })
+    scenario.runnerSilentSecondsMax = silentCloudSeconds
+
+    // The leg: kill receiver B, Reconnect once it is back.
+    const [kept, victim] = receivers
+    const killAtMs = Date.now()
+    victim.child.process.kill('SIGKILL')
+    log(`[watchdog] ${victim.name} killed: the runner's leg should go reconnecting`)
+    const legDown = await waitFor(
+      () =>
+        alertsNow().find(
+          (alert) => alert.check === 'destination-down' && alert.targetId === victim.id
+        ) ?? null,
+      45_000,
+      `destination-down for ${victim.id}`
+    ).catch(() => null)
+    scenario.legDownOpened = legDown !== null
+    scenario.legDownFix = legDown?.fixes?.[0]?.kind ?? null
+    scenario.legDownSource = legDown?.source ?? null
+    spawnReceiver(victim)
+    await sleep(listenerBindMs)
+    const reconnectAtMs = Date.now()
+    const reconnected = await request(backend, timeoutMs, 'cloud.show.reconnectDestination', {
+      targetId: victim.id
+    }).catch((error) => ({ error: String(error?.message ?? error) }))
+    scenario.reconnectAccepted = !reconnected?.error
+    if (reconnected?.error) log(`[watchdog] reconnect refused: ${reconnected.error}`)
+    scenario.legBackLive = await waitFor(
+      () =>
+        latestTargets(collected)?.find((entry) => entry.targetId === victim.id)?.state === 'live'
+          ? true
+          : null,
+      45_000,
+      `${victim.id} to be live again after Reconnect`
+    )
+      .then(() => true)
+      .catch(() => false)
+    scenario.legBackAfterSeconds = scenario.legBackLive
+      ? secondsBetween(reconnectAtMs, Date.now())
+      : null
+    scenario.legAlertCleared = await waitFor(
+      () => (alertsNow().some((alert) => alert.check === 'destination-down') ? null : true),
+      20_000,
+      'destination-down to clear'
+    )
+      .then(() => true)
+      .catch(() => false)
+    scenario.otherReceiverKept = kept.child.process.exitCode === null
+    scenario.killAt = new Date(killAtMs).toISOString()
+    report.watchdog = scenario
+    log(`[watchdog] ${JSON.stringify(scenario)}`)
+    const problems = []
+    if (!silent) problems.push('program-silent never opened on the cloud reading')
+    else if (silent.source !== 'cloud')
+      problems.push(`program-silent source ${silent.source}, expected cloud`)
+    if (!scenario.silentCleared) problems.push('program-silent did not clear')
+    if (!scenario.legDownOpened) problems.push(`no destination-down for ${victim.id}`)
+    else if (scenario.legDownFix !== 'reconnect-destination')
+      problems.push(`destination-down fix ${scenario.legDownFix}, expected reconnect-destination`)
+    if (!scenario.reconnectAccepted) problems.push('cloud.show.reconnectDestination was refused')
+    if (!scenario.legBackLive) problems.push(`${victim.id} never came back live`)
+    if (!scenario.otherReceiverKept) problems.push(`${kept.name} lost its connection`)
+    if (problems.length > 0) throw new Error(`watchdog scenario: ${problems.join('; ')}`)
+    log('[watchdog] scenario passed')
+    assertReceiversConnected(receivers, 'after the watchdog scenario')
+  }
 
   // 11'. Plan 222 L3 (D7): the node dies, in place of the computer. The
   //      runner, the agent and MediaMTX get SIGKILL, the feed proxy refuses
@@ -1390,7 +1522,7 @@ async function prebuildBackendOrThrow(env, onLine = log) {
 }
 
 function collectEvents(ws) {
-  const result = { cloudStates: [], targets: [], health: [], recording: [], raw: [] }
+  const result = { cloudStates: [], targets: [], health: [], recording: [], watchdog: [], raw: [] }
   ws.addEventListener('message', (event) => {
     let message
     try {
@@ -1415,6 +1547,8 @@ function collectEvents(ws) {
       })
     } else if (message.event === 'recording.status') {
       result.recording.push({ atMs, ...message.payload })
+    } else if (message.event === 'watchdog.alerts' && Array.isArray(message.payload?.alerts)) {
+      result.watchdog.push({ atMs, alerts: message.payload.alerts })
     }
   })
   return result
