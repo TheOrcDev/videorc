@@ -85,6 +85,23 @@ behaviour changed (not a line number), that is a STOP condition.
   - One Review pass (fit 9, `fable-5.1`) per phase before its kill switch
     flips.
 
+## Progress
+
+- 2026-11-08, Phase 3 on `plan-184-videorc-cloud` (#727): S0b note,
+  C-G1, C-G4, C-G5, C-G6, C-G7, C-G8 by one executor; C-G2 and C-G3 (the
+  Guests tab, the Show stage and the backstage strip) follow on the hooks
+  and state named in each slice's Result. Deviations from this plan where
+  the built web (`be159d28`) or the runner's wire notes won: the create
+  answer's `room` block carries `url`, `hostToken` and `name` only
+  (`identity` is derived, `host:<showId>`); `GET /api/cloud/shows/:id/room`
+  answers `{ room: { title, platforms, openDoor, limits }, invite }`; the
+  guests list carries a `cursor` for the long-poll; `stage.set` takes
+  `hostShape`; `overlay.set`'s rect is normalized; the runner has no
+  per-leg end today, so End livestream in a talk show sends `legs.end`
+  and reports the runner's refusal until R-G adds it.
+- TODO S-G1 `pnpm smoke:cloud-talk-show`: waits for the runner's talk-show
+  input to land on `phase-1-runner`; not built in this pass.
+
 ## The owner's ask (2026-11-08)
 
 > "plan out thoroughly first 5 things you recommended, it can go from our
@@ -918,6 +935,14 @@ run cold. Gates run once at the end of each phase.
   - **Done when** `docs/cloud/spike-host-room-2026-11.md` says whether
     renderer publishing is good enough (D6) and whether hiding the Preview
     is right (D7), or names what fails.
+  - **Result (2026-11-08)**: the note is in. D7 = hide the Preview; the
+    Show stage is the host's picture, through plan 203 S5's close-and-
+    reopen rule. D6 stands. Found: the main renderer's web permissions
+    allow audio only and refuse display capture, so camera video and the
+    screen share need a main-process grant that lives only while the room
+    is open (C-G4). Not measured on this Mac (no camera TCC in the dev
+    app, no HID from T3): shared-text legibility and publishing CPU; owed
+    to S-G1 or an attended run.
 - **S0f. The churn run, valid this time.** 600 s with a guest joining and
   leaving every 10 s and one tab flapping its network, on a Mac with sleep
   off (`caffeinate -i`). Count decoder restarts, dropped output frames, and
