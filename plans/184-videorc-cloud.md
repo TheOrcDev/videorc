@@ -90,7 +90,10 @@ So every ⚑ takes its recommended answer:
   fails.
 - **D8**: LiveKit Cloud (Ship) first. Self-host when the bill passes $300 a
   month, or before Max sells beyond the beta.
-- **D9**: Hetzner bare metal. S0a picks AX102 with x264 or GEX45 with NVENC.
+- **D9**: Hetzner bare metal (2026-10-16). **Changed 2026-11-08 by the
+  owner**: "we don't want to use hetzner". Neon is the whole backend, and
+  the media nodes run on a VM host: DigitalOcean CPU-Optimized droplets
+  recommended, owner to confirm (D9).
 - **D12**: the hold lasts 30 minutes by default (choices: 5, 15, 30, 60).
 - **D14**: the runner and node agent live in a private `videorc-cloud` repo.
   S0e passed (Progress).
@@ -114,11 +117,11 @@ So every ⚑ takes its recommended answer:
 | Slice | State | Where |
 | --- | --- | --- |
 | S0e code ownership | **Done** 2026-10-16. `scene_geometry.rs`, `overlay_layout.rs`, `buddy_animator.rs` and `buddy_overlay.rs` have only the owner as author. `compositor.rs` and `recording.rs` have five outside authors, so never copy them into the private runner. | this plan |
-| S0a runner spike | **Done on macOS** 2026-10-17 (Apple M4, MediaMTX, 2 local receivers): viewers see Be right back 1.5 s after the feed drops, and the picture is back about 1 s after the feed's first frame (4.6 s end to end, most of it the publisher's own start). The receivers never disconnected; the largest gap was one frame. 1080p60 x264 at 12 to 6 Mbps used 87% of a core on average (VideoToolbox 32%). x264 vs NVENC per box waits for a Hetzner box. `docs/spike-runner-2026-10.md` | `videorc-cloud` #1 |
+| S0a runner spike | **Done on macOS** 2026-10-17 (Apple M4, MediaMTX, 2 local receivers): viewers see Be right back 1.5 s after the feed drops, and the picture is back about 1 s after the feed's first frame (4.6 s end to end, most of it the publisher's own start). The receivers never disconnected; the largest gap was one frame. 1080p60 x264 at 12 to 6 Mbps used 87% of a core on average (VideoToolbox 32%). x264 vs NVENC per box waited for a Hetzner box; since 2026-11-08 it waits for a VM-host box (D9). `docs/spike-runner-2026-10.md` | `videorc-cloud` #1 |
 | S0b host app in a room | Not started (before Phase 2) | |
 | S0c SRT in FFmpeg | **Done** 2026-10-18: go for C1b, on four conditions. (1) On macOS, libsrt 1.5.7 is one configure flag and 0.66 MB more `ffmpeg` (+2.5%); FFmpeg still reports "LGPL version 3 or later", and the bundle gains the MPL-2.0 text and the UDT BSD notice. (2) Windows and Linux already link libsrt, but the pinned BtbN build (2026-07-31) carries 1.5.5, older than 1.5.6's KMREQ CVE fix and 1.5.7's security release: re-pin to autobuild 2026-09-30 before C1b ships. (3) SRT sends the stream id in the clear even with a passphrase, so it never carries the ingest key: one MediaMTX path per feed, `live/<showId>-<h\|v>`, for both protocols, with the ingest key in RTMPS's query and a 32-character passphrase per feed for SRT. (4) MediaMTX checks the passphrase per path, after the auth hook, so the node adds a path per feed through MediaMTX's API. Measured on the M4 at a 40 ms RTT: MediaMTX has an SRT feed ready 0.4 s after the publisher starts (RTMPS 1.6 s), and SRT adds 7.9% to the upload (RTMPS 4.7%). A drop under 5 s keeps the connection and loses no video when shorter than SRT's latency. At 1000 ms latency, 1% and 5% random loss lost no frames, and the latency adds 1.07 s of delay. The 3 s fallback to RTMPS is decided once, at Go Live, by a probe of SRT's handshake, never inside the leg. `docs/cloud/spike-srt-2026-10.md` | this PR |
-| S0d costs measured | **Blocked**: needs a Hetzner box and a LiveKit project from the owner | |
-| I1 nodes, I3 deploys, I4 watching, I5 DNS and TLS | **Blocked**: needs Hetzner and DNS from the owner | |
+| S0d costs measured | **Blocked**: needs a VM-host box (D9; was a Hetzner box until 2026-11-08) and a LiveKit project from the owner | |
+| I1 nodes, I3 deploys, I4 watching, I5 DNS and TLS | **Blocked**: needs a VM-host account (D9; was Hetzner until 2026-11-08) and DNS from the owner | |
 | I2 node agent | **Done** 2026-10-17 (`6ff8d76`): signed show routes, the control proxy, the MediaMTX publish hook, runner supervision with crash restart and adoption, heartbeat, usage and drain. Dev-tested only; TLS with a real cert is untested. | `videorc-cloud` #1 |
 | R1 to R6 runner | **Done** 2026-10-17: decoder, output clock, switcher (12 virtual-time tests), encoder and per-destination fan-out, control socket with `ingest.get`, usage, crash state. 82 tests plus the hold continuity test. The runner's `docs/wire-notes.md` pins 19 details this plan left open. | `videorc-cloud` #1 |
 | W1 to W6 control plane | **Done** 2026-10-17 (`796aab43`). Shows, nodes, signed node calls, placement, the reaper cron and `/live`. 32 new tests; the full web suite is green (1123). | `videorc-web` |
@@ -214,7 +217,7 @@ link.**
                  └──────▲───────────────────▲────────────────────▲────────┘
                         │ create / status   │ heartbeats, usage  │ tokens
  Solo show              │                   │                    │
- Computer ─ the feed ─┐ │    Media node (Hetzner, EU)            │
+ Computer ─ the feed ─┐ │    Media node (VM host, EU)            │
  (Studio builds the   │ │  ┌───────────────── Runner ─────────────────┐
   picture as today;   └─┼─►│ inputs → switch / compose → encode once  │──► YouTube
   RTMPS, later SRT)     │  │   the feed            hold image         │──► Twitch
@@ -227,8 +230,13 @@ link.**
 
 - **The control plane stays on videorc.com.** Vercel and Neon are good at
   accounts, tokens and meters. They can't hold a video stream.
-- **Media nodes are our first rented servers for video.** Bare metal with
-  traffic included (D9), EU first.
+  - Since 2026-11-08 Neon is the whole backend (Postgres, Auth, Object
+    Storage, Functions; D9). Neon Functions can't hold a video stream
+    either: Node.js only, HTTP, SSE and WebSockets only, and they may be
+    evicted (Outside facts, Neon).
+- **Media nodes are our only rented servers.** Linux VMs with dedicated
+  vCPUs and a pooled monthly transfer allowance on a VM host (D9; Hetzner
+  bare metal until 2026-11-08), EU first.
 - **One runner per show.** It owns the platform connections for the whole
   show. Inputs come and go, and the program never stops until the host ends
   the show or the hold runs out.
@@ -439,20 +447,72 @@ Desktop `origin/main` `4c798067`. `rec` means
     ([ports](https://docs.livekit.io/transport/self-hosting/ports-firewall),
     [deployment](https://docs.livekit.io/transport/self-hosting/deployment),
     [benchmark](https://docs.livekit.io/transport/self-hosting/benchmark)).
-- **Hetzner** (prices from 2026-06-15, before VAT,
-  [adjustment](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/)).
-  - AX42 (8 cores, 64 GB): €97.30/mo + €49 setup.
-  - AX102 (16 cores, 128 GB): €257.30/mo + €129 setup.
-  - **GEX45**: an i5-13500 and an RTX PRO 4000 Blackwell with 2 NVENC
-    engines and no session limit. €212.30/mo + €209 setup, Helsinki only
-    ([GEX45](https://www.hetzner.com/dedicated-rootserver/gex45/),
-    [NVIDIA](https://developer.nvidia.com/video-encode-decode-support-matrix)).
-  - Dedicated servers have **unlimited traffic on the 1 Gbit/s port**
-    ([traffic](https://docs.hetzner.com/robot/general/traffic/)). They exist
-    in Falkenstein, Nuremberg and Helsinki.
-  - The US locations are cloud servers only, with 1 to 8 TB included and €1
-    per TB after that
-    ([locations](https://docs.hetzner.com/cloud/general/locations/)).
+- **Hetzner** (dropped by the owner on 2026-11-08, D9). Dedicated servers
+  had unmetered traffic on a 1 Gbit/s port, in Falkenstein, Nuremberg and
+  Helsinki only. The US sites were cloud-only
+  ([locations](https://docs.hetzner.com/cloud/general/locations/)). The
+  prices that stood here moved to plan 185 (private).
+- **Neon** (checked 2026-11-08). Neon is the backend: Postgres, Auth,
+  Object Storage and Functions (D9).
+  - Functions run JS/TS on Node.js 24 only ("Other runtimes and language
+    targets aren't currently supported"). They accept HTTP, SSE and
+    WebSockets only, so no RTMPS, SRT or UDP.
+  - Memory is fixed at 2048 MiB, the platform "may evict and restart a
+    function for operational reasons", and an account has a cap of 100
+    concurrent functions.
+  - Functions run in us-east-2, us-east-1, eu-central-1 and
+    ap-southeast-1. A runner holds RTMPS and SRT connections for hours, so
+    it can't run there
+    ([overview](https://neon.com/docs/compute/functions/overview),
+    [limits](https://neon.com/docs/compute/functions/reference/runtime-limits),
+    [changelog](https://neon.com/docs/changelog/2026-09-18)).
+  - Paid plans include 500 GB of public transfer per project per month,
+    shared by Postgres, Object Storage and Functions. Past it, transfer is
+    metered (the rate is in plan 185)
+    ([plans](https://neon.com/docs/introduction/plans)).
+  - Object Storage is S3-compatible (path-style only) and branches with the
+    database: a child branch sees its parent's objects, copy-on-write.
+  - Presigned URLs are single PUT or GET URLs from the Neon API. Their
+    expiry defaults to 900 s, with a cap of 7 days. Multipart upload goes
+    through the S3 API. An object can be up to 10 GiB today (5 GiB in one
+    request)
+    ([objects](https://neon.com/docs/storage/objects),
+    [presign](https://neon.com/docs/reference/api/buckets/presign-project-branch-bucket-object)).
+  - A credential is scoped to a branch and its descendants, with
+    `storage:read` or `storage:write`. There is no bucket or key-prefix
+    scope and no session token, and `expires_at` "is not currently
+    enforced"
+    ([authentication](https://neon.com/docs/storage/authentication)).
+- **The VM host** (checked 2026-11-08; the owner confirms the provider,
+  D9).
+  - **DigitalOcean CPU-Optimized droplets** (recommended):
+    - dedicated vCPUs in 2, 4, 8 and 16 vCPU sizes (and larger), with
+      4,000 to 7,000 GiB of outbound transfer each for 2 to 16 vCPUs;
+    - transfer is pooled across the team, inbound is free, and overage is
+      billed per GiB;
+    - per-second billing since 2026-01-01, capped at the monthly price
+      ([droplets](https://www.digitalocean.com/pricing/droplets),
+      [bandwidth](https://docs.digitalocean.com/products/droplets/details/pricing/),
+      [per-second](https://www.digitalocean.com/blog/dropletplans-persecbilling-byoip-natgateway)).
+  - CPU-Optimized droplets are offered in NYC1 to NYC3, FRA1 and SGP1, next
+    to Neon's us-east-1, eu-central-1 and ap-southeast-1
+    ([regions](https://docs.digitalocean.com/platform/regional-availability/)).
+  - Cloud Firewalls allow UDP rules, which SRT needs later
+    ([limits](https://docs.digitalocean.com/products/networking/firewalls/details/limits/)).
+  - The API and `doctl` manage droplets
+    ([API](https://docs.digitalocean.com/reference/api/)).
+  - **Alternatives:**
+    - OVHcloud Public Cloud `c3`: public traffic is unmetered in the EU
+      and North America, per OVH's G-Cloud listing and third parties. The
+      Asia-Pacific egress rules are UNVERIFIED.
+    - Vultr CPU Optimized: transfer is bundled per instance. Vultr's own
+      pricing page refused a fetch, so the details are UNVERIFIED.
+    - Fly.io performance Machines: there is no included transfer. UDP
+      needs a dedicated IPv4 and a bind to `fly-global-services`, and
+      public IPv6 doesn't carry UDP
+      ([pricing](https://docs.fly.io/about/pricing),
+      [UDP](https://docs.fly.io/networking/udp-and-tcp)).
+  - Prices and the cost of a show-hour are in plan 185 (private).
 - **GStreamer.** 1.28.8 is current.
   - `fallbacksrc` and `fallbackswitch` (gst-plugins-rs, MPL-2.0) switch to a
     fallback after a timeout (5 s by default) and retry.
@@ -626,22 +686,56 @@ What this choice costs (accepted):
   is then included. Move when the LiveKit bill passes $300 a month, or
   before Max goes on sale beyond the beta ⚑.
 
-### D9. Hosting: Hetzner bare metal, EU first, no Cloudflare in front ⚑
+### D9. Hosting: Neon is the backend; media nodes on a VM host, EU first, no Cloudflare in front ⚑
 
-- Bandwidth decides the margin (Outside facts): 5 platforms at 6 Mbps is
-  about 13.5 GB per show-hour. Bare metal with traffic included makes that
-  close to free.
-- **Node type: S0a decides** between two options:
-  - an AX102 with x264 (Falkenstein or Nuremberg, closest to Spain);
-  - a GEX45 with NVENC (Helsinki). It costs a bit less per month and runs
-    roughly three times as many shows (Outside facts).
-- Start with 2 nodes, one serving and one spare: about €310 to €515 a month
-  before the first customer (plan 185, Costs).
-- Add a US location (X8) when US hosts need it. Hetzner has only cloud
-  servers there, with metered traffic.
-- Ingest hostnames point straight at node IPs (DNS only), never behind
-  Cloudflare's proxy. Spain blocks Cloudflare IPs on football nights, which
-  are prime streaming time ([[videorc-spain-laliga-cloudflare-block]]).
+- **History.**
+  - 2026-10-16: Hetzner bare metal. S0a would pick an AX102 with x264 or a
+    GEX45 with NVENC, because dedicated servers came with unmetered
+    traffic.
+  - **Changed 2026-11-08 by the owner**: "we don't want to use hetzner".
+    A check showed that Neon Functions can't run the media layer (Outside
+    facts, Neon). The owner then chose "Neon + a VM host": "Neon is now
+    the whole backend, they have everything".
+- **Neon holds all data and backend services**: Postgres, Auth, Object
+  Storage and Functions.
+- **The media nodes run on a VM host's Linux VMs with dedicated vCPUs.**
+  The runner, node agent and MediaMTX don't change.
+- **Which host is the owner's call ⚑.** Recommended: **DigitalOcean
+  CPU-Optimized droplets, owner to confirm.** The alternatives are
+  OVHcloud, Vultr and Fly.io (Outside facts). Why DigitalOcean:
+  - dedicated vCPUs;
+  - a pooled transfer allowance large enough for the beta's show-hours;
+  - per-second billing and an API, so I1 can create and destroy nodes
+    from a script;
+  - datacenters next to Neon's regions: FRA1 by eu-central-1, NYC by
+    us-east-1, and SGP1 by ap-southeast-1;
+  - UDP in its cloud firewall, for SRT later.
+- **Bandwidth still decides the margin.** 5 platforms at 6 Mbps is about
+  13.5 GB per show-hour. On a VM host it comes out of the pooled transfer
+  allowance, then a per-GB rate. The numbers are in plan 185 (private).
+- **Node size: S0d decides.** Start with x264 on CPU-Optimized nodes (the
+  8-vCPU class) in FRA1, close to Spain and Neon's eu-central-1.
+  - A vCPU is a hardware thread, so a node carries fewer shows than a
+    16-core bare-metal box. S0d (plan 222 I6) measures shows per node.
+  - NVENC on a GPU VM is a later question. Which GPU droplets carry NVENC
+    is UNVERIFIED.
+- **Start with 2 nodes**, one serving and one spare. The cost is in plan
+  185.
+- **Add a US location (X8)** when US hosts need it: the same droplet type
+  in NYC, so it has the same shape (plan 222 D8).
+- **No Cloudflare proxy in front.** Ingest hostnames point straight at
+  node IPs (a reserved IP per node, DNS only). Spain blocks Cloudflare IPs
+  on football nights, which are prime streaming time
+  ([[videorc-spain-laliga-cloudflare-block]]).
+- **Cloud recordings stay on R2 ⚑** (plan 224 D10). Neon Object Storage
+  credentials can't be limited to one show's key prefix, and their expiry
+  isn't enforced. Objects also stop at 10 GiB today, less than a 12-hour
+  show. R2's temporary credentials are limited to a prefix and expire, and
+  R2 downloads are free.
+  - Move recordings to Neon when Neon offers prefix-scoped, expiring
+    credentials.
+- **Runner binaries (I3) go to Neon Object Storage**, in their own
+  project, like the desktop release origin.
 
 ### D10. The feed goes over RTMPS first, then SRT
 
@@ -995,8 +1089,8 @@ answers 201:
 Each spike ends with a dated note in `docs/cloud/` with the numbers and a go
 or no-go. Nothing ships.
 
-- **S0a. Runner spike.** On one rented Hetzner box (the Linux lab box is
-  fine for the first runs):
+- **S0a. Runner spike.** On one rented VM-host box (D9; a Hetzner box
+  until 2026-11-08; the Linux lab box is fine for the first runs):
   - FFmpeg pushes a synthetic 1080p60 feed with A/V test signals at 8 and 12
     Mbps, over RTMPS (Phase 1) and over SRT (C1b). The runner decodes it, runs the hold switch, re-encodes
     with x264 and fans out to 3 local RTMP receivers, plus one leg through
@@ -1009,8 +1103,10 @@ or no-go. Nothing ships.
   - Build it twice: as D7's default Rust service and as a GStreamer pipeline
     (`fallbacksrc`). Record the build effort and how each handles a vanishing
     input.
-  - Run it on both node types: x264 on an AX102, and NVENC on a GEX45.
-    Compare shows per box and quality per bitrate.
+  - Run it on the node type: x264 on a CPU-Optimized VM (D9). Measure
+    shows per box and quality per bitrate. Before 2026-11-08 this compared
+    x264 on an AX102 with NVENC on a GEX45; NVENC now waits for a GPU VM
+    decision.
   - Add 4 room participants (browser tabs publishing test patterns through
     LiveKit Cloud) and compose a 2×2 grid. Measure CPU and glass-to-glass
     latency.
@@ -1048,8 +1144,11 @@ survives the computer.
 
 ### Infra (`videorc-cloud`)
 
-- **I1. Nodes.** Provision 2 Hetzner dedicated servers (sizes from S0d) from
-  a script in `videorc-cloud/ops/`: firewall (SRT's one UDP port, RTMPS, control
+- **I1. Nodes.** Provision 2 VM-host nodes (sizes from S0d) through the
+  host's API from a script in `videorc-cloud/ops/`. D9: DigitalOcean
+  CPU-Optimized droplets in FRA1 recommended, owner to confirm; Hetzner
+  dedicated servers until 2026-11-08. Each node gets a reserved IP, the
+  host's cloud firewall and its own: firewall (SRT's one UDP port, RTMPS, control
   socket, SSH from an allowlist), time sync, security updates only while
   drained, and a pinned GPL FFmpeg with x264.
   - **Done when** a fresh box comes up from the script and passes
@@ -1065,7 +1164,8 @@ survives the computer.
     node starts and stops 20 runners in a loop with no leaked process or
     port.
 - **I3. Deploys.** CI builds `videorc-runner` and `videorc-node-agent` for
-  Linux x64 and uploads them to a private bucket. The agent updates itself
+  Linux x64 and uploads them to a private bucket (Neon Object Storage, in
+  its own project, so a node's read-only key sees nothing else; D9). The agent updates itself
   only while drained.
 - **I4. Watching.** Per-show metrics (input bitrate, hold state, per-leg
   state, encoder fps and drops, CPU) and logs go to a hosted backend ⚑
@@ -1528,5 +1628,7 @@ Stop and ask the owner when:
   holds the earlier LiveKit research.
 - **Route and lanes**: Status above.
 - **Start with** Phase 0: S0a, S0b and S0c in parallel, then S0d and S0e.
-- **Blockers**: a Hetzner account and API token, a LiveKit Cloud project,
+- **Blockers**: a VM-host account and API token (D9: DigitalOcean
+  recommended, owner to confirm; was Hetzner until 2026-11-08), a LiveKit
+  Cloud project,
   and the owner's go for spending. Ask the owner; never invent credentials.
