@@ -1794,6 +1794,11 @@ mod runtime {
         count
     }
 
+    /// Turns a `DuplicateOutput` creation failure into a named capture error.
+    /// `DXGI_ERROR_UNSUPPORTED` is classified by the host's hardware adapter
+    /// count (see [`duplication_create_fallback_reason`]); access lost and
+    /// device removal or reset keep their own reasons; anything else is a
+    /// plain Desktop Duplication unavailability.
     fn map_duplication_create_error(error: windows::core::Error) -> WindowsD3d11CaptureError {
         if error.code() == DXGI_ERROR_UNSUPPORTED {
             let hardware_adapters = dxgi_hardware_adapter_count();
