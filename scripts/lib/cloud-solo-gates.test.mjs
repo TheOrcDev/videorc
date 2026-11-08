@@ -9,6 +9,7 @@ import {
   evaluateHoldOnReceiver,
   firstPhaseAt,
   holdCardStats,
+  parseFrameRate,
   parsePtsTimes,
   smokePublishH264Encoder,
   sortedGapStats
@@ -321,6 +322,56 @@ describe('cloud solo gates: the run verdict', () => {
     // A run without the test steps (an older report) is judged on the rest.
     const { cloudTest: _omitted, testCap: _cap, ...withoutTest } = passing()
     assert.deepEqual(evaluateCloudSoloReport(withoutTest), [])
+  })
+
+  // Plan 222 L2: the thin-uplink variant's block, judged beside the rest.
+  it('judges the feed under a thin uplink (plan 222 L2)', () => {
+    const thin = () => ({
+      capKbps: 3500,
+      bitrateLowered: true,
+      bitrateKbps: 3072,
+      chosenBitrateKbps: 6000,
+      overflowEvents: 2,
+      overflowNamedFeed: true,
+      overflowNamedPlatform: false,
+      platformRowsStayedLive: true,
+      expectedOutput: { width: 1920, height: 1080, fps: 30 },
+      receivers: [
+        { name: 'receiver-1', width: 1920, height: 1080, averageFrameRate: '30/1' },
+        { name: 'receiver-2', width: 1920, height: 1080, averageFrameRate: '30000/1001' }
+      ]
+    })
+    const clean = passing()
+    clean.thinUplink = thin()
+    assert.deepEqual(evaluateCloudSoloReport(clean), [])
+
+    const broken = passing()
+    broken.thinUplink = {
+      ...thin(),
+      bitrateLowered: false,
+      overflowEvents: 1,
+      overflowNamedFeed: false,
+      overflowNamedPlatform: true,
+      platformRowsStayedLive: false,
+      receivers: [{ name: 'receiver-1', width: 1280, height: 720, averageFrameRate: '30/1' }]
+    }
+    const failures = evaluateCloudSoloReport(broken)
+    assert.ok(
+      failures.some((line) => line.includes('never stepped down')),
+      failures.join('\n')
+    )
+    assert.ok(failures.some((line) => line.includes('did not name Videorc Cloud')))
+    assert.ok(failures.some((line) => line.includes('named a platform')))
+    assert.ok(failures.some((line) => line.includes('platform row left live')))
+    assert.ok(failures.some((line) => line.includes('1280x720')))
+    const silent = passing()
+    silent.thinUplink = { ...thin(), overflowEvents: 0, receivers: [] }
+    const silentFailures = evaluateCloudSoloReport(silent)
+    assert.ok(silentFailures.some((line) => line.includes('never reported an overflow')))
+    assert.ok(silentFailures.some((line) => line.includes("no receiver's output")))
+    assert.equal(parseFrameRate('30/1'), 30)
+    assert.equal(parseFrameRate('0/0'), null)
+    assert.equal(parseFrameRate(undefined), null)
   })
 
   it('names every broken gate of the cloud test (C6b)', () => {

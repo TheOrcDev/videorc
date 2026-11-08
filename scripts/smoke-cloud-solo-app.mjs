@@ -103,6 +103,15 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //      entitled and only the show it remembers can send it to `current`. It
 //      must still find the show and offer Resume and End; Resume and Stop
 //      work with the cloud switched off.
+//  10. VIDEORC_CLOUD_SOLO_THIN_UPLINK_KBPS=<cap> (plan 222 L2, the feed under
+//      plan 218): the session streams 1080p30 at 6 Mbps of per-frame noise,
+//      and after the drops the feed proxy pays out this computer's upload
+//      through one token bucket at the cap (the thin-uplink smoke's shape,
+//      for the one feed leg). The stream bitrate must step down under the
+//      cap, the overflow must name the connection and the feed (never a
+//      platform), the runner's platform legs must stay live, and its output
+//      must stay at the show's settings: the receivers' files are checked
+//      for the show's size and frame rate.
 //
 // Why a proxy and not a killed process: the plan says "kill the stream
 // encoder", but on macOS the stream legs are fifo outputs of the one FFmpeg
@@ -119,6 +128,11 @@ const afterResumeMs = Number(process.env.VIDEORC_CLOUD_SOLO_AFTER_RESUME_MS ?? 8
 const deadMs = Number(process.env.VIDEORC_CLOUD_SOLO_DEAD_MS ?? 6_000)
 const skipDeath = process.env.VIDEORC_CLOUD_SOLO_SKIP_DEATH === '1'
 const rollbackWhileDead = process.env.VIDEORC_CLOUD_SOLO_ROLLBACK === '1'
+// Plan 222 L2: 0 leaves the feed uncapped; a cap in kbps runs the thin-uplink
+// phase after the drops (header, 10). 3500 is the thin-uplink smoke's 7000
+// for two legs, for one.
+const thinUplinkKbps = Math.max(0, Number(process.env.VIDEORC_CLOUD_SOLO_THIN_UPLINK_KBPS ?? 0))
+const thinUplinkWaitMs = Number(process.env.VIDEORC_CLOUD_SOLO_THIN_UPLINK_WAIT_MS ?? 150_000)
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 1_500)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
@@ -163,6 +177,7 @@ const report = {
   tls: null,
   cloudTest: null,
   testCap: null,
+  thinUplink: null,
   secretLeaks: []
 }
 let web = null
@@ -379,7 +394,14 @@ try {
     VIDEORC_USER_DATA_DIR: userDataDir,
     // The screenshots drive the renderer over CDP (the theme flip and the
     // compositor capture, as scripts/ui-theme-screens.mjs does).
-    ...(shotsDir ? { VIDEORC_REMOTE_DEBUG_PORT: '0' } : {})
+    ...(shotsDir ? { VIDEORC_REMOTE_DEBUG_PORT: '0' } : {}),
+    // The thin-uplink phase needs an encode that fills its bitrate: the
+    // plain test pattern encodes far under 6 Mbps, so a cap would never be
+    // short. Per-frame noise in 32 px blocks follows the target down
+    // (plan 218 S1's on-box sweep), so the adaptive bitrate can settle.
+    ...(thinUplinkKbps > 0
+      ? { VIDEORC_SYNTHETIC_HARD_CONTENT: '1', VIDEORC_SYNTHETIC_HARD_CONTENT_GRAIN: '32' }
+      : {})
   }
   let launch = await launchApp(appEnv, 1)
   launched = launch.launched
@@ -811,6 +833,119 @@ try {
     assertReceiversConnected(receivers, 'after the resume')
   }
 
+  // 11b. Plan 222 L2: the feed under plan 218. The proxy now carries less
+  //      than the feed needs; the stream bitrate must step down to fit, the
+  //      overflow must name the connection and the feed (never a platform),
+  //      the runner's platform legs must stay live, and its output must stay
+  //      at the show's settings (the receivers' files, step 13). After the
+  //      drops, so their hold gates read only the drops' cards.
+  let thinStartMs = null
+  if (thinUplinkKbps > 0) {
+    thinStartMs = Date.now()
+    proxy.setCap(thinUplinkKbps)
+    log(
+      `[thin uplink] the feed proxy carries ${thinUplinkKbps} kbps from now on; waiting for the stream bitrate to step down`
+    )
+    const samples = []
+    let lowered = null
+    let lastOverflows = 0
+    let lastOverflowAtMs = null
+    const deadline = thinStartMs + thinUplinkWaitMs
+    while (Date.now() < deadline) {
+      await sleep(2_000)
+      const sample = await request(backend, 10_000, 'diagnostics.stats')
+      const delivery = sample?.streamDelivery ?? null
+      if (!delivery) continue
+      samples.push({
+        atMs: Date.now(),
+        bitrateKbps: delivery.bitrateKbps ?? null,
+        chosenBitrateKbps: delivery.chosenBitrateKbps ?? null,
+        atFloor: delivery.atFloor === true,
+        uplinkOverflows: delivery.uplinkOverflows ?? 0
+      })
+      if ((delivery.uplinkOverflows ?? 0) > lastOverflows) {
+        lastOverflows = delivery.uplinkOverflows
+        lastOverflowAtMs = Date.now()
+      }
+      if (
+        lowered === null &&
+        Number.isFinite(delivery.bitrateKbps) &&
+        Number.isFinite(delivery.chosenBitrateKbps) &&
+        delivery.bitrateKbps < delivery.chosenBitrateKbps
+      ) {
+        lowered = { atMs: Date.now(), bitrateKbps: delivery.bitrateKbps }
+        log(
+          `[thin uplink] stream bitrate stepped down to ${delivery.bitrateKbps} of ${delivery.chosenBitrateKbps} kbps ${secondsBetween(thinStartMs, lowered.atMs)} s after the cap`
+        )
+      }
+      // Settled: the bitrate stepped down and no leg overflowed for 20 s.
+      if (lowered && lastOverflowAtMs !== null && Date.now() - lastOverflowAtMs >= 20_000) break
+    }
+    const overflowEvents = collected.health.filter(
+      (event) => event.atMs >= thinStartMs && event.code === 'stream-leg-overflow'
+    )
+    const platformLabels = receivers.map((receiver) => receiver.label)
+    const platformRowsStayedLive = collected.targets
+      .filter((entry) => entry.atMs >= thinStartMs)
+      .every((entry) =>
+        receivers.every(
+          (receiver) => entry.targets.find((row) => row.targetId === receiver.id)?.state === 'live'
+        )
+      )
+    const last = samples.at(-1) ?? null
+    report.thinUplink = {
+      capKbps: thinUplinkKbps,
+      startedAt: new Date(thinStartMs).toISOString(),
+      waitedSeconds: secondsBetween(thinStartMs, Date.now()),
+      bitrateLowered: lowered !== null,
+      loweredAfterSeconds: lowered ? secondsBetween(thinStartMs, lowered.atMs) : null,
+      bitrateKbps: last?.bitrateKbps ?? null,
+      chosenBitrateKbps: last?.chosenBitrateKbps ?? null,
+      atFloor: last?.atFloor ?? null,
+      uplinkOverflows: lastOverflows,
+      lastOverflowAfterSeconds:
+        lastOverflowAtMs !== null ? secondsBetween(thinStartMs, lastOverflowAtMs) : null,
+      bitrateTimeline: samples
+        .filter(
+          (sample, index, all) => index === 0 || sample.bitrateKbps !== all[index - 1].bitrateKbps
+        )
+        .map((sample) => ({
+          atSeconds: Math.round((sample.atMs - thinStartMs) / 1000),
+          bitrateKbps: sample.bitrateKbps
+        })),
+      bitrateEvents: collected.health
+        .filter(
+          (event) =>
+            event.atMs >= thinStartMs &&
+            ['stream-bitrate-lowered', 'stream-bitrate-restored', 'stream-bitrate-floor'].includes(
+              event.code
+            )
+        )
+        .map((event) => ({ code: event.code, message: event.message })),
+      overflowEvents: overflowEvents.length,
+      overflowMessages: [...new Set(overflowEvents.map((event) => event.message))],
+      overflowNamedFeed:
+        overflowEvents.length > 0 &&
+        overflowEvents.every((event) => String(event.message).includes('Videorc Cloud')),
+      overflowNamedPlatform: overflowEvents.some((event) =>
+        platformLabels.some((label) => String(event.message).includes(label))
+      ),
+      platformRowsStayedLive,
+      cloudPhases: [
+        ...new Set(
+          collected.cloudStates
+            .filter((entry) => entry.atMs >= thinStartMs)
+            .map((entry) => entry.phase)
+        )
+      ],
+      expectedOutput: { width: 1920, height: 1080, fps: 30 },
+      receivers: []
+    }
+    log(
+      `[thin uplink] lowered ${report.thinUplink.bitrateLowered} (${report.thinUplink.bitrateKbps} of ${report.thinUplink.chosenBitrateKbps} kbps, floor ${report.thinUplink.atFloor}), fifo overflows ${lastOverflows}, overflow events ${overflowEvents.length} naming the feed ${report.thinUplink.overflowNamedFeed}, platform rows live ${platformRowsStayedLive}, cloud phases ${report.thinUplink.cloudPhases.join('/')}`
+    )
+  }
+
   // 12. Stop: the show ends on the web and the node, the runner exits and
   //     the receivers' connections close.
   const stopRequestedAtMs = Date.now()
@@ -876,6 +1011,15 @@ try {
   const endMs = Date.now()
   for (const receiver of receivers) {
     const probe = await probeMedia(receiver.recvPath)
+    if (report.thinUplink) {
+      // The runner's output stays at the show's settings (L2).
+      report.thinUplink.receivers.push({
+        name: receiver.name,
+        width: probe.video.width,
+        height: probe.video.height,
+        averageFrameRate: probe.video.averageFrameRate
+      })
+    }
     const gaps = sortedGapStats(
       parsePtsTimes(
         await runCommand(ffprobePath, [
@@ -907,7 +1051,9 @@ try {
     const fileZeroMs = receiver.firstBytesAtMs - (anchor?.offsetSeconds ?? 0) * 1000
     const holds = []
     for (const [index, drop] of report.drops.entries()) {
-      const nextCutMs = report.drops[index + 1]?.cutMs ?? endMs
+      // The thin-uplink phase (11b) may hold the runner while the feed
+      // overflows: the last drop's "nothing freezes after" ends where it starts.
+      const nextCutMs = report.drops[index + 1]?.cutMs ?? thinStartMs ?? endMs
       const verdict = evaluateHoldOnReceiver({
         freezes,
         fileStartMs: fileZeroMs,
@@ -997,6 +1143,9 @@ try {
       (drop2
         ? `the dead computer's show held in ${drop2.timeToHoldSeconds} s and resumed ${drop2.timeToResumeSeconds} s after Resume; `
         : 'the computer-dies drop was skipped; ') +
+      (report.thinUplink
+        ? `under a ${report.thinUplink.capKbps} kbps uplink the stream bitrate stepped down to ${report.thinUplink.bitrateKbps} of ${report.thinUplink.chosenBitrateKbps} kbps after ${report.thinUplink.loweredAfterSeconds} s with ${report.thinUplink.overflowEvents} overflow event(s) naming the feed; `
+        : '') +
       `largest receiver gap ${Math.max(...report.receivers.map((receiver) => receiver.gaps.maxGapSeconds))} s. Report: ${reportPath}`
   )
 } catch (error) {
@@ -1147,7 +1296,12 @@ function sessionParams(outputDirectoryCapability) {
   const timestamp = '2026-10-17T00:00:00.000Z'
   // One 720p30 encode for the recording and the feed: the stream profile
   // matches the recording, so no second encoder is needed in a debug build.
-  const video = { preset: 'tutorial-720p30', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
+  // The thin-uplink phase (plan 222 L2) streams the thin-uplink smoke's
+  // 1080p30 at 6 Mbps instead: the shape plan 218 measured the step-down on.
+  const video =
+    thinUplinkKbps > 0
+      ? { preset: 'stream-safe-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+      : { preset: 'tutorial-720p30', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
   return {
     sources: { testPattern: true },
     layout: {
@@ -1194,8 +1348,8 @@ function sessionParams(outputDirectoryCapability) {
         createdAt: timestamp,
         updatedAt: timestamp
       })),
-      defaultOutputPreset: 'tutorial-720p30',
-      defaultBitrateKbps: 4000,
+      defaultOutputPreset: video.preset,
+      defaultBitrateKbps: video.bitrateKbps,
       enabledTargetIds: receivers.map((receiver) => receiver.id)
     }
   }
@@ -1578,10 +1732,58 @@ function registryShowEnded(agentStateDir, id) {
 
 // --- The feed proxy ----------------------------------------------------------------
 
+/**
+ * The TCP path between the desktop's feed and MediaMTX's RTMPS port. `cut`
+ * drops every connection and refuses new ones (the feed cut), `forward`
+ * carries them again, and `setCap` (plan 222 L2) pays the desktop's bytes
+ * out through one token bucket at that many kbps, the thin-uplink smoke's
+ * shape (plan 218 S1) for the one feed leg: a chunk waits for tokens before
+ * it reaches MediaMTX and the desktop's socket pauses meanwhile, so its
+ * kernel send buffer fills and FFmpeg's fifo blocks on write as it would on
+ * a slow uplink. MediaMTX's replies are never paced. 0 lifts the cap.
+ */
 function startFeedProxy({ listenPort, targetPort }) {
-  const state = { mode: 'forward' }
+  const state = { mode: 'forward', capKbps: 0 }
   const pairs = new Set()
-  const stats = { connections: 0, refused: 0, cuts: 0 }
+  const stats = { connections: 0, refused: 0, cuts: 0, pacedBytes: 0 }
+  const bucket = { tokens: 0, lastRefillAt: Date.now() }
+  const bytesPerMs = () => (state.capKbps * 1000) / 8 / 1000
+  // A quarter second of burst: the RTMP handshake and TCP slow start pass.
+  const burstBytes = () => Math.round(bytesPerMs() * 250)
+  const refill = () => {
+    const now = Date.now()
+    bucket.tokens = Math.min(
+      burstBytes(),
+      bucket.tokens + (now - bucket.lastRefillAt) * bytesPerMs()
+    )
+    bucket.lastRefillAt = now
+  }
+  let queue = Promise.resolve()
+  // Serialises every chunk through the one bucket, in arrival order.
+  const admit = (bytes) =>
+    new Promise((resolveAdmit) => {
+      queue = queue.then(
+        () =>
+          new Promise((resolveNext) => {
+            const tick = () => {
+              if (state.capKbps <= 0) {
+                resolveAdmit()
+                resolveNext()
+                return
+              }
+              refill()
+              if (bucket.tokens >= bytes) {
+                bucket.tokens -= bytes
+                resolveAdmit()
+                resolveNext()
+                return
+              }
+              setTimeout(tick, Math.max(1, Math.ceil((bytes - bucket.tokens) / bytesPerMs())))
+            }
+            tick()
+          })
+      )
+    })
   const server = createNetServer((client) => {
     if (state.mode === 'cut') {
       stats.refused += 1
@@ -1601,7 +1803,27 @@ function startFeedProxy({ listenPort, targetPort }) {
     upstream.on('error', drop)
     client.on('close', drop)
     upstream.on('close', drop)
-    client.pipe(upstream)
+    client.setNoDelay(true)
+    upstream.setNoDelay(true)
+    client.on('data', (chunk) => {
+      if (state.capKbps <= 0) {
+        if (!upstream.write(chunk)) {
+          client.pause()
+          upstream.once('drain', () => {
+            if (!client.destroyed) client.resume()
+          })
+        }
+        return
+      }
+      client.pause()
+      stats.pacedBytes += chunk.length
+      admit(chunk.length).then(() => {
+        if (client.destroyed || upstream.destroyed) return
+        upstream.write(chunk, () => {
+          if (!client.destroyed) client.resume()
+        })
+      })
+    })
     upstream.pipe(client)
   })
   return new Promise((resolveListen, rejectListen) => {
@@ -1621,6 +1843,11 @@ function startFeedProxy({ listenPort, targetPort }) {
         },
         forward() {
           state.mode = 'forward'
+        },
+        setCap(kbps) {
+          state.capKbps = Math.max(0, Number(kbps) || 0)
+          bucket.tokens = burstBytes()
+          bucket.lastRefillAt = Date.now()
         },
         close() {
           for (const pair of [...pairs]) {

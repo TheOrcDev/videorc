@@ -29005,6 +29005,15 @@ fn stream_leg_overflow_message(label: &str, bitrate_kbps: Option<u32>, overflows
     } else {
         String::new()
     };
+    // Plan 222 L2: the cloud feed is this computer's upload, not a
+    // destination. Its viewers are everyone's, and the one that could not
+    // keep up is the connection, never Videorc Cloud.
+    if label == crate::cloud_show::CLOUD_TARGET_LABEL {
+        return format!(
+            "This connection could not carry {} to Videorc Cloud; frames were skipped for your viewers on every destination.{times}",
+            format_stream_bitrate(bitrate_kbps)
+        );
+    }
     format!(
         "{label} could not keep up with {} from this connection; frames were skipped for its viewers.{times}",
         format_stream_bitrate(bitrate_kbps)
@@ -39143,6 +39152,15 @@ mod tests {
             stream_leg_overflow_message("X", Some(4_500), 3),
             "X could not keep up with 4.5 Mbps from this connection; frames were skipped for its viewers. This has happened 3 times this session."
         );
+        // Plan 222 L2: the cloud feed's overflow names the connection, never
+        // the cloud as the side that could not keep up.
+        let cloud =
+            stream_leg_overflow_message(crate::cloud_show::CLOUD_TARGET_LABEL, Some(6_000), 2);
+        assert_eq!(
+            cloud,
+            "This connection could not carry 6 Mbps to Videorc Cloud; frames were skipped for your viewers on every destination. This has happened 2 times this session."
+        );
+        assert!(!cloud.contains("could not keep up") && !cloud.contains("could not receive"));
     }
 
     // Plan 218 S3b: the allowance follows the audio lag FFmpeg waits for.

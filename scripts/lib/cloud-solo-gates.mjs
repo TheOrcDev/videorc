@@ -369,6 +369,49 @@ export function evaluateCloudSoloReport(report) {
   if (Array.isArray(report.secretLeaks) && report.secretLeaks.length > 0) {
     failures.push(`a secret reached the renderer events: ${report.secretLeaks.join(', ')}`)
   }
+  // Plan 222 L2: the feed under plan 218. Under a cap the stream bitrate
+  // steps down, the overflow names the connection and the feed (never a
+  // platform: those are the runner's legs, and they stay live), and the
+  // runner's output stays at the show's settings.
+  if (report.thinUplink) {
+    const thin = report.thinUplink
+    if (thin.bitrateLowered !== true) {
+      failures.push(
+        `thin uplink: the stream bitrate never stepped down under the ${thin.capKbps} kbps cap (${thin.bitrateKbps ?? '?'} of ${thin.chosenBitrateKbps ?? '?'} kbps)`
+      )
+    }
+    if (!(thin.overflowEvents > 0)) {
+      failures.push('thin uplink: the feed never reported an overflow under the cap')
+    } else if (thin.overflowNamedFeed !== true) {
+      failures.push(
+        'thin uplink: an overflow did not name Videorc Cloud as the feed that fell behind'
+      )
+    }
+    if (thin.overflowNamedPlatform === true) {
+      failures.push(
+        "thin uplink: an overflow named a platform; the platforms are the runner's legs"
+      )
+    }
+    if (thin.platformRowsStayedLive !== true) {
+      failures.push('thin uplink: a platform row left live while the feed fell behind')
+    }
+    const expected = thin.expectedOutput ?? {}
+    const receivers = thin.receivers ?? []
+    if (receivers.length === 0) failures.push("thin uplink: no receiver's output was probed")
+    for (const receiver of receivers) {
+      const fps = parseFrameRate(receiver.averageFrameRate)
+      if (
+        receiver.width !== expected.width ||
+        receiver.height !== expected.height ||
+        fps === null ||
+        Math.abs(fps - expected.fps) > 1
+      ) {
+        failures.push(
+          `thin uplink: ${receiver.name} got ${receiver.width}x${receiver.height} at ${fps ?? '?'} fps, not the show's ${expected.width}x${expected.height} at ${expected.fps} fps`
+        )
+      }
+    }
+  }
   // C1b: every `srt` block the node sent must pass the web's own check. One
   // the web drops leaves that feed RTMPS only: the node and the web drifted.
   if (Array.isArray(report.web?.droppedSrt) && report.web.droppedSrt.length > 0) {
@@ -453,4 +496,13 @@ export function evaluateCloudSoloReport(report) {
 
 function round3(value) {
   return Math.round(value * 1000) / 1000
+}
+
+/** ffprobe's `avg_frame_rate` ("30/1", "30000/1001") as a number, else null. */
+export function parseFrameRate(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string') return null
+  const [num, den = '1'] = value.split('/')
+  const fps = Number(num) / Number(den)
+  return Number.isFinite(fps) && fps > 0 ? fps : null
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { StreamTargetRuntime } from '@/lib/backend'
+import type { DiagnosticStats, StreamTargetRuntime } from '@/lib/backend'
 import {
   cloudHealthySummary,
   cloudStreamReading,
@@ -8,6 +8,7 @@ import {
   liveDestinationsView,
   streamHealthFact
 } from './live-session-view'
+import { classifyStreamHealthAttribution, NO_RECENT_DROPS } from './stream-health-attribution'
 
 const target = (
   state: StreamTargetRuntime['state'],
@@ -171,5 +172,100 @@ describe('liveDestinationsView through Videorc Cloud', () => {
 
   it('is nothing until the runner has listed a platform', () => {
     expect(liveDestinationsView([feed('live')], { phase: 'live' })).toBeNull()
+  })
+})
+
+// Plan 222 L2: the one feed leg under plan 218. When this computer's upload
+// cannot carry the feed, Stream health names the connection and the
+// destinations stay quiet: the platforms are the runner's and keep
+// receiving, so no platform row and no "Videorc Cloud could not receive".
+// When the feed is gone the show holds, and the one Cloud row stands for
+// the hold; still never a platform row.
+describe('the cloud feed under a thin uplink (plan 222 L2)', () => {
+  const feed = (
+    state: StreamTargetRuntime['state'],
+    extra: Partial<StreamTargetRuntime> = {}
+  ): StreamTargetRuntime => ({
+    targetId: 'videorc-cloud-horizontal',
+    platform: 'custom',
+    label: 'Videorc Cloud',
+    state,
+    ...extra
+  })
+  const nowMs = Date.parse('2026-11-08T10:00:30.000Z')
+  const stats = (streamDelivery: DiagnosticStats['streamDelivery']): DiagnosticStats =>
+    ({
+      sessionId: 'session-a',
+      targetFps: 30,
+      captureFps: 30,
+      renderFps: 30,
+      encoderSpeed: 1,
+      skippedFrames: 0,
+      droppedFrames: 0,
+      micDroppedFrames: 0,
+      micCaptureCoverage: 1,
+      deviceDisconnected: false,
+      bottleneck: 'none',
+      previewDroppedFrames: 0,
+      streamOutputBitrateKbps: 6_000,
+      streamMeasuredBitrateKbps: 4_800,
+      streamDelivery
+    }) as DiagnosticStats
+
+  it('reads "Connection too slow" with the platforms quiet while the feed overflows', () => {
+    const overflowing = feed('live', {
+      uplinkOverflows: 3,
+      uplinkOverflowAt: new Date(nowMs - 5_000).toISOString()
+    })
+    const targets = [overflowing, target('live'), target('live', 'YouTube')]
+    const lowered = stats({
+      targetFps: 30,
+      deliveredFps: 30,
+      dropPercent: 0,
+      windowSeconds: 30,
+      degraded: false,
+      atFloor: false,
+      uplinkOverflows: 3,
+      bitrateKbps: 4_800,
+      chosenBitrateKbps: 6_000
+    })
+    const attribution = classifyStreamHealthAttribution(
+      lowered,
+      null,
+      targets,
+      NO_RECENT_DROPS,
+      nowMs
+    )
+    expect(attribution).toBe('uplink')
+    const fact = streamHealthFact(attribution, { phase: 'live', feedKbps: 4_800 })
+    expect(fact).toEqual({ label: 'Connection too slow', tone: 'warn' })
+    expect(fact.label).not.toMatch(/Videorc Cloud|receive/)
+    // The platforms are the runner's legs and keep receiving: no row at all.
+    expect(liveDestinationsView(targets, { phase: 'live', feedKbps: 4_800 })).toEqual({
+      kind: 'quiet',
+      summary: '2 of 2 on air'
+    })
+  })
+
+  it('shows the one Cloud row, never a platform row, while the feed is gone and the show holds', () => {
+    const targets = [feed('reconnecting'), target('live'), target('live', 'YouTube')]
+    const view = liveDestinationsView(targets, { phase: 'hold', holdRemainingSeconds: 1_500 })
+    expect(view).toEqual({
+      kind: 'problems',
+      summary: '2 of 2 on air',
+      problems: [
+        {
+          targetId: 'videorc-cloud-horizontal',
+          label: 'Videorc Cloud',
+          word: 'Be right back · 25 min left',
+          tone: 'warn'
+        }
+      ]
+    })
+    // The hold outranks the upload's own reading: viewers see the card.
+    expect(streamHealthFact('uplink', { phase: 'hold', holdRemainingSeconds: 1_500 })).toEqual({
+      label: 'Be right back · 25 min left',
+      tone: 'warn'
+    })
   })
 })
