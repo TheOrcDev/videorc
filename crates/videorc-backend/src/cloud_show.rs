@@ -5817,6 +5817,8 @@ mod tests {
             ingest: None,
             session_id: Some("session-1".to_string()),
             destinations: Vec::new(),
+            handed_over: false,
+            hold_image_png_base64: None,
             resuming: false,
         });
         assert_eq!(
@@ -5834,6 +5836,8 @@ mod tests {
             ingest: None,
             session_id: None,
             destinations: Vec::new(),
+            handed_over: false,
+            hold_image_png_base64: None,
             resuming: false,
         });
         assert_eq!(runtime.take_remembered_change(), None, "the same show");
