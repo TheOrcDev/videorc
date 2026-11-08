@@ -1,8 +1,14 @@
 import { CloudSection } from './cloud-section'
+
+// The Watchdog section (plan 223 D7) loads with the page's first paint of it;
+// its rows, the QR code and the phone list stay out of the eager bundle.
+const WatchdogSection = lazy(async () => ({
+  default: (await import('./watchdog-section')).WatchdogSection
+}))
 import { StreamQualityControl } from './stream-quality-control'
 import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon, WarningIcon } from '@/components/icons'
-import { useMemo, useState, type ReactElement, type ReactNode } from 'react'
+import { lazy, Suspense, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
@@ -172,6 +178,9 @@ export function GoLivePanel({
         />
       </PanelSection>
       <CloudSection />
+      <Suspense fallback={null}>
+        <WatchdogSection />
+      </Suspense>
       <ReadyToGoLive
         cloud={cloud}
         accountByPlatform={accountByPlatform}

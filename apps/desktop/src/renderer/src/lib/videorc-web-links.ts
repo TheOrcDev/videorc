@@ -28,6 +28,8 @@ export const VIDEORC_WEB_LINKS = {
   // exchanges it server-to-server; browser and deep-link never carry a session.
   desktopAuthorize: `${VIDEORC_WEB_ORIGIN}/desktop/authorize/v2`,
   premium: `${VIDEORC_WEB_ORIGIN}/premium`,
+  // The phone page (plan 184 W6, plan 223 D1): alerts on the streamer's phone.
+  live: `${VIDEORC_WEB_ORIGIN}/live`,
   privacy: `${VIDEORC_WEB_ORIGIN}/privacy`,
   terms: `${VIDEORC_WEB_ORIGIN}/terms`,
   billing: `${VIDEORC_WEB_ORIGIN}/account/billing`,

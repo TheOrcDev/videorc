@@ -2,7 +2,7 @@ import { ChevronDownIcon, CloseIcon, HeartbeatIcon, WarningIcon } from '@/compon
 import { useEffect, useId, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
-import { GroupedList } from '@/components/list-row'
+import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
 import { SupportBundleButton } from '@/components/support-bundle-button'
@@ -56,6 +56,7 @@ import { useSystemAccessRows } from '@/hooks/use-system-access-rows'
 import { useVirtualCamera } from '@/hooks/use-virtual-camera'
 import { systemAccessActionLabel } from '@/lib/system-access-view'
 import { toast } from '@/lib/toast'
+import { watchdogHistory, watchdogHistorySpan } from '@/lib/watchdog-view'
 import {
   VIDEORC_CAMERA,
   VIDEORC_CAMERA_COPY,
@@ -181,6 +182,11 @@ export function DiagnosticsTab(): ReactElement {
     checks.some((check) => ids.includes(check.id) && checkNeedsAttention(check))
 
   const sessionLogs = (logSessionId && sessionDetails[logSessionId]?.sessionLogs) || []
+  const sessionHealthEvents = logSessionId ? sessionDetails[logSessionId]?.healthEvents : undefined
+  const watchdogRows = useMemo(
+    () => watchdogHistory(sessionHealthEvents ?? []),
+    [sessionHealthEvents]
+  )
   const sessionLogsError =
     logSessionId && sessionDetailError?.sessionId === logSessionId
       ? sessionDetailError.message
@@ -341,6 +347,22 @@ export function DiagnosticsTab(): ReactElement {
             <p className="px-2 text-sm text-muted-foreground">Nothing is recording.</p>
           )}
         </MetricGroup>
+        {/* Plan 223 D13: every watchdog alert of the session, when it opened
+            and when it cleared, from the persisted `watchdog-*` health events. */}
+        {logSession && watchdogRows.length > 0 ? (
+          <MetricGroup meta={logSession.title} title="Alerts">
+            <GroupedList>
+              {watchdogRows.map((row) => (
+                <ListRow
+                  key={`${row.check}:${row.openedAt}`}
+                  data-testid="watchdog-history-row"
+                  meta={watchdogHistorySpan(row)}
+                  title={row.title}
+                />
+              ))}
+            </GroupedList>
+          </MetricGroup>
+        ) : null}
         {/* Logs say whose they are and when they were cut (I-25). */}
         <MetricGroup
           meta={logSession ? logSession.title : undefined}
