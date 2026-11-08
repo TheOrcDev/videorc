@@ -13102,7 +13102,7 @@ async function runSmokePreviewMotionCommand(
           const inWindow = (rect) => rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= window.innerWidth + 0.5 && rect.bottom <= window.innerHeight + 0.5;
           // A card taller than the room scrolls: a control below its fold is
           // still reachable, as long as it sits inside the card's width.
-          const scrolls = popup.scrollHeight > popup.clientHeight + 1;
+          const scrolls = [popup, ...popup.querySelectorAll('*')].some((element) => element.scrollHeight > element.clientHeight + 1 && ['auto', 'scroll'].includes(getComputedStyle(element).overflowY));
           const controls = Array.from(popup.querySelectorAll('button, textarea')).filter((element) => element.getBoundingClientRect().width > 0).map((element) => {
             const rect = element.getBoundingClientRect();
             return { text: element.textContent?.trim() || element.getAttribute('aria-label') || element.tagName, inside: (inWindow(rect) || scrolls) && rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5 };

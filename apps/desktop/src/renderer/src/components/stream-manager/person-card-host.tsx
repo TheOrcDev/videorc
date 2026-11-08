@@ -113,7 +113,8 @@ export default function PersonCardHost({
             anchor={anchor ?? undefined}
             aria-label={`About ${request?.target.name ?? ''}`}
             // Never taller than the room the window leaves: the card scrolls.
-            className="max-h-(--available-height) w-80 overflow-y-auto"
+            // (less the collision padding Base UI keeps from the edge).
+            className="max-h-[calc(var(--available-height)-0.75rem)] w-80 overflow-y-auto"
             data-testid="person-card-popover"
             side="bottom"
           >
