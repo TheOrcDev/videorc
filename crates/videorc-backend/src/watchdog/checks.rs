@@ -29,6 +29,10 @@ pub const DARK_TAKEOVER_LUMA: u8 = 48;
 pub const CLOUD_FROZEN_AFTER: Duration = Duration::from_secs(3);
 /// `av-drift` (cloud only): skew above this, for the threshold.
 pub const AV_DRIFT_SKEW_MS: f64 = 300.0;
+/// The content checks (silence, black) start counting this long into a
+/// session: the bus and the first frames take a moment, and a stream that
+/// really starts dead still alarms a few seconds later.
+pub const STARTUP_GRACE: Duration = Duration::from_secs(5);
 
 /// Every threshold, with the dev-build overrides (D4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +209,9 @@ pub struct ChatDecision {
 #[derive(Debug, Clone, Default)]
 pub struct Signals<'a> {
     pub live: bool,
+    /// How long the session has run; the content checks wait out
+    /// [`STARTUP_GRACE`].
+    pub session_age: Duration,
     pub mic_muted: bool,
     pub takeover: Option<TakeoverSignal>,
     pub audio: AudioWindow,
@@ -269,11 +276,12 @@ impl Checks {
         let now = clock.now;
         let takeover = signals.takeover;
         let music = signals.audio.music_playing();
+        let warming_up = signals.session_age < STARTUP_GRACE;
 
         // --- program silence clock (shared by mic-muted's fold) ---
-        if signals.audio.silent() {
+        if signals.audio.silent() && !warming_up {
             self.program_silent_since.get_or_insert(now);
-        } else if signals.audio.master_rms_db.is_some() {
+        } else if signals.audio.master_rms_db.is_some() || warming_up {
             self.program_silent_since = None;
         }
         let program_silent_for = self
@@ -414,8 +422,15 @@ impl Checks {
             None => self.takeover_dark = None,
         }
         let dark_takeover = takeover.is_some() && self.takeover_dark == Some(true);
+        // The sampler may have read black since the first frame; the clock
+        // counts from the end of the grace, like the silence clock.
+        let grace_end = (!warming_up)
+            .then(|| now.checked_sub(signals.session_age - STARTUP_GRACE))
+            .flatten();
         let desktop_black = signals
             .black_since
+            .filter(|_| !warming_up)
+            .map(|since| grace_end.map_or(since, |end| since.max(end)))
             .map(|since| now.saturating_duration_since(since))
             .filter(|held| *held >= thresholds.picture_black);
         let cloud_black = signals.cloud.and_then(|cloud| {
@@ -955,6 +970,7 @@ mod tests {
     fn live() -> Signals<'static> {
         Signals {
             live: true,
+            session_age: Duration::from_secs(60),
             audio: AudioWindow {
                 master_rms_db: Some(-30.0),
                 microphone_rms_db: Some(-30.0),
@@ -1656,6 +1672,41 @@ mod tests {
             &signals,
         );
         assert!(opened(&out).is_empty(), "recording only: no new check (D3)");
+    }
+
+    #[test]
+    fn the_first_seconds_of_a_session_never_read_as_silence_or_black() {
+        let mut checks = Checks::new();
+        let mut state = WatchdogState::new();
+        let start = clock();
+        let mut signals = live();
+        signals.audio.master_rms_db = Some(-90.0);
+        signals.black_since = Some(start.now);
+        for second in 0..30 {
+            signals.session_age = Duration::from_secs(second);
+            let out = checks.tick(
+                &signals,
+                &thresholds(),
+                &settings(),
+                &mut state,
+                start.plus(Duration::from_secs(second)),
+            );
+            let opened = opened(&out);
+            if second < 15 {
+                assert!(opened.is_empty(), "second {second}: {opened:?}");
+            } else if second < 25 {
+                assert!(
+                    opened
+                        .iter()
+                        .all(|(check, _)| *check == WatchdogCheck::PictureBlack),
+                    "second {second}: {opened:?}"
+                );
+            }
+        }
+        // 5 s of grace, then the 10 s black clock (15 s) and the 20 s silence
+        // clock (25 s), both counted from the end of the grace.
+        assert!(state.is_open("program-silent"));
+        assert!(state.is_open("picture-black"));
     }
 
     #[test]

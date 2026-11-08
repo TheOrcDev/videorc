@@ -91,6 +91,7 @@ pub struct SessionFacts {
 /// The per-session watch.
 struct SessionWatch {
     session_id: String,
+    started: Instant,
     /// The session streams (set by the tick; the 1064 adoption reads it).
     live: bool,
     state: WatchdogState,
@@ -123,6 +124,7 @@ impl SessionWatch {
     fn new(session_id: &str) -> Self {
         Self {
             session_id: session_id.to_string(),
+            started: Instant::now(),
             live: false,
             state: WatchdogState::new(),
             checks: checks::Checks::new(),
@@ -571,6 +573,7 @@ pub fn tick(state: &AppState, session_id: &str, facts: SessionFacts) {
         let window = std::mem::take(&mut watch.window);
         let signals = Signals {
             live: facts.live,
+            session_age: now.saturating_duration_since(watch.started),
             mic_muted: facts.mic_muted,
             takeover,
             audio: window,
