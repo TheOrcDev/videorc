@@ -31,9 +31,8 @@ use crate::community::{
     CommunityListPage, CommunityListParams, CommunityPathParams, CommunityPerson,
     CommunityPersonIdParams, CommunityPersonParams, CommunitySettings, CommunitySuggestionParams,
     CommunitySummary, CommunityUnlinkParams, CommunityUnlinkResult, CommunityUpdateParams,
-    LINK_MADE_TTL, LinkClaim, LinkOutcome, PendingLinks, ReportArrival, ViewerArrival,
-    account_key, command_bubble_line, parse_chat_command, platform_has_identity,
-    report_community,
+    LINK_MADE_TTL, LinkClaim, LinkOutcome, PendingLinks, ReportArrival, ViewerArrival, account_key,
+    command_bubble_line, parse_chat_command, platform_has_identity, report_community,
 };
 use crate::community_store::{
     CommunityError, CommunityExportFile, CommunityRowFacts, PRUNED_AT_SETTING_KEY,
@@ -1793,7 +1792,11 @@ mod tests {
             })
             .cloned()
             .expect("Suggest proposes the welcome as a card");
-        assert_eq!(snapshot.welcome_back.len(), 1, "the row stays beside the card");
+        assert_eq!(
+            snapshot.welcome_back.len(),
+            1,
+            "the row stays beside the card"
+        );
         crate::cohost::dismiss_utterance(
             &state,
             crate::protocol::CohostUtteranceParams {
@@ -1841,7 +1844,10 @@ mod tests {
             if let Some(community) = report.and_then(|report| report.community) {
                 break community;
             }
-            assert!(Instant::now() < deadline, "the Community block never landed");
+            assert!(
+                Instant::now() < deadline,
+                "the Community block never landed"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
         assert_eq!(community.first_timers, 1);

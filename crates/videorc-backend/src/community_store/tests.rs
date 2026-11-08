@@ -1204,8 +1204,17 @@ fn a_stream_counts_its_first_timers_and_those_who_stayed_forty_minutes() {
             soon,
         )
         .unwrap();
-    assert_eq!(database.community_session_first_timers("s2").unwrap(), (2, 1));
+    assert_eq!(
+        database.community_session_first_timers("s2").unwrap(),
+        (2, 1)
+    );
     // s1's only chatter was a first-timer there; an unknown stream has none.
-    assert_eq!(database.community_session_first_timers("s1").unwrap(), (1, 0));
-    assert_eq!(database.community_session_first_timers("nope").unwrap(), (0, 0));
+    assert_eq!(
+        database.community_session_first_timers("s1").unwrap(),
+        (1, 0)
+    );
+    assert_eq!(
+        database.community_session_first_timers("nope").unwrap(),
+        (0, 0)
+    );
 }
