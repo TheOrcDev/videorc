@@ -93,6 +93,25 @@ const CAMERA_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_CAMERA_RATE_CAP_EPSILON_SECONDS: f64 = 0.000_001;
 
+/// The native thread never answered its start. A thread that outlived the
+/// startup timeout is stopped next, and its stop path keeps the DirectShow
+/// modes cached for this camera, so a timeout forgets them here: whatever
+/// made the start that slow (a replugged or re-driven device) may have
+/// changed them. A deliberate stop disconnects the channel instead, and keeps
+/// the cache.
+fn native_camera_startup_unanswered(
+    error: std_mpsc::RecvTimeoutError,
+    device_unique_id: &str,
+) -> NativeCameraStartup {
+    #[cfg(target_os = "windows")]
+    if error == std_mpsc::RecvTimeoutError::Timeout {
+        windows::forget_dshow_modes(device_unique_id);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (error, device_unique_id);
+    NativeCameraStartup::Failed("Timed out while starting native camera preview.".to_string())
+}
+
 fn native_camera_preview_thread_startup_timeout() -> Duration {
     // FFmpeg-fed cameras (DirectShow, V4L2) pay a child spawn plus device
     // negotiation per attempt before the first frame.
@@ -1677,14 +1696,11 @@ async fn start_registered_preview_camera(
         }
     }
 
+    let startup_camera = unique_id.clone();
     let startup = tokio::task::spawn_blocking(move || {
         startup_rx
             .recv_timeout(native_camera_preview_thread_startup_timeout())
-            .unwrap_or_else(|_| {
-                NativeCameraStartup::Failed(
-                    "Timed out while starting native camera preview.".to_string(),
-                )
-            })
+            .unwrap_or_else(|error| native_camera_startup_unanswered(error, &startup_camera))
     })
     .await
     .unwrap_or_else(|error| {
@@ -5376,9 +5392,20 @@ mod windows {
         }
     }
 
-    fn windows_dshow_mode_cache() -> &'static DshowModeCache {
+    pub(super) fn windows_dshow_mode_cache() -> &'static DshowModeCache {
         static CACHE: std::sync::OnceLock<DshowModeCache> = std::sync::OnceLock::new();
         CACHE.get_or_init(DshowModeCache::default)
+    }
+
+    /// For a start whose native thread outlived the startup timeout; see
+    /// `native_camera_startup_unanswered`.
+    pub(super) fn forget_dshow_modes(camera: &str) {
+        if windows_dshow_mode_cache().forget(camera) {
+            tracing::info!(
+                camera,
+                "[camera-modes] forgot this camera's cached modes after its start timed out"
+            );
+        }
     }
 
     /// One bounded `-list_options` probe. Unreadable when it fails or reports
@@ -9966,6 +9993,39 @@ Error opening input file video=HP HD Camera."#;
             classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS),
             WindowsDshowModeProbe::Modes(_)
         ));
+    }
+
+    /// A start whose native thread outlived the startup timeout is stopped,
+    /// and the thread's stop path keeps the cache, so the timeout forgets the
+    /// camera's modes. A deliberate stop (the channel disconnects) keeps them.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_timed_out_windows_camera_start_forgets_its_cached_modes() {
+        let cache = windows::windows_dshow_mode_cache();
+        let listing = || classify_windows_dshow_mode_probe(HP_HD_CAMERA_LIST_OPTIONS);
+        for camera in ["@device_pnp_timed_out_start", "@device_pnp_stopped_start"] {
+            let _ = cache.probe_through(camera, listing);
+            assert!(cache.probe_through(camera, listing).1, "{camera} is cached");
+        }
+
+        let startup = native_camera_startup_unanswered(
+            std_mpsc::RecvTimeoutError::Timeout,
+            "@device_pnp_timed_out_start",
+        );
+        assert!(matches!(startup, NativeCameraStartup::Failed(_)));
+        assert!(
+            !cache.forget("@device_pnp_timed_out_start"),
+            "a timed-out start must forget the camera's modes"
+        );
+
+        let _ = native_camera_startup_unanswered(
+            std_mpsc::RecvTimeoutError::Disconnected,
+            "@device_pnp_stopped_start",
+        );
+        assert!(
+            cache.forget("@device_pnp_stopped_start"),
+            "a deliberately stopped start keeps the camera's modes"
+        );
     }
 
     /// #1068 step 3: a camera's `-list_options` probe runs once; later starts
