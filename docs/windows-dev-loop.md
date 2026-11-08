@@ -91,6 +91,23 @@ $env:VIDEORC_ALLOW_UNSUPPORTED_WINDOWS = '1'
 pnpm smoke:dev
 ```
 
+Hide screen on every output leg (#1088, plan 210 D8). It covers the primary
+display with a borderless red fixture window for about half a minute once the
+dev app is up, records and
+streams the DXGI display to a loopback RTMP sink with Clips on, hides for four
+seconds, and checks that the recording, the stream, a saved clip and (with a
+camera) the Screen file are frosted and still for the hidden span and live
+again after Show:
+
+```powershell
+pnpm smoke:hide-screen:windows                 # or pnpm smoke:smart-scenes
+pnpm smoke:hide-screen:windows -- --media cpu  # force the CPU compositor bridge
+```
+
+Run it from your own terminal. Desktop Duplication refuses processes started
+from an agent or service session (`0x80070005`), and the smoke then SKIPs and
+names that code instead of passing.
+
 Packaged native-screen acceptance (requires `VIDEORC_PERF_APP_EXECUTABLE` plus
 the bundled FFmpeg/FFprobe paths, as configured in `.github/workflows/windows.yml`):
 

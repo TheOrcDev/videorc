@@ -41,11 +41,12 @@
 //   VIDEORC_SMOKE_TIMEOUT_MS, VIDEORC_SMOKE_RTMP_PORT (13937),
 //   VIDEORC_SMOKE_FFMPEG_PATH, VIDEORC_SMOKE_FFPROBE_PATH
 
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { hostname, loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { buildFixtureApps } from './fixtures/build-fixture-apps.mjs'
 import { launchDevApp } from './lib/app-launcher.mjs'
@@ -98,6 +99,18 @@ class SmokeExit extends Error {
 // T3 shells export this; the dev app then dies at getVersion.
 delete process.env.ELECTRON_RUN_AS_NODE
 
+// Windows runs step 5 (Hide screen on every output) against the DXGI display
+// and reports the macOS-only steps as SKIP (issue #1088).
+if (process.platform === 'win32') {
+  const windowsSmoke = fileURLToPath(
+    new URL('./smoke-hide-screen-windows-app.mjs', import.meta.url)
+  )
+  const delegated = spawnSync(process.execPath, [windowsSmoke, ...process.argv.slice(2)], {
+    stdio: 'inherit'
+  })
+  process.exit(delegated.status ?? 1)
+}
+
 const options = parseArgs(process.argv.slice(2))
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120_000)
 const switchTimeoutMs = Number(process.env.VIDEORC_SCENE_SWITCH_TIMEOUT_MS ?? 20_000)
@@ -149,7 +162,10 @@ let exitCode = 0
 
 try {
   if (process.platform !== 'darwin') {
-    skip('scenes for apps, Follow and the fixture apps are macOS only (plan 210 D12)', 'not-macos')
+    skip(
+      'scenes for apps, Follow and the fixture apps are macOS only (plan 210 D12); Windows runs the Hide screen step (smoke:hide-screen:windows)',
+      'not-macos'
+    )
   }
   for (const tool of [ffmpegPath, ffprobePath]) {
     try {
