@@ -13038,9 +13038,20 @@ type AppCloudShowContext =
 fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let emit_state = state.clone();
     let legs_state = state.clone();
+    let remember_state = state.clone();
     cloud_show::CloudHooks {
         emit: std::sync::Arc::new(move |status| {
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
+        }),
+        // Lane 3 F2: the show this desktop holds survives a relaunch, so the
+        // launch check asks the web about it whatever the account says then.
+        remember: std::sync::Arc::new(move |remembered: Option<String>| {
+            if let Err(error) = remember_state
+                .database
+                .save_setting(cloud_show::CLOUD_OPEN_SHOW_KEY, &remembered)
+            {
+                tracing::warn!("Could not save the remembered Videorc Cloud show: {error:#}");
+            }
         }),
         legs: std::sync::Arc::new(move |session_id: &str, legs| {
             // C2: the runner's legs into the session's own leg model, then
@@ -13135,18 +13146,24 @@ async fn cloud_show_session_stopped(state: &AppState, session_id: Option<&str>) 
         .await;
 }
 
-/// C5: at launch, after the entitlement refresh, ask the web for a live show,
-/// also while the rollback switch has the cloud off (`may_own_a_show`).
+/// C5: at launch, after the entitlement refresh, ask the web for a live show
+/// whenever the account could own one (`may_own_a_show`), has cloud hours,
+/// or this desktop remembers a show, whatever the cloud switch or the
+/// rollout says (lane 3 F2, `launch_check_due`): a show started before a
+/// rollback is still live on its node, and its Resume and End banner must
+/// show.
 async fn cloud_show_detect_at_launch(state: &AppState) {
     let Some(bearer) = account::stored_session_token() else {
         return;
     };
-    let may_own_a_show = state
-        .cloud_show
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .may_own_a_show();
-    if !may_own_a_show {
+    let due = cloud_show::launch_check_due(
+        &state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        true,
+    );
+    if !due {
         return;
     }
     let Some(context) = cloud_context(state) else {

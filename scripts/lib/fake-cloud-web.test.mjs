@@ -1035,7 +1035,23 @@ describe('fake cloud web: what the web changed after the cloud test (plan 184)',
       })
       assert.equal(ended.status, 200)
       web.setDisabled(false)
-      assert.equal((await create()).status, 201)
+      const back = await (await create()).json()
+      assert.ok(isShowId(back.show.id))
+
+      // The plan ends mid-show: no cloud hours, no new show, while current
+      // still finds the open one (smoke:cloud-solo's rollback variant).
+      web.setCloud({ secondsPerMonth: 0 })
+      const plan = await (
+        await fetch(`${web.httpOrigin}/api/ai/capabilities`, { headers: bearer })
+      ).json()
+      assert.equal(plan.cloud.secondsPerMonth, 0)
+      const noHours = await create()
+      assert.equal(noHours.status, 403)
+      assert.equal((await noHours.json()).error.code, 'cloud-not-entitled')
+      const stillOpen = await (
+        await fetch(`${web.httpOrigin}/api/cloud/shows/current`, { headers: bearer })
+      ).json()
+      assert.equal(stillOpen.show.id, back.show.id)
     } finally {
       await web.close()
       await new Promise((resolveClose) => agent.close(resolveClose))

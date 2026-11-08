@@ -942,6 +942,13 @@ export async function startFakeCloudWeb({
           'Videorc Cloud is off right now. Streaming directly from this computer.'
         )
       }
+      // The web's order after the kill switch: the plan. No cloud hours, or
+      // a block that says off, is 403 `cloud-not-entitled` (a plan that
+      // ended mid-show still finds its open show through `current`).
+      const plan = cloudBlock()
+      if ((plan.secondsPerMonth ?? 0) <= 0 || !plan.enabled) {
+        return fail(403, 'cloud-not-entitled', 'Videorc Cloud comes with Premium and Max.')
+      }
       const parsed = parseCreateShowBody(body)
       if (!('kind' in parsed)) return fail(400, 'invalid-cloud-show', parsed.message)
       if (parsed.kind === 'talk') {
@@ -1090,6 +1097,10 @@ export async function startFakeCloudWeb({
     /** `VIDEORC_CLOUD_DISABLED` on or off, mid-run (the rollback scenario). */
     setDisabled(disabled) {
       state.disabled = Boolean(disabled)
+    },
+    /** Change the account's `cloud` block, e.g. a plan that ended mid-show. */
+    setCloud(patch) {
+      Object.assign(enabledCloud, patch)
     },
     /** The show that is open right now, serialized, or null; never a test (C6b). */
     currentShow() {

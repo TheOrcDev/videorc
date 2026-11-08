@@ -314,6 +314,10 @@ describe('cloud solo gates: the run verdict', () => {
 
   it('passes a clean run', () => {
     assert.deepEqual(evaluateCloudSoloReport(passing()), [])
+    // The rollback variant (lane 3 F2): the relaunch found the show unentitled.
+    const rolledBack = passing()
+    rolledBack.drops[1].rollback = { entitledAtRelaunch: false, secondsPerMonthAtRelaunch: 0 }
+    assert.deepEqual(evaluateCloudSoloReport(rolledBack), [])
     // A run without the test steps (an older report) is judged on the rest.
     const { cloudTest: _omitted, testCap: _cap, ...withoutTest } = passing()
     assert.deepEqual(evaluateCloudSoloReport(withoutTest), [])
@@ -387,6 +391,7 @@ describe('cloud solo gates: the run verdict', () => {
     report.drops[0].timeToHoldSeconds = 9
     report.drops[1].timeToResumeSeconds = null
     report.drops[1].destinationsSetAfterResume = 1
+    report.drops[1].rollback = { entitledAtRelaunch: true, secondsPerMonthAtRelaunch: 360_000 }
     report.receivers[0].gaps.maxGapSeconds = 2.5
     report.receivers[1].audio = {}
     report.receivers[1].stayedConnected = false
@@ -407,6 +412,7 @@ describe('cloud solo gates: the run verdict', () => {
       'feed-cut: hold took 9 s (limit 6 s)',
       'computer-died: the show never came back live after the resume',
       'computer-died: the runner applied destinations.set 1 time(s) after the Resume click',
+      'computer-died: the rollback relaunch still saw the cloud on (entitled true)',
       'receiver-1: largest packet gap 2.5 s (limit 2 s)',
       'receiver-2: no audio stream',
       'receiver-2: its connection dropped during a drop',

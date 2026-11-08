@@ -97,6 +97,12 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //   8. A test show nobody ends (the desktop died mid-test) ends on the
 //      runner `max-show` 30 s after its first feed frame, and the web closes
 //      it from the node's heartbeat.
+//   9. VIDEORC_CLOUD_SOLO_ROLLBACK=1 (cloud test lane 3 F2): while the
+//      computer is dead the web rolls the cloud back (VIDEORC_CLOUD_DISABLED)
+//      and the plan loses its cloud hours, so the relaunched desktop is not
+//      entitled and only the show it remembers can send it to `current`. It
+//      must still find the show and offer Resume and End; Resume and Stop
+//      work with the cloud switched off.
 //
 // Why a proxy and not a killed process: the plan says "kill the stream
 // encoder", but on macOS the stream legs are fifo outputs of the one FFmpeg
@@ -112,6 +118,7 @@ const feedCutMs = Number(process.env.VIDEORC_CLOUD_SOLO_DROP_MS ?? 12_000)
 const afterResumeMs = Number(process.env.VIDEORC_CLOUD_SOLO_AFTER_RESUME_MS ?? 8_000)
 const deadMs = Number(process.env.VIDEORC_CLOUD_SOLO_DEAD_MS ?? 6_000)
 const skipDeath = process.env.VIDEORC_CLOUD_SOLO_SKIP_DEATH === '1'
+const rollbackWhileDead = process.env.VIDEORC_CLOUD_SOLO_ROLLBACK === '1'
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 1_500)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
@@ -691,6 +698,11 @@ try {
     )
     const holdAt2 = firstPhase(watcher.states, killAtMs, 'hold')
     log(`[drop 2] runner holds ${((holdAt2 - killAtMs) / 1000).toFixed(2)} s after the death`)
+    if (rollbackWhileDead) {
+      web.setDisabled(true)
+      web.setCloud({ secondsPerMonth: 0 })
+      log('[drop 2] rollback: the web switches the cloud off and the plan loses its cloud hours')
+    }
     await sleep(deadMs)
     assertReceiversConnected(receivers, 'while the computer was dead')
 
@@ -707,7 +719,7 @@ try {
     )
     const resumableAtMs = Date.now()
     log(
-      `[drop 2] relaunched desktop sees the show as resumable ${((resumableAtMs - relaunchAtMs) / 1000).toFixed(1)} s after launch (phase ${resumable.phase}, hold ${resumable.hold?.remainingSeconds ?? '?'} s left)`
+      `[drop 2] relaunched desktop sees the show as resumable ${((resumableAtMs - relaunchAtMs) / 1000).toFixed(1)} s after launch (phase ${resumable.phase}, hold ${resumable.hold?.remainingSeconds ?? '?'} s left, entitled ${resumable.entitled})`
     )
     authorization = await requestSmokeCommand(
       launch.smoke,
@@ -775,7 +787,15 @@ try {
       destinationsSetAfterResume: destinationsSetIntentTimes(agent.logPath).filter(
         (atMs) => atMs >= resumeRequestedAtMs
       ).length,
-      legsKept: receivers.every((receiver) => receiver.child.process.exitCode === null)
+      legsKept: receivers.every((receiver) => receiver.child.process.exitCode === null),
+      // Lane 3 F2: what the relaunched desktop was told while it found the
+      // show (with the cloud off and no hours, only its memory sent it).
+      rollback: rollbackWhileDead
+        ? {
+            entitledAtRelaunch: resumable.entitled,
+            secondsPerMonthAtRelaunch: resumable.allowance?.secondsPerMonth ?? null
+          }
+        : null
     }
     report.drops.push(drop2)
     log(

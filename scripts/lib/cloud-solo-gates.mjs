@@ -296,6 +296,13 @@ export function evaluateCloudSoloReport(report) {
         `${label}: the runner applied destinations.set ${drop.destinationsSetAfterResume} time(s) after the Resume click`
       )
     }
+    // Lane 3 F2: the rollback variant proves something only when the
+    // relaunched desktop really had no cloud while it found the show.
+    if (drop.rollback && drop.rollback.entitledAtRelaunch !== false) {
+      failures.push(
+        `${label}: the rollback relaunch still saw the cloud on (entitled ${drop.rollback.entitledAtRelaunch})`
+      )
+    }
   }
   const receivers = report.receivers ?? []
   if (receivers.length < 2) failures.push(`expected 2 receivers, found ${receivers.length}`)

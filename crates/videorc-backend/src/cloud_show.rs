@@ -14,6 +14,9 @@
 //! - Direct legs reopen only after the web confirms the show is gone (C2). A
 //!   desktop that merely lost its own socket must never push the keys the
 //!   runner still pushes: two pushes to one key make the platform drop both.
+//!   That holds whatever the cloud switch, the rollout or the hours say: a
+//!   show the runner holds is found at launch and fed by Go Live (cloud test
+//!   2026-10-21, lane 3 F2).
 //! - Every YouTube API call stays on this computer (D13): the desktop still
 //!   prepares broadcasts and moves them to `complete`; the runner only pushes
 //!   video into YouTube's ingest.
@@ -51,6 +54,10 @@ use crate::streaming::{
 };
 
 pub const CLOUD_SETTINGS_KEY: &str = "cloud.settings";
+/// The backend-private `app_settings` row holding the id of the show this
+/// desktop holds or last held without seeing it end (`null` when none). Not a
+/// secret: the id names the show, and its token and ingest key are never kept.
+pub const CLOUD_OPEN_SHOW_KEY: &str = "cloud.openShow";
 pub const CLOUD_STATE_EVENT: &str = "cloud.state";
 /// The label of the swapped target and of the physical cloud leg (C3).
 pub const CLOUD_TARGET_LABEL: &str = "Videorc Cloud";
@@ -203,6 +210,16 @@ pub struct CloudEntitlement {
 impl CloudEntitlement {
     pub fn entitled(&self) -> bool {
         self.cloud.as_ref().is_some_and(|cloud| cloud.enabled)
+    }
+
+    /// The account's plan has cloud hours, whether or not the cloud is on
+    /// for it right now: the web's `enabled` is also off during a rollback
+    /// (`VIDEORC_CLOUD_DISABLED`) and outside the beta cohort, while a show
+    /// started before may still be live on a node.
+    pub fn has_cloud_plan(&self) -> bool {
+        self.cloud
+            .as_ref()
+            .is_some_and(|cloud| cloud.enabled || cloud.seconds_per_month > 0)
     }
 
     fn seconds_remaining(&self) -> u64 {
@@ -1042,15 +1059,41 @@ pub struct CloudShowRuntime {
     test: Option<CloudTestStatus>,
     test_run: Option<watch::Sender<bool>>,
     restart: Option<CloudRestart>,
+    /// The show this desktop holds, or last held without seeing it end,
+    /// kept across launches (`CLOUD_OPEN_SHOW_KEY`): a relaunch asks the web
+    /// for it even when the account's cloud is off right now (lane 3 F2).
+    remembered_show: Option<String>,
+    /// The show id the last emit saw: a change moves `remembered_show`.
+    show_seen: Option<String>,
+    /// `remembered_show` as last handed to the `remember` hook.
+    remembered_persisted: Option<String>,
 }
 
 pub type CloudShowSlot = Arc<StdMutex<CloudShowRuntime>>;
 
-pub fn new_cloud_show_slot(settings: CloudSettings) -> CloudShowSlot {
+/// The slot at launch, with the show the last run remembered.
+pub fn new_cloud_show_slot_remembering(
+    settings: CloudSettings,
+    remembered_show: Option<String>,
+) -> CloudShowSlot {
     Arc::new(StdMutex::new(CloudShowRuntime {
         settings: settings.normalized(),
+        remembered_persisted: remembered_show.clone(),
+        remembered_show,
         ..CloudShowRuntime::default()
     }))
+}
+
+/// The show the last run remembered, or `None` (nothing saved, `null`, or a
+/// row that does not parse): never a startup failure.
+pub fn load_remembered_show(database: &crate::storage::Database) -> Option<String> {
+    match database.load_setting::<Option<String>>(CLOUD_OPEN_SHOW_KEY) {
+        Ok(remembered) => remembered.flatten(),
+        Err(error) => {
+            tracing::warn!("Could not load the remembered Videorc Cloud show: {error:#}");
+            None
+        }
+    }
 }
 
 /// The persisted settings, or the defaults when nothing was saved or the
@@ -1224,22 +1267,85 @@ impl CloudShowRuntime {
         self.end_reason = end_reason;
         self.bump_generation();
     }
+
+    /// The show this desktop remembers holding (lane 3 F2).
+    #[cfg(test)]
+    pub fn remembered_show(&self) -> Option<&str> {
+        self.remembered_show.as_deref()
+    }
+
+    /// The web said there is no open show: nothing is left to remember.
+    fn forget_remembered_show(&mut self) {
+        self.remembered_show = None;
+    }
+
+    /// The show left this runtime without the web confirming its end (a
+    /// hand-over that failed with the web unreachable): keep remembering it,
+    /// so the next launch or Go Live asks the web again.
+    fn keep_remembering(&mut self, show_id: &str) {
+        self.show_seen = None;
+        self.remembered_show = Some(show_id.to_string());
+    }
+
+    /// Follows the show into `remembered_show` (a new show is remembered,
+    /// one that left is forgotten) and returns the value to persist when it
+    /// changed since the last call. A launch that has not found its show yet
+    /// changes nothing, so the remembered show survives until the web
+    /// answers.
+    fn take_remembered_change(&mut self) -> Option<Option<String>> {
+        let current = self.show.as_ref().map(|show| show.record.id.clone());
+        if current != self.show_seen {
+            self.show_seen = current.clone();
+            self.remembered_show = current;
+        }
+        if self.remembered_show == self.remembered_persisted {
+            return None;
+        }
+        self.remembered_persisted = self.remembered_show.clone();
+        Some(self.remembered_show.clone())
+    }
+}
+
+/// C5 at launch (lane 3 F2): ask the web for a live show whenever the user
+/// is signed in and either could own a show (`may_own_a_show`: entitled, or
+/// on a paid plan whose cloud block says off), has a plan with cloud hours,
+/// or this desktop remembers a show, whatever the cloud switch, the rollout
+/// switch or the cohort say. A show started before a rollback (or before the
+/// plan or the cohort changed) is still live on its node, and only `current`
+/// finds it. A Basic account that never held a show is never asked.
+pub fn launch_check_due(runtime: &CloudShowRuntime, signed_in: bool) -> bool {
+    signed_in
+        && (runtime.may_own_a_show()
+            || runtime.entitlement.has_cloud_plan()
+            || runtime.remembered_show.is_some())
 }
 
 /// Hands a session id and the runner's legs to the session's leg model.
 pub type CloudLegsHook = Arc<dyn Fn(&str, Vec<StreamTargetRuntime>) + Send + Sync>;
 
+/// Persists the remembered show's id (`None`: nothing to remember).
+pub type CloudRememberHook = Arc<dyn Fn(Option<String>) + Send + Sync>;
+
 /// How the socket task reaches the app without owning `AppState`: emit the
-/// whole state, and hand the runner's legs to the session's leg model.
+/// whole state, hand the runner's legs to the session's leg model, and keep
+/// the remembered show across launches.
 #[derive(Clone)]
 pub struct CloudHooks {
     pub emit: Arc<dyn Fn(CloudStatus) + Send + Sync>,
     pub legs: CloudLegsHook,
+    pub remember: CloudRememberHook,
 }
 
 impl CloudHooks {
     fn emit_from(&self, slot: &CloudShowSlot) {
-        let status = lock(slot).status();
+        let (status, remembered) = {
+            let mut runtime = lock(slot);
+            let remembered = runtime.take_remembered_change();
+            (runtime.status(), remembered)
+        };
+        if let Some(remembered) = remembered {
+            (self.remember)(remembered);
+        }
         (self.emit)(status);
     }
 }
@@ -2000,18 +2106,62 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         destinations: Vec<HandoverDestination>,
         hold_image_png_base64: Option<String>,
     ) -> Result<PrepareOutcome> {
-        let (decision, hold_max_seconds, resumable) = {
+        let (decision, hold_max_seconds, mut resumable, unconfirmed) = {
             let mut runtime = lock(&self.slot);
             runtime.failed = None;
             runtime.fallback = None;
             let decision = decide_go_live(&runtime, bearer.is_some());
-            let resumable = runtime
-                .show
-                .as_ref()
-                .filter(|show| show.session_id.is_none())
-                .map(|show| show.record.id.clone());
-            (decision, runtime.settings.hold_max_seconds, resumable)
+            let resumable = runtime.resumable_show_id();
+            // A show this desktop remembers but does not hold: the launch
+            // check could not reach the web.
+            let unconfirmed = runtime.show.is_none() && runtime.remembered_show.is_some();
+            (
+                decision,
+                runtime.settings.hold_max_seconds,
+                resumable,
+                unconfirmed,
+            )
         };
+        if decision != GoLiveDecision::Cloud {
+            // C2, whatever the cloud switch, the rollout or the hours say
+            // (lane 3 F2): while a show the runner holds may still have these
+            // platforms, Go Live feeds that show (C5b) and never opens direct
+            // legs beside it, two publishers on one key.
+            if unconfirmed && let Some(bearer) = bearer.as_deref() {
+                match self.web.current_show(bearer).await {
+                    Ok(current) => {
+                        self.hold_current_show(bearer, current).await?;
+                        resumable = lock(&self.slot).resumable_show_id();
+                    }
+                    Err(error) => tracing::info!(
+                        "Videorc Cloud could not be asked about the show this computer remembers; Go Live streams directly: {error}"
+                    ),
+                }
+            }
+            if let Some(show_id) = resumable.as_deref() {
+                let Some(bearer) = bearer.as_deref() else {
+                    bail!("Sign in to Videorc to resume the stream.");
+                };
+                if destinations.is_empty() {
+                    bail!("Videorc Cloud needs at least one destination to hand over.");
+                }
+                self.cancel_test().await;
+                match self
+                    .resume_into_session(
+                        session_id,
+                        bearer,
+                        show_id,
+                        Some(destinations.clone()),
+                        hold_image_png_base64.clone(),
+                    )
+                    .await?
+                {
+                    ResumeOutcome::Resumed(outcome) => return Ok(outcome),
+                    // The web or the node confirmed it gone: direct is safe.
+                    ResumeOutcome::ShowGone(_) => {}
+                }
+            }
+        }
         let bearer = match decision {
             GoLiveDecision::DirectByChoice => return Ok(PrepareOutcome::Direct),
             GoLiveDecision::DirectWithReason(reason) => {
@@ -2295,7 +2445,15 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                     .unwrap_or(true),
                 Err(_) => false,
             };
-            lock(&self.slot).clear_show(Some("handover-failed".to_string()));
+            {
+                let mut runtime = lock(&self.slot);
+                runtime.clear_show(Some("handover-failed".to_string()));
+                if !gone {
+                    // The runner may still hold the platforms: the next
+                    // launch or Go Live asks the web about it again.
+                    runtime.keep_remembering(show_id);
+                }
+            }
             if !gone {
                 self.hooks.emit_from(&self.slot);
                 bail!(
@@ -2500,7 +2658,28 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             .current_show(bearer)
             .await
             .map_err(anyhow::Error::new)?;
+        self.hold_current_show(bearer, current).await
+    }
+
+    /// What `GET current` answered, held: an open show becomes resumable and
+    /// its socket connects; no open show means nothing is left to remember.
+    async fn hold_current_show(
+        &self,
+        bearer: &str,
+        current: CurrentShowResponse,
+    ) -> Result<CloudStatus> {
         let Some(show) = current.show.filter(|show| show.status != "ended") else {
+            let forgot = {
+                let mut runtime = lock(&self.slot);
+                let forget = runtime.show.is_none() && runtime.remembered_show.is_some();
+                if forget {
+                    runtime.forget_remembered_show();
+                }
+                forget
+            };
+            if forgot {
+                self.hooks.emit_from(&self.slot);
+            }
             return Ok(lock(&self.slot).status());
         };
         let Some(control) = current.control else {
@@ -3535,11 +3714,19 @@ mod tests {
         context: CloudShowContext<FakeWeb, FakeConnector>,
         emitted: Arc<StdMutex<Vec<CloudStatus>>>,
         legs: Arc<StdMutex<Vec<(String, Vec<StreamTargetRuntime>)>>>,
+        /// Every value the `remember` hook persisted, in order.
+        remembered: Arc<StdMutex<Vec<Option<String>>>>,
     }
 
     fn harness(entitled: bool) -> Harness {
+        harness_remembering(entitled, None)
+    }
+
+    /// A harness whose slot starts as a launch that remembered `remembered`.
+    fn harness_remembering(entitled: bool, remembered_show: Option<&str>) -> Harness {
         let emitted = Arc::new(StdMutex::new(Vec::new()));
         let legs = Arc::new(StdMutex::new(Vec::new()));
+        let remembered = Arc::new(StdMutex::new(Vec::new()));
         let hooks = CloudHooks {
             emit: {
                 let emitted = emitted.clone();
@@ -3551,8 +3738,15 @@ mod tests {
                     legs.lock().unwrap().push((session.to_string(), runtime))
                 })
             },
+            remember: {
+                let remembered = remembered.clone();
+                Arc::new(move |value| remembered.lock().unwrap().push(value))
+            },
         };
-        let slot = new_cloud_show_slot(CloudSettings::default());
+        let slot = new_cloud_show_slot_remembering(
+            CloudSettings::default(),
+            remembered_show.map(str::to_string),
+        );
         if entitled {
             lock(&slot).entitlement = CloudEntitlement {
                 plan: Some(EntitlementPlan::Max),
@@ -3573,6 +3767,7 @@ mod tests {
             },
             emitted,
             legs,
+            remembered,
         }
     }
 
@@ -4147,6 +4342,11 @@ mod tests {
             "rtmps://eu-hel-1.live.videorc.com:1936/live"
         );
         assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 1);
+        // The show is remembered across a relaunch from now on (lane 3 F2).
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string())]
+        );
         {
             let status = lock(&harness.context.slot).status();
             assert_eq!(status.phase, CloudPhase::Connecting);
@@ -4240,6 +4440,11 @@ mod tests {
         assert_eq!(
             *harness.context.web.end_calls.lock().unwrap(),
             vec!["sh_abc".to_string()]
+        );
+        // Ended here: nothing is left to remember.
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string()), None]
         );
         let phases: Vec<CloudPhase> = harness
             .emitted
@@ -5264,6 +5469,376 @@ mod tests {
         assert!(status.show.unwrap().resumable);
         assert_eq!(status.session_id, None);
         assert_eq!(status.phase, CloudPhase::Hold);
+    }
+
+    // --- Lane 3 F2: a show stays visible after a rollback --------------------
+
+    /// What the web's `cloud` block says during a rollback
+    /// (`VIDEORC_CLOUD_DISABLED`) or outside the cohort: the plan still has
+    /// cloud hours, but the cloud is not on for the account.
+    fn rolled_back_entitlement() -> CloudEntitlement {
+        CloudEntitlement {
+            plan: Some(EntitlementPlan::Max),
+            cloud: Some(AiCapabilitiesCloud {
+                enabled: false,
+                seconds_per_month: 360_000,
+                seconds_used: 1000,
+                ..AiCapabilitiesCloud::default()
+            }),
+        }
+    }
+
+    /// `GET current` for the held show: no ingest (the web never stores it).
+    fn held_current(created: &CreateShowResponse) -> CurrentShowResponse {
+        CurrentShowResponse {
+            show: Some(ShowRecord {
+                status: "hold".to_string(),
+                ..created.show.clone()
+            }),
+            control: Some(created.control.clone()),
+            ingest: None,
+        }
+    }
+
+    /// The node's side of a Go Live that feeds the held show again: welcome,
+    /// the ingest handed back, then the fresh destinations acked.
+    async fn node_feeds_the_held_show(server: &mut FakeServer) {
+        let hello = server.next_frame().await;
+        assert_eq!(hello["t"], "hello");
+        server.send(welcome("hold"));
+        let ask = server.next_frame().await;
+        assert_eq!(ask["kind"], "ingest.get");
+        server.send(json!({
+            "t": "ack",
+            "id": ask["id"],
+            "ok": true,
+            "result": { "ingest": [{
+                "orientation": "horizontal",
+                "serverUrl": "rtmps://eu-hel-1.live.videorc.com:1936/live",
+                "streamKey": INGEST_KEY,
+            }] },
+        }));
+        let set = server.next_frame().await;
+        assert_eq!(set["kind"], "destinations.set");
+        server.send(ack(&set["id"]));
+    }
+
+    #[test]
+    fn the_launch_check_runs_for_cloud_hours_or_a_remembered_show_whatever_the_switches_say() {
+        let mut runtime = CloudShowRuntime::default();
+        assert!(
+            !launch_check_due(&runtime, true),
+            "a Basic account that never held a show is never asked"
+        );
+        runtime.remembered_show = Some("sh_abc".to_string());
+        assert!(
+            launch_check_due(&runtime, true),
+            "a plan that ended mid-show"
+        );
+        assert!(!launch_check_due(&runtime, false), "signed out");
+        runtime.remembered_show = None;
+        runtime.entitlement = rolled_back_entitlement();
+        assert!(!runtime.entitlement.entitled());
+        assert!(
+            launch_check_due(&runtime, true),
+            "a rollback, or outside the cohort"
+        );
+        runtime.settings.enabled = Some(false);
+        assert!(
+            launch_check_due(&runtime, true),
+            "the Livestream page's switch off"
+        );
+        runtime
+            .entitlement
+            .cloud
+            .as_mut()
+            .unwrap()
+            .seconds_per_month = 0;
+        assert!(
+            !launch_check_due(&runtime, true),
+            "a plan without cloud hours"
+        );
+        runtime.entitlement.cloud.as_mut().unwrap().enabled = true;
+        assert!(launch_check_due(&runtime, true));
+    }
+
+    /// Lane 3 F2: the computer died mid-show, then the cloud was switched
+    /// off. The relaunched desktop finds the show and offers Resume and End;
+    /// Go Live feeds that show rather than opening direct legs into the
+    /// platforms the runner still holds (C2: two publishers on one key).
+    #[tokio::test(start_paused = true)]
+    async fn a_show_held_while_the_cloud_is_off_is_found_at_launch_and_fed_by_go_live() {
+        let harness = harness(false);
+        lock(&harness.context.slot).entitlement = rolled_back_entitlement();
+        let created = created();
+        assert!(launch_check_due(&lock(&harness.context.slot), true));
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(held_current(&created)));
+        let context = harness.context.clone();
+        let detect = tokio::spawn(async move { context.detect_current_show("bearer").await });
+        let mut banner = harness.context.connector.accept().await;
+        let _hello = banner.next_frame().await;
+        banner.send(json!({ "t": "welcome", "state": {
+            "phase": "hold", "hold": { "active": true, "reason": "feed-lost", "remainingSeconds": 1500 }
+        }}));
+        let status = detect.await.unwrap().unwrap();
+        assert!(!status.entitled);
+        assert_eq!(status.phase, CloudPhase::Hold);
+        assert!(
+            status.show.as_ref().unwrap().resumable,
+            "the Resume and End banner"
+        );
+        assert_eq!(
+            *harness.remembered.lock().unwrap(),
+            vec![Some("sh_abc".to_string())]
+        );
+
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(held_current(&created)));
+        let context = harness.context.clone();
+        let prepare = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-f2",
+                    Some("bearer".to_string()),
+                    Vec::new(),
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        node_feeds_the_held_show(&mut server).await;
+        let PrepareOutcome::Cloud(handover) = prepare.await.unwrap().unwrap() else {
+            panic!("Go Live feeds the show the runner holds, never direct legs");
+        };
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(handover.ingest[0].stream_key, INGEST_KEY);
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
+        let status = lock(&harness.context.slot).status();
+        assert_eq!(status.fallback, None, "no streaming-directly toast");
+        assert_eq!(status.session_id.as_deref(), Some("session-f2"));
+    }
+
+    /// D18 with C2: a month whose hours ran out never ends a live show, and
+    /// never sends Go Live beside the show the runner holds either.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_show_is_fed_by_go_live_even_with_the_hours_used_up() {
+        let harness = harness(true);
+        relaunched_with_a_resumable_show(&harness).await;
+        {
+            let mut runtime = lock(&harness.context.slot);
+            let cloud = runtime.entitlement.cloud.as_mut().unwrap();
+            cloud.seconds_used = cloud.seconds_per_month;
+            assert_eq!(
+                decide_go_live(&runtime, true),
+                GoLiveDecision::DirectWithReason(CloudFallbackReason::CloudHoursUsedUp)
+            );
+        }
+        let context = harness.context.clone();
+        let prepare = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-h",
+                    Some("bearer".to_string()),
+                    Vec::new(),
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        node_feeds_the_held_show(&mut server).await;
+        let PrepareOutcome::Cloud(handover) = prepare.await.unwrap().unwrap() else {
+            panic!("the held show, not direct legs");
+        };
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(lock(&harness.context.slot).status().fallback, None);
+    }
+
+    /// Signed out with a show held: nothing can feed it and direct legs would
+    /// double it, so Go Live fails and the show stays offered for Resume.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_show_while_signed_out_fails_go_live_instead_of_streaming_directly() {
+        let harness = harness(true);
+        relaunched_with_a_resumable_show(&harness).await;
+        lock(&harness.context.slot).entitlement = CloudEntitlement::default();
+        let error = harness
+            .context
+            .prepare_session("session-x", None, Vec::new(), destinations(), None)
+            .await
+            .expect_err("never direct beside a held show");
+        assert_eq!(
+            error.to_string(),
+            "Sign in to Videorc to resume the stream."
+        );
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            lock(&harness.context.slot).resumable_show_id().as_deref(),
+            Some("sh_abc")
+        );
+    }
+
+    /// A show remembered from the last run that the launch check could not
+    /// confirm (the web was unreachable, or the plan ended mid-show): Go Live
+    /// asks the web before any direct leg. Still open: fed. Gone: direct, and
+    /// nothing is left to remember. A launch keeps the remembered show until
+    /// the web has answered.
+    #[tokio::test(start_paused = true)]
+    async fn go_live_asks_the_web_about_a_remembered_show_before_streaming_directly() {
+        let harness = harness_remembering(false, Some("sh_abc"));
+        assert!(launch_check_due(&lock(&harness.context.slot), true));
+        // The launch's entitlement hydrate emits; the remembered show stays.
+        harness.context.hydrate_entitlement(None, None);
+        harness.context.hooks.emit_from(&harness.context.slot);
+        assert!(harness.remembered.lock().unwrap().is_empty());
+        assert_eq!(
+            lock(&harness.context.slot).remembered_show(),
+            Some("sh_abc")
+        );
+
+        // Gone on the web: Go Live streams directly and forgets the show.
+        harness
+            .context
+            .web
+            .current
+            .lock()
+            .unwrap()
+            .push_back(Ok(CurrentShowResponse::default()));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-a",
+                Some("bearer".to_string()),
+                Vec::new(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*harness.remembered.lock().unwrap(), vec![None]);
+        assert_eq!(lock(&harness.context.slot).remembered_show(), None);
+        assert!(!launch_check_due(&lock(&harness.context.slot), true));
+        // The next Go Live has nothing to ask about.
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-b",
+                Some("bearer".to_string()),
+                Vec::new(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        assert_eq!(harness.context.web.current_calls.load(Ordering::SeqCst), 1);
+
+        // Still open on the web: Go Live holds it and feeds it.
+        let harness = harness_remembering(false, Some("sh_abc"));
+        let created = created();
+        for _ in 0..2 {
+            harness
+                .context
+                .web
+                .current
+                .lock()
+                .unwrap()
+                .push_back(Ok(held_current(&created)));
+        }
+        let context = harness.context.clone();
+        let prepare = tokio::spawn(async move {
+            context
+                .prepare_session(
+                    "session-c",
+                    Some("bearer".to_string()),
+                    Vec::new(),
+                    destinations(),
+                    None,
+                )
+                .await
+        });
+        let mut banner = harness.context.connector.accept().await;
+        let _hello = banner.next_frame().await;
+        banner.send(welcome("hold"));
+        let mut server = harness.context.connector.accept().await;
+        node_feeds_the_held_show(&mut server).await;
+        let PrepareOutcome::Cloud(handover) = prepare.await.unwrap().unwrap() else {
+            panic!("the remembered show is fed, never doubled by direct legs");
+        };
+        assert_eq!(handover.show_id, "sh_abc");
+        assert_eq!(harness.context.web.create_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            harness.remembered.lock().unwrap().is_empty(),
+            "already remembered"
+        );
+
+        // The web unreachable: nothing confirms a show, so Go Live streams
+        // directly as before and the show stays remembered.
+        let harness = harness_remembering(false, Some("sh_abc"));
+        let outcome = harness
+            .context
+            .prepare_session(
+                "session-d",
+                Some("bearer".to_string()),
+                Vec::new(),
+                destinations(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PrepareOutcome::Direct));
+        assert_eq!(
+            lock(&harness.context.slot).remembered_show(),
+            Some("sh_abc")
+        );
+    }
+
+    /// A hand-over that failed while the web could not confirm the show's
+    /// end keeps the show remembered: the runner may still hold the keys.
+    #[test]
+    fn an_unconfirmed_end_keeps_the_show_remembered() {
+        let mut runtime = CloudShowRuntime::default();
+        runtime.show = Some(ActiveShow {
+            record: created().show,
+            control: created().control,
+            ingest: None,
+            session_id: Some("session-1".to_string()),
+            destinations: Vec::new(),
+            resuming: false,
+        });
+        assert_eq!(
+            runtime.take_remembered_change(),
+            Some(Some("sh_abc".to_string()))
+        );
+        runtime.clear_show(Some("handover-failed".to_string()));
+        runtime.keep_remembering("sh_abc");
+        assert_eq!(runtime.take_remembered_change(), None);
+        assert_eq!(runtime.remembered_show(), Some("sh_abc"));
+        // A confirmed end forgets it.
+        runtime.show = Some(ActiveShow {
+            record: created().show,
+            control: created().control,
+            ingest: None,
+            session_id: None,
+            destinations: Vec::new(),
+            resuming: false,
+        });
+        assert_eq!(runtime.take_remembered_change(), None, "the same show");
+        runtime.clear_show(Some("ended-by-host".to_string()));
+        assert_eq!(runtime.take_remembered_change(), Some(None));
     }
 
     #[test]

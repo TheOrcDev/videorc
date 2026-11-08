@@ -1360,9 +1360,10 @@ impl AppState {
             audience: Arc::default(),
             youtube_quota: crate::youtube_quota::new_youtube_quota_slot(),
             platform_token_refresh: Arc::default(),
-            cloud_show: crate::cloud_show::new_cloud_show_slot(crate::cloud_show::load_settings(
-                &database,
-            )),
+            cloud_show: crate::cloud_show::new_cloud_show_slot_remembering(
+                crate::cloud_show::load_settings(&database),
+                crate::cloud_show::load_remembered_show(&database),
+            ),
             database,
             remote_control: std::sync::Arc::new(StdMutex::new(
                 crate::remote_control::RemoteControlRuntime::load_from_secrets(),
