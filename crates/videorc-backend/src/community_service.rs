@@ -309,6 +309,7 @@ async fn write_report_community(state: &AppState, ended: SessionCommunity) {
     wait_for_pending_writes(state, REPORT_WRITES_WAIT).await;
     let database = state.database.clone();
     let session_id = ended.session_id.clone();
+    let saved_session_id = session_id.clone();
     let threshold = settings.regular_streams;
     let outcome = tokio::task::spawn_blocking(move || {
         let (first_timers, stayed) = database.community_session_first_timers(&session_id)?;
@@ -332,7 +333,14 @@ async fn write_report_community(state: &AppState, ended: SessionCommunity) {
     })
     .await;
     match outcome {
-        Ok(Ok(_)) => {}
+        // An open Reports tab asks again (plan 119's event).
+        Ok(Ok(true)) => state.emit_event(
+            crate::cohost::COHOST_REPORT_SAVED_EVENT,
+            crate::protocol::CohostReportSavedEvent {
+                session_id: saved_session_id,
+            },
+        ),
+        Ok(Ok(false)) => {}
         Ok(Err(error)) => state.emit_log(
             "warn",
             format!("Community: could not write the report's Community block: {error:#}"),
