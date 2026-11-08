@@ -83,6 +83,14 @@ jobs:
       - name: Test
         # Platform-neutral tests run normally. Tests that require Apple or
         # Windows frameworks remain gated at their implementation boundary.
+        # The backend's test build is two very large rustc units (the bin and
+        # its test harness, at opt-level 2). In parallel, with full debug info,
+        # they ran the 16 GB runner out of memory ("The runner has received a
+        # shutdown signal", twice at the same point on #727). One unit at a
+        # time, with line tables only, keeps file:line backtraces and fits.
+        env:
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
         run: cargo test -p videorc-backend
 
   gates-skip:
