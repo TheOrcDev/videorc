@@ -327,8 +327,10 @@ async function runPremiumScenario(profile) {
       'the wave at an unknown name',
       unknownSince
     )
+    // The grammar reads the name up to a stop word ("here"), so the card
+    // names what was said.
     expect(
-      nobody.command.message === 'No nobody here in chat.',
+      nobody.command.message === 'No nobody in chat.',
       `An unknown name is not found: ${JSON.stringify(nobody.command)}`
     )
     pass(`A2b wave: ${waved.command.message} (${waved.at - waveSince} ms); unknown name not found`)
