@@ -97,12 +97,12 @@ export default function CommunityTab(): ReactElement {
   const community = useCommunityClient()
   const [openPerson, setOpenPerson] = useState<{ id: string; name: string } | null>(null)
   const { cohostGate } = useStudioCore()
-  const memoryLock = cohostGate.allowed
-    ? null
-    : {
-        reason: BUDDY_REMEMBERS_LOCK_REASON,
-        action: lockAlertAction(unlockActionForGate(cohostGate))
-      }
+  const memoryLock = cohostGate.allowed ? null : (
+    <LockAlert
+      action={lockAlertAction(unlockActionForGate(cohostGate))}
+      reason={BUDDY_REMEMBERS_LOCK_REASON}
+    />
+  )
 
   return (
     <div className="flex flex-col" data-testid="community-tab">

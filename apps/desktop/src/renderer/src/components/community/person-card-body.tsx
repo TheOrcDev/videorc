@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { ConfirmDialog } from '@/components/confirm-dialog'
@@ -11,8 +11,6 @@ import {
   TerminalIcon
 } from '@/components/icons'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
-import { LockAlert } from '@/components/lock-alert'
-import { SectionLabel } from '@/components/section-label'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -57,11 +55,13 @@ export type PersonCardTarget =
   | { personId: string; name: string }
   | { platform: StreamPlatform; authorId: string; name: string }
 
-/** What locks "Buddy remembers" (D6, Premium), with its one action. */
-export interface PersonMemoryLock {
-  reason: string
-  action: Parameters<typeof LockAlert>[0]['action']
-}
+/**
+ * The section-label recipe (`SectionLabel`, 11 px / 600, tertiary), spelled
+ * here: the card is shared by the Stream Manager and the main window, and
+ * importing the primitive split it into an eager chunk of its own (the
+ * renderer budget, plan 225 C2).
+ */
+const CARD_LABEL = 'text-label font-semibold text-subtle'
 
 export const NOTE_MAX_CHARS = 300
 
@@ -95,8 +95,11 @@ export function PersonCardBody({
 }: {
   target: PersonCardTarget
   call: CommunityRelayCall
-  /** Null when Buddy remembers is unlocked (Premium). */
-  memoryLock: PersonMemoryLock | null
+  /**
+   * "Buddy remembers" locked (Premium, D6): the host's lock alert, never
+   * hidden. Null when unlocked.
+   */
+  memoryLock: ReactNode | null
   /** The Community dialog shows who linked what, and when. */
   showLinkHistory?: boolean
   /** "Same person as…" from a right-click opens straight on the search. */
@@ -272,13 +275,9 @@ export function PersonCardBody({
         />
       ))}
       <div className="flex flex-col gap-1.5" data-slot="person-card-memories">
-        <SectionLabel>Buddy remembers</SectionLabel>
+        <span className={CARD_LABEL}>Buddy remembers</span>
         {memoryLock ? (
-          <LockAlert
-            action={memoryLock.action}
-            data-testid="person-card-memory-lock"
-            reason={memoryLock.reason}
-          />
+          <div data-testid="person-card-memory-lock">{memoryLock}</div>
         ) : (person.memories ?? []).length > 0 ? (
           <ul className="flex flex-col gap-1 text-xs text-foreground">
             {(person.memories ?? []).map((memory) => (
@@ -315,7 +314,7 @@ export function PersonCardBody({
       ) : null}
       {showLinkHistory && (person.linkEvents ?? []).length > 0 ? (
         <div className="flex flex-col gap-1" data-slot="person-card-history">
-          <SectionLabel>Links</SectionLabel>
+          <span className={CARD_LABEL}>Links</span>
           <ul className="flex flex-col gap-0.5 text-xs text-muted-foreground">
             {(person.linkEvents ?? []).map((event) => (
               <li key={event.id} className="flex min-w-0 gap-1.5">
@@ -544,7 +543,7 @@ function NoteField({
   const id = `person-note-${name.replace(/\W+/g, '-')}`
   return (
     <div className="flex flex-col gap-1.5" data-slot="person-card-note">
-      <label className="text-label font-semibold text-subtle" htmlFor={id}>
+      <label className={CARD_LABEL} htmlFor={id}>
         Your note
       </label>
       <DisabledReason focusable={false} reason={disabled ? disabledReason : null}>

@@ -95,7 +95,7 @@ async function mount(
       createElement(PersonCardBody, {
         call: call as unknown as CommunityRelayCall,
         memoryLock: options.locked
-          ? { reason: 'Buddy remembers what your regulars tell it with Premium.', action: null }
+          ? createElement('p', null, 'Buddy remembers what your regulars tell it with Premium.')
           : null,
         target: { platform: 'twitch', authorId: 't1', name: 'Ada' }
       })

@@ -1,11 +1,9 @@
 import { useState, type ReactElement } from 'react'
 
-import {
-  PersonCardBody,
-  type PersonCardTarget,
-  type PersonMemoryLock
-} from '@/components/community/person-card-body'
+import { PersonCardBody, type PersonCardTarget } from '@/components/community/person-card-body'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogBody,
@@ -47,7 +45,8 @@ export default function PersonCardHost({
 }: {
   request: PersonCardRequest | null
   call: CommunityRelayCall
-  memoryLock: PersonMemoryLock | null
+  /** Why "Buddy remembers" is locked, and the upgrade link; null when unlocked. */
+  memoryLock: { reason: string; upgradeUrl?: string; onUpgrade?: (url: string) => void } | null
   onClose: () => void
 }): ReactElement {
   const [forgetting, setForgetting] = useState<CommunityPerson | null>(null)
@@ -59,11 +58,30 @@ export default function PersonCardHost({
       ? document.querySelector(`[data-message-id="${CSS.escape(request.messageId)}"]`)
       : null
 
+  // The Buddy pane's own locked notice, one reason and View Premium (plan
+  // 174 F-14), so the card stays in the Stream Manager's chunks.
+  const lock = memoryLock ? (
+    <Alert variant="locked">
+      <AlertTitle>{memoryLock.reason}</AlertTitle>
+      {memoryLock.upgradeUrl && memoryLock.onUpgrade ? (
+        <AlertAction>
+          <Button
+            size="xs"
+            type="button"
+            variant="outline"
+            onClick={() => memoryLock.onUpgrade?.(memoryLock.upgradeUrl as string)}
+          >
+            View Premium
+          </Button>
+        </AlertAction>
+      ) : null}
+    </Alert>
+  ) : null
   const body = request ? (
     <PersonCardBody
       key={request.seq}
       call={call}
-      memoryLock={memoryLock}
+      memoryLock={lock}
       startIn={request.startIn}
       target={request.target}
       onClose={onClose}

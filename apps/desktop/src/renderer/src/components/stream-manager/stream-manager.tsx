@@ -696,14 +696,8 @@ export function StreamManager({
     cohostGate && !cohostGate.allowed
       ? {
           reason: BUDDY_REMEMBERS_LOCK_REASON,
-          action:
-            cohostGate.upgradeUrl && onCohostUpgrade
-              ? {
-                  kind: 'view-premium' as const,
-                  url: cohostGate.upgradeUrl,
-                  onClick: onCohostUpgrade
-                }
-              : null
+          upgradeUrl: cohostGate.upgradeUrl,
+          onUpgrade: onCohostUpgrade
         }
       : null
   const onPersonAction = communityCall
