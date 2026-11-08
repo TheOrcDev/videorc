@@ -172,6 +172,11 @@ import {
   useTalkShowRoomController,
   type TalkShowContextValue
 } from '@/hooks/use-talk-show-room'
+import {
+  talkShowLiveStartedAt as talkShowLiveStartedAtFrom,
+  talkShowRecordingBlockedReason,
+  talkShowSessionView
+} from '@/lib/talk-show-session'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
 
@@ -12517,6 +12522,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void openPreviewWindow()
   }, [closePreviewWindow, openPreviewWindow, previewWindow.open, talkShowRoomOpen])
 
+  // Plan 224 C-G6: while the room is open, Record and Go Live stay the same
+  // buttons and work through the room. The cloud recording and the runner's
+  // legs project into the recording-state view the transport, the pill and
+  // the clocks already read (`talkShowSessionView`); the start and stop
+  // paths fork below. The on-air start is taken once from the runner's
+  // clock so the transport's clock never jitters with a status tick.
+  const talkShowRoomOpenRef = useRef(false)
+  talkShowRoomOpenRef.current = talkShowRoomOpen
+  const talkShowLive = cloudStatus?.room?.phase === 'open' && cloudStatus.room.live === true
+  const talkShowShowId = cloudStatus?.show?.id ?? null
+  const [talkShowLiveStartedAt, setTalkShowLiveStartedAt] = useState<string | null>(null)
+  useEffect(() => {
+    setTalkShowLiveStartedAt(
+      talkShowLive ? talkShowLiveStartedAtFrom(cloudStatusRef.current, Date.now()) : null
+    )
+  }, [talkShowLive, talkShowShowId])
+  const talkShowSession = useMemo(
+    () => talkShowSessionView(cloudStatus, talkShowLiveStartedAt),
+    [cloudStatus, talkShowLiveStartedAt]
+  )
+  const talkShowSessionRef = useRef(talkShowSession)
+  talkShowSessionRef.current = talkShowSession
+  // The runner's legs are the session's destinations while the room is on
+  // air (the Session inspector's rows); nothing else feeds them in a talk show.
+  const talkShowLegs = cloudStatus?.legs
+  useEffect(() => {
+    if (talkShowLive) setStreamTargets(talkShowLegs ?? [])
+    else if (talkShowRoomOpen) setStreamTargets([])
+  }, [talkShowLegs, talkShowLive, talkShowRoomOpen])
+
   const setPreviewWindowAlwaysOnTop = useCallback(async (alwaysOnTop: boolean) => {
     const next = await window.videorc?.setPreviewWindowAlwaysOnTop?.(alwaysOnTop)
     if (next) {
@@ -13139,7 +13174,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // updater): those lock for a recording or a livestream only, and a
   // setting that shapes the ring restarts it instead (below).
   const isSessionActive =
-    sessionOwnsTransport(recording) || startRequestPending || stopRequestPending
+    sessionOwnsTransport(recording) ||
+    startRequestPending ||
+    stopRequestPending ||
+    talkShowSession !== null
   const transportSessionActive = isSessionActive
 
   // Plan 222 U1: "Videorc Cloud is on", once per account, never during a
@@ -14738,6 +14776,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!intent.record && !intent.stream) {
         return START_BLOCKED_COPY.noOutput
       }
+      // Plan 224 C-G6: in a talk show the runner composes from the room, so
+      // the local scene's sources never block a start; the runner's own
+      // recording problem does (the wire notes' `recording.problem`).
+      if (talkShowRoomOpen) {
+        if (intent.record && !intent.stream) {
+          return talkShowRecordingBlockedReason(cloudStatus)
+        }
+        return null
+      }
       const config = captureConfigForIntent(captureConfig, intent)
       const turnedOff = sceneSourcesTurnedOff(
         { layout: config.layout, sources: usingVisualSources(config.sources), background: null },
@@ -15820,6 +15867,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               )
             }
           }
+          // Plan 224 C-G6: Go Live in a talk show. The platforms' setup ran
+          // as today (the preflight, the YouTube broadcast); the destinations
+          // go to the runner over the socket this computer already holds,
+          // and no local session, leg or file starts. The YouTube and X
+          // activations run against the show id, the way they run against a
+          // session id; Stop completes them the same way.
+          if (talkShowRoomOpenRef.current && streamingForStart) {
+            const cloudAfterGoLive = await client.requestTyped('cloud.show.goLive', {
+              streaming: streamingForStart
+            })
+            commitCloudStatus(cloudAfterGoLive)
+            const showId = cloudAfterGoLive.show?.id
+            await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId, showId)
+            streamingForStart = await activatePreparedXBroadcasts(
+              streamingForStart,
+              lifecycleRunId,
+              showId
+            )
+            platformLifecycleOwnerRef.current = {
+              sessionId: showId ?? 'talk-show',
+              streaming: streamingForStart
+            }
+            return true
+          }
           const optimisticRecording = isActiveRecordingState(recordingRef.current.state)
             ? recordingRef.current
             : {
@@ -16650,6 +16721,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         refuseStart(blockedReason, intent)
         return false
       }
+      // Plan 224 D10 (C-G6): Record while the room is open records in the
+      // cloud; no local session starts (the backend refuses one anyway).
+      if (talkShowRoomOpenRef.current) {
+        if (!client) return false
+        try {
+          setStartRequestPending(true)
+          commitCloudStatus(await client.requestTyped('cloud.recording.start'))
+          return true
+        } catch (error) {
+          toastUserError(
+            error,
+            { action: 'start', object: 'the cloud recording' },
+            { id: CLOUD_TOAST_ID }
+          )
+          return false
+        } finally {
+          setStartRequestPending(false)
+        }
+      }
       return runStartSession(undefined, undefined, intent)
     },
     [
@@ -17062,6 +17152,42 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         recordLatencyTrackerRef.current.markClick('stop', performance.now(), 'session-call')
         const stopRequestedAtMs = takeRecordClickEpochMs('stop')
         liveAudioProcessingSyncRef.current?.queue.stop()
+        // Plan 224 D17 (C-G6): in a talk show, End livestream completes the
+        // platforms' broadcasts as today and ends the runner's legs; the
+        // room and the cloud recording stay. Stop recording stops the cloud
+        // recording. Neither touches a local session: there is none.
+        const talkSession = talkShowSessionRef.current
+        if (talkSession) {
+          if (talkSession.streamUrl) {
+            const owner = platformLifecycleOwnerRef.current
+            if (owner) {
+              platformLifecycleOwnerRef.current = null
+              await completePreparedPlatformBroadcasts(owner.streaming, owner.sessionId)
+            }
+            try {
+              commitCloudStatus(await client.requestTyped('cloud.show.legs.end'))
+              return true
+            } catch (error) {
+              toastUserError(
+                error,
+                { action: 'end', object: 'the livestream' },
+                { id: CLOUD_TOAST_ID }
+              )
+              return false
+            }
+          }
+          try {
+            commitCloudStatus(await client.requestTyped('cloud.recording.stop'))
+            return true
+          } catch (error) {
+            toastUserError(
+              error,
+              { action: 'stop', object: 'the cloud recording' },
+              { id: CLOUD_TOAST_ID }
+            )
+            return false
+          }
+        }
         const pendingStart = sessionStartInFlightRef.current
         const currentSessionId = recordingRef.current.sessionId
         const currentOwner = currentSessionId
@@ -17169,7 +17295,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const requestStopSession = useCallback(
     (origin: SessionStopOrigin): Promise<boolean> => {
       const now = Date.now()
-      const status = recordingRef.current
+      const status = talkShowSessionRef.current ?? recordingRef.current
       const decision = stopDecision({
         origin,
         live: sessionIsLive(status),
@@ -19234,24 +19360,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   ])
   const recordingStateValue = useMemo<StudioRecordingStateContextValue>(
     () => ({
-      recording: {
-        state: recording.state,
-        sessionId: recording.sessionId,
-        streamUrl: recording.streamUrl,
-        startedAt: recording.startedAt,
-        // Plan 181: the shell keeps Record and Go Live on a buffer-only session.
-        ...(recording.replayOnly ? { replayOnly: true } : {})
-      }
+      // Plan 224 C-G6: the room's recording or on-air state, when it has one.
+      recording: talkShowSession
+        ? {
+            state: talkShowSession.state,
+            sessionId: talkShowSession.sessionId,
+            streamUrl: talkShowSession.streamUrl,
+            startedAt: talkShowSession.startedAt
+          }
+        : {
+            state: recording.state,
+            sessionId: recording.sessionId,
+            streamUrl: recording.streamUrl,
+            startedAt: recording.startedAt,
+            // Plan 181: the shell keeps Record and Go Live on a buffer-only session.
+            ...(recording.replayOnly ? { replayOnly: true } : {})
+          }
     }),
     [
       recording.replayOnly,
       recording.sessionId,
       recording.startedAt,
       recording.state,
-      recording.streamUrl
+      recording.streamUrl,
+      talkShowSession
     ]
   )
-  const recordingValue = useMemo<StudioRecordingContextValue>(() => ({ recording }), [recording])
+  const recordingValue = useMemo<StudioRecordingContextValue>(
+    () => ({ recording: talkShowSession ? { ...recording, ...talkShowSession } : recording }),
+    [recording, talkShowSession]
+  )
   const previewValue = useMemo<StudioPreviewContextValue>(
     () => ({
       previewLiveStatus,

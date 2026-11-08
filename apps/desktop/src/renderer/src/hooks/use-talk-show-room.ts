@@ -23,6 +23,8 @@ import type { TalkShowRoomClient, TalkShowRoomSnapshot } from '@/lib/talk-show-r
 // `lib/talk-show-room.ts` (and `livekit-client` with it) loads only when a
 // room opens: the eager bundle never carries it (the budget is an owner STOP).
 
+export { PROGRAM_MONITOR_EMPTY } from '@/lib/talk-show-session'
+
 /** A frozen idle snapshot, so the UI never waits on the lazy module. */
 const IDLE_SNAPSHOT: TalkShowRoomSnapshot = {
   state: 'idle',
