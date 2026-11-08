@@ -12,6 +12,7 @@ import {
   decodeSourcePcm,
   evaluatePacketDts,
   evaluateSourceIdentity,
+  liveSourceSwitchSkipReason,
   measureSourceWindow,
   readSourcePackets,
   resolveSourceOutputAudioTiming,
@@ -24,6 +25,11 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 // Phase S3 encoded-output gate. Synthetic sources enter through real native
 // producer ownership, preparation, bus cutover, controls, FFmpeg and muxer.
 // Physical-device, visual-source, A/V timing and endurance acceptance remain separate.
+const platformSkip = liveSourceSwitchSkipReason(process.platform)
+if (platformSkip) {
+  console.log(`Live source switch smoke SKIPPED: ${platformSkip}`)
+  process.exit(0)
+}
 const mode = process.env.VIDEORC_SOURCE_SWITCH_MODE
 if (!mode) {
   for (const nextMode of ['record', 'stream', 'combined']) {
