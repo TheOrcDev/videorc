@@ -1,4 +1,11 @@
 import type {
+  CloudProgram,
+  WatchdogAlert,
+  WatchdogAlertDevicesView,
+  WatchdogAlertsView,
+  WatchdogSettings,
+  WatchdogSettingsPatch,
+  WatchdogSnoozeScope,
   AudienceSnapshot,
   AudioLevelsEvent,
   SessionSources,
@@ -518,6 +525,21 @@ export interface BackendRpcMethodMap {
   /** C5: the same start as `session.start`, bound to the show that is live. */
   'cloud.show.resume': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'cloud.show.end': BackendRpcDefinition<undefined, CloudStatus>
+  /** Plan 223 C3: Reconnect one destination of a cloud show (D8). */
+  'cloud.show.reconnectDestination': BackendRpcDefinition<{ targetId: string }, CloudStatus>
+  // --- The stream watchdog (plan 223) ---
+  'watchdog.alerts.list': BackendRpcDefinition<undefined, WatchdogAlertsView>
+  'watchdog.alert.acknowledge': BackendRpcDefinition<{ id: string }, WatchdogAlertsView>
+  'watchdog.alert.snooze': BackendRpcDefinition<
+    { id: string; scope: WatchdogSnoozeScope },
+    WatchdogAlertsView
+  >
+  'watchdog.settings.get': BackendRpcDefinition<undefined, WatchdogSettings>
+  'watchdog.settings.set': BackendRpcDefinition<WatchdogSettingsPatch, WatchdogSettings>
+  /** The renderer relays main's `powerMonitor` idle time for `still-there`. */
+  'watchdog.idle.report': BackendRpcDefinition<{ idleSeconds: number }, { ok: boolean }>
+  /** Plan 223 D2: the phones that get alerts, from videorc.com. */
+  'watchdog.phone.devices': BackendRpcDefinition<undefined, WatchdogAlertDevicesView>
   /** C6b: starts the 10-second test; progress and the result ride `cloud.state`. */
   'cloud.selftest.run': BackendRpcDefinition<CloudTestParams, CloudStatus>
   'cohost.status': BackendRpcDefinition<undefined, CohostState>
@@ -756,6 +778,8 @@ export interface BackendEventMap {
   'cohost.act.result': CohostActAnswer
   /** The whole secret-free cloud status, on every change (plan 184). */
   'cloud.state': CloudStatus
+  /** Plan 223: the full alert list on every change. */
+  'watchdog.alerts': WatchdogAlertsView
   'cohost.report.saved': CohostReportSavedEvent
   /** Plan 225: the community summary, after anything that changed it. */
   'cohost.community.changed': CommunitySummary
@@ -5444,6 +5468,120 @@ const cloudAllowanceSchema = objectSchema(
   { allowUnknown: false }
 )
 
+const cloudProgramSchema = objectSchema(
+  {
+    audioRmsDb: optionalSchema(numberSchema({ min: -200, max: 48 })),
+    audioSilentSeconds: optionalSchema(nonNegativeInteger),
+    blackSeconds: optionalSchema(nonNegativeInteger),
+    frozenSeconds: optionalSchema(nonNegativeInteger),
+    avSkewMs: optionalSchema(numberSchema({ min: -100_000, max: 100_000 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudProgram>
+
+// --- The stream watchdog (plan 223) ---
+const WATCHDOG_CHECKS = [
+  'mic-muted',
+  'mic-silent',
+  'no-voice',
+  'program-silent',
+  'picture-black',
+  'picture-stopped',
+  'destination-down',
+  'platform-health',
+  'bitrate-floor',
+  'av-drift',
+  'chat-says',
+  'brb-long',
+  'still-there'
+] as const
+const watchdogAlertSchema = objectSchema(
+  {
+    id: boundedString,
+    check: enumSchema(WATCHDOG_CHECKS),
+    severity: enumSchema(['critical', 'warning', 'notice']),
+    state: enumSchema(['open', 'acknowledged', 'snoozed']),
+    since: timestamp,
+    lastRepeatAt: optionalSchema(timestamp),
+    title: stringSchema({ minLength: 1, maxLength: 200 }),
+    detail: stringSchema({ maxLength: 2000 }),
+    source: enumSchema(['desktop', 'cloud', 'platform']),
+    platform: optionalSchema(stringSchema({ minLength: 1, maxLength: 64 })),
+    targetId: optionalSchema(stringSchema({ minLength: 1, maxLength: 256 })),
+    fixes: optionalSchema(
+      arraySchema(
+        objectSchema(
+          {
+            kind: enumSchema([
+              'unmute',
+              'end-takeover',
+              'switch-scene',
+              'open-audio',
+              'open-health',
+              'open-livestream',
+              'reconnect-destination',
+              'open-platform-dashboard',
+              'show-brb'
+            ]),
+            label: stringSchema({ minLength: 1, maxLength: 120 }),
+            url: optionalSchema(stringSchema({ minLength: 1, maxLength: 2048 }))
+          },
+          { allowUnknown: false }
+        ),
+        { maxLength: 4 }
+      )
+    ),
+    snoozedUntil: optionalSchema(timestamp),
+    meantTo: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<WatchdogAlert>
+const watchdogAlertsViewSchema = objectSchema(
+  {
+    sessionId: optionalSchema(boundedString),
+    alerts: arraySchema(watchdogAlertSchema, { maxLength: 64 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<WatchdogAlertsView>
+const watchdogCheckSettingSchema = objectSchema({ enabled: booleanSchema }, { allowUnknown: false })
+const watchdogSettingsSchema = objectSchema(
+  {
+    checks: recordSchema(watchdogCheckSettingSchema, { maxKeys: 32 }),
+    micMutedAfterSeconds: nonNegativeInteger,
+    systemNotifications: booleanSchema,
+    phonePush: booleanSchema,
+    aiChatRead: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<WatchdogSettings>
+const watchdogSettingsPatchSchema = objectSchema(
+  {
+    checks: optionalSchema(recordSchema(watchdogCheckSettingSchema, { maxKeys: 32 })),
+    micMutedAfterSeconds: optionalSchema(nonNegativeInteger),
+    systemNotifications: optionalSchema(booleanSchema),
+    phonePush: optionalSchema(booleanSchema),
+    aiChatRead: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<WatchdogSettingsPatch>
+const watchdogAlertDevicesSchema = objectSchema(
+  {
+    devices: arraySchema(
+      objectSchema(
+        {
+          id: boundedString,
+          label: optionalSchema(stringSchema({ maxLength: 200 })),
+          createdAt: optionalSchema(timestamp),
+          lastOkAt: optionalSchema(timestamp)
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 32 }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<WatchdogAlertDevicesView>
+
 const cloudStatusSchema = objectSchema(
   {
     phase: enumSchema(['off', 'connecting', 'live', 'hold', 'resuming', 'ending', 'failed']),
@@ -5580,7 +5718,9 @@ const cloudStatusSchema = objectSchema(
     // Plan 222 U5: a show past the month's hours says how far (never cut, D18).
     allowancePast: optionalSchema(
       objectSchema({ seconds: nonNegativeInteger }, { allowUnknown: false })
-    )
+    ),
+    // Plan 223 C3: the runner's program block, every field optional.
+    program: optionalSchema(cloudProgramSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudStatus>
@@ -6052,6 +6192,30 @@ const runtimeContracts = {
   'cloud.allowance.refresh': { params: undefinedSchema, result: cloudStatusSchema },
   'cloud.show.resume': { params: sessionStartParamsSchema, result: recordingStatusSchema },
   'cloud.show.end': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.show.reconnectDestination': {
+    params: objectSchema({ targetId: boundedString }, { allowUnknown: false }),
+    result: cloudStatusSchema
+  },
+  // --- The stream watchdog (plan 223) ---
+  'watchdog.alerts.list': { params: undefinedSchema, result: watchdogAlertsViewSchema },
+  'watchdog.alert.acknowledge': {
+    params: objectSchema({ id: boundedString }, { allowUnknown: false }),
+    result: watchdogAlertsViewSchema
+  },
+  'watchdog.alert.snooze': {
+    params: objectSchema(
+      { id: boundedString, scope: enumSchema(['ten-minutes', 'stream']) },
+      { allowUnknown: false }
+    ),
+    result: watchdogAlertsViewSchema
+  },
+  'watchdog.settings.get': { params: undefinedSchema, result: watchdogSettingsSchema },
+  'watchdog.settings.set': { params: watchdogSettingsPatchSchema, result: watchdogSettingsSchema },
+  'watchdog.idle.report': {
+    params: objectSchema({ idleSeconds: nonNegativeInteger }, { allowUnknown: false }),
+    result: objectSchema({ ok: booleanSchema }, { allowUnknown: false })
+  },
+  'watchdog.phone.devices': { params: undefinedSchema, result: watchdogAlertDevicesSchema },
   'cloud.selftest.run': { params: cloudTestParamsSchema, result: cloudStatusSchema },
   'cohost.status': { params: undefinedSchema, result: cohostStateSchema },
   'cohost.start': { params: cohostStartParamsSchema, result: cohostStateSchema },
@@ -6367,6 +6531,7 @@ const runtimeEventSchemas = {
   'cohost.state': cohostStateSchema,
   'cohost.act.result': cohostActAnswerSchema,
   'cloud.state': cloudStatusSchema,
+  'watchdog.alerts': watchdogAlertsViewSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   'cohost.community.changed': communitySummarySchema,
   // --- Overlay layout (plan 164) ---

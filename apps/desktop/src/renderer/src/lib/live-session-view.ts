@@ -4,8 +4,9 @@
 // Livestream page uses. Pure, so the derivations run under the node vitest
 // runner; the words are the glossary's (destination, on air, Stopped).
 
-import type { StreamTargetRuntime } from '@/lib/backend'
+import type { StreamTargetRuntime, WatchdogAlert } from '@/lib/backend'
 import { formatCloudCountdown } from './cloud-toasts'
+import { watchdogChipLabel } from './watchdog-view'
 import { cloudPhaseLabel, destinationStateLabel } from './state-labels'
 import { liveProblemLabel, type StreamHealthAttribution } from './stream-health-attribution'
 
@@ -146,8 +147,14 @@ export type StreamHealthFact = {
  */
 export function streamHealthFact(
   attribution: StreamHealthAttribution,
-  cloud: LiveDashboardCloud | null = null
+  cloud: LiveDashboardCloud | null = null,
+  alert: Pick<WatchdogAlert, 'title' | 'severity'> | null = null
 ): StreamHealthFact {
+  // Plan 223 A5: the top open watchdog alert outranks every stage; it is
+  // what viewers see, in the card's own words.
+  if (alert) {
+    return { label: watchdogChipLabel(alert as WatchdogAlert), tone: 'warn' }
+  }
   const reading = cloudStreamReading(cloud)
   if (reading) {
     return { label: reading, tone: 'warn' }

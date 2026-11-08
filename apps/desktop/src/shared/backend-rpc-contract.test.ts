@@ -3890,6 +3890,70 @@ describe('Videorc Camera wire contract (plan 214 A4)', () => {
   })
 })
 
+describe('Stream watchdog wire contract (plan 223)', () => {
+  const fixture = JSON.parse(
+    readFileSync(new URL('../../../../protocol-fixtures/watchdog.json', import.meta.url), 'utf8')
+  ) as {
+    alerts: unknown
+    emptyAlerts: unknown
+    settings: unknown
+    settingsPatch: unknown
+    snoozeParams: unknown
+    devices: unknown
+    program: unknown
+    frozenProgram: unknown
+    rejected: { alerts: unknown[] }
+  }
+
+  it('accepts every fixture shape field for field, absent never null', () => {
+    expect(validateBackendEventPayload('watchdog.alerts', fixture.alerts)).toEqual(fixture.alerts)
+    expect(validateBackendRpcResult('watchdog.alerts.list', fixture.alerts)).toEqual(fixture.alerts)
+    expect(validateBackendRpcResult('watchdog.alert.acknowledge', fixture.emptyAlerts)).toEqual(
+      fixture.emptyAlerts
+    )
+    expect(validateBackendRpcParams('watchdog.alert.snooze', fixture.snoozeParams)).toEqual(
+      fixture.snoozeParams
+    )
+    expect(validateBackendRpcResult('watchdog.settings.get', fixture.settings)).toEqual(
+      fixture.settings
+    )
+    expect(validateBackendRpcParams('watchdog.settings.set', fixture.settingsPatch)).toEqual(
+      fixture.settingsPatch
+    )
+    expect(validateBackendRpcResult('watchdog.phone.devices', fixture.devices)).toEqual(
+      fixture.devices
+    )
+    expect(validateBackendRpcParams('watchdog.idle.report', { idleSeconds: 12 })).toEqual({
+      idleSeconds: 12
+    })
+    expect(
+      validateBackendRpcParams('cloud.show.reconnectDestination', { targetId: 'youtube' })
+    ).toEqual({
+      targetId: 'youtube'
+    })
+  })
+
+  it('carries the runner program block on cloud.state, every field optional', () => {
+    const base = validateBackendEventPayload('cloud.state', {
+      phase: 'live',
+      entitled: true,
+      settings: { enabled: true, holdMaxSeconds: 1800, holdMaxChoices: [300, 900, 1800, 3600] },
+      connected: true,
+      directFallbackAvailable: false
+    })
+    for (const program of [fixture.program, fixture.frozenProgram]) {
+      const status = { ...(base as object), program }
+      expect(validateBackendEventPayload('cloud.state', status)).toEqual(status)
+    }
+  })
+
+  it('refuses a check, a severity or a fix outside the catalogue', () => {
+    for (const alert of fixture.rejected.alerts) {
+      expect(() => validateBackendEventPayload('watchdog.alerts', { alerts: [alert] })).toThrow()
+    }
+  })
+})
+
 describe('Know your viewers wire contract (plan 225 A6)', () => {
   const fixture = JSON.parse(
     readFileSync(new URL('../../../../protocol-fixtures/community.json', import.meta.url), 'utf8')

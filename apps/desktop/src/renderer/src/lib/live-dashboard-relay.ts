@@ -5,7 +5,8 @@ import type {
   StreamHealth,
   StreamTargetsSnapshot,
   ViewerSample,
-  SessionChatTotals
+  SessionChatTotals,
+  WatchdogAlertsView
 } from '@/lib/backend'
 import type { BackendClient } from '@/backendClient'
 import { sessionIsReplayOnly } from '../../../shared/capture-state'
@@ -16,6 +17,7 @@ import {
   emptyLiveDashboardState,
   mergeDashboardViewerHistory,
   reduceDashboardAudience,
+  reduceDashboardAlerts,
   reduceDashboardCloud,
   reduceDashboardHealth,
   reduceDashboardRecording,
@@ -35,6 +37,7 @@ export type DashboardEvent =
   | 'stream.targets'
   | 'liveChat.totals'
   | 'cloud.state'
+  | 'watchdog.alerts'
   | 'events.lagged'
 
 export interface LiveDashboardRelay {
@@ -46,6 +49,8 @@ export interface LiveDashboardRelay {
   chatTotals: (totals: SessionChatTotals) => void
   /** The Videorc Cloud show carrying the session, if any (plan 184 C7). */
   cloud: (status: CloudStatus) => void
+  /** Plan 223 A6: the watchdog's open alerts for the chip. */
+  alerts: (view: WatchdogAlertsView) => void
   /** Adopts main's cached state after a renderer reload mid-session. */
   seed: (state: LiveDashboardState | null) => void
   backfillViewers: (sessionId: string, samples: ViewerSample[]) => void
@@ -128,6 +133,7 @@ export function createLiveDashboardRelay(
       apply(reduceDashboardChatTotals(state, totals, now()))
     },
     cloud: (status) => apply(reduceDashboardCloud(state, status, now())),
+    alerts: (view) => apply(reduceDashboardAlerts(state, view, now())),
     seed: (seeded) => {
       if (!seeded || state.sessionId !== null || !normalizeLiveDashboardState(seeded)) return
       state = seeded
@@ -226,6 +232,9 @@ export async function startLiveDashboardRelay({
         return
       case 'cloud.state':
         relay.cloud(payload as CloudStatus)
+        return
+      case 'watchdog.alerts':
+        relay.alerts(payload as WatchdogAlertsView)
         return
       case 'events.lagged': {
         const sessionId = relay.current().sessionId

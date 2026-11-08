@@ -37,7 +37,8 @@ import type {
   PreviewWindowState,
   UpdateStatus,
   VideorcApi,
-  ViewerSample
+  ViewerSample,
+  WatchdogFixRequest
 } from './backend'
 import type { MarkerContext, MarkerRelayCommand } from './session-markers'
 import {
@@ -203,6 +204,9 @@ export const electronInvokeApiMethods = {
   'comments-window:marker-context-get': 'getMarkerContext',
   'comments-window:marker-context-push': 'pushMarkerContext',
   'comments-window:marker': 'markerFromCommentsWindow',
+  'comments-window:watchdog-fix': 'watchdogFixFromCommentsWindow',
+  'watchdog:notify': 'notifyWatchdog',
+  'watchdog:idle': 'getSystemIdleSeconds',
   'comments-window:marker-result-push': 'pushMarkerResult',
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
@@ -328,6 +332,8 @@ export interface ElectronIpcEventMap {
   'comments-window:clear-request': CommentsClearCommand
   'comments-window:marker-context': MarkerContext | null
   'comments-window:marker-request': MarkerRelayCommand
+  'watchdog:focus': string
+  'watchdog:fix-request': WatchdogFixRequest
   'comments-window:clip-mark-request': ClipMarkCommand
   'comments-window:banners': BannerSummary[] | null
   'comments-window:banner-request': BannerRelayCommand
@@ -383,6 +389,8 @@ export const electronEventChannels = [
   'comments-window:clear-request',
   'comments-window:marker-context',
   'comments-window:marker-request',
+  'watchdog:focus',
+  'watchdog:fix-request',
   'comments-window:clip-mark-request',
   'comments-window:banners',
   'comments-window:banner-request',
@@ -1233,6 +1241,37 @@ const optionalGenerationArgs = runtimeSchema<unknown[]>(
 const optionalGenerationOnlyArgs = tupleSchema([optionalSchema(nonNegativeSafeIntegerSchema)])
 
 const noArgs = tupleSchema([])
+
+// The stream watchdog (plan 223).
+const watchdogFixKinds = [
+  'unmute',
+  'end-takeover',
+  'switch-scene',
+  'open-audio',
+  'open-health',
+  'open-livestream',
+  'reconnect-destination',
+  'open-platform-dashboard',
+  'show-brb'
+] as const
+const watchdogFixRequestSchema = objectSchema(
+  {
+    alertId: stringSchema({ minLength: 1, maxLength: 256 }),
+    kind: enumSchema(watchdogFixKinds),
+    url: optionalSchema(stringSchema({ minLength: 1, maxLength: 2048 }))
+  },
+  { allowUnknown: false }
+)
+const watchdogNoticeSchema = objectSchema(
+  {
+    alertId: stringSchema({ minLength: 1, maxLength: 256 }),
+    title: stringSchema({ minLength: 1, maxLength: 200 }),
+    body: stringSchema({ maxLength: 500 }),
+    critical: booleanSchema,
+    openSeconds: numberSchema({ min: 0 })
+  },
+  { allowUnknown: false }
+)
 /** A picked file as main hands it to the renderer: an opaque single-use
  * `input-file` capability and the name to show, never the path itself. */
 const inputFileSelectionSchema = objectSchema(
@@ -1574,6 +1613,16 @@ const specificRuntimeInvokeContracts = {
     tupleSchema([markerRelayCommandSchema]),
     markerRelayResultSchema
   ),
+  // The stream watchdog (plan 223): a fix pressed on the Stream Manager's
+  // card goes to the Studio, which runs it like a deck key; the system
+  // notification carries the alert's words only; the idle time feeds
+  // still-there.
+  'comments-window:watchdog-fix': invokeContract(
+    tupleSchema([watchdogFixRequestSchema]),
+    booleanSchema
+  ),
+  'watchdog:notify': invokeContract(tupleSchema([watchdogNoticeSchema]), booleanSchema),
+  'watchdog:idle': invokeContract(noArgs, numberSchema({ min: 0 })),
   'comments-window:marker-result-push': invokeContract(
     tupleSchema([markerRelayResolutionSchema]),
     booleanSchema
@@ -2091,6 +2140,8 @@ const specificRuntimeEventSchemas = {
   // Page Visibility API, so document.visibilityState reads 'visible' even when
   // the window is minimised or hidden.
   'window:visible': booleanSchema,
+  'watchdog:focus': stringSchema({ minLength: 1, maxLength: 256 }),
+  'watchdog:fix-request': watchdogFixRequestSchema,
   'app:front-changed': objectSchema(
     {
       bundleId: optionalSchema(nullableSchema(stringSchema({ maxLength: 1024 }))),

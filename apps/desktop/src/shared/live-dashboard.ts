@@ -9,7 +9,9 @@ import type {
   StreamTargetState,
   StreamTargetsSnapshot,
   SessionChatTotals,
-  ViewerSample
+  ViewerSample,
+  WatchdogAlert,
+  WatchdogAlertsView
 } from './backend'
 import { sessionIsLive } from './capture-state'
 import { sessionChatTotalsSchema } from './session-chat-totals'
@@ -35,6 +37,8 @@ export interface LiveDashboardState {
   chatTotals?: SessionChatTotals | null
   /** The Videorc Cloud show carrying this session (plan 184 C7). */
   cloud?: LiveDashboardCloud | null
+  /** The stream watchdog's open alerts for this session (plan 223 A6). */
+  alerts?: WatchdogAlert[]
   updatedAt: string
 }
 
@@ -337,6 +341,33 @@ export function reduceDashboardCloud(
   return { ...state, cloud, updatedAt: now }
 }
 
+/**
+ * `watchdog.alerts` (plan 223 A6): the open alerts while they belong to this
+ * session. Another session's, or none, clears them.
+ */
+export function reduceDashboardAlerts(
+  state: LiveDashboardState,
+  view: WatchdogAlertsView,
+  now: string
+): LiveDashboardState {
+  const alerts =
+    view.sessionId && state.sessionId && view.sessionId === state.sessionId ? view.alerts : []
+  const previous = state.alerts ?? []
+  if (
+    previous.length === alerts.length &&
+    previous.every(
+      (alert, index) =>
+        alert.id === alerts[index]?.id &&
+        alert.title === alerts[index]?.title &&
+        alert.detail === alerts[index]?.detail &&
+        alert.state === alerts[index]?.state &&
+        alert.severity === alerts[index]?.severity
+    )
+  )
+    return state
+  return { ...state, alerts, updatedAt: now }
+}
+
 export function reduceDashboardHealth(
   state: LiveDashboardState,
   health: StreamHealth,
@@ -455,6 +486,20 @@ export function normalizeLiveDashboardState(value: unknown): LiveDashboardState 
     } catch {
       return null
     }
+  }
+  if (state.alerts !== undefined) {
+    if (
+      !Array.isArray(state.alerts) ||
+      state.alerts.some(
+        (alert) =>
+          !alert ||
+          typeof alert !== 'object' ||
+          typeof alert.id !== 'string' ||
+          typeof alert.title !== 'string' ||
+          typeof alert.detail !== 'string'
+      )
+    )
+      return null
   }
   if (state.cloud !== undefined && state.cloud !== null) {
     const cloud = state.cloud

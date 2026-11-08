@@ -5354,6 +5354,124 @@ export interface CloudStatus {
   restart?: CloudRestart
   /** Plan 222: while a show runs past the month's cloud hours, how far past (D18: it keeps going). */
   allowancePast?: { seconds: number }
+  /** Plan 223 C3: the runner's program measurements while the show is live or holding. */
+  program?: CloudProgram
+}
+
+/** The runner's `program` block (plan 223 C1): what leaves our servers, as numbers. */
+export interface CloudProgram {
+  audioRmsDb?: number
+  audioSilentSeconds?: number
+  blackSeconds?: number
+  frozenSeconds?: number
+  avSkewMs?: number
+}
+
+// --- The stream watchdog (plan 223) ---
+
+export type WatchdogCheck =
+  | 'mic-muted'
+  | 'mic-silent'
+  | 'no-voice'
+  | 'program-silent'
+  | 'picture-black'
+  | 'picture-stopped'
+  | 'destination-down'
+  | 'platform-health'
+  | 'bitrate-floor'
+  | 'av-drift'
+  | 'chat-says'
+  | 'brb-long'
+  | 'still-there'
+
+export type WatchdogAlertSeverity = 'critical' | 'warning' | 'notice'
+export type WatchdogAlertState = 'open' | 'acknowledged' | 'snoozed'
+export type WatchdogAlertSource = 'desktop' | 'cloud' | 'platform'
+export type WatchdogFixKind =
+  | 'unmute'
+  | 'end-takeover'
+  | 'switch-scene'
+  | 'open-audio'
+  | 'open-health'
+  | 'open-livestream'
+  | 'reconnect-destination'
+  | 'open-platform-dashboard'
+  | 'show-brb'
+
+export interface WatchdogAlertFix {
+  kind: WatchdogFixKind
+  label: string
+  url?: string
+}
+
+/** One open alert (`watchdog.alerts`): the backend owns it, the renderer draws it (D2). */
+export interface WatchdogAlert {
+  id: string
+  check: WatchdogCheck
+  severity: WatchdogAlertSeverity
+  state: WatchdogAlertState
+  /** RFC 3339: when it opened. */
+  since: string
+  lastRepeatAt?: string
+  title: string
+  detail: string
+  source: WatchdogAlertSource
+  platform?: string
+  targetId?: string
+  fixes?: WatchdogAlertFix[]
+  snoozedUntil?: string
+  meantTo?: boolean
+}
+
+export interface WatchdogAlertsView {
+  sessionId?: string
+  alerts: WatchdogAlert[]
+}
+
+export type WatchdogSnoozeScope = 'ten-minutes' | 'stream'
+
+export interface WatchdogSettings {
+  checks: Record<string, { enabled: boolean }>
+  micMutedAfterSeconds: number
+  systemNotifications: boolean
+  phonePush: boolean
+  aiChatRead: boolean
+}
+
+export interface WatchdogSettingsPatch {
+  checks?: Record<string, { enabled: boolean }>
+  micMutedAfterSeconds?: number
+  systemNotifications?: boolean
+  phonePush?: boolean
+  aiChatRead?: boolean
+}
+
+export interface WatchdogAlertDevice {
+  id: string
+  label?: string
+  createdAt?: string
+  lastOkAt?: string
+}
+
+export interface WatchdogAlertDevicesView {
+  devices: WatchdogAlertDevice[]
+}
+
+/** `watchdog:notify` (renderer → main): the system notification's words. */
+export interface WatchdogNotice {
+  alertId: string
+  title: string
+  body: string
+  critical: boolean
+  /** Seconds the alert has been open: a critical one 60 s old shows even when focused. */
+  openSeconds: number
+}
+
+/** A fix pressed on a card in the Stream Manager (`watchdog:fix-request`). */
+export interface WatchdogFixRequest {
+  alertId: string
+  kind: WatchdogFixKind
+  url?: string
 }
 
 /** `cloud.settings.set`: a partial patch; `holdImageScreenId: null` clears the image. */
@@ -5793,6 +5911,8 @@ export interface VideorcApi {
   pushMarkerContext: (context: MarkerContext | null) => Promise<boolean>
   onMarkerContext: (callback: (context: MarkerContext | null) => void) => () => void
   markerFromCommentsWindow: (command: MarkerRelayCommand) => Promise<MarkerRelayResult>
+  /** A watchdog fix from the Stream Manager's alert card (plan 223 A6): relayed, never run here. */
+  watchdogFixFromCommentsWindow: (request: WatchdogFixRequest) => Promise<boolean>
   onMarkerRequest: (callback: (command: MarkerRelayCommand) => void) => () => void
   pushMarkerResult: (resolution: CommentsCommandResolution<MarkerRelayResult>) => Promise<boolean>
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
@@ -6060,6 +6180,16 @@ export interface VideorcApi {
   onShortcutModifier: (callback: (held: boolean) => void) => () => void
   /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */
   onWindowVisible: (callback: (visible: boolean) => void) => () => void
+  // The stream watchdog (plan 223 A7): main shows the system notification
+  // when the Studio isn't the front window, or the alert is critical and
+  // has stayed open; a click brings the Studio forward (`onWatchdogFocus`)
+  // and never runs the fix.
+  notifyWatchdog: (notice: WatchdogNotice) => Promise<boolean>
+  onWatchdogFocus: (callback: (alertId: string) => void) => () => void
+  /** `powerMonitor.getSystemIdleTime()`, for the still-there check. */
+  getSystemIdleSeconds: () => Promise<number>
+  /** A fix pressed in the Stream Manager's card, relayed to the Studio (D2). */
+  onWatchdogFixRequest: (callback: (request: WatchdogFixRequest) => void) => () => void
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLifecycle: (callback: (event: BackendLifecycleEvent) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void

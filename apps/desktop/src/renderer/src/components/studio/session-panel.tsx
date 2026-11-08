@@ -8,7 +8,15 @@ import {
   BuddyIcon,
   RecordIcon
 } from '@/components/icons'
-import { useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
+import {
+  lazy,
+  Suspense,
+  useContext,
+  useEffect,
+  useState,
+  type ReactElement,
+  type ReactNode
+} from 'react'
 
 import { LCD_STATUS_DOT, LcdPanelNavRow, type StudioLook } from '@/components/lcd-panel'
 import { CohostPresenceDot } from '@/components/cohost-status'
@@ -40,6 +48,8 @@ import { cohostPresenceView } from '@/lib/cohost-presence'
 import { activeCohostAlerts, cohostAlertLabel } from '@/lib/cohost-view'
 import { providerStreamOutputPlanOptions, streamOutputVideosForTargets } from '@/lib/capture'
 import { liveDestinationsView, streamHealthFact } from '@/lib/live-session-view'
+import { MICROPHONE_SILENT_CODE } from '@/lib/session-runtime-notice'
+import { topWatchdogAlert, visibleWatchdogAlerts } from '@/lib/watchdog-view'
 import {
   dashboardCloudFromStatus,
   type LiveDashboardCloud
@@ -403,6 +413,12 @@ export function useSessionOutputSummary(live: boolean): string {
 }
 
 /** The last refused start and a mid-session notice, under the Session facts. */
+// The watchdog's cards (plan 223 A5) load with the first alert: the chunk
+// holds the card and its words, and the eager Studio keeps only the list.
+const WatchdogAlertCard = lazy(async () => ({
+  default: (await import('@/components/studio/watchdog-alert-card')).WatchdogAlertCard
+}))
+
 export function SessionNotices({
   active,
   startRequestPending,
@@ -414,10 +430,32 @@ export function SessionNotices({
 }: Omit<SessionPanelProps, 'live'>): ReactElement {
   const { setActive } = useWorkspaceNav()
   const { recording } = useStudioRecording()
-  const { diagnosticStats } = useStudioDiagnostics()
+  const { diagnosticStats, watchdogAlerts = [], watchdogAct } = useStudioDiagnostics()
   const cameraNotice = cameraCaptureNotice(recording, diagnosticStats)
+  // The 1064 silence notice already renders below as a SessionRuntimeAlert;
+  // the watchdog's adoption of it (repeats, the notification) draws no
+  // second card while that notice is up.
+  const silenceNoticeShown =
+    runtimeNotice?.kind === 'microphone-input-lost' &&
+    runtimeNotice.audioIssues?.every((issue) => issue.code === MICROPHONE_SILENT_CODE) === true
+  const cards = visibleWatchdogAlerts(watchdogAlerts).filter(
+    (alert) => !(silenceNoticeShown && alert.check === 'mic-silent')
+  )
   return (
     <>
+      {cards.length > 0 ? (
+        <Suspense fallback={null}>
+          {cards.map((alert) => (
+            <WatchdogAlertCard
+              key={alert.id}
+              alert={alert}
+              onAcknowledge={(target) => watchdogAct({ kind: 'acknowledge', alert: target })}
+              onFix={(target, fix) => watchdogAct({ kind: 'fix', alert: target, fix })}
+              onSnooze={(target, scope) => watchdogAct({ kind: 'snooze', alert: target, scope })}
+            />
+          ))}
+        </Suspense>
+      ) : null}
       {/* A refused start is the ONE place destructive red is allowed on chrome:
           it is status, it persists, and it carries the backend's reason
           verbatim (the toast can be missed mid-stream; this line cannot). */}
@@ -581,7 +619,12 @@ export function LiveDestinationRows({
  */
 export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook }): ReactElement {
   const { streamTargets } = useStudioCore()
-  const { diagnosticStats, recentStreamDrops, streamHealth } = useStudioDiagnostics()
+  const {
+    diagnosticStats,
+    recentStreamDrops,
+    streamHealth,
+    watchdogAlerts = []
+  } = useStudioDiagnostics()
   const { setActive } = useWorkspaceNav()
   const cloud = useSessionCloud()
   const fact = streamHealthFact(
@@ -591,7 +634,8 @@ export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook })
       streamTargets,
       recentStreamDrops
     ),
-    cloud
+    cloud,
+    topWatchdogAlert(watchdogAlerts)
   )
   return (
     <FactRow

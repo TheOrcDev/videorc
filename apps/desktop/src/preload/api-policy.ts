@@ -34,6 +34,8 @@ export const AUXILIARY_API_KEYS = {
     'getMarkerContext',
     'onMarkerContext',
     'markerFromCommentsWindow',
+    // A watchdog fix from the alert chip's card (plan 223 A6): ask, never run.
+    'watchdogFixFromCommentsWindow',
     'markClipFromCommentsWindow',
     // Banners (plan 186 S7): read the list, ask for a show or hide; never push.
     'getCommentsBanners',

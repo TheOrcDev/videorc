@@ -10,6 +10,7 @@ import {
   type CameraExtensionState
 } from './camera-extension'
 import { runVirtualCameraAction } from './virtual-camera-action'
+import { WatchdogNotifyLedger, watchdogNotifyDecision } from './watchdog-notify'
 import { runLinuxLoadModule } from './virtual-camera-linux-setup'
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { writeBackgroundThumbnail } from './background-thumbnail'
@@ -64,6 +65,8 @@ import {
   nativeImage,
   nativeTheme,
   net,
+  Notification,
+  powerMonitor,
   powerSaveBlocker,
   protocol,
   safeStorage,
@@ -16899,6 +16902,10 @@ function installApplicationMenu(): void {
 }
 
 app.whenReady().then(async () => {
+  // Plan 223 A7: Windows shows a notification only for an app with an
+  // AppUserModelID; the installer's shortcut carries electron-builder's
+  // appId, and a dev run has no shortcut, so set it here either way.
+  if (process.platform === 'win32') app.setAppUserModelId('dev.theorcdev.videorc')
   if (!hasSingleInstanceLock) {
     return
   }
@@ -17660,6 +17667,51 @@ app.whenReady().then(async () => {
       return accepted
     }
   )
+  // The stream watchdog (plan 223 A7): the system notification, the idle
+  // time for still-there, and a fix pressed in the Stream Manager's card.
+  const watchdogNotified = new WatchdogNotifyLedger()
+  secureIpcHandle('watchdog:notify', (event, notice) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    const now = Date.now()
+    const decision = watchdogNotifyDecision({
+      notice,
+      mainFocused: mainWindow.isFocused(),
+      enabled: true,
+      supported: Notification.isSupported(),
+      lastShownAt: watchdogNotified.lastShownAt(notice.alertId),
+      now
+    })
+    if (!decision.show) return false
+    watchdogNotified.mark(notice.alertId, now)
+    const notification = new Notification({
+      title: decision.title,
+      body: decision.body,
+      silent: true
+    })
+    notification.on('click', () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+      sendElectronEvent(mainWindow.webContents, 'watchdog:focus', notice.alertId)
+    })
+    notification.on('failed', (_event, error) => {
+      safeConsole.warn(`[watchdog] system notification failed: ${error}`)
+    })
+    notification.show()
+    return true
+  })
+  secureIpcHandle('watchdog:idle', (event) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return 0
+    return powerMonitor.getSystemIdleTime()
+  })
+  secureIpcHandle('comments-window:watchdog-fix', (event, request) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id)
+      throw new Error('Only Stream Manager can ask for a watchdog fix here.')
+    if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+    sendElectronEvent(mainWindow.webContents, 'watchdog:fix-request', request)
+    return true
+  })
   secureIpcHandle('comments-window:marker-context-get', () => markerContext)
   secureIpcHandle('comments-window:marker-context-push', (event, context) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false

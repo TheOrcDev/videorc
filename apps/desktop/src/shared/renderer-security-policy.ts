@@ -163,6 +163,12 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:marker-context-get': MAIN_AND_COMMENTS,
   'comments-window:marker-context-push': MAIN_ONLY,
   'comments-window:marker': MAIN_AND_COMMENTS,
+  // The stream watchdog (plan 223): a fix pressed in the Stream Manager's
+  // card is relayed to the Studio; the notification and the idle time are
+  // the Studio's own.
+  'comments-window:watchdog-fix': MAIN_AND_COMMENTS,
+  'watchdog:notify': MAIN_ONLY,
+  'watchdog:idle': MAIN_ONLY,
   'comments-window:marker-result-push': MAIN_ONLY,
   'comments-window:clip-mark': MAIN_AND_COMMENTS,
   'comments-window:clip-mark-result-push': MAIN_ONLY,

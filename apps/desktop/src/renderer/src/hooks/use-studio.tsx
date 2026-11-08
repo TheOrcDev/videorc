@@ -579,6 +579,7 @@ import {
   normalizeCommentHighlightAnchor,
   offCohostState
 } from '@/lib/backend'
+import type { WatchdogAlert, WatchdogAlertFix, WatchdogAlertsView } from '@/lib/backend'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
 import { soundboard } from '@/lib/soundboard-store'
 import {
@@ -1898,7 +1899,18 @@ interface StudioDiagnosticsContextValue {
   streamHealth: StreamHealth | null
   previewSurfaceStatus: PreviewSurfaceStatus
   retryCaptureRecovery: () => Promise<void>
+  /** The stream watchdog's open alerts (plan 223): the backend's list, as sent. */
+  watchdogAlerts: WatchdogAlert[]
+  /** A card's buttons: the fix, Got it, Snooze (plan 223 A5). */
+  watchdogAct: (action: WatchdogAction) => void
+  /** The backend socket, for the Livestream page's Watchdog section (its own RPCs, lazily). */
+  client: BackendClient | null
 }
+
+export type WatchdogAction =
+  | { kind: 'fix'; alert: WatchdogAlert; fix: WatchdogAlertFix }
+  | { kind: 'acknowledge'; alert: WatchdogAlert }
+  | { kind: 'snooze'; alert: WatchdogAlert; scope: 'ten-minutes' | 'stream' }
 
 interface StudioChatContextValue {
   liveChatSnapshot: LiveChatSnapshot
@@ -2802,6 +2814,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const performanceCheckHoldRef = useRef(false)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
+  // Plan 223: the watchdog's alerts, drawn here and in the Stream Manager.
+  const [watchdogAlerts, setWatchdogAlerts] = useState<WatchdogAlert[]>([])
+  const watchdogAlertsRef = useRef<WatchdogAlert[]>([])
+  // The Studio's action source is built far below (plan 209 S5); a fix
+  // pressed on a card reads it at click time.
+  const studioActionSourceRef = useRef<(() => StudioActionSource | null) | null>(null)
   // Plan 069: the newest system-audio health issue, kept apart from the
   // bounded event list so a long session cannot scroll it away.
   const [systemAudioIssueEvent, setSystemAudioIssueEvent] = useState<{
@@ -5454,6 +5472,79 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelled = true
     }
   }, [client, commitCloudStatus, wsStatus])
+
+  // Plan 223: the watchdog's alerts once per connection (a reload mid-stream
+  // must show the open card); `watchdog.alerts` keeps them current. The
+  // toasts, the system notification and the fixes live in a chunk loaded
+  // with the first alert.
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    let cancelled = false
+    void client
+      .requestTyped('watchdog.alerts.list')
+      .then((view) => {
+        if (!cancelled) setWatchdogAlerts(view.alerts)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [client, wsStatus])
+  const watchdogDeps = useCallback(
+    () => ({
+      client,
+      source: () => studioActionSourceRef.current?.() ?? null,
+      openStudioPanel: (panel: 'assets' | 'layouts') => openWorkspaceTab(panel),
+      openStudio: () => openWorkspaceTab('studio')
+    }),
+    [client]
+  )
+  useEffect(() => {
+    const previous = watchdogAlertsRef.current
+    watchdogAlertsRef.current = watchdogAlerts
+    if (previous.length === 0 && watchdogAlerts.length === 0) return
+    void import('@/lib/watchdog-surface').then((surface) =>
+      surface.onWatchdogAlertsChanged(previous, watchdogAlerts, watchdogDeps())
+    )
+  }, [watchdogAlerts, watchdogDeps])
+  const watchdogAct = useCallback(
+    (action: WatchdogAction) => {
+      void import('@/lib/watchdog-surface').then((surface) => {
+        if (action.kind === 'fix')
+          return surface.runWatchdogFix(action.alert, action.fix, watchdogDeps())
+        if (action.kind === 'acknowledge')
+          return surface.acknowledgeWatchdogAlert(client, action.alert.id)
+        return surface.snoozeWatchdogAlert(client, action.alert.id, action.scope)
+      })
+    },
+    [client, watchdogDeps]
+  )
+  // The system notification's click brings the Studio forward and the card
+  // into view; a fix pressed in the Stream Manager runs here (plan 223 A6).
+  useEffect(() => {
+    const api = window.videorc
+    if (!api?.onWatchdogFocus) return
+    const offFocus = api.onWatchdogFocus(() => openWorkspaceTab('studio'))
+    const offFix = api.onWatchdogFixRequest?.((request) => {
+      const alert = watchdogAlertsRef.current.find((candidate) => candidate.id === request.alertId)
+      const fix = alert?.fixes?.find((candidate) => candidate.kind === request.kind)
+      if (alert && fix) watchdogAct({ kind: 'fix', alert, fix })
+    })
+    return () => {
+      offFocus()
+      offFix?.()
+    }
+  }, [watchdogAct])
+  // still-there needs the system's idle time, which only main can read.
+  useEffect(() => {
+    if (!client || !sessionIsLive(recording)) return
+    const tick = (): void => {
+      void import('@/lib/watchdog-surface').then((surface) => surface.reportSystemIdle(client))
+    }
+    tick()
+    const timer = window.setInterval(tick, 30_000)
+    return () => window.clearInterval(timer)
+  }, [client, recording])
 
   const setCloudSettings = useCallback(
     async (patch: CloudSettingsPatch): Promise<void> => {
@@ -8324,6 +8415,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (settings.twitchGifs) void window.videorc?.pushChatGifMode?.(settings.twitchGifs)
       }),
       nextClient.on('stream.audience', (payload) => feedDashboard('stream.audience', payload)),
+      nextClient.on('watchdog.alerts', (payload) => {
+        const view = payload as WatchdogAlertsView
+        setWatchdogAlerts(view.alerts)
+        feedDashboard('watchdog.alerts', payload)
+      }),
       nextClient.on('health.event', (payload) => {
         bootstrapGuard.mark('sessions')
         const event = payload as HealthEvent
@@ -18567,6 +18663,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       noteRecordClick
     }
 
+  studioActionSourceRef.current = studioActionSource
+
   // An effect event: stable identity for the one-time client subscription,
   // latest closure inside.
   const handleRemoteIntent = useEffectEvent(async (payload: unknown) => {
@@ -18965,7 +19063,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recentStreamDrops: recentDrops,
       recordLatency,
       retryCaptureRecovery,
-      streamHealth
+      streamHealth,
+      watchdogAlerts,
+      watchdogAct,
+      client
     }),
     [
       captureRecoveryRetryPending,
@@ -18977,7 +19078,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recentDrops,
       recordLatency,
       retryCaptureRecovery,
-      streamHealth
+      streamHealth,
+      watchdogAlerts,
+      watchdogAct,
+      client
     ]
   )
   const chatNewCount = useChatNewCount(

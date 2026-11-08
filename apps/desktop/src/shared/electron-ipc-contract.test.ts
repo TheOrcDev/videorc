@@ -83,8 +83,12 @@ describe('Electron IPC contract', () => {
     // Settings, removal and setup).
     // 160: plan 215 A3 adds comments-window:sign-in-videorc ("Sign in to
     // Videorc" on a chat row; the main window starts the sign-in).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(160)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(160)
+    // 163: plan 223 adds watchdog:notify (the system notification),
+    // watchdog:idle (the idle time for still-there) and
+    // comments-window:watchdog-fix (a fix pressed in the Stream Manager's
+    // alert card, relayed to the Studio).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(163)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(163)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
