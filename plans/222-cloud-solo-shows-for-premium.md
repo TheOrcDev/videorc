@@ -66,7 +66,26 @@ moved: re-read Phase R.
     against main). The renderer budget is still
     the owner's STOP: eager gzip 479,409 against 477,000 (the port was
     479,188; plan 225's eager wiring adds 221).
-  - Next: Phase U and Y on #727; L1 after the cohort.
+  - Phase U and Y on #727 (2026-11-08, unpushed; plan 221 Progress):
+    - U1: `cloud.announce.seen` and `CloudStatus.announce` (true or
+      absent), a hashed account list in `app_settings` `cloud.announced`,
+      one info toast outside a session with Open Livestream.
+    - U2 to U5: the switch row's upload and hours lines, the held-show copy
+      and Go Live's cloud step, and `allowancePast` from the web's meter
+      plus the runner's clock.
+    - U6: shots in both themes. The eye found four faults, fixed: the
+      Livestream page crashed in the dev app (plan 223's lazy const above
+      `import { lazy }`); the hold picker read "default"; the hold's
+      countdown was said twice in Session; the feed toast said viewers
+      "see nothing".
+    - Y1: `docs/compliance/youtube-tos-report-v2-cloud-draft.md`, for the
+      owner to send. Y3: plan 184 Outside facts, the 2026-11-08 update.
+      The two Twitch pages are still UNVERIFIED (no browser).
+    - Not done: U3's `VIDEORC_CLOUD_SOLO_VERTICAL=1` smoke variant (it needs
+      the session's dual-orientation `simulcast` block in the smoke). U7 is
+      the release's job.
+    - Eager gzip: 480,639 against 480,354 before U (owner STOP, 477,000).
+  - Next: U3's vertical smoke; L1 after the cohort.
 - **Priority**: P1. The owner's pick 1 and 2 of five on 2026-11-08 ("the
   stream never drops", "upload once, stream everywhere"). Umbrella: plan 221.
 - **Effort**: XL. About 5 to 7 weeks of agent work in sequence, plus waits
