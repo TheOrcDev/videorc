@@ -17,7 +17,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import { cloudTestOutputs, cloudUploadPlan } from '@/lib/cloud-test-outputs'
-import { CLOUD_SECTION_FOCUS_EVENT, takeCloudSectionFocus } from '@/lib/cloud-toasts'
+import { CLOUD_SECTION_FOCUS_EVENT, takeCloudSectionFocus } from '@/lib/cloud-notices'
 import {
   CLOUD_PREMIUM_REASON,
   cloudSectionState,

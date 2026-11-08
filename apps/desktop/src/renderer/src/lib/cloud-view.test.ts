@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import type { CloudStatus, CloudTestResult } from './backend'
 import { cloudResumeNotice, formatCloudCountdown, goesThroughCloud } from './cloud-show-view'
+import { cloudAllowancePastToast } from './cloud-notices'
 import {
   cloudFallbackMessage,
   cloudFallbackToast,
   cloudLostToast,
   cloudRestartToast,
-  cloudAllowancePastToast,
   cloudShowCapToast,
   formatCloudResetDate
 } from './cloud-toasts'

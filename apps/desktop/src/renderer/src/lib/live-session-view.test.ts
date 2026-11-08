@@ -2,13 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import type { DiagnosticStats, StreamTargetRuntime } from '@/lib/backend'
 import {
-  cloudDestinationCount,
-  cloudHealthySummary,
   cloudStreamReading,
   liveDestinationProblem,
   liveDestinationsView,
   streamHealthFact
 } from './live-session-view'
+import { cloudDestinationCount, cloudHealthySummary } from './cloud-show-view'
 import { classifyStreamHealthAttribution, NO_RECENT_DROPS } from './stream-health-attribution'
 
 const target = (

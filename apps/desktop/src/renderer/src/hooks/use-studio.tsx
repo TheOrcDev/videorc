@@ -161,14 +161,11 @@ import {
 } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, TOAST_WITH_DESCRIPTION_MS, toast } from '@/lib/toast'
 import {
-  CLOUD_ANNOUNCE_TOAST,
   CLOUD_TOAST_ID,
-  cloudAllowancePastToast,
   cloudFallbackToast,
   cloudLostToast,
   cloudRestartToast,
-  cloudShowCapToast,
-  requestCloudSectionFocus
+  cloudShowCapToast
 } from '@/lib/cloud-toasts'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { openHealthToastAction } from '@/lib/health-door'
@@ -780,6 +777,9 @@ function loadCaptionOverlay() {
 
 // Chat on stream (plan 215 G): the box's driver and painter, lazy, loaded the
 // first time a chat switch is on while live.
+/** Plan 222 U1, U5: the cloud's rarer notices load when one is due. */
+const loadCloudNotices = () => import('@/lib/cloud-notices')
+
 async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlayDriver> {
   const [{ createChatOverlayDriver }, { renderChatOverlayCards }] = await Promise.all([
     import('@/lib/chat-overlay'),
@@ -5366,9 +5366,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (restarted) toast.warning(restarted, { id: CLOUD_TOAST_ID })
     const cap = cloudShowCapToast(previous, next)
     if (cap) toast.warning(cap, { id: CLOUD_TOAST_ID })
-    // Plan 222 U5: past the month's hours is news, never a cut (D18).
-    const past = cloudAllowancePastToast(previous, next)
-    if (past) toast.info(past.title, { id: CLOUD_TOAST_ID, description: past.description })
+    // Plan 222 U5: past the month's hours is news, never a cut (D18); the
+    // words load only when a show runs past them.
+    if (next.allowancePast)
+      void loadCloudNotices().then((n) => n.toastCloudAllowancePast(previous, next))
   }, [])
 
   // --- Live Chat Co-host (Premium cloud AI) --------------------------------
@@ -13109,23 +13110,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(() => {
     if (!client || !cloudAnnounceDue || isSessionActive || cloudAnnounceShownRef.current) return
     cloudAnnounceShownRef.current = true
-    toast.info(CLOUD_ANNOUNCE_TOAST.title, {
-      id: CLOUD_TOAST_ID,
-      description: CLOUD_ANNOUNCE_TOAST.description,
-      action: {
-        label: 'Open Livestream',
-        onClick: () => {
-          requestCloudSectionFocus()
-          openWorkspaceTab('live', 'setup')
-        }
-      }
-    })
-    void client
-      .requestTyped('cloud.announce.seen')
-      .then(commitCloudStatus)
-      .catch(() => {
-        // Shown once in this run either way; the next launch asks again.
-      })
+    void loadCloudNotices().then((n) => n.announceCloud(client, commitCloudStatus))
   }, [client, cloudAnnounceDue, commitCloudStatus, isSessionActive])
   // Plan 215 D1: the Scene page unlocks a source's position and size only
   // once the session says a commit reaches its picture.

@@ -63,11 +63,8 @@ import {
   type RecentStreamDrops,
   type StreamHealthAttribution
 } from '@/lib/stream-health-attribution'
-import {
-  cloudDestinationCount,
-  cloudHealthySummary,
-  cloudStreamReading
-} from '@/lib/live-session-view'
+import { cloudDestinationCount, cloudHealthySummary } from '@/lib/cloud-show-view'
+import { cloudStreamReading } from '@/lib/live-session-view'
 
 import {
   dashboardCloudFromStatus,
