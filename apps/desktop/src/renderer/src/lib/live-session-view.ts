@@ -6,7 +6,7 @@
 
 import type { StreamTargetRuntime, WatchdogAlert } from '@/lib/backend'
 import { formatCloudCountdown } from './cloud-toasts'
-import { watchdogChipLabel } from './watchdog-view'
+import { watchdogChipLabel } from './watchdog-rank'
 import { cloudPhaseLabel, destinationStateLabel } from './state-labels'
 import { liveProblemLabel, type StreamHealthAttribution } from './stream-health-attribution'
 
@@ -148,12 +148,12 @@ export type StreamHealthFact = {
 export function streamHealthFact(
   attribution: StreamHealthAttribution,
   cloud: LiveDashboardCloud | null = null,
-  alert: Pick<WatchdogAlert, 'title' | 'severity'> | null = null
+  alert: Pick<WatchdogAlert, 'check' | 'title' | 'targetId'> | null = null
 ): StreamHealthFact {
   // Plan 223 A5: the top open watchdog alert outranks every stage; it is
-  // what viewers see, in the card's own words.
+  // what viewers see, in a few words.
   if (alert) {
-    return { label: watchdogChipLabel(alert as WatchdogAlert), tone: 'warn' }
+    return { label: watchdogChipLabel(alert), tone: 'warn' }
   }
   const reading = cloudStreamReading(cloud)
   if (reading) {

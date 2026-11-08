@@ -49,7 +49,7 @@ import { activeCohostAlerts, cohostAlertLabel } from '@/lib/cohost-view'
 import { providerStreamOutputPlanOptions, streamOutputVideosForTargets } from '@/lib/capture'
 import { liveDestinationsView, streamHealthFact } from '@/lib/live-session-view'
 import { MICROPHONE_SILENT_CODE } from '@/lib/session-runtime-notice'
-import { topWatchdogAlert, visibleWatchdogAlerts } from '@/lib/watchdog-view'
+import { topWatchdogAlert, visibleWatchdogAlerts } from '@/lib/watchdog-rank'
 import {
   dashboardCloudFromStatus,
   type LiveDashboardCloud

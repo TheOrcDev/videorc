@@ -5519,32 +5519,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [client, watchdogDeps]
   )
-  // The system notification's click brings the Studio forward and the card
-  // into view; a fix pressed in the Stream Manager runs here (plan 223 A6).
+  // The notification's click, a fix from the Stream Manager and the idle
+  // time for still-there (plan 223 A6, A7), mounted from the lazy chunk.
+  const watchdogLive = sessionIsLive(recording)
   useEffect(() => {
-    const api = window.videorc
-    if (!api?.onWatchdogFocus) return
-    const offFocus = api.onWatchdogFocus(() => openWorkspaceTab('studio'))
-    const offFix = api.onWatchdogFixRequest?.((request) => {
-      const alert = watchdogAlertsRef.current.find((candidate) => candidate.id === request.alertId)
-      const fix = alert?.fixes?.find((candidate) => candidate.kind === request.kind)
-      if (alert && fix) watchdogAct({ kind: 'fix', alert, fix })
+    let dispose: (() => void) | null = null
+    let cancelled = false
+    void import('@/lib/watchdog-surface').then((surface) => {
+      if (cancelled) return
+      dispose = surface.mountWatchdogSurface({
+        client,
+        live: watchdogLive,
+        alerts: () => watchdogAlertsRef.current,
+        act: (alert, fix) => watchdogAct({ kind: 'fix', alert, fix })
+      })
     })
     return () => {
-      offFocus()
-      offFix?.()
+      cancelled = true
+      dispose?.()
     }
-  }, [watchdogAct])
-  // still-there needs the system's idle time, which only main can read.
-  useEffect(() => {
-    if (!client || !sessionIsLive(recording)) return
-    const tick = (): void => {
-      void import('@/lib/watchdog-surface').then((surface) => surface.reportSystemIdle(client))
-    }
-    tick()
-    const timer = window.setInterval(tick, 30_000)
-    return () => window.clearInterval(timer)
-  }, [client, recording])
+  }, [client, watchdogLive, watchdogAct])
 
   const setCloudSettings = useCallback(
     async (patch: CloudSettingsPatch): Promise<void> => {

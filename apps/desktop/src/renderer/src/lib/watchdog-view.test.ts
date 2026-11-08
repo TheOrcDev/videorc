@@ -53,7 +53,7 @@ describe('watchdog view (plan 223 A5, A6)', () => {
 
   it('names the top alert in the Stream fact row before any stage', () => {
     expect(streamHealthFact('healthy', null, alert({ check: 'mic-muted' }))).toEqual({
-      label: 'Your microphone is muted',
+      label: 'Microphone muted',
       tone: 'warn'
     })
     expect(
@@ -62,17 +62,29 @@ describe('watchdog view (plan 223 A5, A6)', () => {
         { phase: 'hold', holdRemainingSeconds: 60 },
         alert({ check: 'mic-muted' })
       ).label
-    ).toBe('Your microphone is muted')
+    ).toBe('Microphone muted')
     expect(streamHealthFact('healthy', null, null)).toEqual({ label: 'Healthy', tone: 'good' })
   })
 
   it('writes the chip in a few words and keys the toasts per check', () => {
-    expect(watchdogChipLabel(alert({ check: 'mic-muted' }))).toBe('Your microphone is muted')
+    expect(watchdogChipLabel(alert({ check: 'mic-muted' }))).toBe('Microphone muted')
     expect(
       watchdogChipLabel(
         alert({ check: 'destination-down', title: 'YouTube has been down for 0:20' })
       )
-    ).toBe('YouTube has been down')
+    ).toBe('YouTube down')
+    expect(
+      watchdogChipLabel(
+        alert({
+          check: 'destination-down',
+          title: 'Nobody is receiving your stream',
+          targetId: 'all'
+        })
+      )
+    ).toBe('Nobody receiving')
+    expect(watchdogChipLabel(alert({ check: 'chat-says', targetId: 'lag' }))).toBe(
+      'Chat says lagging'
+    )
     expect(watchdogToastId(alert({ check: 'mic-muted' }))).toBe('watchdog:mic-muted')
     expect(watchdogToastId(alert({ check: 'destination-down', targetId: 'yt' }))).toBe(
       'watchdog:destination-down:yt'

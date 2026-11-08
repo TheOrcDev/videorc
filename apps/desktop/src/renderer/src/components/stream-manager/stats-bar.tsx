@@ -27,7 +27,7 @@ import {
 } from '@/lib/stream-manager-stats-layout'
 import { SCREEN_HIDDEN_LABEL } from '@/lib/screen-privacy-view'
 import { cn } from '@/lib/utils'
-import { watchdogChipLabel } from '@/lib/watchdog-view'
+import { watchdogChipLabel } from '@/lib/watchdog-rank'
 import type { WatchdogAlert } from '@/lib/backend'
 
 // The watchdog's card (plan 223 A6) rides the chip's hover; its chunk loads

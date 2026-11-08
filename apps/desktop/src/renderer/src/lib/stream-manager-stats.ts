@@ -1,4 +1,4 @@
-import { topWatchdogAlert } from './watchdog-view'
+import { topWatchdogAlert } from './watchdog-rank'
 import type { WatchdogAlert } from '@/lib/backend'
 import type {
   AudienceSnapshot,

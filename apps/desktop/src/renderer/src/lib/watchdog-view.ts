@@ -4,38 +4,14 @@
 // node vitest runner; the backend owns the alerts and their copy, this only
 // orders and quotes them.
 
-import type { WatchdogAlert, WatchdogAlertSeverity } from '@/lib/backend'
+import type { WatchdogAlert } from '@/lib/backend'
 
-const SEVERITY_RANK: Record<WatchdogAlertSeverity, number> = {
-  critical: 0,
-  warning: 1,
-  notice: 2
-}
-
-/** Alerts the streamer should see now: snoozed ones are hidden (D3). */
-export function visibleWatchdogAlerts(alerts: readonly WatchdogAlert[]): WatchdogAlert[] {
-  return alerts
-    .filter((alert) => alert.state !== 'snoozed')
-    .sort((left, right) => {
-      const rank = SEVERITY_RANK[left.severity] - SEVERITY_RANK[right.severity]
-      return rank !== 0 ? rank : left.since.localeCompare(right.since)
-    })
-}
-
-/** The alert the Stream fact row and the chip name: the worst, oldest first. */
-export function topWatchdogAlert(alerts: readonly WatchdogAlert[]): WatchdogAlert | null {
-  return visibleWatchdogAlerts(alerts)[0] ?? null
-}
-
-/** The chip's few words beside ON AIR: the title without its live clock. */
-export function watchdogChipLabel(alert: WatchdogAlert): string {
-  return alert.title.replace(/ for \d+:\d{2}(:\d{2})?$/, '').replace(/ on the livestream$/, '')
-}
-
-/** The toast key per check: the clearing toast replaces the alert's (D3). */
-export function watchdogToastId(alert: Pick<WatchdogAlert, 'check' | 'targetId'>): string {
-  return alert.targetId ? `watchdog:${alert.check}:${alert.targetId}` : `watchdog:${alert.check}`
-}
+export {
+  topWatchdogAlert,
+  visibleWatchdogAlerts,
+  watchdogChipLabel,
+  watchdogToastId
+} from './watchdog-rank'
 
 /**
  * The system notification's words (plan 223, "System notification form"):

@@ -68,12 +68,10 @@ export async function onWatchdogAlertsChanged(
     const changed = !known || known.title !== alert.title || known.detail !== alert.detail
     if (!changed) continue
     const [fix] = alert.fixes ?? []
-    const show =
-      alert.severity === 'critical'
-        ? toast.error
-        : alert.severity === 'warning'
-          ? toast.warning
-          : toast.info
+    // Critical rides the warning toast too: the error toast adds its Copy
+    // affordance (for failures), and a card is the problem's home, not the
+    // toast; the fix is the one action.
+    const show = alert.severity === 'notice' ? toast.info : toast.warning
     show(alert.title, {
       id: watchdogToastId(alert),
       description: alert.detail,
@@ -177,6 +175,37 @@ export async function snoozeWatchdogAlert(
     await client.requestTyped('watchdog.alert.snooze', { id: alertId, scope })
   } catch (error) {
     toastUserError(error, { action: 'snooze', object: 'the alert' })
+  }
+}
+
+/**
+ * Mounted once by the Studio: the notification's click brings the Studio
+ * forward, a fix pressed in the Stream Manager runs here (A6), and while
+ * live the system's idle time reaches the backend every 30 s (still-there).
+ */
+export function mountWatchdogSurface(options: {
+  client: BackendClient | null
+  live: boolean
+  alerts: () => readonly WatchdogAlert[]
+  act: (alert: WatchdogAlert, fix: WatchdogAlertFix) => void
+}): () => void {
+  const api = window.videorc
+  const offFocus = api?.onWatchdogFocus?.(() => openWorkspaceTab('studio'))
+  const offFix = api?.onWatchdogFixRequest?.((request) => {
+    const alert = options.alerts().find((candidate) => candidate.id === request.alertId)
+    const fix = alert?.fixes?.find((candidate) => candidate.kind === request.kind)
+    if (alert && fix) options.act(alert, fix)
+  })
+  let timer: number | null = null
+  if (options.live && options.client) {
+    const tick = (): void => void reportSystemIdle(options.client)
+    tick()
+    timer = window.setInterval(tick, 30_000)
+  }
+  return () => {
+    offFocus?.()
+    offFix?.()
+    if (timer !== null) window.clearInterval(timer)
   }
 }
 
