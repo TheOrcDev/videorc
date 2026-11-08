@@ -142,7 +142,8 @@ pub(crate) fn arrival_reaction_due(slot: &CommunitySlot, now: Instant) -> bool {
 pub struct CommunityLane {
     welcome_back: Vec<(CohostWelcomeBack, String, Instant)>,
     link_made: Vec<(CohostLinkMade, Instant)>,
-    /// Arrival rows the bubble (or a Suggest card) already welcomed: the
+    /// Arrival rows the bubble welcomed, or whose Suggest card was posted or
+    /// dismissed: the
     /// greeting pass runs on the delivery, the arrival write after it, so
     /// a welcomed row never joins the list late.
     welcomed: std::collections::VecDeque<String>,
@@ -1618,6 +1619,54 @@ mod tests {
         let summary = summary(&state).await.unwrap();
         assert_eq!(summary.links_pending, 1);
         assert_eq!(summary.people, 4);
+    }
+
+    /// Owner call 2026-11-08 (plan 225 C3): in Suggest mode the "Welcome
+    /// back" row stays while its welcome card waits, and leaves when the
+    /// card is dismissed (or posted).
+    #[tokio::test]
+    async fn a_suggest_welcome_card_keeps_the_welcome_back_row_until_dismissed() {
+        let state = test_state();
+        set_talk(&state, CohostTalkMode::Suggest).await;
+        let first = start_session(&state, "s1").await;
+        deliver(
+            &state,
+            first,
+            vec![row("s1", StreamPlatform::Twitch, "ada", "Ada", 1, "hello")],
+        )
+        .await;
+        crate::live_chat::stop_live_chat(&state).await;
+        let second = start_session(&state, "s2").await;
+        deliver(
+            &state,
+            second,
+            vec![row("s2", StreamPlatform::Twitch, "ada", "Ada", 2, "back")],
+        )
+        .await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        let card = snapshot
+            .utterances
+            .iter()
+            .find(|utterance| {
+                utterance.trigger.kind == CohostUtteranceTriggerKind::Greeting
+                    && utterance.status == CohostUtteranceStatus::Proposed
+            })
+            .cloned()
+            .expect("Suggest proposes the welcome as a card");
+        assert_eq!(snapshot.welcome_back.len(), 1, "the row stays beside the card");
+        crate::cohost::dismiss_utterance(
+            &state,
+            crate::protocol::CohostUtteranceParams {
+                session_id: "s2".to_string(),
+                utterance_id: card.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            state.cohost.lock().await.snapshot().welcome_back.is_empty(),
+            "a dismissed card takes the row off"
+        );
     }
 
     /// B1: the arrival rides the delivery, once per person per stream, for

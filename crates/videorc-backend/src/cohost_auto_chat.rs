@@ -1071,6 +1071,14 @@ impl AutoChatLane {
     }
 
     /// True when the card changed.
+    /// One card or line by id, for what its outcome means elsewhere.
+    pub(crate) fn utterance(&self, utterance_id: &str) -> Option<&CohostUtterance> {
+        self.records
+            .iter()
+            .find(|record| record.utterance.id == utterance_id)
+            .map(|record| &record.utterance)
+    }
+
     pub(crate) fn dismiss(&mut self, utterance_id: &str) -> bool {
         self.mark(utterance_id, CohostUtteranceStatus::Dismissed)
     }

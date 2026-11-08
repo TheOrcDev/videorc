@@ -7789,13 +7789,28 @@ impl CohostEngine {
         if self.talk_mode() != CohostTalkMode::Suggest {
             return Err(CohostError::AutoChatOff);
         }
-        self.auto_chat
+        let utterance = self
+            .auto_chat
             .approve(utterance_id, now)
-            .map_err(|refusal| CohostError::UtteranceUnavailable(refusal.message()))
+            .map_err(|refusal| CohostError::UtteranceUnavailable(refusal.message()))?;
+        // Plan 225 D11: a posted welcome card takes its row off "Welcome back".
+        if let Some(row) = welcomed_arrival_row(&utterance) {
+            self.community.note_welcomed(&[row]);
+        }
+        Ok(utterance)
     }
 
     pub(crate) fn dismiss_utterance(&mut self, utterance_id: &str) -> bool {
-        self.auto_chat.dismiss(utterance_id)
+        // Plan 225 D11: so does a dismissed one.
+        let row = self
+            .auto_chat
+            .utterance(utterance_id)
+            .and_then(welcomed_arrival_row);
+        let dismissed = self.auto_chat.dismiss(utterance_id);
+        if dismissed && let Some(row) = row {
+            self.community.note_welcomed(&[row]);
+        }
+        dismissed
     }
 
     /// The Say box (D7, plan 211 D1): one bubble-only utterance, in every
@@ -7943,6 +7958,13 @@ async fn apply_auto_chat_pass(
     publish_auto_chat_pass(state, pass, lifecycle_delivery).await;
 }
 
+/// Plan 225 D11: the arrival row a welcome greets, when the line is one.
+fn welcomed_arrival_row(utterance: &CohostUtterance) -> Option<String> {
+    (utterance.trigger.kind == CohostUtteranceTriggerKind::Greeting)
+        .then(|| utterance.trigger.event_id.clone())
+        .flatten()
+}
+
 /// The pass minus the pump: logs, proposals, bubble lines, the skip counts
 /// and the AI greet request. The pump itself calls this (it owns its own
 /// schedule). Nothing here sends (plan 211 D2): a Suggest card posts only
@@ -7992,13 +8014,14 @@ async fn publish_auto_chat_pass(
                 .iter()
                 .map(|utterance| engine.utterance_source(&utterance.id))
                 .collect();
-            // Plan 225 D11: a welcomed arrival leaves "Welcome back".
+            // Plan 225 D11: an arrival the bubble welcomed leaves "Welcome
+            // back". A Suggest card does not: the row stays until the card
+            // is posted or dismissed (`approve_utterance`,
+            // `dismiss_utterance`).
             let welcomed: Vec<String> = pass
                 .bubble
                 .iter()
-                .chain(pass.propose.iter())
-                .filter(|utterance| utterance.trigger.kind == CohostUtteranceTriggerKind::Greeting)
-                .filter_map(|utterance| utterance.trigger.event_id.clone())
+                .filter_map(welcomed_arrival_row)
                 .collect();
             engine.community.note_welcomed(&welcomed);
             // Plan 225 B6: the opt-in automatic milestone card.
