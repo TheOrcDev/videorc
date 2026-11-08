@@ -492,7 +492,7 @@ impl CloudStage {
         Ok(())
     }
 
-    fn frame(&self, id: &str) -> Value {
+    pub(crate) fn frame(&self, id: &str) -> Value {
         let mut frame = json!({
             "t": "intent",
             "id": id,
@@ -1338,20 +1338,6 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         send_intent(&tx, stage.frame(&id), id, ACK_TIMEOUT)
             .await
             .map(|_| ())
-    }
-
-    /// The stage again after a runner restart (`stageSet: false`), from the
-    /// control loop; best effort.
-    pub(crate) async fn resend_stage(&self) {
-        let stage = lock(&self.slot)
-            .talk
-            .as_ref()
-            .map(|talk| talk.stage.clone());
-        if let Some(stage) = stage
-            && let Err(problem) = self.send_stage(&stage).await
-        {
-            tracing::warn!("The stage did not reach the restarted runner: {problem}");
-        }
     }
 
     /// Record in a talk show (D10): the cloud recording.

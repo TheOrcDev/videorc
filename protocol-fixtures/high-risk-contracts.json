@@ -2624,7 +2624,6 @@
         "kind": "talk"
       },
       "connected": true,
-      "feeds": [],
       "legs": [
         {
           "targetId": "youtube",

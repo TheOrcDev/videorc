@@ -2171,9 +2171,19 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     .await
                     .map_err(|_| ())?;
             }
+            // Plan 224: the stage again after a runner restart, written to the
+            // socket like the hold image: this loop delivers the acks, so it
+            // never waits for one. The runner's `stageSet` says it landed.
             if self.resend_stage {
                 self.resend_stage = false;
-                self.context.resend_stage().await;
+                let stage = lock(&self.context.slot)
+                    .talk
+                    .as_ref()
+                    .map(|talk| talk.stage.clone());
+                if let Some(stage) = stage {
+                    let id = new_intent_id();
+                    transport.send(stage.frame(&id)).await.map_err(|_| ())?;
+                }
             }
             tokio::select! {
                 frame = transport.recv() => {
@@ -3275,6 +3285,9 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         {
             tracing::info!("Videorc Cloud end request failed (the runner's end stands): {error}");
         }
+        // Plan 224: the room goes with the show, and its camera comes back
+        // before the slot forgets the talk state (`clear_show` drops it).
+        self.forget_talk_show().await;
         let status = {
             let mut runtime = lock(&self.slot);
             runtime.clear_show(Some("ended-by-host".to_string()));
