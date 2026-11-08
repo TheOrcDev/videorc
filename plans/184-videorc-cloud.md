@@ -492,6 +492,37 @@ Desktop `origin/main` `4c798067`. `rec` means
   - Larix (both) pushes SRT and RTMP(S). SRTLA isn't listed
     ([Larix](https://softvelum.com/larix/)).
 
+### Update 2026-11-08: relaying and holds re-checked (plan 222 Y3)
+
+Plan 222 re-read the platform rules on relaying and on a hold card before
+the cloud reaches anyone but the owner. This update supersedes the
+2026-10-16 lines above on relaying and holds; where they differ, these win.
+Facts marked UNVERIFIED could not be read at the source by a fetch (the page
+needs a browser) and rest on secondary sources until someone re-reads them
+in a browser.
+
+| Platform | Relaying through a server | A hold card while the computer is gone | Source |
+| --- | --- | --- | --- |
+| YouTube | Allowed. Restream ("Stream live to 30+ platforms simultaneously from our cloud studio"), StreamYard, Upstream, Gyre and Grabyo are on the verified encoders list, so a cloud relay pushing to YouTube's ingest is an ordinary verified-encoder shape. | Nothing against it found. With `enableAutoStop` on, YouTube "automatically ends the broadcast about a minute after you stop transmitting video"; a runner on hold never stops transmitting, so auto-stop can't fire during a hold. Nothing is said about a brief drop and return. | [verified encoders](https://support.google.com/youtube/answer/2907883), [life of a broadcast](https://developers.google.com/youtube/v3/live/life-of-a-broadcast) |
+| Twitch | Simulcasting allowed; the Twitch experience must be no worse than elsewhere; don't send viewers away from Twitch; the written terms still name third-party services that merge other platforms' chat onto the Twitch stream, and Twitch's CEO said in February 2026 that this is no longer enforced. A relay changes none of it: the cloud sends Twitch the same picture. **UNVERIFIED at the source**: the ToS page (`twitch.tv/p/en/legal/terms-of-service/` redirects to `legal.twitch.com`) returns no article text to a fetch, again on 2026-11-08. | The Community Guidelines allow "a temporary 'Be Right Back' static image" and forbid static images or VODs whose core purpose is Drops farming. **UNVERIFIED at the source**: the Safety Center page returns "Loading" and a CSS error to a fetch, again on 2026-11-08. The 30-minute default hold limit (D12) is what keeps a hold temporary. | [upstream.so](https://upstream.so/blog/twitch-allows-unified-chat-simulcasting-rules/), [Lightstream](https://golightstream.com/how-to-comply-with-twitch-tos-when-simulcasting/), [esports.gg quoting Twitch](https://esports.gg/news/streamers/twitch-to-start-combatting-drop-farming-and-other-spam-content/), [Insider Gaming](https://insider-gaming.com/twitch-drops-campaigns-rules/) |
+| Kick | Allowed. Kick's help centre tells streamers how to stream through Restream, Castr and Restreamer, with no conditions. | The partner rules say "Avoid mirror streams, blank streams, or pre-recorded content" and nothing about static images or multistreaming. A long hold is a blank stream; the hold limit covers it. | [help](https://help.kick.com/en/articles/7135578-how-to-connect-your-kick-stream-to-restream-service), [rules](https://help.kick.com/en/articles/7901645-grounds-for-revoking-or-refusing-verification-or-the-kick-partner-program) |
+| X | Live Studio (in Creator Studio) has replaced Media Studio Producer. The Livestream API models a persistent source and an ephemeral broadcast bound to it. | A broadcast whose source stops sending video goes `TIMED OUT`: "Your livestream ended automatically because the source stopped sending video. Timed-out livestreams cannot be restarted and must be recreated." So on X the hold is the only thing that keeps a broadcast alive through a computer drop. This answers D13's open check: X ends a stream by itself when the RTMP stops. Third parties cite a 24 h cap (UNVERIFIED on X's own pages). | [Live Studio](https://help.x.com/en/using-x/live-studio), [Livestream API](https://docs.x.com/livestream-api/introduction) |
+| Facebook (not a Videorc destination; rules only) | RTMPS, and an 8-hour maximum per broadcast. UNVERIFIED at the source (Meta's spec page didn't render to a fetch); secondary sources agree. | Not checked. | [Restream](https://support.restream.io/en/articles/4798898-stream-to-a-facebook-group), [Upstream](https://upstream.so/live-streaming-limits/) |
+
+What this changes:
+
+- **Nothing in the design.** No platform forbids relaying, and every rule
+  found on a hold card is met by the hold limit (D12; plan 222 D9). STOP
+  condition "a platform's rules forbid relaying or a 30-minute hold" (plan
+  222) is not met.
+- **The 2026-10-16 X line is out of date.** "Producer" is now Live Studio,
+  and the open question in D13 is answered: X times a broadcast out when
+  video stops.
+- **Still owed:** the two Twitch pages, read in a browser by the owner or an
+  agent with one. Until then the Twitch rows rest on the secondary sources
+  above. If either page says something else about relaying or a temporary
+  card, that is plan 222's STOP.
+
 ## Decisions (⚑ = owner may override)
 
 ### D1. Talk shows come before the phone (owner)
