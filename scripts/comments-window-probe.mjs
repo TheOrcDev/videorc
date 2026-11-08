@@ -41,6 +41,13 @@ const REWARD_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-reward`
 const TIP_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-tip`
 // Plan 177: one unbroken token, the content that once widened a whole list.
 const LONG_LINK = `https://videorc.com/download?ref=${'orc'.repeat(40)}`
+// Plan 225 C4: the arrival rows the community phase drives.
+const ARRIVAL_IDS = {
+  regular: `${NEXT_LIVE_SESSION_ID}:twitch:probe-regular`,
+  back: `${NEXT_LIVE_SESSION_ID}:kick:probe-back`,
+  milestone: `${NEXT_LIVE_SESSION_ID}:youtube:probe-milestone`
+}
+const COMMUNITY_SHOTS_DIR = process.env.VIDEORC_COMMUNITY_SHOTS_DIR ?? null
 const HISTORY_SESSION_ID = 'comments-window-probe-history'
 const HISTORY_MODE = {
   kind: 'history',
@@ -950,12 +957,6 @@ async function probeNarrowWidths() {
 // Plan 225 C4: the arrival chips, the person card and "Welcome back" at
 // every width. The card's calls are answered by a fixture in main, so the
 // probe never needs a real community. Nothing here sends a chat message.
-const ARRIVAL_IDS = {
-  regular: `${NEXT_LIVE_SESSION_ID}:twitch:probe-regular`,
-  back: `${NEXT_LIVE_SESSION_ID}:kick:probe-back`,
-  milestone: `${NEXT_LIVE_SESSION_ID}:youtube:probe-milestone`
-}
-const COMMUNITY_SHOTS_DIR = process.env.VIDEORC_COMMUNITY_SHOTS_DIR ?? null
 
 async function probeCommunity() {
   await smokeCommand('comments-window-community-fixture', { answers: communityAnswers() })
