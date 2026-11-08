@@ -241,11 +241,6 @@ try {
       } else {
         pass('mic-muted', `opened ${sinceMute} ms after the mute, silence folded in`)
       }
-      if (opened && shotsDir) {
-        await captureStudioShots(smoke, 'mic-muted').catch((error) =>
-          console.log(`  • screenshots skipped: ${error?.message ?? error}`)
-        )
-      }
       if (!healthEvents.some((event) => event.code === 'watchdog-mic-muted' && event.level === 'error')) {
         fail('mic-muted health event', `no watchdog-mic-muted error event (${healthCodes()})`)
       } else {
@@ -254,7 +249,10 @@ try {
       // 6. Acknowledge: no repeat inside the dev repeat window.
       const alertId = opened?.id
       if (alertId) {
-        await request(ws, timeoutMs, 'watchdog.alert.acknowledge', { id: alertId })
+        const acknowledged0 = await request(ws, timeoutMs, 'watchdog.alert.acknowledge', {
+          id: alertId
+        }).catch((error) => ({ error: String(error?.message ?? error) }))
+        if (acknowledged0?.error) fail('acknowledge', `refused: ${acknowledged0.error}`)
         await sleep(REPEAT_WINDOW_MS)
         const repeated = alertViews.some((view) =>
           view.alerts.some((alert) => alert.id === alertId && alert.lastRepeatAt)
@@ -278,7 +276,7 @@ try {
     {
       const greyPath = join(outputDirectory, 'takeover-grey.png')
       makePng(greyPath, 'gray')
-      const imported = await request(ws, timeoutMs, 'screens.importImage', { path: greyPath })
+      const imported = await importTakeover(ws, smoke, greyPath)
       const screenId = imported?.screen?.id ?? imported?.id
       if (!screenId) {
         fail('takeover guard', `could not import the takeover: ${JSON.stringify(imported)}`)
@@ -305,7 +303,7 @@ try {
     {
       const blackPath = join(outputDirectory, 'takeover-black.png')
       makePng(blackPath, 'black')
-      const imported = await request(ws, timeoutMs, 'screens.importImage', { path: blackPath })
+      const imported = await importTakeover(ws, smoke, blackPath)
       const screenId = imported?.screen?.id ?? imported?.id
       if (!screenId) {
         fail('picture-black', `could not import the black takeover: ${JSON.stringify(imported)}`)
@@ -328,12 +326,14 @@ try {
       }
     }
 
-    // 3. The stall: the FIFO pause fires once PAUSE_AFTER_FRAMES frames in.
+    // 3. The stall: the FIFO pause fires once PAUSE_AFTER_FRAMES frames in,
+    //    which may land during an earlier scenario, so the health events
+    //    (persisted, D13) are the evidence: opened, then cleared.
     if (process.platform !== 'darwin') {
       skip('picture-stopped', 'the VideoToolbox FIFO pause seam is macOS only')
     } else {
       const stalled = await waitFor(
-        () => openAlerts().find((alert) => alert.check === 'picture-stopped'),
+        () => healthEvents.find((event) => event.code === 'watchdog-picture-stopped'),
         45000
       )
       if (!stalled) {
@@ -346,10 +346,10 @@ try {
         )
       } else {
         const cleared = await waitFor(
-          () => !openAlerts().some((alert) => alert.check === 'picture-stopped'),
+          () => healthEvents.find((event) => event.code === 'watchdog-picture-stopped-cleared'),
           15000
         )
-        if (cleared) pass('picture-stopped', `opened on the stall ("${stalled.detail}"), then cleared`)
+        if (cleared) pass('picture-stopped', `opened on the stall ("${stalled.message}"), then cleared`)
         else fail('picture-stopped', 'opened but never cleared after the pause')
       }
       await assertSessionRunning(ws, 'after the stall')
@@ -483,6 +483,21 @@ try {
       else pass('leak scan', `${everyEvent.length} events, no key and no ingest URL`)
     }
 
+    // The by-eye check (A5): a mic-muted card in dark and light. Last, because
+    // the renderer reload it needs re-applies the renderer's own audio
+    // settings (the mute is the renderer's), which would disturb a scenario.
+    if (shotsDir) {
+      await captureStudioShots(smoke, 'mic-muted', async () => {
+        await setMuted(ws, sessionId, true)
+        return waitFor(
+          () => openAlerts().find((alert) => alert.check === 'mic-muted'),
+          MIC_MUTED_AFTER_MS + 4000
+        )
+      }).catch((error) => console.log(`  • screenshots skipped: ${error?.message ?? error}`))
+      await setMuted(ws, sessionId, false)
+      await sleep(2000)
+    }
+
     // Stop inside the budget.
     const stopStartedAt = Date.now()
     const stopped = await request(ws, timeoutMs, 'session.stop')
@@ -556,6 +571,20 @@ function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 }
 
+// A takeover import takes main's single-use input-file capability, never a
+// raw path (plan 186): the smoke command server issues one for the file.
+async function importTakeover(ws, smoke, path) {
+  const authorized = await requestSmokeCommand(
+    smoke,
+    'authorize-smoke-resource',
+    { kind: 'input-file', path },
+    { timeoutMs }
+  )
+  return request(ws, timeoutMs, 'screens.importImage', {
+    sourceCapability: authorized.capabilityId
+  }).catch((error) => ({ error: String(error?.message ?? error) }))
+}
+
 function makePng(path, color) {
   execFileSync(
     ffmpegPath,
@@ -568,7 +597,10 @@ function makePng(path, color) {
 function sessionParams(outputDirectoryCapability) {
   const timestamp = '2026-01-01T00:00:00.000Z'
   return {
-    sources: { testPattern: true },
+    // The synthetic 440 Hz tone microphone (VIDEORC_CAPTION_CONTRACT_TEST +
+    // VIDEORC_LIVE_SOURCE_SWITCH_TEST, as smoke:output-stall): without a
+    // microphone the program is digital silence from the first frame.
+    sources: { testPattern: true, microphoneId: 'microphone:coreaudio:4294967295' },
     layout: {
       layoutPreset: 'screen-camera',
       cameraTransformMode: 'preset',
@@ -645,7 +677,7 @@ function stopListener(proc, signal) {
 
 // --- Screenshots (A5's by-eye check) ---------------------------------------
 
-async function captureStudioShots(smoke, stage) {
+async function captureStudioShots(smoke, stage, raise) {
   mkdirSync(shotsDir, { recursive: true })
   const devtools = await waitFor(
     () =>
@@ -669,9 +701,13 @@ async function captureStudioShots(smoke, stage) {
   await requestSmokeCommand(
     smoke,
     'open-tab',
-    { tab: 'studio', waitFor: '[data-testid="watchdog-alert"]' },
+    { tab: 'studio', waitFor: '[data-testid="session-stream-health"]' },
     { timeoutMs: 30000 }
   )
+  // The reload re-applied the renderer's own audio settings (the mute is
+  // the renderer's): raise the alert only now, and wait for its card.
+  if (!(await raise())) throw new Error(`no ${stage} card to shoot`)
+  await sleep(1500)
   const theme = () =>
     cdpEvaluate(host, `document.documentElement.classList.contains('dark') ? 'dark' : 'light'`)
   const setTheme = async (wanted) => {
@@ -684,7 +720,7 @@ async function captureStudioShots(smoke, stage) {
     await setTheme(wanted)
     await cdpEvaluate(
       host,
-      `document.querySelector('[data-testid="watchdog-alert"]')?.scrollIntoView({ block: 'center' }); 'ok'`
+      `document.querySelector('[data-testid="watchdog-alert"][data-check="${stage}"]')?.scrollIntoView({ block: 'center' }); 'ok'`
     )
     await sleep(200)
     const shot = await cdpCall(host, 'Page.captureScreenshot', { format: 'png' })
@@ -692,7 +728,7 @@ async function captureStudioShots(smoke, stage) {
     writeFileSync(file, Buffer.from(shot.data, 'base64'))
     const words = await cdpEvaluate(
       host,
-      `document.querySelector('[data-testid="watchdog-alert"]')?.innerText ?? ''`
+      `document.querySelector('[data-testid="watchdog-alert"][data-check="${stage}"]')?.innerText ?? ''`
     )
     console.log(`  [shots] ${stage} ${wanted}: ${file} (${JSON.stringify(words)})`)
   }

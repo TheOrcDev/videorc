@@ -1259,3 +1259,11 @@ Stop and report when:
 | D2 the desktop sends | **Done**. `watchdog/push.rs` builds the body (a count and a class for `chat-says`, never words; no URL, no key); `VideorcApiClient::post_alert_notify` on open and clear of critical and warning alerts, off without Premium or the switch; one session-log line per stream on failure, never a toast; `GET /api/alerts/devices` behind `watchdog.phone.devices` for the section's "Alerts reach {n} devices". |
 | D3 owner acceptance | Waits for the owner's phone. |
 
+### Gates (2026-11-08, on `plan-184-videorc-cloud`)
+
+- Rust: `cargo fmt --check --all`, `cargo clippy -p videorc-backend --all-targets -- -D warnings`, targeted `cargo test` (watchdog, platform_stream_watch, cloud_show, x_live, viewer_stats, protocol: 235) and the full `cargo test -p videorc-backend` (4,803 passed, 26 ignored).
+- TypeScript: `pnpm typecheck`, `pnpm lint` (the inherited `setDeviceList` warning only), `pnpm format:check`, `pnpm --filter @videorc/desktop test` (656 files, 7,341 tests), `pnpm test:scripts` (3,160).
+- `pnpm build` + `check:renderer-assets`: eager 2,338,620 raw / 480,088 gzip against the inherited 2,335,436 / 479,409 (+3,184 raw, +679 gzip; the ceilings 2,325,000 / 477,000 were already passed by the port, an owner call). The card, the surface, the section, the history and the words all load lazily; what stays eager is the alert list, one listener, one hydration effect, one mount effect and the two-word chip labels.
+- D10 measurement: one 64×36 sample of a 1080p frame costs 2.7 µs p95 (BGRA) / 1.3 µs (Y plane) in a debug build (`watchdog::luma::tests::one_sample_on_a_1080p_frame_is_far_under_a_frame_budget`, `--nocapture`); it runs on the watchdog's own task once a second, never on the compositor's frame thread, so the compositor's p95 is untouched. Far under 0.3 ms: the desktop check ships.
+- Smokes: see the handoff report for `smoke:stream-watchdog`, `smoke:cloud-solo` (watchdog scenario), `smoke:multistream`, `smoke:stream-leg-eof` and `smoke:live-chat-fake-providers`.
+
