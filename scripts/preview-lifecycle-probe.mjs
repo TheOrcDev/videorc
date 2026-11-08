@@ -472,6 +472,45 @@ async function main() {
   lifecycleEvidence.setContext({ cycle: null, action: 'shortcut-close' })
   await toggleClosed('shortcut path: cleanup close')
 
+  // Plan 224 C-G5: while a talk-show room is open the Show stage replaces
+  // the Preview: the window closes when the room opens and comes back when
+  // it closes, through the first-run rule (plan 203 S5). The room is
+  // scripted (no LiveKit): the renderer's DEV hook flips the same flag.
+  lifecycleEvidence.setContext({ cycle: null, action: 'talk-show-open-preview' })
+  await toggleOpen('talk show: preview open before the room')
+  lifecycleEvidence.setContext({ cycle: null, action: 'talk-show-room-open' })
+  await setTalkShowRoom(true, 'talk show: room open')
+  const hiddenForRoom = await waitForState((candidate) => candidate.open === false, 5000)
+  assertProbe(hiddenForRoom.ok, 'talk show: the Preview closed when the room opened', {
+    state: hiddenForRoom.last
+  })
+  const cardShown = await smokeCommand('eval-js', {
+    code: "return Boolean(document.querySelector('[data-testid=\"preview-replaced-by-show-stage\"]'))"
+  })
+  assertProbe(cardShown?.result === true, 'talk show: the Preview card names the Show stage', cardShown)
+  lifecycleEvidence.setContext({ cycle: null, action: 'talk-show-room-close' })
+  await setTalkShowRoom(false, 'talk show: room close')
+  const backAfterRoom = await waitForState(
+    (candidate) =>
+      candidate.open === true &&
+      candidate.visible === true &&
+      candidate.supervisor?.windowOpen === true &&
+      candidate.supervisor?.lifecycleState !== 'closed' &&
+      candidate.supervisor?.lifecycleState !== 'closing',
+    8000
+  )
+  assertProbe(backAfterRoom.ok, 'talk show: the Preview came back when the room closed', {
+    state: backAfterRoom.last
+  })
+  assertProbe(
+    supervisorGeneration(backAfterRoom.last) > lastSupervisorGeneration,
+    'talk show: the reopened Preview is a new supervisor generation',
+    { previous: lastSupervisorGeneration, state: backAfterRoom.last }
+  )
+  lastSupervisorGeneration = supervisorGeneration(backAfterRoom.last)
+  lifecycleEvidence.setContext({ cycle: null, action: 'talk-show-close' })
+  await toggleClosed('talk show: cleanup close')
+
   lifecycleEvidence.setContext({ cycle: null, action: 'final-open' })
   await toggleOpen('final reopen')
   lifecycleEvidence.setContext({ cycle: null, action: 'final-close' })
@@ -484,6 +523,15 @@ async function main() {
     `PASS - ${cycles} repeated preview toggle cycles preserved the ${windowsPreviewMode} surface contract and clean teardown.`
   )
   return 0
+}
+
+/** Plan 224 C-G5: the renderer's DEV hook that stands in for a room. */
+async function setTalkShowRoom(open, label) {
+  const answer = await smokeCommand('eval-js', {
+    code: 'return window.__videorcSmokeSetTalkShowRoomOpen?.(params.open) ?? null',
+    open
+  })
+  assertProbe(answer?.result === open, `${label}: the renderer took the scripted room`, answer)
 }
 
 async function setPreviewMode(mode, label) {

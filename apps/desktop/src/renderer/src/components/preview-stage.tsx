@@ -6,7 +6,7 @@ import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import type {
   DockHiddenReason,
   PreviewLiveStatus,
@@ -76,6 +76,7 @@ export function PreviewStage({
     performanceCheckProgress
   } = useStudioCore()
   const accessRows = useSystemAccessRows()
+  const { talkShow } = useStudioCloud()
   const permissionPane = previewPermissionPane(previewWindow.supervisor)
   const permissionRow = accessRows.find((candidate) => candidate.id === permissionPane)
   const permissionAccess: PreviewPermissionAccess | null = permissionPane
@@ -91,11 +92,28 @@ export function PreviewStage({
       }
     : null
 
+  // Plan 224 D7 (C-G5): while the room is open the Show stage is the host's
+  // picture; the native Preview (the backend's program) is closed by the
+  // provider and this card says why. No Open here: the room decides.
+  const previewReplaced = talkShow.previewReplaced
   const docked =
-    nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
+    nativePreviewSurfaceEnabled &&
+    previewWindow.open &&
+    previewWindow.mode === 'docked' &&
+    !previewReplaced
   // The reporter is active exactly while the docked frame is on screen; its
   // cleanup tells main the slot unmounted (tab switch, undock, close).
   const slotRef = useDockSlotReporter(docked, previewWindow.dockEpoch, 'studio')
+
+  if (previewReplaced) {
+    return (
+      <TalkShowPreviewCard
+        aspect={{ width: captureConfig.video.width, height: captureConfig.video.height }}
+        className={className}
+        onCloseRoom={() => void talkShow.closeRoom()}
+      />
+    )
+  }
 
   if (docked) {
     return (
@@ -137,6 +155,39 @@ export function PreviewStage({
       onStick={() => void setPreviewWindowMode('docked')}
       platform={runtimeInfo?.platform}
     />
+  )
+}
+
+/** Plan 224 D7: the Preview's one line while the room is open. */
+export const PREVIEW_REPLACED_BY_SHOW_STAGE =
+  'The Show stage replaces the Preview while the room is open.'
+export const CLOSE_THE_ROOM_LABEL = 'Close the room'
+
+function TalkShowPreviewCard({
+  aspect,
+  className,
+  onCloseRoom
+}: {
+  aspect: { width: number; height: number }
+  className?: string
+  onCloseRoom: () => void
+}): ReactElement {
+  return (
+    <div
+      className={cn(
+        'flex w-full flex-col items-center justify-center gap-3 rounded-panel bg-inset px-6 text-center',
+        className
+      )}
+      data-testid="preview-replaced-by-show-stage"
+      data-videorc-preview-card
+      style={{ aspectRatio: previewFootprintRatio(aspect) }}
+    >
+      <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
+      <span className="text-sm font-medium">{PREVIEW_REPLACED_BY_SHOW_STAGE}</span>
+      <Button size="xs" type="button" variant="outline" onClick={onCloseRoom}>
+        {CLOSE_THE_ROOM_LABEL}
+      </Button>
+    </div>
   )
 }
 
