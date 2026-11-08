@@ -925,6 +925,23 @@ pub async fn summary(state: &AppState) -> Result<CommunitySummary, CommunityErro
     current_summary(state).await
 }
 
+/// `cohost.community.suggestions` (D12 "Links that need you"): every open
+/// suggestion and cancelled `!link`, newest first.
+pub async fn suggestions(
+    state: &AppState,
+) -> Result<crate::community::CommunitySuggestionsPage, CommunityError> {
+    blocking(state, move |database| {
+        Ok(crate::community::CommunitySuggestionsPage {
+            suggestions: database
+                .community_open_suggestions()?
+                .into_iter()
+                .take(500)
+                .collect(),
+        })
+    })
+    .await
+}
+
 pub async fn list(
     state: &AppState,
     params: CommunityListParams,

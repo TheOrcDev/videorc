@@ -67,6 +67,7 @@ import type {
   CommunityLinkEvent,
   CommunityLinkParams,
   CommunityListPage,
+  CommunitySuggestionsPage,
   CommunityListParams,
   CommunityMemory,
   CommunityPathParams,
@@ -672,6 +673,7 @@ export interface BackendRpcMethodMap {
   // --- Know your viewers (plan 225 A5) ---
   'cohost.community.summary': BackendRpcDefinition<undefined, CommunitySummary>
   'cohost.community.list': BackendRpcDefinition<CommunityListParams, CommunityListPage>
+  'cohost.community.suggestions': BackendRpcDefinition<undefined, CommunitySuggestionsPage>
   'cohost.community.person': BackendRpcDefinition<CommunityPersonParams, CommunityPerson>
   'cohost.community.update': BackendRpcDefinition<CommunityUpdateParams, CommunityPerson>
   'cohost.community.link': BackendRpcDefinition<CommunityLinkParams, CommunityPerson>
@@ -4146,6 +4148,10 @@ const communitySuggestionSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CommunitySuggestion>
+const communitySuggestionsPageSchema = objectSchema(
+  { suggestions: arraySchema(communitySuggestionSchema, { maxLength: 500 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<CommunitySuggestionsPage>
 const communityLinkEventSchema = objectSchema(
   {
     id: boundedString,
@@ -6461,6 +6467,10 @@ const runtimeContracts = {
   // --- Know your viewers (plan 225 A5) ---
   'cohost.community.summary': { params: undefinedSchema, result: communitySummarySchema },
   'cohost.community.list': { params: communityListParamsSchema, result: communityListPageSchema },
+  'cohost.community.suggestions': {
+    params: undefinedSchema,
+    result: communitySuggestionsPageSchema
+  },
   'cohost.community.person': { params: communityPersonParamsSchema, result: communityPersonSchema },
   'cohost.community.update': { params: communityUpdateParamsSchema, result: communityPersonSchema },
   'cohost.community.link': { params: communityLinkParamsSchema, result: communityPersonSchema },

@@ -6035,6 +6035,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.report.latest"
         | "cohost.community.summary"
         | "cohost.community.list"
+        | "cohost.community.suggestions"
         | "cohost.community.person"
         | "ai.capabilities.get"
         | "ai.quota.get"
@@ -10338,6 +10339,11 @@ async fn handle_text_message_with_role(
             Ok(params) => community_rpc(command.id, community_service::list(state, params).await),
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
+        // Plan 225 D-2: "Links that need you", the open suggestions and
+        // cancelled `!link`s, newest first.
+        "cohost.community.suggestions" => {
+            community_rpc(command.id, community_service::suggestions(state).await)
+        }
         "cohost.community.person" => match serde_json::from_value(command.params) {
             Ok(params) => community_rpc(command.id, community_service::person(state, params).await),
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),

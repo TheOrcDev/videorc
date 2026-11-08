@@ -1269,6 +1269,12 @@ impl Database {
         })
     }
 
+    /// D12 "Links that need you": the open suggestions, newest first.
+    pub fn community_open_suggestions(&self) -> Result<Vec<CommunitySuggestion>> {
+        let conn = self.lock()?;
+        open_suggestions_locked(&conn, None)
+    }
+
     /// `cohost.community.list` (D12): search, filter, sort, page.
     pub fn community_list(
         &self,

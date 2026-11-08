@@ -4025,6 +4025,17 @@ describe('Know your viewers wire contract (plan 225 A6)', () => {
     )
   })
 
+  it('lists the links that need you (plan 225 D-2)', () => {
+    const suggestions = (fixture.person as { suggestions: unknown[] }).suggestions
+    expect(validateBackendRpcResult('cohost.community.suggestions', { suggestions })).toEqual({
+      suggestions
+    })
+    expect(validateBackendRpcParams('cohost.community.suggestions', undefined)).toBeUndefined()
+    expect(() =>
+      validateBackendRpcResult('cohost.community.suggestions', { suggestions, extra: 1 })
+    ).toThrow()
+  })
+
   it('carries the report Community block (plan 225 D15), absent in older reports', () => {
     const report = {
       version: 1,

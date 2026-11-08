@@ -7582,6 +7582,11 @@ export interface CommunityPerson {
   youtube?: boolean
 }
 
+/** `cohost.community.suggestions` (D12 "Links that need you"). */
+export interface CommunitySuggestionsPage {
+  suggestions: CommunitySuggestion[]
+}
+
 export interface CommunityPersonRow {
   id: string
   name: string

@@ -218,6 +218,13 @@ pub struct CommunityMemory {
 }
 
 /// "Might be the same person" (D4 c), or a cancelled `!link` (D4 b).
+/// `cohost.community.suggestions` (D12): the open ones, newest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunitySuggestionsPage {
+    pub suggestions: Vec<CommunitySuggestion>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommunitySuggestion {
