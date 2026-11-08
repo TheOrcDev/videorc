@@ -29,7 +29,11 @@ export const BUDDY_TRIGGER_COPY: Readonly<Record<BuddyTrigger, { title: string; 
     raid: { title: 'Raid', detail: 'Another channel raids you' },
     'watch-streak': { title: 'Watch streak', detail: 'A viewer shares their streak' },
     redemption: { title: 'Reward redeemed', detail: 'Channel points and rewards' },
-    'destination-failed': { title: 'A destination fails', detail: 'Off by default' }
+    'destination-failed': { title: 'A destination fails', detail: 'Off by default' },
+    // Plan 225 D9: the arrivals the community store knows.
+    regular: { title: 'A regular arrives', detail: 'Their first chat of the stream' },
+    comeback: { title: 'Back after a while', detail: 'Their first chat in 30 days or more' },
+    milestone: { title: 'Milestone', detail: 'Their 10th stream, 5 in a row, one year' }
   }
 
 /** The Reactions list, sectioned: what viewers do, then what the stream does. */
@@ -41,6 +45,7 @@ export const BUDDY_TRIGGER_SECTIONS: readonly {
     label: 'Viewers',
     triggers: ['follow', 'subscription', 'gift', 'tip', 'raid', 'watch-streak', 'redemption']
   },
+  { label: 'Regulars', triggers: ['regular', 'comeback', 'milestone'] },
   { label: 'Your stream', triggers: ['destination-failed'] }
 ]
 

@@ -706,11 +706,22 @@
               "text": "Yo {name}, back again!",
               "state": "laugh",
               "reaction": "wave"
-            }
+            },
+            "regular": { "enabled": true, "state": "talk" },
+            "comeback": { "enabled": true, "state": "talk" },
+            "milestone": { "enabled": true, "state": "talk" }
           }
         },
         "answers": { "enabled": true, "cooldownSeconds": 30 },
         "banter": { "enabled": false, "cooldownSeconds": 240 }
+      },
+      "community": {
+        "enabled": true,
+        "regularStreams": 5,
+        "welcomeOnStream": false,
+        "milestoneCards": true,
+        "remember": false,
+        "sync": false
       }
     },
     "settings": {
@@ -743,11 +754,22 @@
           "ai": true,
           "welcomes": {
             "firstTime": { "enabled": true, "state": "talk" },
-            "returning": { "enabled": true, "state": "talk" }
+            "returning": { "enabled": true, "state": "talk" },
+            "regular": { "enabled": true, "state": "talk" },
+            "comeback": { "enabled": true, "state": "talk" },
+            "milestone": { "enabled": true, "state": "talk" }
           }
         },
         "answers": { "enabled": true, "cooldownSeconds": 20 },
         "banter": { "enabled": false, "cooldownSeconds": 240 }
+      },
+      "community": {
+        "enabled": true,
+        "regularStreams": 3,
+        "welcomeOnStream": true,
+        "milestoneCards": false,
+        "remember": false,
+        "sync": false
       }
     },
     "state": {

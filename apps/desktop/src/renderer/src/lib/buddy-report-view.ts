@@ -607,7 +607,8 @@ const POST_TRIGGER_LABELS: Record<CohostReportPost['trigger'], string> = {
   greeting: 'Greeting',
   answer: 'Answer',
   banter: 'Banter',
-  manual: 'Say'
+  manual: 'Say',
+  community: 'Community'
 }
 
 const POST_RESULT_LABELS: Record<CohostReportPost['result'], string> = {

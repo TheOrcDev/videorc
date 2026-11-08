@@ -1,0 +1,298 @@
+{
+  "$comment": "Plan 225 (Know your viewers across platforms): the community wire shapes. Rust (community::tests::shared_community_fixture) and TypeScript (backend-rpc-contract.test.ts) each assert these round-trip field for field. Absent fields are omitted, never null: `plainRow` has no `arrival`, `arrivalRow` carries one, and `rejected` holds shapes the renderer must refuse.",
+  "version": 1,
+  "arrivalRow": {
+    "id": "session-fixture:twitch:default:arrival-1",
+    "providerMessageId": "arrival-1",
+    "platform": "twitch",
+    "sessionId": "session-fixture",
+    "authorId": "1001",
+    "authorName": "Ada",
+    "authorBadges": [],
+    "authorRoles": [],
+    "publishedAt": "2026-11-08T18:00:00Z",
+    "receivedAt": "2026-11-08T18:00:00.120Z",
+    "messageText": "hi!!",
+    "fragments": [{ "type": "text", "text": "hi!!" }],
+    "eventType": "message",
+    "isDeleted": false,
+    "rawProviderType": "channel.chat.message",
+    "arrival": {
+      "streams": 14,
+      "regular": true,
+      "awayDays": 31,
+      "inARow": 5,
+      "milestone": { "kind": "streams", "value": 10 },
+      "platforms": ["twitch", "youtube"],
+      "since": "2026-03"
+    }
+  },
+  "plainRow": {
+    "id": "session-fixture:twitch:default:plain-9",
+    "providerMessageId": "plain-9",
+    "platform": "twitch",
+    "sessionId": "session-fixture",
+    "authorId": "1002",
+    "authorName": "newcomer",
+    "authorBadges": [],
+    "authorRoles": [],
+    "publishedAt": "2026-11-08T18:00:05Z",
+    "receivedAt": "2026-11-08T18:00:05.080Z",
+    "messageText": "first time here",
+    "fragments": [{ "type": "text", "text": "first time here" }],
+    "eventType": "message",
+    "isDeleted": false,
+    "rawProviderType": "channel.chat.message",
+    "firstMessage": true
+  },
+  "minimalArrival": { "streams": 2, "regular": false, "inARow": 1 },
+  "settings": {
+    "enabled": true,
+    "regularStreams": 3,
+    "welcomeOnStream": true,
+    "milestoneCards": false,
+    "remember": false,
+    "sync": false
+  },
+  "summary": {
+    "people": 312,
+    "regulars": 18,
+    "streams": 41,
+    "newRegularsThisWeek": 2,
+    "linksPending": 1,
+    "backfill": { "state": "done", "done": 41, "total": 41 }
+  },
+  "person": {
+    "id": "person-ada",
+    "name": "Ada",
+    "avatarUrl": "https://static-cdn.jtvnw.net/jtv_user_pictures/ada.png",
+    "accounts": [
+      {
+        "accountKey": "twitch:1001",
+        "platform": "twitch",
+        "authorId": "1001",
+        "name": "Ada",
+        "handle": "ada",
+        "avatarUrl": "https://static-cdn.jtvnw.net/jtv_user_pictures/ada.png",
+        "firstSeenAt": "2026-03-02T19:00:00.000Z",
+        "lastSeenAt": "2026-11-08T18:00:00.120Z"
+      },
+      {
+        "accountKey": "youtube:UCada",
+        "platform": "youtube",
+        "authorId": "UCada",
+        "name": "ada_dev",
+        "firstSeenAt": "2026-10-20T19:00:00.000Z",
+        "lastSeenAt": "2026-11-01T19:00:00.000Z"
+      }
+    ],
+    "streams": 14,
+    "messages": 812,
+    "inARow": 5,
+    "bestInARow": 7,
+    "regular": true,
+    "firstSeenAt": "2026-03-02T19:00:00.000Z",
+    "lastSeenAt": "2026-11-08T18:00:00.120Z",
+    "support": { "bits": 4500, "giftedSubs": 3, "tips": { "USD": 20000000 } },
+    "milestones": ["streams-5", "streams-10", "row-5"],
+    "note": "Learning Rust",
+    "status": "normal",
+    "memories": [
+      {
+        "id": "memory-1",
+        "accountKey": "twitch:1001",
+        "text": "Asked about Rust lifetimes last stream",
+        "sessionId": "session-earlier",
+        "createdAt": "2026-11-01T21:00:00.000Z",
+        "updatedAt": "2026-11-01T21:00:00.000Z"
+      }
+    ],
+    "suggestions": [
+      {
+        "accountA": {
+          "accountKey": "kick:77",
+          "platform": "kick",
+          "authorId": "77",
+          "name": "Ada",
+          "firstSeenAt": "2026-10-30T19:00:00.000Z",
+          "lastSeenAt": "2026-10-30T19:00:00.000Z"
+        },
+        "accountB": {
+          "accountKey": "twitch:1001",
+          "platform": "twitch",
+          "authorId": "1001",
+          "name": "Ada",
+          "handle": "ada",
+          "avatarUrl": "https://static-cdn.jtvnw.net/jtv_user_pictures/ada.png",
+          "firstSeenAt": "2026-03-02T19:00:00.000Z",
+          "lastSeenAt": "2026-11-08T18:00:00.120Z"
+        },
+        "reason": "name",
+        "createdAt": "2026-10-30T19:00:00.000Z"
+      }
+    ],
+    "linkEvents": [
+      {
+        "id": "link-1",
+        "accountKey": "youtube:UCada",
+        "kind": "self",
+        "at": "2026-10-20T19:10:00.000Z"
+      }
+    ],
+    "youtube": true
+  },
+  "unknownPerson": {
+    "id": "",
+    "name": "newcomer",
+    "accounts": [
+      {
+        "accountKey": "twitch:1002",
+        "platform": "twitch",
+        "authorId": "1002",
+        "name": "newcomer",
+        "firstSeenAt": "2026-11-08T18:00:05.080Z",
+        "lastSeenAt": "2026-11-08T18:00:05.080Z"
+      }
+    ],
+    "streams": 0,
+    "messages": 0,
+    "inARow": 0,
+    "bestInARow": 0,
+    "regular": false,
+    "support": {},
+    "note": "",
+    "status": "normal"
+  },
+  "listPage": {
+    "people": [
+      {
+        "id": "person-ada",
+        "name": "Ada",
+        "avatarUrl": "https://static-cdn.jtvnw.net/jtv_user_pictures/ada.png",
+        "platforms": ["twitch", "youtube"],
+        "streams": 14,
+        "regular": true,
+        "lastSeenAt": "2026-11-08T18:00:00.120Z",
+        "status": "normal"
+      },
+      {
+        "id": "person-nightbot",
+        "name": "Nightbot",
+        "platforms": ["twitch"],
+        "streams": 41,
+        "regular": false,
+        "lastSeenAt": "2026-11-08T18:00:00.000Z",
+        "status": "bot"
+      }
+    ],
+    "nextCursor": "2"
+  },
+  "listParams": {
+    "query": "ada",
+    "filter": "linked",
+    "sort": "recent",
+    "cursor": "0",
+    "limit": 50
+  },
+  "state": {
+    "sessionId": "session-fixture",
+    "status": "listening",
+    "reason": null,
+    "detail": null,
+    "questions": [],
+    "flags": [],
+    "mood": null,
+    "lastTickAt": null,
+    "tickSeq": 0,
+    "partial": false,
+    "tickInFlight": false,
+    "pendingMessages": 0,
+    "nextTickAt": null,
+    "messagesSeen": 0,
+    "questionsTotal": 0,
+    "welcomeBack": [
+      {
+        "personId": "person-ada",
+        "authorKey": "twitch:1001",
+        "name": "Ada",
+        "platform": "twitch",
+        "arrival": {
+          "streams": 14,
+          "regular": true,
+          "inARow": 5,
+          "platforms": ["twitch", "youtube"],
+          "since": "2026-03"
+        },
+        "firstSeenAt": "2026-11-08T18:00:00.120Z"
+      }
+    ],
+    "linkMade": [
+      {
+        "personId": "person-ada",
+        "names": ["Ada", "ada_dev"],
+        "platforms": ["twitch", "youtube"],
+        "accountKey": "youtube:UCada",
+        "at": "2026-11-08T18:03:00.000Z"
+      }
+    ]
+  },
+  "rejected": {
+    "arrivals": [
+      { "streams": 2, "regular": false, "inARow": 1, "awayDays": null },
+      { "streams": 2, "regular": false, "inARow": 1, "milestone": null },
+      { "streams": 2, "regular": false, "inARow": 1, "platforms": null },
+      {
+        "streams": 2,
+        "regular": false,
+        "inARow": 1,
+        "milestone": { "kind": "birthday", "value": 1 }
+      },
+      { "streams": 2, "regular": false, "inARow": 1, "extra": true }
+    ],
+    "people": [
+      {
+        "id": "x",
+        "name": "x",
+        "accounts": [],
+        "streams": 0,
+        "messages": 0,
+        "inARow": 0,
+        "bestInARow": 0,
+        "regular": false,
+        "support": {},
+        "note": "",
+        "status": "unknown"
+      },
+      {
+        "id": "x",
+        "name": "x",
+        "accounts": [],
+        "streams": 0,
+        "messages": 0,
+        "inARow": 0,
+        "bestInARow": 0,
+        "regular": false,
+        "support": {},
+        "note": "",
+        "status": "normal",
+        "avatarUrl": null
+      }
+    ],
+    "linkMade": [
+      {
+        "personId": "p",
+        "names": ["Ada"],
+        "platforms": ["twitch", "youtube"],
+        "accountKey": "a",
+        "at": "2026-11-08T18:03:00.000Z"
+      },
+      {
+        "personId": "p",
+        "names": ["Ada", "B", "C"],
+        "platforms": ["twitch", "youtube"],
+        "accountKey": "a",
+        "at": "2026-11-08T18:03:00.000Z"
+      }
+    ]
+  }
+}
