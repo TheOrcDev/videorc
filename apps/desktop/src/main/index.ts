@@ -928,6 +928,9 @@ type CommentsSmokeCommandFixture =
       reason: string
     }
 let commentsSmokeCommandFixture: CommentsSmokeCommandFixture | null = null
+// Plan 225 C4: the comments probe answers the person card's relay from a
+// fixture, keyed by method. Only a smoke command sets it.
+let commentsSmokeCommunityFixture: Record<string, unknown> | null = null
 let commentsSmokeCommandTrace: Record<string, unknown> | null = null
 let commentsSmokeSnapshotOverride = false
 // Once a smoke seeds viewers or co-host state, the idle main renderer's pushes
@@ -12992,6 +12995,159 @@ async function runSmokePreviewMotionCommand(
     throw new Error('Invalid Chat smoke command fixture.')
   }
 
+  // Plan 225 C4: answer the person card's calls from a fixture (null clears).
+  if (command === 'comments-window-community-fixture') {
+    const answers = params.answers
+    commentsSmokeCommunityFixture =
+      answers && typeof answers === 'object' ? (answers as Record<string, unknown>) : null
+    return { methods: Object.keys(commentsSmokeCommunityFixture ?? {}) }
+  }
+
+  // Plan 225 C4: the community surfaces' real geometry. `inspect` reads the
+  // arrival chips, "Welcome back" and the link cards; `open` opens a row's
+  // person card by a real right-click (or ⋯) and measures it; `close` sends
+  // Escape; `pane` picks the Chat or Buddy pane; `click-chip` clicks a chip
+  // with a real mouse click (it must act as the row: on stream).
+  if (command === 'comments-window-person-card') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return { ok: false, reason: 'Chat window is not open.' }
+    }
+    const run = (script: string): Promise<unknown> =>
+      window.webContents.executeJavaScript(script, true)
+    const click = async (
+      point: { x: number; y: number },
+      button: 'left' | 'right' = 'left'
+    ): Promise<void> => {
+      window.focus()
+      for (const type of ['mouseDown', 'mouseUp'] as const) {
+        window.webContents.sendInputEvent({ type, x: point.x, y: point.y, button, clickCount: 1 })
+      }
+    }
+    const action = typeof params.action === 'string' ? params.action : 'inspect'
+    if (action === 'pane') {
+      const pane = params.pane === 'buddy' ? 'Buddy' : 'Chat'
+      const point = (await run(`(() => {
+        const button = Array.from(document.querySelectorAll('[role="tab"], [role="radio"], button'))
+          .find((candidate) => candidate.textContent?.trim().startsWith(${jsonForInlineScript(pane)}) && candidate.getBoundingClientRect().width > 0 && (candidate.getAttribute('role') === 'tab' || candidate.closest('[data-slot="pane-tabs-narrow"]')));
+        if (!button) return null;
+        const box = button.getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+      })()`)) as { x: number; y: number } | null
+      if (point) await click(point)
+      await delay(250)
+      return { ok: point !== null, pane }
+    }
+    if (action === 'close') {
+      for (const type of ['keyDown', 'keyUp'] as const) {
+        window.webContents.sendInputEvent({ type, keyCode: 'Escape' })
+      }
+      await delay(300)
+      const open = await run(
+        `Boolean(document.querySelector('[data-testid="person-card-popover"], [data-testid="person-card-dialog"], [data-testid="comment-person-menu"]'))`
+      )
+      return { ok: true, closed: open === false }
+    }
+    const messageId = typeof params.messageId === 'string' ? params.messageId : ''
+    if (action === 'click-chip') {
+      const point = (await run(`(() => {
+        const row = Array.from(document.querySelectorAll('[data-message-id]'))
+          .find((candidate) => candidate.getAttribute('data-message-id') === ${jsonForInlineScript(messageId)});
+        const chip = row?.querySelector('[data-testid="comment-arrival"]');
+        if (!chip) return null;
+        chip.scrollIntoView({ block: 'center' });
+        const box = chip.getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), phase: row.getAttribute('data-highlight-phase') };
+      })()`)) as { x: number; y: number; phase: string } | null
+      if (!point) return { ok: false, reason: 'No chip in that row.' }
+      await click(point)
+      return { ok: true, before: point.phase }
+    }
+    if (action === 'open') {
+      const via = params.via === 'menu' ? 'menu' : 'context'
+      const target = (await run(`(() => {
+        const row = Array.from(document.querySelectorAll('[data-message-id]'))
+          .find((candidate) => candidate.getAttribute('data-message-id') === ${jsonForInlineScript(messageId)});
+        if (!row) return null;
+        row.scrollIntoView({ block: 'center' });
+        const part = ${jsonForInlineScript(via)} === 'menu'
+          ? row.querySelector('[data-slot="kebab-menu-trigger"], button[aria-label^="Actions for"]')
+          : row.querySelector('[id$="-author"]') ?? row;
+        if (!part) return null;
+        const box = part.getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+      })()`)) as { x: number; y: number } | null
+      if (!target) return { ok: false, reason: 'No such row.' }
+      await click(target, via === 'menu' ? 'left' : 'right')
+      await delay(300)
+      const menu = (await run(`(() => {
+        const items = Array.from(document.querySelectorAll('[data-testid="comment-person-menu"] [data-slot="context-menu-item"], [role="menu"] [role="menuitem"]'));
+        const about = items.find((item) => item.textContent?.trim().startsWith('About '));
+        if (!about) return { items: items.map((item) => item.textContent?.trim()) };
+        const box = about.getBoundingClientRect();
+        return { items: items.map((item) => item.textContent?.trim()), x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+      })()`)) as { items: string[]; x?: number; y?: number }
+      if (menu.x === undefined || menu.y === undefined) {
+        return { ok: false, reason: 'No About item.', menu }
+      }
+      await click({ x: menu.x, y: menu.y })
+      let card: unknown = null
+      for (let attempt = 0; attempt < 30 && !card; attempt += 1) {
+        await delay(100)
+        card = await run(`(() => {
+          const popup = document.querySelector('[data-testid="person-card-popover"], [data-testid="person-card-dialog"]');
+          const body = popup?.querySelector('[data-slot="person-card"]');
+          if (!popup || !body) return null;
+          const box = popup.getBoundingClientRect();
+          const inWindow = (rect) => rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= window.innerWidth + 0.5 && rect.bottom <= window.innerHeight + 0.5;
+          const controls = Array.from(popup.querySelectorAll('button, textarea')).filter((element) => element.getBoundingClientRect().width > 0).map((element) => {
+            const rect = element.getBoundingClientRect();
+            return { text: element.textContent?.trim() || element.getAttribute('aria-label') || element.tagName, inside: inWindow(rect) && rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5 };
+          });
+          return {
+            surface: popup.getAttribute('data-testid') === 'person-card-dialog' ? 'dialog' : 'popover',
+            box: { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height },
+            window: { width: window.innerWidth, height: window.innerHeight },
+            inWindow: inWindow(box),
+            overflow: body.scrollWidth > body.clientWidth + 1,
+            controls,
+            text: body.innerText
+          };
+        })()`)
+      }
+      return { ok: Boolean(card), menu: menu.items, card }
+    }
+    // inspect
+    return run(`(() => {
+      const inWindow = (rect) => rect.width > 0 && rect.left >= -0.5 && rect.right <= window.innerWidth + 0.5;
+      const chips = Array.from(document.querySelectorAll('[data-message-id] [data-testid="comment-arrival"]')).map((chip) => {
+        const row = chip.closest('[data-message-id]');
+        const rect = chip.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        return {
+          messageId: row.getAttribute('data-message-id'),
+          kind: chip.getAttribute('data-arrival'),
+          text: chip.textContent?.trim(),
+          inside: inWindow(rect) && rect.right <= rowRect.right + 0.5,
+          inRowButton: Boolean(chip.closest('[data-message-id] > button'))
+        };
+      });
+      const welcomeBack = Array.from(document.querySelectorAll('[data-slot="cohost-welcome-back-row"]')).filter((row) => row.getBoundingClientRect().width > 0).map((row) => {
+        const wave = row.querySelector('[data-testid="cohost-welcome-back-wave"]');
+        return {
+          personId: row.getAttribute('data-person-id'),
+          text: row.textContent?.trim(),
+          waveInside: wave ? inWindow(wave.getBoundingClientRect()) : false
+        };
+      });
+      const linkCards = Array.from(document.querySelectorAll('[data-testid="link-made-card"]')).filter((card) => card.getBoundingClientRect().width > 0).map((card) => ({
+        title: card.querySelector('[data-slot="buddy-card-title"]')?.textContent?.trim(),
+        buttonsInside: Array.from(card.querySelectorAll('button')).every((button) => inWindow(button.getBoundingClientRect()))
+      }));
+      return { ok: true, chips, welcomeBack, linkCards, documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 1 };
+    })()`)
+  }
+
   if (command === 'comments-window-command-trace') {
     return {
       pendingCount: commentsCommandBroker.pendingCount,
@@ -17850,6 +18006,12 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:community', (event, command) => {
     if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
       return Promise.reject(new Error('Only Stream Manager can ask about a person here.'))
+    }
+    const fixture = commentsSmokeCommunityFixture
+    if (fixture) {
+      return command.method in fixture
+        ? Promise.resolve(fixture[command.method])
+        : Promise.reject(new Error('The probe has no answer for that.'))
     }
     return commentsCommandBroker.request<unknown>(
       command.requestId,

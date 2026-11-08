@@ -10,7 +10,7 @@
 //
 // Exits 0 when all assertions pass, 1 otherwise.
 
-import { mkdirSync } from 'node:fs'
+import { copyFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -627,6 +627,7 @@ async function main() {
 
   await probeLinksAndStreaks()
   await probeNarrowWidths()
+  await probeCommunity()
 
   const closed = await smokeCommand('comments-window-toggle')
   assertProbe(
@@ -944,6 +945,311 @@ async function probeNarrowWidths() {
     (s) => s.bounds && Math.abs(s.bounds.width - 420) <= 6,
     5000
   )
+}
+
+// Plan 225 C4: the arrival chips, the person card and "Welcome back" at
+// every width. The card's calls are answered by a fixture in main, so the
+// probe never needs a real community. Nothing here sends a chat message.
+const ARRIVAL_IDS = {
+  regular: `${NEXT_LIVE_SESSION_ID}:twitch:probe-regular`,
+  back: `${NEXT_LIVE_SESSION_ID}:kick:probe-back`,
+  milestone: `${NEXT_LIVE_SESSION_ID}:youtube:probe-milestone`
+}
+const COMMUNITY_SHOTS_DIR = process.env.VIDEORC_COMMUNITY_SHOTS_DIR ?? null
+
+async function probeCommunity() {
+  await smokeCommand('comments-window-community-fixture', { answers: communityAnswers() })
+  await smokeCommand('comments-window-push-snapshot', { snapshot: communitySnapshot() })
+  await smokeCommand('comments-window-seed-viewers', { sample: viewerSampleFixture() })
+  await smokeCommand('comments-window-seed-dashboard', { state: dashboardFixture() })
+  await smokeCommand('comments-window-seed-cohost', { state: cohostCommunityFixture() })
+  await smokeCommand('comments-window-set-command-fixture', {
+    kind: 'highlight',
+    outcome: 'live',
+    delayMs: 50
+  })
+  const shots = []
+  const shoot = async (name, label, width, height) => {
+    const capture = await captureState(name, label, width, height)
+    if (capture?.file) shots.push(capture.file)
+  }
+  for (const theme of ['dark', 'light']) {
+    await smokeCommand('comments-window-set-theme', { theme })
+    for (const width of SWEEP_WIDTHS) {
+      const tag = `community ${theme} ${width}px`
+      await layoutAt(width)
+      await smokeCommand('comments-window-person-card', { action: 'pane', pane: 'chat' })
+      const seen = await waitFor(
+        () => smokeCommand('comments-window-person-card', { action: 'inspect' }),
+        (s) => s.chips?.length === 3,
+        5000
+      )
+      const chips = seen.last?.chips ?? []
+      assertProbe(
+        seen.ok &&
+          chips.every((chip) => chip.inside && chip.inRowButton) &&
+          chips.find((chip) => chip.messageId === ARRIVAL_IDS.regular)?.text === 'Regular · 14' &&
+          chips.find((chip) => chip.messageId === ARRIVAL_IDS.back)?.text === 'Back · 3 wk' &&
+          chips.find((chip) => chip.messageId === ARRIVAL_IDS.milestone)?.text === '10th stream',
+        `${tag}: one chip per arrival row, inside the row's button and the window`,
+        JSON.stringify(chips)
+      )
+      assertProbe(
+        seen.last?.documentOverflow === false,
+        `${tag}: nothing overflows the window`,
+        JSON.stringify(seen.last?.documentOverflow)
+      )
+      // The row click stays on stream, through the chip too (owner call D10).
+      const before = (await smokeCommand('comments-window-reader-state')).highlightPhases?.[
+        ARRIVAL_IDS.regular
+      ]
+      const clicked = await smokeCommand('comments-window-person-card', {
+        action: 'click-chip',
+        messageId: ARRIVAL_IDS.regular
+      })
+      const toggled = await waitFor(
+        () => smokeCommand('comments-window-reader-state'),
+        (s) => (s.highlightPhases?.[ARRIVAL_IDS.regular] ?? 'idle') !== (before ?? 'idle'),
+        4000
+      )
+      assertProbe(
+        clicked.ok && toggled.ok,
+        `${tag}: a click on the chip is the row's click (on stream)`,
+        JSON.stringify({ before, after: toggled.last?.highlightPhases?.[ARRIVAL_IDS.regular] })
+      )
+      // Settle any applying highlight before the menu opens.
+      await waitFor(
+        () => smokeCommand('comments-window-reader-state'),
+        (s) => s.highlightPhases?.[ARRIVAL_IDS.regular] !== 'applying',
+        4000
+      )
+      const via = width === 800 || width === 320 ? 'menu' : 'context'
+      const opened = await smokeCommand('comments-window-person-card', {
+        action: 'open',
+        via,
+        messageId: ARRIVAL_IDS.milestone
+      })
+      const card = opened.card
+      assertProbe(
+        opened.ok &&
+          card?.surface === (width < MEDIUM_TIER_MIN_WIDTH ? 'dialog' : 'popover') &&
+          card.inWindow &&
+          !card.overflow &&
+          card.controls.length > 0 &&
+          card.controls.every((control) => control.inside) &&
+          card.text.includes('14 streams · since March 2026 · 5 in a row · 812 messages'),
+        `${tag}: About from ${via === 'menu' ? '⋯' : 'a right-click'} opens the card whole (${width < MEDIUM_TIER_MIN_WIDTH ? 'dialog' : 'popover'})`,
+        JSON.stringify(opened)
+      )
+      if (via === 'context') {
+        assertProbe(
+          ['About Ada', 'Same person as…', 'Mark as bot'].every((label) =>
+            opened.menu?.includes(label)
+          ),
+          `${tag}: the right-click menu offers About, Same person as… and Mark as bot`,
+          JSON.stringify(opened.menu)
+        )
+      }
+      if (width === 320 || width === 1280) {
+        await shoot(
+          `community-card-${width}-${theme}`,
+          `person card ${width}px ${theme}`,
+          width,
+          width === 1280 ? 720 : 640
+        )
+      }
+      const closed = await smokeCommand('comments-window-person-card', { action: 'close' })
+      assertProbe(closed.closed, `${tag}: Escape closes the card`, JSON.stringify(closed))
+      await smokeCommand('comments-window-person-card', { action: 'pane', pane: 'buddy' })
+      const buddy = await waitFor(
+        () => smokeCommand('comments-window-person-card', { action: 'inspect' }),
+        (s) => s.welcomeBack?.length === 2,
+        5000
+      )
+      assertProbe(
+        buddy.ok &&
+          buddy.last.welcomeBack.every((row) => row.waveInside) &&
+          buddy.last.linkCards.length === 1 &&
+          buddy.last.linkCards[0].title === 'Linked Ada (Twitch) and ada_dev (YouTube)' &&
+          buddy.last.linkCards[0].buttonsInside,
+        `${tag}: Welcome back lists both people with a reachable Wave, and the link card is whole`,
+        JSON.stringify(buddy.last)
+      )
+      if (width === 480 || width === 1280) {
+        await shoot(
+          `community-welcome-back-${width}-${theme}`,
+          `Welcome back ${width}px ${theme}`,
+          width,
+          width === 1280 ? 720 : 640
+        )
+      }
+    }
+  }
+  if (COMMUNITY_SHOTS_DIR) {
+    mkdirSync(COMMUNITY_SHOTS_DIR, { recursive: true })
+    for (const file of shots) copyFileSync(file, join(COMMUNITY_SHOTS_DIR, file.split('/').at(-1)))
+    console.log(`Community screenshots copied to ${COMMUNITY_SHOTS_DIR}`)
+  }
+  // Leave the window as the rest of the probe expects it.
+  await smokeCommand('comments-window-set-theme', { theme: 'dark' })
+  await smokeCommand('comments-window-community-fixture', { answers: null })
+  await smokeCommand('comments-window-seed-viewers', { sample: null })
+  await smokeCommand('comments-window-seed-dashboard', { state: null })
+  await smokeCommand('comments-window-seed-cohost', { state: cohostOffFixture() })
+  await smokeCommand('comments-window-push-snapshot', { snapshot: nextLiveSessionSnapshot() })
+  await smokeCommand('comments-window-set-bounds', { width: 420, height: 640 })
+  await waitFor(
+    () => smokeCommand('comments-window-state'),
+    (s) => s.bounds && Math.abs(s.bounds.width - 420) <= 6,
+    5000
+  )
+}
+
+function communitySnapshot() {
+  const snapshot = nextLiveSessionSnapshot()
+  const row = (id, platform, authorId, authorName, messageText, at, arrival) => ({
+    ...messageFixture({
+      id,
+      platform,
+      sessionId: NEXT_LIVE_SESSION_ID,
+      authorName,
+      messageText,
+      at
+    }),
+    authorId,
+    ...(arrival ? { arrival } : {})
+  })
+  return {
+    ...snapshot,
+    messages: [
+      ...snapshot.messages,
+      row(ARRIVAL_IDS.regular, 'twitch', 't-ada', 'Ada', 'hi!!', '2026-07-10T10:00:03Z', {
+        streams: 14,
+        regular: true,
+        inARow: 5,
+        platforms: ['twitch', 'youtube'],
+        since: '2026-03'
+      }),
+      row(
+        ARRIVAL_IDS.back,
+        'kick',
+        'k-bo',
+        'Bo',
+        'I am back, did I miss the borrow checker?',
+        '2026-07-10T10:00:04Z',
+        {
+          streams: 6,
+          regular: false,
+          awayDays: 23,
+          inARow: 1,
+          since: '2026-01'
+        }
+      ),
+      row(
+        ARRIVAL_IDS.milestone,
+        'youtube',
+        'UC-ada',
+        'Ada',
+        'Tenth stream, let us go',
+        '2026-07-10T10:00:05Z',
+        {
+          streams: 10,
+          regular: true,
+          inARow: 3,
+          milestone: { kind: 'streams', value: 10 },
+          since: '2026-03'
+        }
+      ),
+      row(
+        `${NEXT_LIVE_SESSION_ID}:twitch:probe-quiet`,
+        'twitch',
+        't-new',
+        'Newcomer',
+        'first time here',
+        '2026-07-10T10:00:06Z',
+        null
+      )
+    ]
+  }
+}
+
+function cohostCommunityFixture() {
+  const now = new Date().toISOString()
+  const listening = cohostListeningFixture()
+  return {
+    ...listening,
+    state: {
+      ...listening.state,
+      welcomeBack: [
+        {
+          personId: 'p-ada',
+          authorKey: 'twitch:t-ada',
+          name: 'Ada',
+          platform: 'twitch',
+          arrival: { streams: 14, regular: true, inARow: 5 },
+          firstSeenAt: now
+        },
+        {
+          personId: 'p-bo',
+          authorKey: 'kick:k-bo',
+          name: 'Bo',
+          platform: 'kick',
+          arrival: { streams: 6, regular: false, awayDays: 23, inARow: 1 },
+          firstSeenAt: now
+        }
+      ],
+      linkMade: [
+        {
+          personId: 'p-ada',
+          names: ['Ada', 'ada_dev'],
+          platforms: ['twitch', 'youtube'],
+          accountKey: 'youtube:UC-ada',
+          at: now
+        }
+      ]
+    }
+  }
+}
+
+function communityAnswers() {
+  const account = (platform, authorId, name, handle) => ({
+    accountKey: `${platform}:${authorId}`,
+    platform,
+    authorId,
+    name,
+    ...(handle ? { handle } : {}),
+    firstSeenAt: '2026-03-02T18:00:00Z',
+    lastSeenAt: '2026-07-10T10:00:05Z'
+  })
+  const person = {
+    id: 'p-ada',
+    name: 'Ada',
+    accounts: [account('twitch', 't-ada', 'Ada', 'ada'), account('youtube', 'UC-ada', 'ada_dev')],
+    streams: 14,
+    messages: 812,
+    inARow: 5,
+    bestInARow: 6,
+    regular: true,
+    firstSeenAt: '2026-03-02T18:00:00Z',
+    lastSeenAt: '2026-07-10T10:00:05Z',
+    support: { bits: 4500, giftedSubs: 3 },
+    note: 'Learning Rust; ask how the borrow checker is treating her.',
+    status: 'normal',
+    youtube: true,
+    suggestions: [
+      {
+        accountA: account('kick', 'k-max', 'MaxPlays'),
+        accountB: account('twitch', 't-ada', 'Ada', 'ada'),
+        reason: 'name',
+        createdAt: '2026-07-01T18:00:00Z'
+      }
+    ]
+  }
+  return {
+    'cohost.community.person': person,
+    'cohost.community.list': { people: [] },
+    'cohost.community.wave': { accepted: true }
+  }
 }
 
 async function layoutAt(width, options = {}) {
