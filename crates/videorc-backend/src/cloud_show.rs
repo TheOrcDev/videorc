@@ -1344,9 +1344,16 @@ impl CloudShowRuntime {
     /// Plan 223 C3: the runner's legs carry `session_id` (the destinations
     /// were handed over), so a down leg's Reconnect is a real fix.
     pub fn carries_session(&self, session_id: &str) -> bool {
-        self.show
-            .as_ref()
-            .is_some_and(|show| show.session_id.as_deref() == Some(session_id) && show.handed_over)
+        self.show.as_ref().is_some_and(|show| {
+            show.session_id.as_deref() == Some(session_id)
+                && (show.handed_over
+                    // A resumed show (C5b) never re-sends its destinations:
+                    // the runner's legs are the hand-over.
+                    || self
+                        .runner
+                        .as_ref()
+                        .is_some_and(|runner| !runner.legs.is_empty()))
+        })
     }
 
     /// Plan 223 C3: the program block as the watchdog reads it, with the
@@ -3026,6 +3033,13 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
                 .find(|destination| destination.id == target_id)
                 .cloned()
             else {
+                // A resumed show (C5b) keeps its keys on the runner; this
+                // computer never got them back, so it cannot re-send one.
+                if show.destinations.is_empty() {
+                    bail!(
+                        "Videorc Cloud holds this show's keys from before the restart, so this computer can't reconnect one destination. End the livestream and go live again."
+                    );
+                }
                 bail!("That destination is not part of this show.");
             };
             let Some(tx) = runtime.control_tx.clone() else {
@@ -5111,6 +5125,48 @@ mod tests {
         .await;
         // Still the show, still not a fallback: only the web may say it's gone.
         assert_ne!(lock(&harness.context.slot).phase(), CloudPhase::Failed);
+    }
+
+    /// Plan 223 C3: a resumed show never re-sends its destinations, so the
+    /// runner's legs are what says it carries the session; the watchdog
+    /// signal follows.
+    #[test]
+    fn a_resumed_show_with_runner_legs_carries_the_session_for_the_watchdog() {
+        let mut runtime = CloudShowRuntime {
+            show: Some(ActiveShow {
+                record: created().show,
+                control: created().control,
+                ingest: None,
+                session_id: Some("session-1".to_string()),
+                destinations: Vec::new(),
+                handed_over: false,
+                hold_image_png_base64: None,
+                resuming: false,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !runtime.carries_session("session-1"),
+            "no runner legs and no hand-over: nothing carries it"
+        );
+        runtime.runner = Some(
+            serde_json::from_value(json!({
+                "phase": "live",
+                "legs": live_legs(),
+                "program": { "audioSilentSeconds": 25, "avSkewMs": 21.5 }
+            }))
+            .unwrap(),
+        );
+        assert!(runtime.carries_session("session-1"));
+        assert!(!runtime.carries_session("session-2"));
+        let signal = runtime.watchdog_signal("session-1").unwrap();
+        assert_eq!(signal.audio_silent_seconds, Some(25));
+        assert_eq!(signal.av_skew_ms, Some(21.5));
+        assert!(!signal.hold_active);
+        assert_eq!(
+            runtime.status().program.unwrap().audio_silent_seconds,
+            Some(25)
+        );
     }
 
     #[test]
