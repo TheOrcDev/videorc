@@ -24,6 +24,9 @@ pub(crate) const CLOUD_REQUEST_TIMEOUT: std::time::Duration = std::time::Duratio
 pub(crate) const CLOUD_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// The lost route asks the node's health for up to 8 s before it answers.
 pub(crate) const CLOUD_LOST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Plan 224: the guests list long-polls 25 s on the web; allow it and a margin.
+pub(crate) const CLOUD_GUESTS_POLL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(35);
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Co-host ticks are synchronous and small, but the server fans one tick out
 /// across a model ladder: a slow-but-alive gateway needs headroom beyond the
@@ -3552,6 +3555,133 @@ impl crate::cloud_show::CloudWebApi for VideorcApiClient {
                 .json(report),
             &path,
             CLOUD_LOST_TIMEOUT,
+        )
+        .await
+    }
+
+    // --- Plan 224: talk shows (`docs/cloud.md` "Talk shows", the web's routes) ---
+
+    async fn room_token(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<crate::cloud_talk::RoomTokenAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/room/token");
+        self.cloud_json(
+            self.http.post(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn get_room(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<crate::cloud_talk::RoomSettingsAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/room");
+        self.cloud_json(
+            self.http.get(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn patch_room(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        patch: &crate::cloud_talk::RoomPatch,
+    ) -> std::result::Result<crate::cloud_talk::RoomSettingsAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/room");
+        self.cloud_json(
+            self.http
+                .patch(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(patch),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn rotate_invite(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> std::result::Result<crate::cloud_talk::ShowInvite, crate::cloud_show::CloudApiError> {
+        #[derive(serde::Deserialize)]
+        struct Answer {
+            invite: crate::cloud_talk::ShowInvite,
+        }
+        let path = format!("/api/cloud/shows/{show_id}/invite/rotate");
+        self.cloud_json::<Answer>(
+            self.http.post(self.endpoint(&path)).bearer_auth(bearer),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|answer| answer.invite)
+    }
+
+    async fn list_guests(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        since: Option<&str>,
+    ) -> std::result::Result<crate::cloud_talk::GuestsAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/guests");
+        let mut request = self.http.get(self.endpoint(&path)).bearer_auth(bearer);
+        if let Some(since) = since {
+            request = request.query(&[("since", since)]);
+        }
+        // The web long-polls 25 s (plan 224 Wire shape): wait that out.
+        self.cloud_json(request, &path, CLOUD_GUESTS_POLL_TIMEOUT)
+            .await
+    }
+
+    async fn decide_request(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        request_id: &str,
+        decision: crate::cloud_talk::GuestDecision,
+    ) -> std::result::Result<(), crate::cloud_show::CloudApiError> {
+        let path = format!("/api/cloud/shows/{show_id}/guests/requests/{request_id}");
+        self.cloud_json::<serde_json::Value>(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({ "decision": decision })),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn guest_action(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        guest_id: &str,
+        body: &crate::cloud_talk::GuestActionBody,
+    ) -> std::result::Result<crate::cloud_talk::GuestActionAnswer, crate::cloud_show::CloudApiError>
+    {
+        let path = format!("/api/cloud/shows/{show_id}/guests/{guest_id}");
+        self.cloud_json(
+            self.http
+                .post(self.endpoint(&path))
+                .bearer_auth(bearer)
+                .json(body),
+            &path,
+            CLOUD_REQUEST_TIMEOUT,
         )
         .await
     }

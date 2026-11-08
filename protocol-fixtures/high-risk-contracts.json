@@ -2589,6 +2589,194 @@
         }
       }
     },
+    "statusTalk": {
+      "phase": "live",
+      "entitled": true,
+      "plan": "max",
+      "settings": {
+        "enabled": true,
+        "holdMaxSeconds": 1800,
+        "holdMaxChoices": [
+          300,
+          900,
+          1800,
+          3600
+        ],
+        "holdImageScreenId": "screen-1"
+      },
+      "allowance": {
+        "enabled": true,
+        "secondsPerMonth": 360000,
+        "secondsUsed": 133200,
+        "overageSeconds": 0,
+        "resetAt": "2026-11-01T00:00:00.000Z",
+        "talkShows": true,
+        "guestsOnStage": 5,
+        "roomSize": 10,
+        "recordingRetentionDays": 30
+      },
+      "show": {
+        "id": "sh_0123456789abcdefghijkl",
+        "nodeId": "eu-hel-1",
+        "createdAt": "2026-11-08T12:00:00.000Z",
+        "expiresAt": "2026-11-09T00:30:00.000Z",
+        "resumable": false,
+        "kind": "talk"
+      },
+      "connected": true,
+      "feeds": [],
+      "legs": [
+        {
+          "targetId": "youtube",
+          "platform": "youtube",
+          "label": "YouTube",
+          "state": "live"
+        },
+        {
+          "targetId": "twitch",
+          "platform": "twitch",
+          "label": "Twitch",
+          "state": "reconnecting",
+          "message": "ingest closed the connection"
+        }
+      ],
+      "liveSeconds": 600,
+      "directFallbackAvailable": false,
+      "room": {
+        "phase": "open",
+        "inviteUrl": "https://videorc.com/guest/k7m2k7m2k7m2k7m2",
+        "inviteExpiresAt": "2026-11-15T12:00:00.000Z",
+        "doorOpen": false,
+        "title": "Tuesday talk",
+        "platforms": [
+          "youtube",
+          "twitch"
+        ],
+        "requests": [
+          {
+            "requestId": "gr_0123456789abcdefghijkl",
+            "name": "Ada",
+            "askedAt": "2026-11-08T12:05:00.000Z",
+            "device": "phone"
+          }
+        ],
+        "guests": [
+          {
+            "guestId": "g_0123456789abcdefghijkl",
+            "name": "Bo",
+            "joinedAt": "2026-11-08T12:03:00.000Z",
+            "muted": false,
+            "screenShareAllowed": false
+          }
+        ],
+        "declinedCount": 1,
+        "participants": [
+          {
+            "identity": "host:sh_0123456789abcdefghijkl",
+            "name": "Orc",
+            "role": "host",
+            "onStage": true,
+            "video": true,
+            "audio": true,
+            "muted": false,
+            "screen": false,
+            "quality": "excellent",
+            "sinceMs": 600000,
+            "away": false
+          },
+          {
+            "identity": "g_0123456789abcdefghijkl",
+            "name": "Bo",
+            "role": "guest",
+            "onStage": true,
+            "video": true,
+            "audio": true,
+            "muted": false,
+            "screen": false,
+            "quality": "good",
+            "sinceMs": 420000,
+            "away": false
+          }
+        ],
+        "stage": {
+          "layout": "side-by-side",
+          "onStage": [
+            "host:sh_0123456789abcdefghijkl",
+            "g_0123456789abcdefghijkl"
+          ],
+          "hostShape": "rounded"
+        },
+        "hostAway": false,
+        "connected": true,
+        "limits": {
+          "guestsOnStage": 5,
+          "roomSize": 10,
+          "recordingRetentionDays": 30
+        },
+        "client": "connected",
+        "returnEnabled": false,
+        "stageSet": true,
+        "live": true
+      },
+      "recording": {
+        "active": true,
+        "since": "2026-11-08T12:04:00.000Z",
+        "seconds": 540,
+        "bytes": 123456789,
+        "orientations": [
+          "h"
+        ]
+      }
+    },
+    "roomOpenParams": {
+      "outputs": [
+        {
+          "orientation": "horizontal",
+          "width": 1920,
+          "height": 1080,
+          "fps": 30,
+          "videoKbps": 6000
+        }
+      ],
+      "title": "Tuesday talk",
+      "platforms": [
+        "youtube"
+      ]
+    },
+    "stageSetParams": {
+      "layout": "spotlight",
+      "onStage": [
+        "host:sh_0123456789abcdefghijkl",
+        "g_0123456789abcdefghijkl"
+      ],
+      "spotlight": "g_0123456789abcdefghijkl",
+      "hostShape": "circle"
+    },
+    "guestDecideParams": {
+      "requestId": "gr_0123456789abcdefghijkl",
+      "decision": "let-in"
+    },
+    "guestActParams": {
+      "guestId": "g_0123456789abcdefghijkl",
+      "action": "rename",
+      "name": "Bo R."
+    },
+    "roomClientReportParams": {
+      "state": "reconnecting",
+      "detail": "Reconnecting to the room."
+    },
+    "roomTokenAnswer": {
+      "hostToken": "eyJhbGciOiJIUzI1NiJ9.hostTOKENfixture.sig",
+      "url": "wss://videorc.livekit.cloud",
+      "identity": "host:sh_0123456789abcdefghijkl",
+      "showId": "sh_0123456789abcdefghijkl"
+    },
+    "roomRequestEvent": {
+      "requestId": "gr_0123456789abcdefghijkl",
+      "name": "Ada",
+      "askedAt": "2026-11-08T12:05:00.000Z",
+      "device": "computer"
+    },
     "settingsPatch": { "enabled": false, "holdMaxSeconds": 900, "holdImageScreenId": null },
     "testRunParams": {
       "outputs": [

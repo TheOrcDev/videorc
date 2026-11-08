@@ -42,6 +42,7 @@ mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
 mod cloud_show;
+mod cloud_talk;
 mod cohost;
 mod cohost_ack;
 mod cohost_auto_chat;
@@ -5960,6 +5961,21 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         // Plan 184: both talk to videorc.com (and the show's node).
         | "cloud.allowance.refresh"
         | "cloud.show.end"
+        // Plan 224: the room's doors, all through videorc.com or the node.
+        | "cloud.room.open"
+        | "cloud.room.close"
+        | "cloud.room.resume"
+        | "cloud.room.invite.rotate"
+        | "cloud.room.door.set"
+        | "cloud.room.token.refresh"
+        | "cloud.guest.decide"
+        | "cloud.guest.act"
+        | "cloud.stage.set"
+        | "cloud.recording.start"
+        | "cloud.recording.stop"
+        | "cloud.return.set"
+        | "cloud.show.goLive"
+        | "cloud.show.legs.end"
         | "repair.restore_file"
         | "preview.snapshot" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
@@ -5996,7 +6012,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.alert.snooze"
         | "watchdog.settings.set"
         | "watchdog.idle.report"
-        | "cloud.show.reconnectDestination" => Some(DEFAULT_MUTATION_POLICY),
+        | "cloud.show.reconnectDestination"
+        | "cloud.room.client.report" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
         | "cloud.show.resume"
@@ -11485,6 +11502,15 @@ async fn handle_text_message_with_role(
             }
         }
         "cloud.show.end" => match cloud_context(state) {
+            // Plan 224: a held room goes with the show (its camera comes back).
+            Some(context) if cloud_talk_show_open(state) => {
+                match context.close_room(account::stored_session_token()).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "cloud-end-failed", error.to_string())
+                    }
+                }
+            }
             Some(context) => match context
                 .end_current_show(account::stored_session_token())
                 .await
@@ -11554,6 +11580,253 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 224: talk shows. Every answer is the secret-free `CloudStatus`
+        // but `cloud.room.token.refresh`, the renderer's alone.
+        "cloud.room.open" => {
+            let params = match serde_json::from_value::<cloud_talk::RoomOpenParams>(command.params)
+            {
+                Ok(params) => params,
+                Err(error) => {
+                    return ServerResponse::error(command.id, "invalid-params", error.to_string());
+                }
+            };
+            let session_active = !matches!(
+                current_recording_status(state).await.state,
+                RecordingState::Idle
+            );
+            match cloud_context(state) {
+                Some(context) => match context
+                    .open_room(account::stored_session_token(), params, session_active)
+                    .await
+                {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        cloud_talk_error_code(&error, "cloud-room-open-failed"),
+                        format!("{error:#}"),
+                    ),
+                },
+                None => cloud_unavailable(command.id),
+            }
+        }
+        "cloud.room.close" => match cloud_context(state) {
+            Some(context) => match context.close_room(account::stored_session_token()).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-room-close-failed",
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.room.resume" => match cloud_context(state) {
+            Some(context) => match context.resume_room(account::stored_session_token()).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    cloud_talk_error_code(&error, "cloud-room-resume-failed"),
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.room.invite.rotate" => match cloud_context(state) {
+            Some(context) => match context.rotate_invite(account::stored_session_token()).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-room-invite-failed",
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.room.door.set" => {
+            match serde_json::from_value::<cloud_talk::RoomDoorParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .set_door(account::stored_session_token(), params.open)
+                        .await
+                    {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-room-door-failed",
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.room.token.refresh" => match cloud_context(state) {
+            Some(context) => match context.room_token(account::stored_session_token()).await {
+                Ok(answer) => ServerResponse::ok(command.id, answer),
+                Err(error) => ServerResponse::error(
+                    command.id,
+                    "cloud-room-token-failed",
+                    format!("{error:#}"),
+                ),
+            },
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.room.client.report" => {
+            match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => ServerResponse::ok(command.id, context.report_client(params)),
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.guest.decide" => {
+            match serde_json::from_value::<cloud_talk::GuestDecideParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .decide_guest(account::stored_session_token(), params)
+                        .await
+                    {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            cloud_talk_error_code(&error, "cloud-guest-decide-failed"),
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.guest.act" => {
+            match serde_json::from_value::<cloud_talk::GuestActParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context
+                        .act_on_guest(account::stored_session_token(), params)
+                        .await
+                    {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-guest-action-failed",
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.stage.set" => {
+            match serde_json::from_value::<cloud_talk::CloudStage>(command.params) {
+                Ok(stage) => match cloud_context(state) {
+                    Some(context) => match context.set_stage(stage).await {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-stage-failed",
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.recording.start" | "cloud.recording.stop" => match cloud_context(state) {
+            Some(context) => {
+                let result = if command.method == "cloud.recording.start" {
+                    context.recording_start().await
+                } else {
+                    context.recording_stop().await
+                };
+                match result {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "cloud-recording-failed",
+                        format!("{error:#}"),
+                    ),
+                }
+            }
+            None => cloud_unavailable(command.id),
+        },
+        "cloud.return.set" => {
+            match serde_json::from_value::<cloud_talk::RoomDoorParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context.set_return(params.open).await {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-return-failed",
+                            format!("{error:#}"),
+                        ),
+                    },
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // C-G6: Go Live in a talk show hands the destinations over; no local
+        // leg. The platforms' own setup (a YouTube broadcast) stays with the
+        // renderer, as today.
+        "cloud.show.goLive" => {
+            match serde_json::from_value::<cloud_talk::TalkGoLiveParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => {
+                        let (destinations, platforms) =
+                            match recording::cloud_talk_handover(&params.streaming) {
+                                Ok(resolved) => resolved,
+                                Err(error) => {
+                                    return ServerResponse::error(
+                                        command.id,
+                                        "cloud-go-live-failed",
+                                        format!("{error:#}"),
+                                    );
+                                }
+                            };
+                        match context
+                            .talk_go_live(account::stored_session_token(), destinations, platforms)
+                            .await
+                        {
+                            Ok(status) => ServerResponse::ok(command.id, status),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "cloud-go-live-failed",
+                                format!("{error:#}"),
+                            ),
+                        }
+                    }
+                    None => cloud_unavailable(command.id),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.show.legs.end" => match cloud_context(state) {
+            Some(context) => match context.legs_end().await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => {
+                    ServerResponse::error(command.id, "cloud-legs-end-failed", format!("{error:#}"))
+                }
+            },
+            None => cloud_unavailable(command.id),
+        },
         "remote.intent" => {
             match serde_json::from_value::<crate::remote_control::RemoteIntent>(
                 command.params.clone(),
@@ -14838,6 +15111,8 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
     let emit_state = state.clone();
     let legs_state = state.clone();
     let remember_state = state.clone();
+    let camera_state = state.clone();
+    let request_state = state.clone();
     cloud_show::CloudHooks {
         emit: std::sync::Arc::new(move |status| {
             emit_state.emit_event(cloud_show::CLOUD_STATE_EVENT, status);
@@ -14865,6 +15140,26 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                 }
             });
         }),
+        // Plan 224 D6: the camera has one owner at a time. The room borrows
+        // it with reason `talk-show` and gives it back when it closes.
+        camera: std::sync::Arc::new(move |handover| {
+            let state = camera_state.clone();
+            Box::pin(async move {
+                match handover {
+                    cloud_talk::CameraHandover::Lend => {
+                        preview_camera::lend_camera_to_talk_show(&state).await
+                    }
+                    cloud_talk::CameraHandover::Return => {
+                        preview_camera::return_camera_from_talk_show(&state).await;
+                        Ok(())
+                    }
+                }
+            })
+        }),
+        // Plan 224: "Ada wants to join", one event per new request.
+        request: std::sync::Arc::new(move |request| {
+            request_state.emit_event(cloud_talk::CLOUD_ROOM_REQUESTS_EVENT, request);
+        }),
     }
 }
 
@@ -14882,6 +15177,37 @@ fn cloud_context(state: &AppState) -> Option<AppCloudShowContext> {
         web: std::sync::Arc::new(web),
         connector: std::sync::Arc::new(cloud_show::WsConnector),
     })
+}
+
+/// Plan 224: this desktop holds a talk show's room.
+fn cloud_talk_show_open(state: &AppState) -> bool {
+    state
+        .cloud_show
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .talk_show_open()
+}
+
+fn cloud_unavailable(id: String) -> ServerResponse {
+    ServerResponse::error(
+        id,
+        "cloud-unavailable",
+        "Videorc Cloud is unavailable in this build.",
+    )
+}
+
+/// A talk-show refusal's own code (`RoomOpenRefusal`, the web's refusals),
+/// else the arm's default.
+fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'static str {
+    if let Some(refusal) = error.downcast_ref::<cloud_talk::RoomOpenRefusal>() {
+        return refusal.code();
+    }
+    if let Some(api) = error.downcast_ref::<cloud_show::CloudApiError>()
+        && let Some(code) = cloud_talk::talk_show_create_refusal(api)
+    {
+        return code;
+    }
+    default
 }
 
 fn cloud_show_status(state: &AppState) -> cloud_show::CloudStatus {
@@ -15035,6 +15361,16 @@ async fn start_session_command(
     role: BackendRole,
     kind: SessionStartKind,
 ) -> ServerResponse {
+    // Plan 224 C-G6: while the room is open, Record and Go Live work
+    // through it (`cloud.recording.start`, `cloud.show.goLive`); no local
+    // session, so no `StreamTarget` is ever built beside the runner's legs.
+    if cloud_talk_show_open(state) {
+        return ServerResponse::error(
+            command.id,
+            "cloud-talk-show-open",
+            "Record and Go Live work through the room while it is open.",
+        );
+    }
     if kind == SessionStartKind::CloudResume {
         let resumable = state
             .cloud_show

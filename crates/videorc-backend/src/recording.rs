@@ -27315,6 +27315,24 @@ fn cloud_hold_image(state: &AppState) -> Option<String> {
 
 /// The destinations the runner takes over, keys plain: built here and sent
 /// on the control socket only (`HandoverDestination`'s `Debug` redacts).
+/// Plan 224 C-G6: Go Live in a talk show resolves the enabled destinations
+/// (keys from the keychain, as a session start does) into the runner's
+/// hand-over, and names their platforms for the consent line. No
+/// `StreamTarget` leaves this function: the desktop opens no leg.
+pub(crate) fn cloud_talk_handover(
+    streaming: &StreamingSettings,
+) -> Result<(Vec<crate::cloud_show::HandoverDestination>, Vec<String>)> {
+    let targets = stream_targets_from_streaming(streaming)?;
+    let mut platforms: Vec<String> = Vec::new();
+    for target in &targets {
+        let platform = crate::streaming::stream_platform_id(target.platform).to_string();
+        if !platforms.contains(&platform) {
+            platforms.push(platform);
+        }
+    }
+    Ok((cloud_handover_destinations(&targets), platforms))
+}
+
 fn cloud_handover_destinations(
     targets: &[StreamTarget],
 ) -> Vec<crate::cloud_show::HandoverDestination> {

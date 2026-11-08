@@ -13,6 +13,13 @@ import type {
   CloudSettingsPatch,
   CloudStatus,
   CloudTestParams,
+  CloudGuestActParams,
+  CloudGuestDecideParams,
+  CloudRoomClientReportParams,
+  CloudRoomOpenParams,
+  CloudRoomRequest,
+  CloudRoomTokenAnswer,
+  CloudStage,
   EntitlementsSnapshot,
   CleanCutEdl,
   CleanCutGetResult,
@@ -317,6 +324,15 @@ interface HighRiskContractFixtures {
     statusTest: CloudStatus
     settingsPatch: CloudSettingsPatch
     testRunParams: CloudTestParams
+    // Plan 224: the talk show's status, params, token answer and event.
+    statusTalk: CloudStatus
+    roomOpenParams: CloudRoomOpenParams
+    stageSetParams: CloudStage
+    guestDecideParams: CloudGuestDecideParams
+    guestActParams: CloudGuestActParams
+    roomClientReportParams: CloudRoomClientReportParams
+    roomTokenAnswer: CloudRoomTokenAnswer
+    roomRequestEvent: CloudRoomRequest
   }
 }
 
@@ -593,6 +609,66 @@ describe('shared high-risk protocol fixture', () => {
       validateBackendEventPayload('cloud.state', { ...statusHold, phase: 'paused' })
     ).toThrow()
     expect(statusHold.restart?.destinationsResent).toBe(true)
+    // Plan 224: a talk show's room and recording ride the same status, the
+    // room's params and the token answer round-trip, and the token answer is
+    // the one shape that may carry a token (never the status).
+    const {
+      statusTalk,
+      roomOpenParams,
+      stageSetParams,
+      guestDecideParams,
+      guestActParams,
+      roomClientReportParams,
+      roomTokenAnswer,
+      roomRequestEvent
+    } = fixtures.cloud
+    expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
+    expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
+    expect(statusTalk.room?.phase).toBe('open')
+    expect(statusTalk.room?.stage.layout).toBe('side-by-side')
+    expect(statusTalk.recording?.active).toBe(true)
+    expect(statusTalk.show?.kind).toBe('talk')
+    expect(JSON.stringify(statusTalk)).not.toMatch(/hostToken|token|rtmps?:|streamKey/)
+    expect(jsonShape(validateBackendRpcParams('cloud.room.open', roomOpenParams))).toEqual(
+      roomOpenParams
+    )
+    expect(jsonShape(validateBackendRpcParams('cloud.stage.set', stageSetParams))).toEqual(
+      stageSetParams
+    )
+    expect(jsonShape(validateBackendRpcParams('cloud.guest.decide', guestDecideParams))).toEqual(
+      guestDecideParams
+    )
+    expect(jsonShape(validateBackendRpcParams('cloud.guest.act', guestActParams))).toEqual(
+      guestActParams
+    )
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.client.report', roomClientReportParams))
+    ).toEqual(roomClientReportParams)
+    expect(
+      jsonShape(validateBackendRpcResult('cloud.room.token.refresh', roomTokenAnswer))
+    ).toEqual(roomTokenAnswer)
+    expect(jsonShape(validateBackendEventPayload('cloud.room.requests', roomRequestEvent))).toEqual(
+      roomRequestEvent
+    )
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusTalk,
+        room: { ...statusTalk.room, phase: 'ajar' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cloud.guest.act', { ...guestActParams, action: 'kick' })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cloud.state', {
+        ...statusTalk,
+        fallback: {
+          reason: 'cloud-rooms-unavailable',
+          at: statusTalk.show?.createdAt,
+          sessionId: 's'
+        }
+      })
+    ).not.toThrow()
     expect(() =>
       validateBackendEventPayload('cloud.state', {
         ...statusHold,

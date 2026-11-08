@@ -48,6 +48,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::cloud_talk::{
+    CloudCameraHook, CloudRecordingStatus, CloudRequestHook, CloudRoomStatus, CreateShowRoom,
+    GuestActionAnswer, GuestActionBody, GuestDecision, GuestsAnswer, RoomPatch, RoomSettingsAnswer,
+    RoomTokenAnswer, RunnerRecordingState, RunnerRoomState, ShowInvite, ShowRoomAnswer, TalkLimits,
+    TalkShowState,
+};
 use crate::protocol::{AiCapabilitiesCloud, EntitlementPlan};
 use crate::streaming::{
     StreamOutputOrientation, StreamPlatform, StreamTargetRuntime, StreamTargetState,
@@ -79,7 +85,7 @@ const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 /// starts, and the node agent waits up to 15 s for it behind the hello, so
 /// the first `welcome` can take that long (the runner's wire notes).
 const WELCOME_TIMEOUT: Duration = Duration::from_secs(20);
-const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const END_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Reconnect backoff after the socket drops: the runner keeps the show, so
 /// patience costs nothing; the cap keeps a flapping network from hammering.
@@ -230,6 +236,13 @@ impl CloudEntitlement {
         self.cloud.as_ref().is_some_and(|cloud| cloud.enabled)
     }
 
+    /// Plan 224: the plan allows talk shows and the cloud is on (D15).
+    pub fn talk_shows(&self) -> bool {
+        self.cloud
+            .as_ref()
+            .is_some_and(|cloud| cloud.enabled && cloud.talk_shows)
+    }
+
     /// The account's plan has cloud hours, whether or not the cloud is on
     /// for it right now: the web's `enabled` is also off during a rollback
     /// (`VIDEORC_CLOUD_DISABLED`) and outside the beta cohort, while a show
@@ -280,6 +293,11 @@ pub enum CloudFallbackReason {
     /// videorc.com could not say whether it is still live. Sent once L3
     /// builds the rule; today the log line says it.
     CloudUnchecked,
+    /// Plan 224 (W-G4): the month's guest-hours are used up; a room cannot
+    /// open and the next Let in is refused.
+    CloudGuestHoursUsedUp,
+    /// Plan 224: LiveKit is off or unreachable; no room can open.
+    CloudRoomsUnavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -301,8 +319,13 @@ pub struct CloudShowSummary {
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
-    /// Live on the runner with no local feed: Resume or End (C5).
+    /// Live on the runner with no local feed: Resume or End (C5). Never
+    /// while this desktop holds the show's room (plan 224).
     pub resumable: bool,
+    /// `solo`, `talk` or `test` (plan 224: a resumable talk show rejoins the
+    /// room, it never starts a local session).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -401,6 +424,12 @@ pub struct CloudStatus {
     /// `cloud.announce.seen`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announce: Option<bool>,
+    /// Plan 224: the room this desktop holds, while it holds one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<CloudRoomStatus>,
+    /// Plan 224 D10: the cloud recording, on a talk show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<CloudRecordingStatus>,
 }
 
 /// `cloud.show.reconnectDestination { targetId }` (plan 223 C3).
@@ -526,6 +555,9 @@ pub struct CreateShowRequest {
     /// fastest, else nothing. Nothing measures it yet, so it is never sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_region: Option<String>,
+    /// Plan 224: a talk show's room (`kind: "talk"` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<CreateShowRoom>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -631,6 +663,14 @@ pub struct CreateShowResponse {
     pub control: ShowControl,
     #[serde(default)]
     pub allowance: Option<AiCapabilitiesCloud>,
+    /// Plan 224: on a talk show, where the renderer joins (`Debug` masks
+    /// the token), the invite link and the room's limits.
+    #[serde(default)]
+    pub room: Option<ShowRoomAnswer>,
+    #[serde(default)]
+    pub invite: Option<ShowInvite>,
+    #[serde(default)]
+    pub limits: Option<TalkLimits>,
 }
 
 /// `GET /api/cloud/shows/current`. The web never stores ingest keys, so
@@ -691,6 +731,12 @@ pub enum CloudApiError {
     Disabled,
     Full,
     NodeUnreachable,
+    /// Plan 224 W-G4 (429): the month's guest-hours are used up.
+    GuestHoursUsedUp {
+        reset_at: Option<String>,
+    },
+    /// Plan 224 (503): talk shows are off, or LiveKit is unreachable.
+    RoomsUnavailable,
     Transport(String),
     Other {
         status: u16,
@@ -711,6 +757,13 @@ impl std::fmt::Display for CloudApiError {
             Self::Disabled => write!(f, "Videorc Cloud is switched off right now."),
             Self::Full => write!(f, "Videorc Cloud is full right now."),
             Self::NodeUnreachable => write!(f, "Videorc Cloud could not be reached."),
+            Self::GuestHoursUsedUp { .. } => {
+                write!(
+                    f,
+                    "This month's guest limit is reached. Guests already on stay."
+                )
+            }
+            Self::RoomsUnavailable => write!(f, "Rooms aren't available right now."),
             Self::Transport(message) => write!(f, "Videorc Cloud could not be reached: {message}"),
             Self::Other {
                 status,
@@ -742,6 +795,8 @@ impl CloudApiError {
             Self::Other { status, .. } if *status >= 500 => {
                 Some(CloudFallbackReason::CloudNodeUnreachable)
             }
+            Self::GuestHoursUsedUp { .. } => Some(CloudFallbackReason::CloudGuestHoursUsedUp),
+            Self::RoomsUnavailable => Some(CloudFallbackReason::CloudRoomsUnavailable),
             Self::Unauthorized
             | Self::ShowLive(_)
             | Self::TestLimit { .. }
@@ -768,6 +823,8 @@ pub fn classify_cloud_failure(
         (503, "cloud-disabled") => CloudApiError::Disabled,
         (503, "cloud-full") => CloudApiError::Full,
         (503, "cloud-node-unreachable") => CloudApiError::NodeUnreachable,
+        (429, "cloud-guest-hours-used-up") => CloudApiError::GuestHoursUsedUp { reset_at },
+        (503, "cloud-rooms-unavailable") => CloudApiError::RoomsUnavailable,
         _ => CloudApiError::Other {
             status,
             code: code.to_string(),
@@ -805,6 +862,48 @@ pub trait CloudWebApi: Send + Sync + 'static {
         show_id: &str,
         report: &LostShowReport,
     ) -> impl Future<Output = std::result::Result<LostShowResponse, CloudApiError>> + Send;
+    // --- Plan 224: talk shows (the web's `talk-route.ts`) ---
+    fn room_token(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> impl Future<Output = std::result::Result<RoomTokenAnswer, CloudApiError>> + Send;
+    fn get_room(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> impl Future<Output = std::result::Result<RoomSettingsAnswer, CloudApiError>> + Send;
+    fn patch_room(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        patch: &RoomPatch,
+    ) -> impl Future<Output = std::result::Result<RoomSettingsAnswer, CloudApiError>> + Send;
+    fn rotate_invite(
+        &self,
+        bearer: &str,
+        show_id: &str,
+    ) -> impl Future<Output = std::result::Result<ShowInvite, CloudApiError>> + Send;
+    fn list_guests(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        since: Option<&str>,
+    ) -> impl Future<Output = std::result::Result<GuestsAnswer, CloudApiError>> + Send;
+    fn decide_request(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        request_id: &str,
+        decision: GuestDecision,
+    ) -> impl Future<Output = std::result::Result<(), CloudApiError>> + Send;
+    fn guest_action(
+        &self,
+        bearer: &str,
+        show_id: &str,
+        guest_id: &str,
+        body: &GuestActionBody,
+    ) -> impl Future<Output = std::result::Result<GuestActionAnswer, CloudApiError>> + Send;
 }
 
 // --- Wire: the control socket -------------------------------------------------
@@ -982,6 +1081,12 @@ pub struct RunnerState {
     /// Absent on `starting`, `ending` and `ended`, and from an older runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<CloudProgram>,
+    /// Plan 224: the room, on a talk show only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<RunnerRoomState>,
+    /// Plan 224 D10: the cloud recording, on a talk show only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RunnerRecordingState>,
 }
 
 /// The runner's `program` block (plan 223 C1, `docs/wire-notes.md`): what
@@ -1108,7 +1213,7 @@ impl std::fmt::Debug for HandoverDestination {
     }
 }
 
-fn destinations_set_frame(id: &str, destinations: &[HandoverDestination]) -> Value {
+pub(crate) fn destinations_set_frame(id: &str, destinations: &[HandoverDestination]) -> Value {
     json!({
         "t": "intent",
         "id": id,
@@ -1134,7 +1239,7 @@ fn intent_frame(id: &str, kind: &str) -> Value {
     json!({ "t": "intent", "id": id, "kind": kind })
 }
 
-fn new_intent_id() -> String {
+pub(crate) fn new_intent_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
@@ -1150,32 +1255,32 @@ type AckResult = std::result::Result<Option<Value>, String>;
 type AckSender = oneshot::Sender<AckResult>;
 
 /// A request from the show's owner to the socket task.
-struct ControlRequest {
+pub(crate) struct ControlRequest {
     frame: Value,
     ack: Option<(String, AckSender)>,
 }
 
 #[derive(Debug, Clone)]
-struct ActiveShow {
-    record: ShowRecord,
-    control: ShowControl,
+pub(crate) struct ActiveShow {
+    pub(crate) record: ShowRecord,
+    pub(crate) control: ShowControl,
     /// Present after a create, or when `GET current` handed it back.
-    ingest: Option<Vec<ShowIngest>>,
+    pub(crate) ingest: Option<Vec<ShowIngest>>,
     /// The local session feeding the show; `None` is a resumable show.
-    session_id: Option<String>,
-    destinations: Vec<HandoverDestination>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) destinations: Vec<HandoverDestination>,
     /// The runner acked `destinations` for this show: from then on a state
     /// without legs means it restarted and lost them.
-    handed_over: bool,
+    pub(crate) handed_over: bool,
     /// The hold image this computer handed over, in memory only: a runner
     /// that restarts draws its default card until it gets it again.
-    hold_image_png_base64: Option<String>,
+    pub(crate) hold_image_png_base64: Option<String>,
     /// Set by a resume until the runner reports live again.
-    resuming: bool,
+    pub(crate) resuming: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FailedShow {
+pub(crate) struct FailedShow {
     end_reason: String,
     message: String,
     /// The web confirmed the show gone while a session fed it (C2).
@@ -1188,20 +1293,23 @@ pub struct CloudShowRuntime {
     pub entitlement: CloudEntitlement,
     connected: bool,
     ending: bool,
-    show: Option<ActiveShow>,
-    runner: Option<RunnerState>,
-    failed: Option<FailedShow>,
-    fallback: Option<CloudFallback>,
-    end_reason: Option<String>,
-    message: Option<String>,
+    pub(crate) show: Option<ActiveShow>,
+    pub(crate) runner: Option<RunnerState>,
+    pub(crate) failed: Option<FailedShow>,
+    pub(crate) fallback: Option<CloudFallback>,
+    pub(crate) end_reason: Option<String>,
+    pub(crate) message: Option<String>,
     /// Bumped with every new show or socket owner so a stale task stops.
-    generation: u64,
-    control_tx: Option<mpsc::UnboundedSender<ControlRequest>>,
+    pub(crate) generation: u64,
+    pub(crate) control_tx: Option<mpsc::UnboundedSender<ControlRequest>>,
+    /// Plan 224: the room this desktop holds, beside `show`; cleared with
+    /// it. Its token is the one secret in the runtime.
+    pub(crate) talk: Option<TalkShowState>,
     /// C6b: the test that runs or the last one that ran, and the running
     /// test task's cancel switch (`Some` only while it runs).
     test: Option<CloudTestStatus>,
     test_run: Option<watch::Sender<bool>>,
-    restart: Option<CloudRestart>,
+    pub(crate) restart: Option<CloudRestart>,
     /// The show this desktop holds, or last held without seeing it end,
     /// kept across launches (`CLOUD_OPEN_SHOW_KEY`): a relaunch asks the web
     /// for it even when the account's cloud is off right now (lane 3 F2).
@@ -1326,14 +1434,14 @@ pub fn load_settings(database: &crate::storage::Database) -> CloudSettings {
     }
 }
 
-fn lock(slot: &CloudShowSlot) -> std::sync::MutexGuard<'_, CloudShowRuntime> {
+pub(crate) fn lock(slot: &CloudShowSlot) -> std::sync::MutexGuard<'_, CloudShowRuntime> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl CloudShowRuntime {
     /// Replace the cached allowance (plan 222 U5): the runner's clock from
     /// here on adds to its `secondsUsed`.
-    fn replace_allowance(&mut self, allowance: Option<AiCapabilitiesCloud>) {
+    pub(crate) fn replace_allowance(&mut self, allowance: Option<AiCapabilitiesCloud>) {
         self.entitlement.cloud = allowance;
         self.allowance_live_mark = self.runner.as_ref().map(|runner| runner.live_seconds);
     }
@@ -1411,7 +1519,8 @@ impl CloudShowRuntime {
                 node_id: show.record.node_id.clone(),
                 created_at: show.record.created_at.clone(),
                 expires_at: show.record.expires_at.clone(),
-                resumable: show.session_id.is_none(),
+                resumable: show.session_id.is_none() && self.talk.is_none(),
+                kind: (!show.record.kind.is_empty()).then(|| show.record.kind.clone()),
             }),
             session_id: self.show.as_ref().and_then(|show| show.session_id.clone()),
             connected: self.connected,
@@ -1454,6 +1563,13 @@ impl CloudShowRuntime {
                 .map(|seconds| CloudAllowancePast { seconds }),
             program: runner.and_then(|runner| runner.program),
             announce: (self.announce_due && self.entitlement.entitled()).then_some(true),
+            room: self
+                .talk
+                .as_ref()
+                .map(|talk| talk.status(runner.and_then(|runner| runner.room.as_ref()))),
+            recording: runner
+                .and_then(|runner| runner.recording.as_ref())
+                .map(CloudRecordingStatus::from_runner),
         }
     }
 
@@ -1569,8 +1685,9 @@ impl CloudShowRuntime {
         })
     }
 
-    fn clear_show(&mut self, end_reason: Option<String>) {
+    pub(crate) fn clear_show(&mut self, end_reason: Option<String>) {
         self.show = None;
+        self.talk = None;
         self.runner = None;
         self.allowance_live_mark = None;
         self.restart = None;
@@ -1663,10 +1780,14 @@ pub struct CloudHooks {
     pub emit: Arc<dyn Fn(CloudStatus) + Send + Sync>,
     pub legs: CloudLegsHook,
     pub remember: CloudRememberHook,
+    /// Plan 224 D6: the camera lent to the room and taken back.
+    pub camera: CloudCameraHook,
+    /// Plan 224: `cloud.room.requests`, one per new "wants to join".
+    pub request: CloudRequestHook,
 }
 
 impl CloudHooks {
-    fn emit_from(&self, slot: &CloudShowSlot) {
+    pub(crate) fn emit_from(&self, slot: &CloudShowSlot) {
         let (status, remembered) = {
             let mut runtime = lock(slot);
             let remembered = runtime.take_remembered_change();
@@ -1740,13 +1861,13 @@ impl<W: CloudWebApi, C: ControlConnector> Clone for CloudShowContext<W, C> {
     }
 }
 
-enum HelloFailure {
+pub(crate) enum HelloFailure {
     BadToken,
     NoSuchShow,
     Transport(String),
 }
 
-async fn connect_and_hello<C: ControlConnector>(
+pub(crate) async fn connect_and_hello<C: ControlConnector>(
     connector: &C,
     control: &ShowControl,
 ) -> std::result::Result<(C::Transport, RunnerState), HelloFailure> {
@@ -1791,7 +1912,7 @@ async fn connect_and_hello<C: ControlConnector>(
 
 /// Install a connected socket as the show's control channel and run its loop
 /// on its own task. Returns the request sender.
-fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
+pub(crate) fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
     context: &CloudShowContext<W, C>,
     bearer: String,
     control: ShowControl,
@@ -1819,6 +1940,7 @@ fn install_control_loop<W: CloudWebApi, C: ControlConnector>(
         resend_hold_image: None,
         // The hand-over that installs this socket sends the image itself.
         hold_image_sent_on_socket: true,
+        resend_stage: false,
     };
     tokio::spawn(task.run(transport, rx));
     tx
@@ -1838,6 +1960,9 @@ struct ControlLoop<W: CloudWebApi, C: ControlConnector> {
     resend_hold_image: Option<String>,
     /// The hold image went (or was queued) on this socket: at most once each.
     hold_image_sent_on_socket: bool,
+    /// Plan 224: the runner reports no `stage.set` while this desktop holds
+    /// a stage (a restart): send it again, once per socket.
+    resend_stage: bool,
 }
 
 /// A runner that restarted mid-show (plan 184 "When things break"). The
@@ -1993,17 +2118,20 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
             LoopExit::Superseded => {}
             LoopExit::Ended(reason) => {
                 if self.current() {
+                    self.context.forget_talk_show().await;
                     lock(&self.context.slot).clear_show(reason);
                     self.context.hooks.emit_from(&self.context.slot);
                 }
             }
             LoopExit::Gone => {
                 if self.current() {
+                    self.context.forget_talk_show().await;
                     self.mark_gone("show-gone", "Videorc Cloud no longer has this show.");
                 }
             }
             LoopExit::Lost(end_reason) => {
                 if self.current() {
+                    self.context.forget_talk_show().await;
                     let message = if end_reason == "node-unreachable" {
                         "Videorc Cloud lost your show: its server stopped answering."
                     } else {
@@ -2042,6 +2170,10 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     .send(json!({ "t": "intent", "id": id, "kind": "hold.image.set", "pngBase64": png }))
                     .await
                     .map_err(|_| ())?;
+            }
+            if self.resend_stage {
+                self.resend_stage = false;
+                self.context.resend_stage().await;
             }
             tokio::select! {
                 frame = transport.recv() => {
@@ -2189,7 +2321,20 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                 self.resend_hold_image = Some(png);
                 self.hold_image_sent_on_socket = true;
             }
+            // Plan 224: a restarted runner shows the host alone on Solo
+            // until it gets the stage again (`stageSet: false`).
+            let stage_lost = runtime.talk.as_ref().is_some_and(|talk| {
+                !talk.stage.on_stage.is_empty()
+                    && state
+                        .room
+                        .as_ref()
+                        .is_some_and(|room| room.connected && !room.stage_set)
+            });
+            if stage_lost {
+                self.resend_stage = true;
+            }
             runtime.set_runner(state);
+            runtime.talk_layout_from_runner();
             runtime.connected = true;
             (session, legs)
         };
@@ -2412,7 +2557,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
     }
 }
 
-async fn send_intent(
+pub(crate) async fn send_intent(
     tx: &mpsc::UnboundedSender<ControlRequest>,
     frame: Value,
     id: String,
@@ -2690,6 +2835,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
             hold_max_seconds,
             client: client_info(),
             preferred_region: None,
+            room: None,
         };
         let created = match self.web.create_show(&bearer, &request).await {
             Ok(created) => created,
@@ -3451,9 +3597,11 @@ fn test_result_from_api_error(
             (CloudTestReason::CantReach, None)
         }
         CloudApiError::Other { status, .. } if *status >= 500 => (CloudTestReason::CantReach, None),
-        CloudApiError::Unauthorized | CloudApiError::Other { .. } => {
-            (CloudTestReason::Failed, None)
-        }
+        // Plan 224: a test never creates a talk show; these never reach it.
+        CloudApiError::GuestHoursUsedUp { reset_at } => (CloudTestReason::Failed, reset_at.clone()),
+        CloudApiError::RoomsUnavailable
+        | CloudApiError::Unauthorized
+        | CloudApiError::Other { .. } => (CloudTestReason::Failed, None),
     };
     CloudTestResult {
         ok: false,
@@ -3768,6 +3916,7 @@ impl<W: CloudWebApi, C: ControlConnector> CloudTestRun<W, C> {
             hold_max_seconds: self.hold_max_seconds,
             client: client_info(),
             preferred_region: None,
+            room: None,
         };
         let created = match self.create(&request).await? {
             Ok(created) => created,
@@ -3998,6 +4147,8 @@ mod tests {
     /// The show's SRT passphrase (C1b): 32 base62, in every `srt` block.
     const SRT_PASSPHRASE: &str = "srtSECRETpassphrase0123456789abc";
     const TOKEN: &str = "vcs1.eyJ2IjoxfQ.sigSECRET";
+    /// Plan 224: the LiveKit host token the create answers with.
+    const HOST_TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.hostSECRETlivekit.sig";
 
     fn destinations() -> Vec<HandoverDestination> {
         vec![
@@ -4045,6 +4196,9 @@ mod tests {
                 seconds_used: 1_200,
                 ..AiCapabilitiesCloud::default()
             }),
+            room: None,
+            invite: None,
+            limits: None,
         }
     }
 
@@ -4103,6 +4257,13 @@ mod tests {
         lost: StdMutex<VecDeque<std::result::Result<LostShowResponse, CloudApiError>>>,
         /// Every lost report sent: the show id and the body.
         lost_calls: StdMutex<Vec<(String, LostShowReport)>>,
+        // Plan 224: the talk-show routes, scripted.
+        room_tokens: AtomicUsize,
+        room_patches: StdMutex<Vec<RoomPatch>>,
+        rotations: AtomicUsize,
+        guests: StdMutex<VecDeque<GuestsAnswer>>,
+        decisions: StdMutex<Vec<(String, GuestDecision)>>,
+        actions: StdMutex<Vec<(String, GuestActionBody)>>,
     }
 
     impl CloudWebApi for FakeWeb {
@@ -4171,6 +4332,121 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Err(CloudApiError::NodeUnreachable))
+        }
+
+        async fn room_token(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+        ) -> std::result::Result<RoomTokenAnswer, CloudApiError> {
+            self.room_tokens.fetch_add(1, Ordering::SeqCst);
+            Ok(RoomTokenAnswer {
+                host_token: "lk.hostSECRETtoken.refreshed".to_string(),
+                url: "ws://127.0.0.1:7880".to_string(),
+            })
+        }
+
+        async fn get_room(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+        ) -> std::result::Result<RoomSettingsAnswer, CloudApiError> {
+            Ok(RoomSettingsAnswer {
+                room: crate::cloud_talk::RoomSettingsRecord {
+                    title: "Tuesday talk".to_string(),
+                    platforms: vec!["youtube".to_string()],
+                    open_door: false,
+                    limits: TalkLimits {
+                        guests_on_stage: 5,
+                        room_size: 10,
+                        recording_retention_days: 30,
+                    },
+                },
+                invite: Some(ShowInvite {
+                    slug: "k7m2k7m2k7m2k7m2".to_string(),
+                    url: "https://videorc.com/guest/k7m2k7m2k7m2k7m2".to_string(),
+                    expires_at: Some("2026-11-15T00:00:00Z".to_string()),
+                }),
+            })
+        }
+
+        async fn patch_room(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            patch: &RoomPatch,
+        ) -> std::result::Result<RoomSettingsAnswer, CloudApiError> {
+            self.room_patches.lock().unwrap().push(patch.clone());
+            Ok(RoomSettingsAnswer {
+                room: crate::cloud_talk::RoomSettingsRecord {
+                    title: patch.title.clone().unwrap_or_default(),
+                    platforms: patch.platforms.clone().unwrap_or_default(),
+                    open_door: patch.open_door.unwrap_or(false),
+                    limits: TalkLimits {
+                        guests_on_stage: 5,
+                        room_size: 10,
+                        recording_retention_days: 30,
+                    },
+                },
+                invite: None,
+            })
+        }
+
+        async fn rotate_invite(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+        ) -> std::result::Result<ShowInvite, CloudApiError> {
+            let n = self.rotations.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(ShowInvite {
+                slug: format!("rotated{n:09}slug"),
+                url: format!("https://videorc.com/guest/rotated{n:09}slug"),
+                expires_at: None,
+            })
+        }
+
+        async fn list_guests(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            _since: Option<&str>,
+        ) -> std::result::Result<GuestsAnswer, CloudApiError> {
+            Ok(self.guests.lock().unwrap().pop_front().unwrap_or_default())
+        }
+
+        async fn decide_request(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            request_id: &str,
+            decision: GuestDecision,
+        ) -> std::result::Result<(), CloudApiError> {
+            self.decisions
+                .lock()
+                .unwrap()
+                .push((request_id.to_string(), decision));
+            Ok(())
+        }
+
+        async fn guest_action(
+            &self,
+            _bearer: &str,
+            _show_id: &str,
+            guest_id: &str,
+            body: &GuestActionBody,
+        ) -> std::result::Result<GuestActionAnswer, CloudApiError> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push((guest_id.to_string(), body.clone()));
+            Ok(GuestActionAnswer {
+                ok: true,
+                invite: (body.action == crate::cloud_talk::GuestAction::Ban).then(|| ShowInvite {
+                    slug: "bannedrotatedslug".to_string(),
+                    url: "https://videorc.com/guest/bannedrotatedslug".to_string(),
+                    expires_at: None,
+                }),
+            })
         }
     }
 
@@ -4284,6 +4560,12 @@ mod tests {
         legs: RecordedLegs,
         /// Every value the `remember` hook persisted, in order.
         remembered: Arc<StdMutex<Vec<Option<String>>>>,
+        /// Plan 224: every camera hand-over, in order; `camera_busy` makes
+        /// the next lend fail like a take that records the camera.
+        camera: Arc<StdMutex<Vec<crate::cloud_talk::CameraHandover>>>,
+        camera_busy: Arc<std::sync::atomic::AtomicBool>,
+        /// Plan 224: every `cloud.room.requests` event.
+        requests: Arc<StdMutex<Vec<crate::cloud_talk::CloudRoomRequest>>>,
     }
 
     fn harness(entitled: bool) -> Harness {
@@ -4295,6 +4577,9 @@ mod tests {
         let emitted = Arc::new(StdMutex::new(Vec::new()));
         let legs = Arc::new(StdMutex::new(Vec::new()));
         let remembered = Arc::new(StdMutex::new(Vec::new()));
+        let camera = Arc::new(StdMutex::new(Vec::new()));
+        let camera_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let requests = Arc::new(StdMutex::new(Vec::new()));
         let hooks = CloudHooks {
             emit: {
                 let emitted = emitted.clone();
@@ -4309,6 +4594,30 @@ mod tests {
             remember: {
                 let remembered = remembered.clone();
                 Arc::new(move |value| remembered.lock().unwrap().push(value))
+            },
+            camera: {
+                let camera = camera.clone();
+                let busy = camera_busy.clone();
+                Arc::new(move |handover| {
+                    let camera = camera.clone();
+                    let busy = busy.clone();
+                    Box::pin(async move {
+                        if handover == crate::cloud_talk::CameraHandover::Lend
+                            && busy.load(Ordering::SeqCst)
+                        {
+                            return Err(
+                                crate::preview_camera::CAMERA_LEND_REFUSED_BY_SOURCE_TAKE_MESSAGE
+                                    .to_string(),
+                            );
+                        }
+                        camera.lock().unwrap().push(handover);
+                        Ok(())
+                    })
+                })
+            },
+            request: {
+                let requests = requests.clone();
+                Arc::new(move |request| requests.lock().unwrap().push(request))
             },
         };
         let slot = new_cloud_show_slot_remembering(
@@ -4336,6 +4645,423 @@ mod tests {
             emitted,
             legs,
             remembered,
+            camera,
+            camera_busy,
+            requests,
+        }
+    }
+
+    /// A talk-show create answer: the solo one plus the room, invite, limits.
+    fn created_talk() -> CreateShowResponse {
+        let mut answer = created();
+        answer.show.kind = "talk".to_string();
+        answer.room = Some(crate::cloud_talk::ShowRoomAnswer {
+            url: "ws://127.0.0.1:7880".to_string(),
+            host_token: HOST_TOKEN.to_string(),
+            name: "sh_abc".to_string(),
+        });
+        answer.invite = Some(crate::cloud_talk::ShowInvite {
+            slug: "k7m2k7m2k7m2k7m2".to_string(),
+            url: "https://videorc.com/guest/k7m2k7m2k7m2k7m2".to_string(),
+            expires_at: Some("2026-11-15T00:00:00Z".to_string()),
+        });
+        answer.limits = Some(crate::cloud_talk::TalkLimits {
+            guests_on_stage: 5,
+            room_size: 10,
+            recording_retention_days: 30,
+        });
+        answer
+    }
+
+    fn room_open_params() -> crate::cloud_talk::RoomOpenParams {
+        crate::cloud_talk::RoomOpenParams {
+            outputs: vec![CloudTestOutput {
+                orientation: StreamOutputOrientation::Horizontal,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                video_kbps: 6000,
+            }],
+            title: Some("Tuesday talk".to_string()),
+            platforms: None,
+        }
+    }
+
+    fn talk_entitlement() -> CloudEntitlement {
+        CloudEntitlement {
+            plan: Some(EntitlementPlan::Max),
+            cloud: Some(AiCapabilitiesCloud {
+                enabled: true,
+                seconds_per_month: 360_000,
+                seconds_used: 1000,
+                talk_shows: true,
+                guests_on_stage: Some(5),
+                room_size: Some(10),
+                recording_retention_days: Some(30),
+                ..AiCapabilitiesCloud::default()
+            }),
+        }
+    }
+
+    fn welcome_talk(stage_set: bool) -> Value {
+        json!({ "t": "welcome", "state": {
+            "phase": "starting", "liveSeconds": 0, "feeds": [], "legs": [],
+            "room": { "connected": true, "participants": [
+                { "identity": "host:sh_abc", "name": "Orc", "role": "host", "onStage": true,
+                  "video": true, "audio": true, "muted": false, "screen": false,
+                  "quality": "excellent", "sinceMs": 10 }
+            ], "layout": "solo", "hostAway": false, "returnEnabled": false, "stageSet": stage_set },
+            "recording": { "active": false, "seconds": 0, "bytes": 0, "orientations": [], "problem": "no-target" }
+        } })
+    }
+
+    /// Plan 224 C-G1: Open the room creates a talk show, lends the camera
+    /// before anything reaches the web, holds the room in a secret-free
+    /// status, and hands the token out through `room_token` only. Close the
+    /// room ends the show and returns the camera, once.
+    #[tokio::test(start_paused = true)]
+    async fn open_the_room_lends_the_camera_and_the_status_carries_no_token() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created_talk()));
+        let context = harness.context.clone();
+        let open = tokio::spawn(async move {
+            context
+                .open_room(Some("bearer".to_string()), room_open_params(), false)
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        let hello = server.next_frame().await;
+        assert_eq!(hello["t"], "hello");
+        server.send(welcome_talk(false));
+        let status = open.await.unwrap().expect("the room opens");
+        let room = status.room.as_ref().expect("a room in the status");
+        assert_eq!(room.phase, crate::cloud_talk::CloudRoomPhase::Open);
+        assert_eq!(
+            room.invite_url.as_deref(),
+            Some("https://videorc.com/guest/k7m2k7m2k7m2k7m2")
+        );
+        assert!(!room.door_open, "the door is closed by default (D4)");
+        assert_eq!(room.limits.map(|limits| limits.guests_on_stage), Some(5));
+        assert_eq!(room.participants.len(), 1);
+        assert_eq!(
+            status.recording.as_ref().map(|r| r.problem.as_deref()),
+            Some(Some("no-target"))
+        );
+        assert_eq!(
+            status.show.as_ref().map(|show| show.kind.as_deref()),
+            Some(Some("talk"))
+        );
+        assert!(
+            !status.show.as_ref().unwrap().resumable,
+            "a held room is never the Resume notice's show"
+        );
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[crate::cloud_talk::CameraHandover::Lend]
+        );
+        assert_eq!(
+            harness.context.web.create_kinds.lock().unwrap().as_slice(),
+            &["talk".to_string()]
+        );
+        // The create carried the room block the web parses.
+        let request = CreateShowRequest {
+            kind: "talk".to_string(),
+            outputs: Vec::new(),
+            hold_max_seconds: 1800,
+            client: client_info(),
+            preferred_region: None,
+            room: Some(crate::cloud_talk::CreateShowRoom {
+                return_width: 1280,
+                return_height: 720,
+                title: Some("Tuesday talk".to_string()),
+                platforms: Vec::new(),
+            }),
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["room"]["returnWidth"], 1280);
+        assert!(wire["room"].get("platforms").is_none());
+        // Secret-free: the status, every emitted status and their Debug.
+        for status in std::iter::once(&status).chain(harness.emitted.lock().unwrap().iter()) {
+            let printed = serde_json::to_string(status).unwrap();
+            assert!(!printed.contains(HOST_TOKEN), "{printed}");
+            assert!(!printed.contains(TOKEN), "{printed}");
+            assert!(!format!("{status:?}").contains(HOST_TOKEN));
+        }
+        assert!(!format!("{:?}", lock(&harness.context.slot).talk).contains(HOST_TOKEN));
+        // The token goes out through the one RPC, and the fake's refreshed one.
+        let answer = harness
+            .context
+            .room_token(Some("bearer".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(answer.identity, "host:sh_abc");
+        assert_eq!(answer.show_id, "sh_abc");
+        assert_eq!(answer.host_token, "lk.hostSECRETtoken.refreshed");
+        assert!(!format!("{answer:?}").contains("hostSECRET"));
+        // Record and Go Live refuse a local session while the room is open.
+        assert!(lock(&harness.context.slot).talk_show_open());
+        // Close the room: show.end, the web's end, the camera back once.
+        let context = harness.context.clone();
+        let close =
+            tokio::spawn(async move { context.close_room(Some("bearer".to_string())).await });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "show.end");
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        let status = close.await.unwrap().unwrap();
+        assert!(status.room.is_none());
+        assert_eq!(status.phase, CloudPhase::Off);
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[
+                crate::cloud_talk::CameraHandover::Lend,
+                crate::cloud_talk::CameraHandover::Return
+            ]
+        );
+        assert_eq!(
+            harness.context.web.end_calls.lock().unwrap().as_slice(),
+            &["sh_abc".to_string()]
+        );
+        assert!(!lock(&harness.context.slot).talk_show_open());
+    }
+
+    /// Plan 224 D6: a take that records the camera refuses the lend, and
+    /// nothing reaches the web.
+    #[tokio::test(start_paused = true)]
+    async fn open_the_room_is_refused_while_a_take_records_the_camera() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        harness.camera_busy.store(true, Ordering::SeqCst);
+        let error = harness
+            .context
+            .open_room(Some("bearer".to_string()), room_open_params(), false)
+            .await
+            .expect_err("refused");
+        let refusal = error
+            .downcast_ref::<crate::cloud_talk::RoomOpenRefusal>()
+            .expect("a room refusal");
+        assert_eq!(refusal.code(), "cloud-room-camera-busy");
+        assert_eq!(
+            harness.context.web.create_calls.load(Ordering::SeqCst),
+            0,
+            "nothing reached the web"
+        );
+        assert!(lock(&harness.context.slot).talk.is_none());
+        // A running session refuses too, before the camera.
+        harness.camera_busy.store(false, Ordering::SeqCst);
+        let error = harness
+            .context
+            .open_room(Some("bearer".to_string()), room_open_params(), true)
+            .await
+            .expect_err("refused");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::cloud_talk::RoomOpenRefusal>()
+                .map(|r| r.code()),
+            Some("cloud-room-session-active")
+        );
+        assert!(harness.camera.lock().unwrap().is_empty());
+    }
+
+    /// Plan 224 C-G1: the stage, the guests' moves and the runner's restart.
+    /// A removed guest leaves the stage at once; a runner that comes back
+    /// without the stage gets it again; Go Live hands destinations over
+    /// with no local leg; End livestream reports the runner's refusal.
+    #[tokio::test(start_paused = true)]
+    async fn the_stage_follows_the_host_and_the_room_survives_a_runner_restart() {
+        let harness = harness(true);
+        lock(&harness.context.slot).entitlement = talk_entitlement();
+        *harness.context.web.create.lock().unwrap() = Some(Ok(created_talk()));
+        harness
+            .context
+            .web
+            .guests
+            .lock()
+            .unwrap()
+            .push_back(crate::cloud_talk::GuestsAnswer {
+                cursor: "2026-11-08T12:05:00Z".to_string(),
+                declined_count: 0,
+                guests: vec![crate::cloud_talk::CloudRoomGuest {
+                    guest_id: "g_bo".to_string(),
+                    name: "Bo".to_string(),
+                    joined_at: "2026-11-08T12:03:00Z".to_string(),
+                    muted: false,
+                    screen_share_allowed: false,
+                }],
+                requests: vec![crate::cloud_talk::CloudRoomRequest {
+                    request_id: "gr_ada".to_string(),
+                    name: "Ada".to_string(),
+                    asked_at: "2026-11-08T12:05:00Z".to_string(),
+                    device: crate::cloud_talk::CloudGuestDevice::Phone,
+                }],
+            });
+        let context = harness.context.clone();
+        let open = tokio::spawn(async move {
+            context
+                .open_room(Some("bearer".to_string()), room_open_params(), false)
+                .await
+        });
+        let mut server = harness.context.connector.accept().await;
+        let _hello = server.next_frame().await;
+        server.send(welcome_talk(false));
+        open.await.unwrap().unwrap();
+        // The guests poll found Ada asking and Bo in: one request event.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            harness
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.request_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["gr_ada".to_string()]
+        );
+        let status = lock(&harness.context.slot).status();
+        let room = status.room.unwrap();
+        assert_eq!(room.requests.len(), 1);
+        assert_eq!(room.guests.len(), 1);
+        // Bring Bo on: one stage.set with the whole stage.
+        let context = harness.context.clone();
+        let set = tokio::spawn(async move {
+            context
+                .set_stage(crate::cloud_talk::CloudStage {
+                    layout: crate::cloud_talk::CloudStageLayout::SideBySide,
+                    on_stage: vec!["host:sh_abc".to_string(), "g_bo".to_string()],
+                    spotlight: None,
+                    screen: None,
+                    host_shape: Some(crate::cloud_talk::CloudHostShape::Circle),
+                })
+                .await
+        });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "stage.set");
+        assert_eq!(frame["layout"], "side-by-side");
+        assert_eq!(frame["onStage"], json!(["host:sh_abc", "g_bo"]));
+        assert_eq!(frame["hostShape"], "circle");
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        let status = set.await.unwrap().unwrap();
+        assert_eq!(status.room.unwrap().stage.on_stage.len(), 2);
+        // Let Ada in: the web decides; the request leaves the list.
+        let status = harness
+            .context
+            .decide_guest(
+                Some("bearer".to_string()),
+                crate::cloud_talk::GuestDecideParams {
+                    request_id: "gr_ada".to_string(),
+                    decision: crate::cloud_talk::GuestDecision::LetIn,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(status.room.unwrap().requests.is_empty());
+        assert_eq!(
+            harness.context.web.decisions.lock().unwrap().as_slice(),
+            &[(
+                "gr_ada".to_string(),
+                crate::cloud_talk::GuestDecision::LetIn
+            )]
+        );
+        // Remove Bo: the web removes, and the stage goes again without him.
+        let context = harness.context.clone();
+        let remove = tokio::spawn(async move {
+            context
+                .act_on_guest(
+                    Some("bearer".to_string()),
+                    crate::cloud_talk::GuestActParams {
+                        guest_id: "g_bo".to_string(),
+                        action: crate::cloud_talk::GuestAction::Remove,
+                        name: None,
+                    },
+                )
+                .await
+        });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "stage.set");
+        assert_eq!(frame["onStage"], json!(["host:sh_abc"]));
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        let status = remove.await.unwrap().unwrap();
+        let room = status.room.unwrap();
+        assert!(room.guests.is_empty());
+        assert_eq!(room.stage.on_stage, vec!["host:sh_abc".to_string()]);
+        // Go Live: destinations.set, no local leg, the room is live.
+        let context = harness.context.clone();
+        let go_live = tokio::spawn(async move {
+            context
+                .talk_go_live(
+                    Some("bearer".to_string()),
+                    destinations(),
+                    vec!["youtube".to_string(), "twitch".to_string()],
+                )
+                .await
+        });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "destinations.set");
+        assert_eq!(frame["destinations"].as_array().unwrap().len(), 2);
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        let status = go_live.await.unwrap().unwrap();
+        assert!(status.room.as_ref().unwrap().live);
+        assert!(
+            status.session_id.is_none(),
+            "no local session feeds a talk show"
+        );
+        assert_eq!(
+            harness
+                .context
+                .web
+                .room_patches
+                .lock()
+                .unwrap()
+                .last()
+                .and_then(|patch| patch.platforms.clone()),
+            Some(vec!["youtube".to_string(), "twitch".to_string()])
+        );
+        // End livestream: the runner has no legs.end yet; the refusal is named.
+        let context = harness.context.clone();
+        let end = tokio::spawn(async move { context.legs_end().await });
+        let frame = server.next_frame().await;
+        assert_eq!(frame["kind"], "legs.end");
+        server
+            .send(json!({ "t": "ack", "id": frame["id"], "ok": false, "error": "unknown intent" }));
+        let error = end.await.unwrap().expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::cloud_talk::LEGS_END_UNSUPPORTED_MESSAGE)
+        );
+        assert!(lock(&harness.context.slot).status().room.unwrap().live);
+        // The runner restarts and comes back without the stage: it goes again.
+        server.send(json!({ "t": "state", "state": {
+            "phase": "live", "liveSeconds": 30, "feeds": [], "legs": [
+                { "id": "youtube-main", "platform": "youtube", "label": "YouTube", "orientation": "horizontal", "state": "live" },
+                { "id": "twitch-main", "platform": "twitch", "label": "Twitch", "orientation": "horizontal", "state": "live" }
+            ],
+            "destinationsSet": true, "restarts": 1,
+            "room": { "connected": true, "participants": [], "layout": "solo", "hostAway": false, "stageSet": false }
+        } }));
+        let frame = server.next_frame().await;
+        assert_eq!(
+            frame["kind"], "stage.set",
+            "the stage goes again after a restart"
+        );
+        assert_eq!(frame["onStage"], json!(["host:sh_abc"]));
+        server.send(json!({ "t": "ack", "id": frame["id"], "ok": true }));
+        // The runner ends the show: the room goes with it, the camera comes back.
+        server.send(json!({ "t": "state", "state": { "phase": "ended", "endReason": "host-ended", "liveSeconds": 40, "feeds": [], "legs": [] } }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status = lock(&harness.context.slot).status();
+        assert!(status.room.is_none());
+        assert_eq!(status.phase, CloudPhase::Off);
+        assert_eq!(
+            harness.camera.lock().unwrap().as_slice(),
+            &[
+                crate::cloud_talk::CameraHandover::Lend,
+                crate::cloud_talk::CameraHandover::Return
+            ]
+        );
+        // Nothing the socket carried leaked the host token.
+        for frame in harness.context.connector.sent.lock().unwrap().iter() {
+            assert!(!frame.to_string().contains(HOST_TOKEN));
         }
     }
 
@@ -4512,6 +5238,7 @@ mod tests {
             "/cloud/statusOff",
             "/cloud/statusFallback",
             "/cloud/statusTest",
+            "/cloud/statusTalk",
         ] {
             let wire = high_risk_fixture(pointer);
             let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
@@ -6938,8 +7665,13 @@ mod tests {
             hold_max_seconds: 1800,
             client: info,
             preferred_region: None,
+            room: None,
         })
         .unwrap();
+        assert!(
+            wire.get("room").is_none(),
+            "a solo create carries no room block"
+        );
         assert_eq!(wire["client"]["version"], "0.9.143");
         // `hello` carries the same client block.
         let hello = hello_frame("vcs1.x.y");

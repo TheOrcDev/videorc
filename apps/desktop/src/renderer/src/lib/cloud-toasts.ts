@@ -55,6 +55,12 @@ export function cloudFallbackMessage(
     // Plan 222 D6: a remembered show the web could not be asked about.
     case 'cloud-unchecked':
       return `Videorc couldn't check your last cloud show. ${direct}.`
+    // Plan 224: a room that could not open never streams directly (there is
+    // no talk show without a room); these name the refusal on the Guests tab.
+    case 'cloud-guest-hours-used-up':
+      return "This month's guest limit is reached. Guests already on stay."
+    case 'cloud-rooms-unavailable':
+      return "Rooms aren't available right now. Try again in a moment."
   }
 }
 

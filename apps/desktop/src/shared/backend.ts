@@ -5270,6 +5270,10 @@ export type CloudFallbackReason =
   | 'cloud-quality'
   /** Plan 222 D6: a remembered show the web could not be asked about. */
   | 'cloud-unchecked'
+  /** Plan 224 W-G4: the month's guest-hours are used up. */
+  | 'cloud-guest-hours-used-up'
+  /** Plan 224: talk shows are off, or LiveKit is unreachable. */
+  | 'cloud-rooms-unavailable'
 
 /**
  * The runner restarted mid-show and lost its destinations (plan 184 "When
@@ -5295,8 +5299,11 @@ export interface CloudShowSummary {
   nodeId: string
   createdAt?: string
   expiresAt?: string
-  /** Live on the runner with no local feed: Resume or End (C5). */
+  /** Live on the runner with no local feed: Resume or End (C5). Never while
+   * this computer holds the show's room (plan 224). */
   resumable: boolean
+  /** Plan 224: a resumable talk show rejoins the room, never a local session. */
+  kind?: 'solo' | 'talk' | 'test'
 }
 
 export interface CloudHoldStatus {
@@ -5361,6 +5368,177 @@ export interface CloudStatus {
   program?: CloudProgram
   /** Plan 222 U1: "Videorc Cloud is on" is due for this account; absent once seen. */
   announce?: boolean
+  /** Plan 224: the room this computer holds, while it holds one. */
+  room?: CloudRoomStatus
+  /** Plan 224 D10: the cloud recording, on a talk show. */
+  recording?: CloudRecordingStatus
+}
+
+// --- Talk shows (plan 224) ---------------------------------------------------
+// Everything below is secret-free but `CloudRoomTokenAnswer`, the answer to
+// `cloud.room.token.refresh` (renderer role only): the renderer joins the
+// LiveKit room with it and never shows, logs or stores it.
+
+export type CloudRoomPhase = 'closed' | 'opening' | 'open' | 'closing'
+export type CloudStageLayout = 'solo' | 'side-by-side' | 'screen-people' | 'spotlight'
+/** The host's camera shape from Sources (D8), on the host's tile only. */
+export type CloudHostShape = 'rounded' | 'circle'
+export type CloudRoomQuality = 'excellent' | 'good' | 'poor' | 'lost'
+export type CloudRoomRole = 'host' | 'guest'
+export type CloudGuestDevice = 'phone' | 'computer'
+/** The renderer's own room connection, as it reports it. */
+export type CloudRoomClientState =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
+
+/** Someone who asked to join and waits for Let in or Decline (D4). */
+export interface CloudRoomRequest {
+  requestId: string
+  name: string
+  askedAt: string
+  device: CloudGuestDevice
+}
+
+/** A guest the host let in, as videorc.com lists them. */
+export interface CloudRoomGuest {
+  guestId: string
+  name: string
+  joinedAt: string
+  muted: boolean
+  screenShareAllowed: boolean
+}
+
+/** One person in the room as the runner sees them. */
+export interface CloudRoomParticipant {
+  identity: string
+  name: string
+  role: CloudRoomRole
+  onStage: boolean
+  video: boolean
+  audio: boolean
+  muted: boolean
+  screen: boolean
+  quality: CloudRoomQuality
+  sinceMs: number
+  /** No camera frame for 5 s while on stage (D12): "Back in a moment". */
+  away: boolean
+}
+
+export interface CloudRoomLimits {
+  guestsOnStage: number
+  roomSize: number
+  recordingRetentionDays: number
+}
+
+/** The whole stage in one frame (`cloud.stage.set`; the runner diffs). */
+export interface CloudStage {
+  layout: CloudStageLayout
+  /** LiveKit identities: `host:<showId>` and `g_…` guest ids, never names. */
+  onStage: string[]
+  spotlight?: string
+  screen?: string
+  hostShape?: CloudHostShape
+}
+
+/** `CloudStatus.room`: what the Guests tab, the Show stage and the strip draw. */
+export interface CloudRoomStatus {
+  phase: CloudRoomPhase
+  inviteUrl?: string
+  inviteExpiresAt?: string
+  doorOpen: boolean
+  title?: string
+  platforms?: string[]
+  requests?: CloudRoomRequest[]
+  guests?: CloudRoomGuest[]
+  declinedCount: number
+  participants?: CloudRoomParticipant[]
+  stage: CloudStage
+  hostAway: boolean
+  /** The runner is in the LiveKit room. */
+  connected: boolean
+  limits?: CloudRoomLimits
+  client: CloudRoomClientState
+  returnEnabled: boolean
+  stageSet: boolean
+  /** Destinations were handed over during this room: the show is on air. */
+  live: boolean
+  message?: string
+}
+
+/** `CloudStatus.recording` (D10): the cloud recording of the program. */
+export interface CloudRecordingStatus {
+  active: boolean
+  since?: string
+  seconds: number
+  bytes: number
+  orientations?: string[]
+  problem?: string
+}
+
+/** `cloud.room.open`: the outputs a Go Live would create the show with. */
+export interface CloudRoomOpenParams {
+  outputs: CloudTestOutput[]
+  title?: string
+  platforms?: string[]
+}
+
+/** The one token-carrying answer (`cloud.room.token.refresh`). */
+export interface CloudRoomTokenAnswer {
+  hostToken: string
+  url: string
+  /** `host:<showId>`: what the guest page trusts the stage topic from. */
+  identity: string
+  showId: string
+}
+
+export type CloudGuestDecision = 'let-in' | 'decline'
+export type CloudGuestAction =
+  | 'mute'
+  | 'unmute'
+  | 'remove'
+  | 'ban'
+  | 'rename'
+  | 'allow-screen-share'
+  | 'disallow-screen-share'
+
+export interface CloudGuestDecideParams {
+  requestId: string
+  decision: CloudGuestDecision
+}
+
+export interface CloudGuestActParams {
+  guestId: string
+  action: CloudGuestAction
+  name?: string
+}
+
+export interface CloudRoomClientReportParams {
+  state: CloudRoomClientState
+  detail?: string
+}
+
+/** `cloud.show.goLive` (C-G6): the destinations the Go Live dialog settled. */
+export interface CloudTalkGoLiveParams {
+  streaming: StreamingSettings
+}
+
+/** Plan 224 C-G4: one `desktopCapturer` source, as the host picks it. */
+export interface TalkShowDisplaySource {
+  id: string
+  name: string
+  kind: 'screen' | 'window'
+  /** A small PNG data URL, for the picker. */
+  thumbnailDataUrl: string | null
+}
+
+/** Plan 224 C-G4: what main lets the renderer's web media do while a room is open. */
+export interface TalkShowMediaGrant {
+  video: boolean
+  /** The `desktopCapturer` source the next `getDisplayMedia` gets, once. */
+  screenSourceId: string | null
 }
 
 /** The runner's `program` block (plan 223 C1): what leaves our servers, as numbers. */
@@ -6014,6 +6192,13 @@ export interface VideorcApi {
   closePreviewWindow: () => Promise<PreviewWindowState>
   togglePreviewWindow: () => Promise<PreviewWindowState>
   getPreviewWindowState: () => Promise<PreviewWindowState>
+  /** Plan 224 C-G4: the screens and windows the host may share, from main's
+   * `desktopCapturer`; empty unless a talk-show room holds the grant. */
+  getTalkShowDisplaySources: () => Promise<TalkShowDisplaySource[]>
+  /** Plan 224 C-G4: while a room is open the main renderer may open a camera
+   * (web `media` video) and, once a source is named, answer one
+   * `getDisplayMedia` with it. `{ video: false }` ends both. */
+  setTalkShowMediaGrant: (grant: TalkShowMediaGrant) => Promise<boolean>
   reportPreviewPermissionRequired: (
     permissionStatus: Exclude<PreviewPermissionStatus, 'ok'>,
     message?: string,

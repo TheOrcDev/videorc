@@ -114,6 +114,16 @@ import type {
   CloudSettingsPatch,
   CloudStatus,
   CloudTestParams,
+  CloudGuestActParams,
+  CloudGuestDecideParams,
+  CloudRecordingStatus,
+  CloudRoomClientReportParams,
+  CloudRoomOpenParams,
+  CloudRoomRequest,
+  CloudRoomStatus,
+  CloudRoomTokenAnswer,
+  CloudStage,
+  CloudTalkGoLiveParams,
   CohostStartParams,
   CohostState,
   CohostReportGetParams,
@@ -531,6 +541,35 @@ export interface BackendRpcMethodMap {
   'cloud.show.end': BackendRpcDefinition<undefined, CloudStatus>
   /** Plan 223 C3: Reconnect one destination of a cloud show (D8). */
   'cloud.show.reconnectDestination': BackendRpcDefinition<{ targetId: string }, CloudStatus>
+  // --- Talk shows (plan 224 C-G1). Every answer is the secret-free status
+  // but `cloud.room.token.refresh`, the renderer's alone. ---
+  /** "Open the room" (D17): creates the talk show, lends the camera (D6). */
+  'cloud.room.open': BackendRpcDefinition<CloudRoomOpenParams, CloudStatus>
+  /** "Close the room": the show ends, the guests leave, the camera comes back. */
+  'cloud.room.close': BackendRpcDefinition<undefined, CloudStatus>
+  /** C-G8: after a relaunch, hold the room again (the renderer rejoins). */
+  'cloud.room.resume': BackendRpcDefinition<undefined, CloudStatus>
+  /** "New link" (D5). */
+  'cloud.room.invite.rotate': BackendRpcDefinition<undefined, CloudStatus>
+  /** "Let anyone with the link in backstage" (D4). */
+  'cloud.room.door.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
+  /** A fresh 10-minute host token; renderer role only, never logged. */
+  'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
+  /** The renderer's own room connection, for the status copy. */
+  'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
+  'cloud.guest.decide': BackendRpcDefinition<CloudGuestDecideParams, CloudStatus>
+  'cloud.guest.act': BackendRpcDefinition<CloudGuestActParams, CloudStatus>
+  /** The whole stage in one frame (D8). */
+  'cloud.stage.set': BackendRpcDefinition<CloudStage, CloudStatus>
+  /** Record in a talk show (D10). */
+  'cloud.recording.start': BackendRpcDefinition<undefined, CloudStatus>
+  'cloud.recording.stop': BackendRpcDefinition<undefined, CloudStatus>
+  /** The Program monitor's feed (R-G5). */
+  'cloud.return.set': BackendRpcDefinition<{ open: boolean }, CloudStatus>
+  /** Go Live in a talk show (C-G6): the destinations go to the runner; no local leg. */
+  'cloud.show.goLive': BackendRpcDefinition<CloudTalkGoLiveParams, CloudStatus>
+  /** End livestream in a talk show (D17): the legs end, the room stays. */
+  'cloud.show.legs.end': BackendRpcDefinition<undefined, CloudStatus>
   // --- The stream watchdog (plan 223) ---
   'watchdog.alerts.list': BackendRpcDefinition<undefined, WatchdogAlertsView>
   'watchdog.alert.acknowledge': BackendRpcDefinition<{ id: string }, WatchdogAlertsView>
@@ -783,6 +822,8 @@ export interface BackendEventMap {
   'cohost.act.result': CohostActAnswer
   /** The whole secret-free cloud status, on every change (plan 184). */
   'cloud.state': CloudStatus
+  /** Plan 224: one per new "wants to join", for the Studio's alert. */
+  'cloud.room.requests': CloudRoomRequest
   /** Plan 223: the full alert list on every change. */
   'watchdog.alerts': WatchdogAlertsView
   'cohost.report.saved': CohostReportSavedEvent
@@ -5638,6 +5679,106 @@ const watchdogAlertDevicesSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<WatchdogAlertDevicesView>
 
+// --- Talk shows (plan 224): the room, the recording and their params ---
+const cloudRoomRequestSchema = objectSchema(
+  {
+    requestId: boundedString,
+    name: stringSchema({ maxLength: 64 }),
+    askedAt: stringSchema({ maxLength: 64 }),
+    device: enumSchema(['phone', 'computer'])
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomRequest>
+const cloudRoomGuestSchema = objectSchema(
+  {
+    guestId: boundedString,
+    name: stringSchema({ maxLength: 64 }),
+    joinedAt: stringSchema({ maxLength: 64 }),
+    muted: booleanSchema,
+    screenShareAllowed: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const cloudRoomParticipantSchema = objectSchema(
+  {
+    identity: boundedString,
+    name: stringSchema({ maxLength: 64 }),
+    role: enumSchema(['host', 'guest']),
+    onStage: booleanSchema,
+    video: booleanSchema,
+    audio: booleanSchema,
+    muted: booleanSchema,
+    screen: booleanSchema,
+    quality: enumSchema(['excellent', 'good', 'poor', 'lost']),
+    sinceMs: nonNegativeInteger,
+    away: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const cloudStageSchema = objectSchema(
+  {
+    layout: enumSchema(['solo', 'side-by-side', 'screen-people', 'spotlight']),
+    onStage: arraySchema(boundedString, { maxLength: 8 }),
+    spotlight: optionalSchema(boundedString),
+    screen: optionalSchema(boundedString),
+    hostShape: optionalSchema(enumSchema(['rounded', 'circle']))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudStage>
+const cloudRoomStatusSchema = objectSchema(
+  {
+    phase: enumSchema(['closed', 'opening', 'open', 'closing']),
+    inviteUrl: optionalSchema(stringSchema({ minLength: 1, maxLength: 2048 })),
+    inviteExpiresAt: optionalSchema(timestamp),
+    doorOpen: booleanSchema,
+    title: optionalSchema(stringSchema({ maxLength: 200 })),
+    platforms: optionalSchema(arraySchema(stringSchema({ maxLength: 32 }), { maxLength: 16 })),
+    requests: optionalSchema(arraySchema(cloudRoomRequestSchema, { maxLength: 64 })),
+    guests: optionalSchema(arraySchema(cloudRoomGuestSchema, { maxLength: 64 })),
+    declinedCount: nonNegativeInteger,
+    participants: optionalSchema(arraySchema(cloudRoomParticipantSchema, { maxLength: 64 })),
+    stage: cloudStageSchema,
+    hostAway: booleanSchema,
+    connected: booleanSchema,
+    limits: optionalSchema(
+      objectSchema(
+        {
+          guestsOnStage: nonNegativeInteger,
+          roomSize: nonNegativeInteger,
+          recordingRetentionDays: nonNegativeInteger
+        },
+        { allowUnknown: false }
+      )
+    ),
+    client: enumSchema(['idle', 'connecting', 'connected', 'reconnecting', 'disconnected']),
+    returnEnabled: booleanSchema,
+    stageSet: booleanSchema,
+    live: booleanSchema,
+    message: optionalText
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomStatus>
+const cloudRecordingStatusSchema = objectSchema(
+  {
+    active: booleanSchema,
+    since: optionalSchema(timestamp),
+    seconds: nonNegativeInteger,
+    bytes: nonNegativeInteger,
+    orientations: optionalSchema(arraySchema(stringSchema({ maxLength: 8 }), { maxLength: 4 })),
+    problem: optionalSchema(stringSchema({ maxLength: 200 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRecordingStatus>
+const cloudRoomTokenAnswerSchema = objectSchema(
+  {
+    hostToken: stringSchema({ minLength: 1, maxLength: 8192 }),
+    url: stringSchema({ minLength: 1, maxLength: 2048 }),
+    identity: boundedString,
+    showId: boundedString
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomTokenAnswer>
+
 const cloudStatusSchema = objectSchema(
   {
     phase: enumSchema(['off', 'connecting', 'live', 'hold', 'resuming', 'ending', 'failed']),
@@ -5660,7 +5801,8 @@ const cloudStatusSchema = objectSchema(
           nodeId: stringSchema({ maxLength: 128 }),
           createdAt: optionalSchema(timestamp),
           expiresAt: optionalSchema(timestamp),
-          resumable: booleanSchema
+          resumable: booleanSchema,
+          kind: optionalSchema(enumSchema(['solo', 'talk', 'test']))
         },
         { allowUnknown: false }
       )
@@ -5704,7 +5846,9 @@ const cloudStatusSchema = objectSchema(
             'cloud-show-limit',
             'not-entitled',
             'cloud-quality',
-            'cloud-unchecked'
+            'cloud-unchecked',
+            'cloud-guest-hours-used-up',
+            'cloud-rooms-unavailable'
           ]),
           at: timestamp,
           sessionId: boundedString,
@@ -5778,7 +5922,10 @@ const cloudStatusSchema = objectSchema(
     // Plan 223 C3: the runner's program block, every field optional.
     program: optionalSchema(cloudProgramSchema),
     // Plan 222 U1: "Videorc Cloud is on" is due for this account (true or absent).
-    announce: optionalSchema(booleanSchema)
+    announce: optionalSchema(booleanSchema),
+    // Plan 224: the room and the cloud recording, on a talk show.
+    room: optionalSchema(cloudRoomStatusSchema),
+    recording: optionalSchema(cloudRecordingStatusSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudStatus>
@@ -5811,6 +5958,57 @@ const cloudTestParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+
+const cloudTestOutputSchema = objectSchema(
+  {
+    orientation: enumSchema(['horizontal', 'vertical']),
+    width: nonNegativeInteger,
+    height: nonNegativeInteger,
+    fps: nonNegativeInteger,
+    videoKbps: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const cloudRoomOpenParamsSchema = objectSchema(
+  {
+    outputs: arraySchema(cloudTestOutputSchema, { maxLength: 2 }),
+    title: optionalSchema(stringSchema({ maxLength: 80 })),
+    platforms: optionalSchema(arraySchema(stringSchema({ maxLength: 32 }), { maxLength: 16 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomOpenParams>
+const cloudGuestDecideParamsSchema = objectSchema(
+  { requestId: boundedString, decision: enumSchema(['let-in', 'decline']) },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudGuestDecideParams>
+const cloudGuestActParamsSchema = objectSchema(
+  {
+    guestId: boundedString,
+    action: enumSchema([
+      'mute',
+      'unmute',
+      'remove',
+      'ban',
+      'rename',
+      'allow-screen-share',
+      'disallow-screen-share'
+    ]),
+    name: optionalSchema(stringSchema({ minLength: 1, maxLength: 32 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudGuestActParams>
+const cloudRoomClientReportParamsSchema = objectSchema(
+  {
+    state: enumSchema(['idle', 'connecting', 'connected', 'reconnecting', 'disconnected']),
+    detail: optionalSchema(stringSchema({ maxLength: 200 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomClientReportParams>
+const cloudTalkGoLiveParamsSchema = objectSchema(
+  { streaming: boundedBackendParamValueSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudTalkGoLiveParams>
+const cloudOpenFlagSchema = objectSchema({ open: booleanSchema }, { allowUnknown: false })
 
 const runtimeContracts = {
   'session.sources.get': {
@@ -6255,6 +6453,25 @@ const runtimeContracts = {
     params: objectSchema({ targetId: boundedString }, { allowUnknown: false }),
     result: cloudStatusSchema
   },
+  // --- Talk shows (plan 224 C-G1) ---
+  'cloud.room.open': { params: cloudRoomOpenParamsSchema, result: cloudStatusSchema },
+  'cloud.room.close': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.room.resume': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.room.invite.rotate': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.room.door.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
+  'cloud.room.token.refresh': { params: undefinedSchema, result: cloudRoomTokenAnswerSchema },
+  'cloud.room.client.report': {
+    params: cloudRoomClientReportParamsSchema,
+    result: cloudStatusSchema
+  },
+  'cloud.guest.decide': { params: cloudGuestDecideParamsSchema, result: cloudStatusSchema },
+  'cloud.guest.act': { params: cloudGuestActParamsSchema, result: cloudStatusSchema },
+  'cloud.stage.set': { params: cloudStageSchema, result: cloudStatusSchema },
+  'cloud.recording.start': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.recording.stop': { params: undefinedSchema, result: cloudStatusSchema },
+  'cloud.return.set': { params: cloudOpenFlagSchema, result: cloudStatusSchema },
+  'cloud.show.goLive': { params: cloudTalkGoLiveParamsSchema, result: cloudStatusSchema },
+  'cloud.show.legs.end': { params: undefinedSchema, result: cloudStatusSchema },
   // --- The stream watchdog (plan 223) ---
   'watchdog.alerts.list': { params: undefinedSchema, result: watchdogAlertsViewSchema },
   'watchdog.alert.acknowledge': {
@@ -6594,6 +6811,7 @@ const runtimeEventSchemas = {
   'cohost.state': cohostStateSchema,
   'cohost.act.result': cohostActAnswerSchema,
   'cloud.state': cloudStatusSchema,
+  'cloud.room.requests': cloudRoomRequestSchema,
   'watchdog.alerts': watchdogAlertsViewSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
   'cohost.community.changed': communitySummarySchema,
