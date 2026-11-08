@@ -91,9 +91,9 @@ try {
       preset: layout.preset,
       settleMs
     })
-    const [surface, previewWindow, captureState] = await Promise.all([
+    const previewWindow = await revealDockedPreview(smoke)
+    const [surface, captureState] = await Promise.all([
       smokeCommand(smoke, 'preview-surface-scene-state'),
-      smokeCommand(smoke, 'preview-window-state'),
       smokeCommand(smoke, 'eval-js', {
         code: `
           const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}');
@@ -187,6 +187,25 @@ function assertLayoutLoop(layout, selected, surface, scene, previewWindow, captu
       `Detached preview surface sources ${visibleSurfaceSources.join(', ')} did not match backend scene sources ${expectedSurfaceSources.join(', ')}.`
     )
   }
+}
+
+// Plan 210 put Scenes above the Layout tab's canvas, so at the default
+// 1180x780 window the docked slot starts below the fold and the Preview hides
+// as scrolled-away, which is right for a user. Scroll the canvas into view
+// (a vertical preset reopens the tab through Studio, back at the top) and give
+// the dock a moment to show it before asserting. A floating Preview is
+// unaffected by the scroll.
+async function revealDockedPreview(smoke) {
+  await smokeCommand(smoke, 'eval-js', {
+    code: `document.querySelector('[data-videorc-dock-slot="scene"]')?.scrollIntoView({ block: 'center', behavior: 'instant' }); return null;`
+  })
+  const deadline = Date.now() + 10000
+  let state = await smokeCommand(smoke, 'preview-window-state')
+  while (!(state?.open && state.visible) && Date.now() < deadline) {
+    await sleep(100)
+    state = await smokeCommand(smoke, 'preview-window-state')
+  }
+  return state
 }
 
 function sourceKinds(scene) {

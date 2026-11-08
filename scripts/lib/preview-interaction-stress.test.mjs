@@ -7,6 +7,7 @@ import {
   analyzeNativeStatusSamples,
   cgOraclePreviewReady,
   effectivePresentFpsFloor,
+  findInProcessHostWindows,
   pixelOracleCaptureSize,
   layoutIntentDiagnostic,
   previewInteractionPhaseEvidence,
@@ -654,6 +655,66 @@ describe('preview interaction stress contract', () => {
     assert.equal(result.inProcessSamples, 1)
   })
 
+  it('finds a docked preview inside the main window, with no Preview window (plan 213 D)', () => {
+    const main = mainWindow()
+    const observation = {
+      expectedBounds: { x: 419, y: 300, width: 458, height: 258 },
+      hostKind: 'in-process',
+      hostWindow: 'main',
+      windows: [main],
+      processes: [{ pid: 10, ppid: 1, command: 'Electron' }]
+    }
+    const result = analyzeCgWindowObservations([observation], {
+      expectedHostKind: 'in-process',
+      expectedWindowPid: 10
+    })
+    assert.deepEqual(result.failures, [])
+    assert.deepEqual(findInProcessHostWindows([main], 10, 'main'), [main])
+    // The floating oracle still wants its Preview window: without the host
+    // window the same sample has none.
+    assert.deepEqual(findInProcessHostWindows([main], 10, null), [])
+    assert.equal(
+      cgOraclePreviewReady({ windows: [main] }, { hostKind: 'in-process', expectedWindowPid: 10 }),
+      false
+    )
+    assert.equal(
+      cgOraclePreviewReady(
+        { windows: [main] },
+        { hostKind: 'in-process', hostWindow: 'main', expectedWindowPid: 10 }
+      ),
+      true
+    )
+  })
+
+  it('flags a visible Preview window beside a docked in-window preview', () => {
+    const windows = [electronWindow(), mainWindow()]
+    const result = analyzeCgWindowObservations(
+      [
+        {
+          expectedBounds: { x: 419, y: 300, width: 458, height: 258 },
+          hostKind: 'in-process',
+          hostWindow: 'main',
+          windows,
+          processes: [{ pid: 10, ppid: 1, command: 'Electron' }]
+        }
+      ],
+      { expectedHostKind: 'in-process', expectedWindowPid: 10 }
+    )
+    assert.match(result.failures.join('\n'), /did not resolve to exactly one Electron/)
+    assert.equal(
+      cgOraclePreviewReady({ windows }, { hostKind: 'in-process', hostWindow: 'main' }),
+      false
+    )
+  })
+
+  it('never takes another process or a surface window for the docked host', () => {
+    const windows = [
+      { ...mainWindow(), pid: 99 },
+      { ...mainWindow(), name: 'Videorc Native Preview Surface', width: 2000, height: 2000 }
+    ]
+    assert.deepEqual(findInProcessHostWindows(windows, 10, 'main'), [])
+  })
+
   it('scopes the preview oracle to the launched Electron process', () => {
     const result = analyzeCgWindowObservations(
       [
@@ -899,6 +960,23 @@ function electronWindow() {
     y: 100,
     width: 640,
     height: 390
+  }
+}
+
+/** The main window: its title follows the open page, so it is not 'Videorc'. */
+function mainWindow() {
+  return {
+    order: 3,
+    id: 101,
+    pid: 10,
+    owner: 'Electron',
+    name: 'Studio',
+    layer: 0,
+    alpha: 1,
+    x: 100,
+    y: 90,
+    width: 1180,
+    height: 780
   }
 }
 

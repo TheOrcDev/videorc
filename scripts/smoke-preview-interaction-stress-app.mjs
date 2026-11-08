@@ -954,6 +954,7 @@ function joinOracleObservations(samples, oracleSamples, startedAt, finishedAt) {
       return {
         at: sample.at,
         hostKind: sample.status.nativePreviewHostKind ?? null,
+        hostWindow: sample.status.nativePreviewHostWindow ?? null,
         expectedBounds: sample.windowState.contentBounds,
         processes,
         oracleObserved,
@@ -1334,6 +1335,8 @@ async function waitForCgHost(windowOracle, smoke) {
       lastReceivedAt = latest.receivedAt
       const ready = cgOraclePreviewReady(latest, {
         hostKind: status.nativePreviewHostKind,
+        // Docked on macOS, the layer lives in the main window (plan 213 D).
+        hostWindow: status.nativePreviewHostWindow ?? null,
         expectedWindowPid: thresholds.expectedWindowPid,
         requirePixels: thresholds.requirePixelOracle
       })
