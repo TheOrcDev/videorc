@@ -374,6 +374,10 @@ pub enum CohostAutoHighlightSource {
     /// renderer's schema reads the source as a free string, so this is not a
     /// new closed enum value on the wire.
     Command,
+    /// Plan 225 B6: "Show milestone cards automatically" put a milestone
+    /// card on stream (the renderer draws the milestone variant, never the
+    /// message text).
+    Milestone,
 }
 
 /// One automatic "put this on stream" command. The renderer keys on
@@ -735,6 +739,8 @@ pub enum CohostUtteranceTriggerKind {
     Answer,
     Banter,
     Manual,
+    /// Plan 225 D13, D4: a viewer's `!` command answered in the bubble.
+    Community,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -782,6 +788,27 @@ pub struct CohostUtterance {
     /// Present while `proposed` in Suggest mode: the card leaves then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Plan 225 B6: a milestone welcome's card facts (the person, never the
+    /// message text), so the Stream Manager can put the milestone card on
+    /// stream. Absent on every other line, never null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<CohostUtteranceMilestone>,
+}
+
+/// Plan 225 B6: what the milestone card draws: avatar, name, the milestone
+/// ("10th stream"), the platform; never the message text. `message_id` is
+/// the arrival row the backend highlights, so eligibility and the 10 s
+/// lifetime stay authoritative (D9).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtteranceMilestone {
+    pub message_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    pub platform: StreamPlatform,
+    /// "10th stream", "5 in a row", "One year".
+    pub label: String,
 }
 
 /// A greeting written by the user, with `{name}`-style fields resolved in
@@ -838,7 +865,9 @@ impl Default for WelcomeLine {
     }
 }
 
-/// The two welcomes (plan 192 D2), both on by default.
+/// The welcomes (plan 192 D2; plan 225 D9 adds the regular, comeback and
+/// milestone lines), all on by default. Never in `templates[]`: an older
+/// app ignores a welcome it does not know and keeps its persona.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostWelcomes {
@@ -846,6 +875,15 @@ pub struct CohostWelcomes {
     pub first_time: WelcomeLine,
     #[serde(default)]
     pub returning: WelcomeLine,
+    /// A regular's arrival (plan 225 D9).
+    #[serde(default)]
+    pub regular: WelcomeLine,
+    /// Back after 30 days or more.
+    #[serde(default)]
+    pub comeback: WelcomeLine,
+    /// The Nth stream, N in a row, or the anniversary.
+    #[serde(default)]
+    pub milestone: WelcomeLine,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1085,6 +1123,9 @@ pub(crate) fn validate_auto_chat(auto_chat: &CohostAutoChat) -> Result<CohostAut
     }
     normalize_welcome_line(&mut valid.greetings.welcomes.first_time)?;
     normalize_welcome_line(&mut valid.greetings.welcomes.returning)?;
+    normalize_welcome_line(&mut valid.greetings.welcomes.regular)?;
+    normalize_welcome_line(&mut valid.greetings.welcomes.comeback)?;
+    normalize_welcome_line(&mut valid.greetings.welcomes.milestone)?;
     for (label, behaviour) in [("answers", &valid.answers), ("banter", &valid.banter)] {
         if behaviour.cooldown_seconds == 0 || behaviour.cooldown_seconds > 3600 {
             return Err(format!("The {label} cooldown is 1 to 3600 seconds."));
@@ -1165,6 +1206,11 @@ pub struct CohostSettings {
     /// loads as Bubble.
     #[serde(default)]
     pub auto_chat: CohostAutoChat,
+    /// Know your viewers (plan 225): the community store's switches and
+    /// the regular threshold. `default` so a settings row from before the
+    /// field loads with the store on.
+    #[serde(default)]
+    pub community: crate::community::CommunitySettings,
 }
 
 impl Default for CohostSettings {
@@ -1181,6 +1227,7 @@ impl Default for CohostSettings {
             remove_confirm: RemoveConfirmMode::Confirm,
             persona: CohostPersona::default(),
             auto_chat: CohostAutoChat::default(),
+            community: crate::community::CommunitySettings::default(),
         }
     }
 }
@@ -1188,6 +1235,7 @@ impl Default for CohostSettings {
 impl CohostSettings {
     fn normalized(mut self) -> Self {
         self.notes = truncate_utf16(&self.notes, COHOST_NOTES_MAX_CHARS);
+        self.community = self.community.clone().normalized();
         self.rules = normalize_rules(self.rules);
         // Plan 211 D3: a block saved before `talk` existed takes it from
         // `mode` (`auto` reads as Bubble); `mode` is re-projected.
@@ -1197,6 +1245,9 @@ impl CohostSettings {
         for line in [
             &mut self.auto_chat.greetings.welcomes.first_time,
             &mut self.auto_chat.greetings.welcomes.returning,
+            &mut self.auto_chat.greetings.welcomes.regular,
+            &mut self.auto_chat.greetings.welcomes.comeback,
+            &mut self.auto_chat.greetings.welcomes.milestone,
         ] {
             if normalize_welcome_line(line).is_err() {
                 line.reaction = None;
@@ -1238,6 +1289,9 @@ impl CohostSettings {
         }
         if let Some(auto_chat) = patch.auto_chat {
             self.auto_chat = auto_chat;
+        }
+        if let Some(community) = patch.community {
+            self.community = community.normalized();
         }
     }
 
@@ -1401,6 +1455,11 @@ pub enum CohostCommandKind {
     /// Plan 209 S19: a sentence Buddy's planner turned into tool calls. Its
     /// card says what ran, or asks for a spoken yes first (D14).
     Act,
+    /// Plan 225 B5: "wave at {name}", "say hi to {name}": done at once.
+    Wave,
+    /// Plan 225 B5: "remember that {name} {fact}": a confirm card, then the
+    /// fact goes to the person's note.
+    Remember,
 }
 
 /// Where the latest voice command stands.
@@ -1701,6 +1760,14 @@ pub struct CohostState {
     /// Plan 164 D10: automatic sends this chat session. Omitted while zero.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub auto_chat_sends: u64,
+    /// Plan 225 D11: returning people not waved at or welcomed yet, like
+    /// `say_hi`, oldest first, gone after 15 minutes. Omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub welcome_back: Vec<crate::community::CohostWelcomeBack>,
+    /// Plan 225 D4: links a viewer made with `!link`, with Undo, for 15
+    /// minutes. Omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_made: Vec<crate::community::CohostLinkMade>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -1743,6 +1810,8 @@ impl CohostState {
             command_availability: None,
             utterances: Vec::new(),
             auto_chat_sends: 0,
+            welcome_back: Vec::new(),
+            link_made: Vec::new(),
         }
     }
 }
@@ -2643,6 +2712,9 @@ enum CommandPending {
     Removal,
     /// A confirmed removal is running at the platform.
     Removing,
+    /// Plan 225 B5: "remember that {name} {fact}" waits for a yes before the
+    /// fact goes to the note; `CommandRecord::remember` holds it.
+    RememberConfirm,
     /// Plan 209 D14: a planner call (going live, ending what runs) waits for
     /// a spoken yes; `CommandRecord::act` holds the rest of the plan.
     ActConfirm,
@@ -2687,6 +2759,16 @@ struct CommandRecord {
     countdown_allowed: bool,
     /// Plan 209: the planner's calls still to run while a D14 card waits.
     act: Option<crate::buddy_act::PendingAct>,
+    /// Plan 225 B5: the fact a "remember that" card waits to save.
+    remember: Option<RememberNote>,
+}
+
+/// Plan 225 B5: what "Buddy, remember that {name} {fact}" saves on a yes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RememberNote {
+    person_id: String,
+    name: String,
+    fact: String,
 }
 
 impl CommandRecord {
@@ -2748,6 +2830,7 @@ impl CommandRecord {
             operation_rank: 0,
             countdown_allowed: false,
             act: None,
+            remember: None,
         }
     }
 
@@ -2892,6 +2975,9 @@ struct CommandEffects {
     /// Plan 209 D14: the streamer said yes to this card (its id): the
     /// planner's calls run on from the one that waited.
     run_act: Option<(String, crate::buddy_act::PendingAct)>,
+    /// Plan 225 B5: the streamer said yes to a "remember that" card: the
+    /// fact goes to this person's note.
+    remember_note: Option<(String, String)>,
 }
 
 /// The kill switches as the state carries them: absent while both are on.
@@ -3321,6 +3407,8 @@ impl CohostSession {
             command_availability: None,
             utterances: Vec::new(),
             auto_chat_sends: 0,
+            welcome_back: Vec::new(),
+            link_made: Vec::new(),
         }
     }
 
@@ -5071,6 +5159,27 @@ impl CohostSession {
                 record.wire.at = now_iso;
                 effects.run_act = Some((record.wire.id.clone(), act));
             }
+            // Plan 225 B5: yes saves the fact to the note; no saves nothing.
+            (CommandPending::RememberConfirm, CommandAnswer::Confirm) => {
+                let Some(note) = record.remember.take() else {
+                    return Err(CohostCommandError::not_pending());
+                };
+                record.finish(
+                    CohostCommandStatus::Done,
+                    format!("Saved to {}'s note.", note.name),
+                    &now_iso,
+                );
+                effects.remember_note = Some((note.person_id, note.fact));
+            }
+            (CommandPending::RememberConfirm, CommandAnswer::Cancel) => {
+                record.remember = None;
+                record.finish(
+                    CohostCommandStatus::Cancelled,
+                    "Cancelled. Nothing was saved.",
+                    &now_iso,
+                );
+                self.report.commands.cancelled += 1;
+            }
             (CommandPending::ActConfirm, CommandAnswer::Cancel) => {
                 let message = match record.act.take() {
                     Some(act) => {
@@ -5113,6 +5222,91 @@ impl CohostSession {
         }
         self.command = Some(record);
         effects
+    }
+
+    /// Plan 225 B5: the "remember that" card, open for an answer.
+    fn note_remember_card(
+        &mut self,
+        heard: &str,
+        note: RememberNote,
+        ctx: &CommandContext,
+    ) -> CommandEffects {
+        let mut effects = CommandEffects {
+            emit: true,
+            ..CommandEffects::default()
+        };
+        effects.cancel_superseded = self.supersede_command();
+        let mut record = CommandRecord::with(CohostCommandKind::Remember, None, heard, None, ctx);
+        let expires_at = iso_after(ctx.now, ctx.now + COMMAND_CARD_TTL);
+        record.pending = CommandPending::RememberConfirm;
+        record.wire.status = CohostCommandStatus::Confirm;
+        record.wire.message = format!("Remember about {}: {}?", note.name, note.fact);
+        record.wire.expires_at = Some(expires_at.clone());
+        record.wire.at = ctx.now_iso();
+        effects.expire_card = Some((record.wire.id.clone(), expires_at));
+        record.remember = Some(note);
+        self.command = Some(record);
+        effects
+    }
+
+    /// Plan 225 B5: the chatter of this stream a spoken name names, among
+    /// the rows noted in the last ten minutes, matched like a highlight's
+    /// name. With `split`, the spoken words are a name followed by a fact
+    /// ("bo got the job"): the longest leading run of words (up to four)
+    /// that names a chatter is the name, and the rest is the fact.
+    fn chatter_by_spoken_name(&self, spoken: &str, now: Instant, split: bool) -> Option<SpokenChatter> {
+        let raw: Vec<&str> = spoken.split_whitespace().collect();
+        if raw.is_empty() {
+            return None;
+        }
+        let longest = if split {
+            raw.len().saturating_sub(1).min(4)
+        } else {
+            raw.len().min(4)
+        };
+        // The most specific match wins (the whole name said, over a fuzzy
+        // one), and among equals the shortest prefix, so "bo plays got the
+        // job" is Bo Plays and "got the job", not a fuzzy "bo plays got the".
+        let mut best: Option<(u8, usize, &KnownMessage)> = None;
+        for take in 1..=longest {
+            let words: Vec<String> = name_tokens(&raw[..take].join(" "))
+                .into_iter()
+                .filter(|word| !crate::cohost_command::is_command_word(word))
+                .collect();
+            if words.is_empty() {
+                continue;
+            }
+            let candidates = match_candidates(&words);
+            let spoken_joined = words.concat();
+            for known in self.known.values() {
+                if now.saturating_duration_since(known.noted_at) > COMMAND_NAME_WINDOW {
+                    continue;
+                }
+                let forms = name_match_forms(&known.author_name);
+                if !name_forms_match(&words, &candidates, &forms) {
+                    continue;
+                }
+                let display_joined = name_tokens(&known.author_name).concat();
+                let specificity = if display_joined == spoken_joined {
+                    3
+                } else if candidates.contains(&display_joined) {
+                    2
+                } else {
+                    1
+                };
+                if best.is_none_or(|(seen, _, _)| specificity > seen) {
+                    best = Some((specificity, take, known));
+                }
+            }
+        }
+        let (_, take, known) = best?;
+        let (platform_json, author) = known.author.split_once(':')?;
+        let platform: StreamPlatform = serde_json::from_str(platform_json).ok()?;
+        Some(SpokenChatter {
+            key: crate::community::account_key(platform, author),
+            name: known.author_name.clone(),
+            fact: raw[take..].join(" "),
+        })
     }
 
     /// Buddy was addressed and understood nothing: "Buddy didn't catch
@@ -5314,6 +5508,10 @@ impl CohostSession {
         let message = match record.pending {
             CommandPending::Choice => "No comment was picked.".to_string(),
             CommandPending::HighlightConfirm => "No answer. Nothing was shown.".to_string(),
+            CommandPending::RememberConfirm => {
+                record.remember = None;
+                "No answer. Nothing was saved.".to_string()
+            }
             CommandPending::ActConfirm => match record.act.take() {
                 Some(act) => act.with_results(crate::buddy_act::halt_words(act.waiting_tool()).1),
                 None => "No answer, so Buddy did nothing more.".to_string(),
@@ -6489,6 +6687,9 @@ pub struct CohostEngine {
     /// `cohost.greet` from the last capability read (plan 192 D4): the AI
     /// writes greetings only when the web said 1 or more. Absent reads as 0.
     web_greet_version: Option<u32>,
+    /// Plan 225: "Welcome back" and "Linked … Undo" on the state, following
+    /// the live-chat session like the automatic chat lane.
+    pub(crate) community: crate::community_service::CommunityLane,
 }
 
 impl CohostEngine {
@@ -6508,6 +6709,7 @@ impl CohostEngine {
             auto_chat: AutoChatLane::default(),
             web_tick_version: None,
             web_greet_version: None,
+            community: crate::community_service::CommunityLane::default(),
         }
     }
 
@@ -6727,6 +6929,9 @@ impl CohostEngine {
         // Plan 164 D7: the lane rides every state, tick session or not.
         state.utterances = self.auto_chat.snapshot(now);
         state.auto_chat_sends = self.auto_chat.sends();
+        // Plan 225 D11, D4: the community lane rides it the same way.
+        state.welcome_back = self.community.welcome_back(now);
+        state.link_made = self.community.link_made(now);
         state
     }
 
@@ -6755,6 +6960,7 @@ impl CohostEngine {
                     pending,
                     CommandPending::Removal
                         | CommandPending::HighlightConfirm
+                        | CommandPending::RememberConfirm
                         | CommandPending::ActConfirm
                 ),
                 awaiting_choice: pending == CommandPending::Choice,
@@ -7310,6 +7516,10 @@ impl CohostEngine {
         now_iso: &str,
     ) -> AutoChatPass {
         let ai = self.greet_ai_context(premium);
+        // Plan 225 D9: "Welcome regulars on stream" off reads an arrival as
+        // the plain returning welcome.
+        self.auto_chat
+            .set_arrivals_on(self.settings.community.welcome_on_stream);
         self.auto_chat.note_activity(
             &self.settings.auto_chat,
             ai.as_ref(),
@@ -7318,6 +7528,42 @@ impl CohostEngine {
             now,
             now_iso,
         )
+    }
+
+    /// Plan 225 B6, D9: "Show milestone cards automatically" (opt-in). The
+    /// arrival row goes on stream as the milestone card with the automatic
+    /// cadence: never while a card is live or asked, never the same row
+    /// twice. Returns the command the renderer executes, if one was made.
+    pub(crate) fn auto_show_milestone(
+        &mut self,
+        message_id: &str,
+        now: Instant,
+    ) -> Option<CohostAutoHighlight> {
+        if !self.settings.community.milestone_cards {
+            return None;
+        }
+        let session = self.session.as_mut()?;
+        if session.auto.shown.contains(message_id) || session.auto.requested.is_some() {
+            return None;
+        }
+        let author = session
+            .known
+            .get(message_id)
+            .map(|known| known.author.clone())
+            .unwrap_or_default();
+        let generation = self.auto_highlight_generation.wrapping_add(1).max(1);
+        self.auto_highlight_generation = generation;
+        Some(session.apply_auto_decision(
+            AutoHighlightDecision {
+                message_id: message_id.to_string(),
+                author,
+                source: CohostAutoHighlightSource::Milestone,
+                highlight_type: None,
+                refresh: false,
+            },
+            generation,
+            now,
+        ))
     }
 
     /// The pump's pass over the held greeting buckets.
@@ -7735,12 +7981,27 @@ async fn publish_auto_chat_pass(
             );
         }
         let (snapshot, sources) = {
-            let engine = state.cohost.lock().await;
+            let mut engine = state.cohost.lock().await;
             let sources: Vec<Option<crate::protocol::CohostReportPostSource>> = pass
                 .bubble
                 .iter()
                 .map(|utterance| engine.utterance_source(&utterance.id))
                 .collect();
+            // Plan 225 D11: a welcomed arrival leaves "Welcome back".
+            let welcomed: Vec<String> = pass
+                .bubble
+                .iter()
+                .chain(pass.propose.iter())
+                .filter(|utterance| utterance.trigger.kind == CohostUtteranceTriggerKind::Greeting)
+                .filter_map(|utterance| utterance.trigger.event_id.clone())
+                .collect();
+            engine.community.note_welcomed(&welcomed);
+            // Plan 225 B6: the opt-in automatic milestone card.
+            for utterance in pass.bubble.iter().chain(pass.propose.iter()) {
+                if let Some(milestone) = &utterance.milestone {
+                    engine.auto_show_milestone(&milestone.message_id, Instant::now());
+                }
+            }
             (engine.snapshot(), sources)
         };
         match lifecycle_delivery {
@@ -7766,6 +8027,7 @@ fn utterance_trigger_label(kind: CohostUtteranceTriggerKind) -> &'static str {
         CohostUtteranceTriggerKind::Answer => "answer",
         CohostUtteranceTriggerKind::Banter => "banter",
         CohostUtteranceTriggerKind::Manual => "say",
+        CohostUtteranceTriggerKind::Community => "community",
     }
 }
 
@@ -8703,6 +8965,11 @@ async fn run_detected_command(
         CommandKind::ShowBuddy | CommandKind::HideBuddy => {
             return run_buddy_presence_command(state, scope, command, premium).await;
         }
+        // Plan 225 B5.
+        CommandKind::Wave => return run_wave_command(state, scope, command, premium).await,
+        CommandKind::Remember => {
+            return run_remember_command(state, scope, command, premium).await;
+        }
         CommandKind::Highlight => CommandIntent::Highlight,
         CommandKind::Clear => CommandIntent::Clear,
         CommandKind::Remove => CommandIntent::Remove,
@@ -8750,7 +9017,9 @@ async fn run_banner_command(
         | CommandKind::Choose(_)
         | CommandKind::Unknown
         | CommandKind::ShowBuddy
-        | CommandKind::HideBuddy => return,
+        | CommandKind::HideBuddy
+        | CommandKind::Wave
+        | CommandKind::Remember => return,
     };
     let ctx = command_context(state, premium).await;
     let (status, message) = match command_gate(&ctx, None) {
@@ -8800,6 +9069,142 @@ async fn run_buddy_presence_command(
 }
 
 /// Flip `overlayLayout.buddy.showOnStream` and say so in the Buddy's name.
+/// Plan 225 B5: "Buddy, wave at Ada" / "say hi to Ada": the regular wave
+/// and "Hey Ada!" in the bubble (Bubble mode), for a chatter of this stream
+/// found by the spoken name. Never chat. The card says what happened.
+async fn run_wave_command(
+    state: &AppState,
+    scope: &CommandSession,
+    command: DetectedCommand,
+    premium: bool,
+) {
+    let CommandTarget::Name(spoken) = &command.target else {
+        return;
+    };
+    let ctx = command_context(state, premium).await;
+    let (status, message) = match command_gate(&ctx, None) {
+        Some(message) => (CohostCommandStatus::Unavailable, message.to_string()),
+        None => {
+            let found = {
+                let engine = state.cohost.lock().await;
+                if !engine.command_session_current(scope) {
+                    tracing::info!("Buddy dropped a wave command: its session changed.");
+                    return;
+                }
+                engine
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.chatter_by_spoken_name(spoken, ctx.now, false))
+            };
+            match found {
+                None => (
+                    CohostCommandStatus::NotFound,
+                    format!("No {} in chat.", spoken.trim()),
+                ),
+                Some(SpokenChatter { key, name, .. }) => {
+                    let database = state.database.clone();
+                    let person_id = tokio::task::spawn_blocking(move || database.community_account_person(&key))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .flatten()
+                        .unwrap_or_default();
+                    crate::community_service::wave_at(state, &person_id, &name).await;
+                    (CohostCommandStatus::Done, format!("Waved at {name}."))
+                }
+            }
+        }
+    };
+    record_instant_command(state, scope, CohostCommandKind::Wave, &command.heard, status, message, &ctx).await;
+}
+
+/// Plan 225 B5: "Buddy, remember that Bo got the job": the name is told
+/// from the fact against this stream's chatters, and a card asks "Remember
+/// about Bo: got the job?" with Save and Cancel. A yes appends the fact to
+/// the person's note; it never goes to the AI memory list.
+async fn run_remember_command(
+    state: &AppState,
+    scope: &CommandSession,
+    command: DetectedCommand,
+    premium: bool,
+) {
+    let CommandTarget::Name(tail) = &command.target else {
+        return;
+    };
+    let ctx = command_context(state, premium).await;
+    let note = match command_gate(&ctx, None) {
+        Some(message) => Err((CohostCommandStatus::Unavailable, message.to_string())),
+        None => {
+            let found = {
+                let engine = state.cohost.lock().await;
+                if !engine.command_session_current(scope) {
+                    tracing::info!("Buddy dropped a remember command: its session changed.");
+                    return;
+                }
+                engine
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.chatter_by_spoken_name(tail, ctx.now, true))
+            };
+            match found {
+                None => Err((
+                    CohostCommandStatus::NotFound,
+                    format!("No one called {} in chat.", tail.trim()),
+                )),
+                Some(SpokenChatter { key, name, fact, .. }) => {
+                    let database = state.database.clone();
+                    match tokio::task::spawn_blocking(move || database.community_account_person(&key))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .flatten()
+                    {
+                        Some(person_id) => Ok(RememberNote {
+                            person_id,
+                            name,
+                            fact,
+                        }),
+                        None => Err((
+                            CohostCommandStatus::NotFound,
+                            format!("Buddy doesn't know {name} yet."),
+                        )),
+                    }
+                }
+            }
+        }
+    };
+    match note {
+        Err((status, message)) => {
+            record_instant_command(state, scope, CohostCommandKind::Remember, &command.heard, status, message, &ctx).await;
+        }
+        Ok(note) => {
+            let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+            let (effects, snapshot) = {
+                let mut engine = state.cohost.lock().await;
+                engine.set_command_availability(ctx.availability());
+                let Some(session) = engine.command_session_mut(scope) else {
+                    tracing::info!("Buddy dropped a remember card: its session changed.");
+                    return;
+                };
+                let effects = session.note_remember_card(&command.heard, note, &ctx);
+                mirror_command_slot(state, &engine);
+                (effects, engine.snapshot())
+            };
+            emit_state(state, &snapshot, &lifecycle_delivery);
+            run_command_effects(state, scope, effects, false).await;
+        }
+    }
+}
+
+/// A chatter of this stream a spoken name matched (plan 225 B5).
+struct SpokenChatter {
+    /// The community account key (`<platform>:<author_id>`).
+    key: String,
+    name: String,
+    /// The words after the name, for "remember that".
+    fact: String,
+}
+
 async fn buddy_presence_outcome(state: &AppState, show: bool) -> (CohostCommandStatus, String) {
     let name = get_cohost_settings(state).await.persona.name;
     let name = match name.trim() {
@@ -8883,6 +9288,8 @@ fn kind_label(kind: CohostCommandKind) -> &'static str {
         CohostCommandKind::HideBanners => "banners",
         CohostCommandKind::ShowBuddy | CohostCommandKind::HideBuddy => "presence",
         CohostCommandKind::Act => "act",
+        CohostCommandKind::Wave => "wave",
+        CohostCommandKind::Remember => "remember",
     }
 }
 
@@ -9012,7 +9419,9 @@ async fn banner_command_outcome(
         | CommandKind::Choose(_)
         | CommandKind::Unknown
         | CommandKind::ShowBuddy
-        | CommandKind::HideBuddy => (
+        | CommandKind::HideBuddy
+        | CommandKind::Wave
+        | CommandKind::Remember => (
             CohostCommandStatus::NotFound,
             "Buddy didn't catch that.".to_string(),
         ),
@@ -9722,7 +10131,9 @@ pub(crate) async fn execute_resolved_command(
         | CommandKind::HideBanner
         | CommandKind::HideBanners
         | CommandKind::ShowBuddy
-        | CommandKind::HideBuddy => {
+        | CommandKind::HideBuddy
+        | CommandKind::Wave
+        | CommandKind::Remember => {
             return;
         }
     };
@@ -9882,6 +10293,11 @@ async fn run_command_effects(
         } else {
             run_voice_act(state, scope, Some(command_id), act, true).await;
         }
+    }
+    // Plan 225 B5: the streamer said yes to "remember that": the fact goes
+    // to the person's note, never to the AI memory list.
+    if let Some((person_id, fact)) = effects.remember_note {
+        crate::community_service::append_note(state, &person_id, &fact).await;
     }
 }
 
@@ -10331,6 +10747,9 @@ pub async fn set_cohost_settings(
     crate::cohost_library::settings_saved(state, &previous, &next);
     let listen_changed = engine.settings.listen != next.listen;
     engine.settings = next.clone();
+    // Plan 225: the delivery path reads the community block without the
+    // engine lock.
+    crate::community_service::sync_settings(state, &next.community);
     // Plan 168 S-B1: the pet on stream follows the persona (avatar, pack,
     // still images); the sprite worker decides whether anything changed.
     state.buddy_sprite.set_persona(&next.persona);
@@ -10785,11 +11204,34 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
         let mut engine = state.cohost.lock().await;
         // Plan 168 S-C3: Activity rows make the Buddy react on stream (the
         // greeting's own reaction wins), any chat keeps it awake.
-        let buddy_events = crate::buddy_animator::live_chat_events(
+        let mut buddy_events = crate::buddy_animator::live_chat_events(
             messages,
             &engine.settings.auto_chat,
             chrono::Utc::now(),
         );
+        // Plan 225 D9: a returning person's arrival makes Buddy react
+        // whatever the talk mode; one wave per 20 s wave of regulars, every
+        // milestone its own moment.
+        for message in messages {
+            let Some(event) = crate::buddy_animator::arrival_trigger(
+                message,
+                &engine.settings.auto_chat,
+                chrono::Utc::now(),
+            ) else {
+                continue;
+            };
+            let limited = matches!(
+                event,
+                crate::buddy_animator::BuddyAnimatorEvent::Trigger {
+                    trigger: crate::buddy_pet::BuddyTrigger::Regular
+                        | crate::buddy_pet::BuddyTrigger::Comeback,
+                    ..
+                }
+            );
+            if !limited || crate::community_service::arrival_reaction_due(&state.community, Instant::now()) {
+                buddy_events.push(event);
+            }
+        }
         let auto_chat = engine.note_activity(
             messages,
             premium,
@@ -11507,6 +11949,7 @@ mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            arrival: None,
             author_affiliation: None,
             author_verified: None,
         }
@@ -11531,6 +11974,7 @@ mod tests {
             remove_confirm: RemoveConfirmMode::Confirm,
             persona: CohostPersona::default(),
             auto_chat: CohostAutoChat::default(),
+            community: crate::community::CommunitySettings::default(),
         }
     }
 
@@ -15456,6 +15900,7 @@ mod tests {
             remove_confirm: None,
             persona: None,
             auto_chat: None,
+            community: None,
         });
         assert_eq!(settings.notes.chars().count(), COHOST_NOTES_MAX_CHARS);
         assert_eq!(settings.rules, vec!["No spoilers".to_string()]);
@@ -15758,6 +16203,7 @@ mod tests {
                 remove_confirm: None,
                 persona: None,
                 auto_chat: None,
+                community: None,
             },
         )
         .await
@@ -15833,6 +16279,7 @@ mod tests {
                 remove_confirm: None,
                 persona: None,
                 auto_chat: None,
+                community: None,
             },
         )
         .await
@@ -16152,6 +16599,7 @@ mod tests {
                 remove_confirm: None,
                 persona: None,
                 auto_chat: None,
+                community: None,
             },
         )
         .await
@@ -18202,6 +18650,7 @@ mod tests {
             reply: None,
             first_message: false,
             first_in_session: false,
+            arrival: None,
             author_affiliation: None,
             author_verified: None,
         }
@@ -18373,6 +18822,7 @@ mod tests {
             reason: reason.map(str::to_string),
             heard: heard.to_string(),
             wake_word: true,
+            note: None,
         }
     }
 
@@ -20276,6 +20726,7 @@ mod tests {
             reason: None,
             heard: "what is the weather".to_string(),
             wake_word,
+            note: None,
         };
         run_detected_command(&state, &scope, unclear(true), true).await;
         let unheard = state_command(&state).await;
@@ -20341,6 +20792,156 @@ mod tests {
             .into_iter()
             .map(|banner| banner.name)
             .collect()
+    }
+
+    /// Plan 225 B5: "Buddy, wave at Ada" waves at a chatter of this stream
+    /// (the card says so, the bubble says "Hey Ada!" in Bubble mode, nothing
+    /// reaches chat); an unknown name is not found; "remember that Bo got
+    /// the job" opens a card, and the yes saves the fact to Bo's note.
+    #[tokio::test]
+    async fn wave_and_remember_commands_find_the_chatter_and_never_post() {
+        let mut ada = chat_message(COMMAND_SESSION, 1, "2026-08-22T10:00:01Z");
+        ada.author_id = Some("ada-id".to_string());
+        ada.author_name = "Ada".to_string();
+        let mut bo = chat_message(COMMAND_SESSION, 2, "2026-08-22T10:00:02Z");
+        bo.author_id = Some("bo-id".to_string());
+        bo.author_name = "Bo Plays".to_string();
+        let (state, scope) = command_state(&[ada.clone(), bo.clone()], None).await;
+        // The store knows both (the delivery path would have written them).
+        state
+            .database
+            .community_record_batch(
+                &[
+                    crate::community_store::CommunityRowFacts::from_message(&ada, &Default::default()).unwrap(),
+                    crate::community_store::CommunityRowFacts::from_message(&bo, &Default::default()).unwrap(),
+                ],
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        {
+            let mut engine = state.cohost.lock().await;
+            engine.settings.auto_chat.talk = Some(CohostTalkMode::Bubble);
+        }
+        run_detected_command(
+            &state,
+            &scope,
+            detected(CommandKind::Wave, CommandTarget::Name("ada".into()), "buddy wave at ada", None),
+            true,
+        )
+        .await;
+        let waved = state_command(&state).await;
+        assert_eq!(
+            (waved.kind, waved.status, waved.message.as_str()),
+            (CohostCommandKind::Wave, CohostCommandStatus::Done, "Waved at Ada.")
+        );
+        assert_eq!(crate::community_service::bubble_lines(&state), ["Hey Ada!"]);
+        assert_eq!(state.cohost.lock().await.snapshot().auto_chat_sends, 0);
+        run_detected_command(
+            &state,
+            &scope,
+            detected(CommandKind::Wave, CommandTarget::Name("zed".into()), "buddy wave at zed", None),
+            true,
+        )
+        .await;
+        let missing = state_command(&state).await;
+        assert_eq!(missing.status, CohostCommandStatus::NotFound);
+        assert_eq!(missing.message, "No zed in chat.");
+        // Remember: the name is told from the fact against the chatters.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Remember,
+                CommandTarget::Name("bo plays got the job".into()),
+                "buddy remember that bo plays got the job",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(card.kind, CohostCommandKind::Remember);
+        assert_eq!(card.status, CohostCommandStatus::Confirm);
+        assert_eq!(card.message, "Remember about Bo Plays: got the job?");
+        assert!(card.expires_at.is_some());
+        assert!(state.cohost.lock().await.command_slot_mirror().0.awaiting_answer);
+        confirm_command(
+            &state,
+            crate::protocol::CohostCommandParams {
+                command_id: card.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let saved = state_command(&state).await;
+        assert_eq!(
+            (saved.status, saved.message.as_str()),
+            (CohostCommandStatus::Done, "Saved to Bo Plays's note.")
+        );
+        let person = state
+            .database
+            .community_person(
+                &crate::community::CommunityPersonParams {
+                    platform: Some(StreamPlatform::Twitch),
+                    author_id: Some("bo-id".to_string()),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+                3,
+            )
+            .unwrap();
+        assert_eq!(person.note, "got the job");
+        assert!(person.memories.is_empty(), "a note is never a memory");
+        // A fact with no known name is not found; a cancel saves nothing.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Remember,
+                CommandTarget::Name("nobody likes tea".into()),
+                "buddy remember that nobody likes tea",
+                None,
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(state_command(&state).await.status, CohostCommandStatus::NotFound);
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Remember,
+                CommandTarget::Name("ada loves rust".into()),
+                "buddy remember ada loves rust",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let open = state_command(&state).await;
+        assert_eq!(open.message, "Remember about Ada: loves rust?");
+        cancel_command(
+            &state,
+            crate::protocol::CohostCommandParams {
+                command_id: open.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(state_command(&state).await.status, CohostCommandStatus::Cancelled);
+        let ada_person = state
+            .database
+            .community_person(
+                &crate::community::CommunityPersonParams {
+                    platform: Some(StreamPlatform::Twitch),
+                    author_id: Some("ada-id".to_string()),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+                3,
+            )
+            .unwrap();
+        assert!(ada_person.note.is_empty());
     }
 
     /// "Buddy, show up" flips the one on-stream switch and tells every
@@ -21880,6 +22481,7 @@ mod tests {
             CohostWelcomes {
                 first_time: WelcomeLine::default(),
                 returning: WelcomeLine::default(),
+                ..CohostWelcomes::default()
             }
         );
         assert!(auto_chat.greetings.welcomes.first_time.enabled);
@@ -22202,6 +22804,60 @@ mod tests {
 
     /// Plan 192 S1.1: a welcome's text is trimmed, empty reads as absent,
     /// long is cut to the greeting cap, and its reaction is a plain id.
+    /// Plan 225 B3: an app from before this plan reads the new welcomes
+    /// JSON and keeps its persona. The old shape (plan 192) has no
+    /// `deny_unknown_fields`, so the three new lines are ignored, and the
+    /// new app reads the old shape with the three lines at their defaults.
+    #[test]
+    fn an_app_from_before_plan_225_reads_the_new_welcomes_and_keeps_its_persona() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        #[serde(rename_all = "camelCase")]
+        struct OldWelcomes {
+            #[serde(default)]
+            first_time: WelcomeLine,
+            #[serde(default)]
+            returning: WelcomeLine,
+        }
+        let mut settings = CohostSettings::default();
+        settings.persona.name = "Grum".to_string();
+        settings.auto_chat.greetings.welcomes.regular.text = Some("Yo {name}!".to_string());
+        settings.auto_chat.greetings.welcomes.milestone.enabled = false;
+        settings.auto_chat.greetings.welcomes.comeback.reaction = Some("excited".to_string());
+        let json = serde_json::to_value(&settings).unwrap();
+        let welcomes = json["autoChat"]["greetings"]["welcomes"].clone();
+        for kind in ["regular", "comeback", "milestone"] {
+            assert!(welcomes.get(kind).is_some(), "{kind} is on the wire");
+        }
+        let old: OldWelcomes = serde_json::from_value(welcomes.clone()).unwrap();
+        assert_eq!(old.first_time, WelcomeLine::default());
+        assert_eq!(old.returning, WelcomeLine::default());
+        // The whole block, as an older app parses it: the persona survives.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldSettings {
+            persona: CohostPersona,
+            #[serde(default)]
+            auto_chat: serde_json::Value,
+        }
+        let old_settings: OldSettings = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(old_settings.persona.name, "Grum");
+        assert!(old_settings.auto_chat["greetings"]["templates"].as_array().unwrap().is_empty());
+        // And the new app reads a block saved by an older one.
+        let mut old_json = json.clone();
+        for kind in ["regular", "comeback", "milestone"] {
+            old_json["autoChat"]["greetings"]["welcomes"]
+                .as_object_mut()
+                .unwrap()
+                .remove(kind);
+        }
+        old_json.as_object_mut().unwrap().remove("community");
+        let parsed: CohostSettings = serde_json::from_value(old_json).unwrap();
+        assert_eq!(parsed.auto_chat.greetings.welcomes.regular, WelcomeLine::default());
+        assert_eq!(parsed.auto_chat.greetings.welcomes.milestone, WelcomeLine::default());
+        assert_eq!(parsed.community, crate::community::CommunitySettings::default());
+        assert_eq!(parsed.persona.name, "Grum");
+    }
+
     #[test]
     fn welcome_lines_are_trimmed_bounded_and_their_reaction_checked() {
         let mut auto_chat = CohostAutoChat::default();
@@ -22747,6 +23403,7 @@ mod tests {
                 status,
                 at: chrono::Utc::now().to_rfc3339(),
                 expires_at: None,
+                milestone: None,
             };
         let mut refusal = || {
             let mut why = None;

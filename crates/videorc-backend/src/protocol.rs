@@ -5888,6 +5888,9 @@ pub struct CohostSettingsPatch {
     /// The whole automatic chat block (plan 164 S-A2), validated likewise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_chat: Option<crate::cohost::CohostAutoChat>,
+    /// The whole community block (plan 225), clamped by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<crate::community::CommunitySettings>,
 }
 
 /// Why a Buddy look picture failed (plan 169), in the web's code and the
