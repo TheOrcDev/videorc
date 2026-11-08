@@ -733,8 +733,8 @@ writes it down.
 
 One LiveKit Cloud project, two API keys (one for tokens and the server API,
 one as the webhook signing key). The self-host move is plan 184 X8. The
-runner's hidden participant is billed like anyone else; the metering counts
-it (W-G4).
+runner's participant is billed like anyone else; the metering counts it
+(W-G4).
 
 ## Wire shape (additive)
 
@@ -758,7 +758,10 @@ repos.
     [camera, microphone]` (plus `screen_share`, `screen_share_audio` after
     "Allow screen share"), `canPublishData: false`, name = the typed name,
     TTL 10 min;
-  - runner: `roomJoin`, `hidden: true`, `canSubscribe`, `canPublish`
+  - runner: `roomJoin`, `hidden: false` (changed 2026-11-08 from `hidden: true`:
+    LiveKit makes a hidden participant's tracks invisible, so the host could
+    never subscribe to the return; spike `docs/spike-rooms-2026-11.md` in the
+    runner repo), `canSubscribe`, `canPublish`
     (the return), `canPublishSources: [camera, microphone]`, TTL the show's
     limit (12.5 h).
 
@@ -1031,7 +1034,7 @@ S0b says renderer publishing is good enough; the churn run is clean.
 
 ### Phase 2: runner (`videorc-cloud`)
 
-- **R-G1. Room input.** `crates/runner/src/room.rs`: join hidden with the
+- **R-G1. Room input.** `crates/runner/src/room.rs`: join with the (visible)
   runner token, subscribe to the high layer of on-stage identities only
   (plus the screen track), decode VP8 to I420 into a latest-wins store per
   track (the S0a shape), PCM per track into the mix's ring, the
@@ -1064,9 +1067,11 @@ S0b says renderer publishing is good enough; the churn run is clean.
     image again.
 - **R-G5. The return.** The runner publishes the program as a camera-source
   video track (720p30 VP8, no simulcast) and an audio track into the room;
-  `return.set` turns it off. Guests never subscribe to it (their token's
-  page code never asks; the runner's identity is `hidden`, so they can't see
-  it anyway).
+  `return.set` turns it off. Guests never receive it: the runner sets LiveKit
+  track subscription permissions on the return so only `host:<showId>` (later
+  the phone and producers) may subscribe, which the server enforces; and every
+  client leaves the `runner:` identity out of people lists, tiles and counts
+  (decision 2026-11-08, plan 221 U3).
   - **Done when** the host harness sees the return within 700 ms of a flash
     on a guest's tile.
 - **R-G6. Cloud recording.** `recording.start/stop`: a second FFmpeg
