@@ -112,6 +112,147 @@ pub fn youtube_stream_answer(body: &Value) -> PlatformAnswer {
     }
 }
 
+/// Plan 223 A4: the stream's own health, read from the same
+/// `liveStreams.list part=status` body (0 extra quota): `healthStatus.status`
+/// and its `configurationIssues[]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum YouTubeHealthAnswer {
+    Fine,
+    /// An `error` issue, or `healthStatus.status == bad`: reported at once.
+    Problem {
+        kind: crate::watchdog::PlatformHealthKind,
+        critical: bool,
+        description: Option<String>,
+    },
+    /// `warning` issues only: reported after two polls in a row.
+    Warning {
+        description: Option<String>,
+    },
+    /// No health in the body: changes nothing.
+    Unknown,
+}
+
+pub fn youtube_health_answer(body: &Value) -> YouTubeHealthAnswer {
+    use crate::watchdog::PlatformHealthKind;
+    let Some(health) = body
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("status"))
+        .and_then(|status| status.get("healthStatus"))
+    else {
+        return YouTubeHealthAnswer::Unknown;
+    };
+    let status = health.get("status").and_then(Value::as_str);
+    let issues: Vec<&Value> = health
+        .get("configurationIssues")
+        .and_then(Value::as_array)
+        .map(|issues| issues.iter().collect())
+        .unwrap_or_default();
+    let description = |issue: &Value| {
+        issue
+            .get("description")
+            .or_else(|| issue.get("reason"))
+            .and_then(Value::as_str)
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    fn severity(issue: &Value) -> Option<&str> {
+        issue.get("severity").and_then(Value::as_str)
+    }
+    if let Some(issue) = issues.iter().find(|issue| severity(issue) == Some("error")) {
+        let kind = match issue.get("type").and_then(Value::as_str) {
+            Some("noAudioStream") => PlatformHealthKind::NoAudio,
+            Some("noVideoStream") => PlatformHealthKind::NoVideo,
+            _ => PlatformHealthKind::Problem,
+        };
+        return YouTubeHealthAnswer::Problem {
+            critical: kind != PlatformHealthKind::Problem,
+            kind,
+            description: description(issue),
+        };
+    }
+    if status == Some("bad") {
+        return YouTubeHealthAnswer::Problem {
+            kind: PlatformHealthKind::Problem,
+            critical: false,
+            description: issues.first().and_then(|issue| description(issue)),
+        };
+    }
+    if let Some(issue) = issues
+        .iter()
+        .find(|issue| severity(issue) == Some("warning"))
+    {
+        return YouTubeHealthAnswer::Warning {
+            description: description(issue),
+        };
+    }
+    match status {
+        Some("good" | "ok" | "noData" | "bad") => YouTubeHealthAnswer::Fine,
+        _ => YouTubeHealthAnswer::Unknown,
+    }
+}
+
+/// Debounces the health answers for the watchdog: a problem at once, a
+/// warning after [`NOT_RECEIVING_ANSWERS_BEFORE_WARNING`] polls in a row.
+/// `Some(None)` withdraws the signal, `None` changes nothing.
+#[derive(Debug, Default)]
+pub struct YouTubeHealthDebounce {
+    warning_streak: u32,
+}
+
+/// YouTube Studio's live dashboard for a broadcast.
+pub fn youtube_dashboard_url(broadcast_id: &str) -> String {
+    format!("https://studio.youtube.com/video/{broadcast_id}/livestreaming")
+}
+
+impl YouTubeHealthDebounce {
+    pub fn observe(
+        &mut self,
+        answer: YouTubeHealthAnswer,
+        target_id: &str,
+        broadcast_id: &str,
+    ) -> Option<Option<crate::watchdog::PlatformHealthSignal>> {
+        use crate::watchdog::{PlatformHealthKind, PlatformHealthSignal};
+        let signal = |kind, critical, description| PlatformHealthSignal {
+            target_id: target_id.to_string(),
+            label: "YouTube".to_string(),
+            platform: "youtube".to_string(),
+            kind,
+            critical,
+            description,
+            dashboard_url: Some(youtube_dashboard_url(broadcast_id)),
+        };
+        match answer {
+            YouTubeHealthAnswer::Unknown => None,
+            YouTubeHealthAnswer::Fine => {
+                self.warning_streak = 0;
+                Some(None)
+            }
+            YouTubeHealthAnswer::Problem {
+                kind,
+                critical,
+                description,
+            } => {
+                self.warning_streak = 0;
+                Some(Some(signal(kind, critical, description)))
+            }
+            YouTubeHealthAnswer::Warning { description } => {
+                self.warning_streak = self.warning_streak.saturating_add(1);
+                if self.warning_streak >= NOT_RECEIVING_ANSWERS_BEFORE_WARNING {
+                    Some(Some(signal(
+                        PlatformHealthKind::Problem,
+                        false,
+                        description,
+                    )))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
 /// `liveBroadcasts.list part=status,contentDetails`: the bound stream id and
 /// whether YouTube already ended the broadcast (`complete`, `revoked`).
 pub fn youtube_broadcast_answer(body: &Value) -> (Option<String>, PlatformAnswer) {
@@ -245,6 +386,7 @@ pub async fn run_youtube_ingest_watch(
     let mut token =
         crate::session_token::SessionToken::new(config.access_token.clone(), config.token_source);
     let mut liveness = PlatformLiveness::default();
+    let mut health = YouTubeHealthDebounce::default();
     let mut stream_id: Option<String> = None;
     let mut poll: u32 = 0;
     loop {
@@ -280,7 +422,7 @@ pub async fn run_youtube_ingest_watch(
             }
             if let Some(stream_id) = stream_id.as_deref() {
                 let url = format!("{root}/liveStreams?part=status&id={stream_id}");
-                let answer = match youtube_read(
+                let (answer, health_answer) = match youtube_read(
                     &state,
                     &client,
                     &mut token,
@@ -289,9 +431,22 @@ pub async fn run_youtube_ingest_watch(
                 )
                 .await
                 {
-                    Some(body) => youtube_stream_answer(&body),
-                    None => PlatformAnswer::Unknown,
+                    Some(body) => (youtube_stream_answer(&body), youtube_health_answer(&body)),
+                    None => (PlatformAnswer::Unknown, YouTubeHealthAnswer::Unknown),
                 };
+                // Plan 223 A4: the same body, read for the watchdog.
+                if let Some(signal) = health.observe(
+                    health_answer,
+                    config.target_id.as_deref().unwrap_or("youtube"),
+                    &config.broadcast_id,
+                ) {
+                    crate::watchdog::observe_platform_health(
+                        &state,
+                        &session_id,
+                        config.target_id.as_deref().unwrap_or("youtube"),
+                        signal,
+                    );
+                }
                 if let Some(observation) = liveness.observe(answer) {
                     apply(
                         &state,
@@ -432,6 +587,104 @@ mod tests {
             Some(PlatformStreamObservation::Ended {
                 detail: "ended".to_string()
             })
+        );
+    }
+
+    #[test]
+    fn youtube_health_reads_issues_from_the_same_status_body() {
+        use crate::watchdog::PlatformHealthKind;
+        let bad_no_audio = json!({"items":[{"status":{
+            "streamStatus":"active",
+            "healthStatus":{"status":"bad","configurationIssues":[
+                {"type":"noAudioStream","severity":"error","reason":"No audio",
+                 "description":"The stream has no audio."}]}}}]});
+        assert_eq!(
+            youtube_health_answer(&bad_no_audio),
+            YouTubeHealthAnswer::Problem {
+                kind: PlatformHealthKind::NoAudio,
+                critical: true,
+                description: Some("The stream has no audio.".to_string())
+            }
+        );
+        assert_eq!(
+            youtube_stream_answer(&bad_no_audio),
+            PlatformAnswer::Receiving,
+            "the liveness answer is unchanged by the health read"
+        );
+        let bad_only = json!({"items":[{"status":{"streamStatus":"active",
+            "healthStatus":{"status":"bad"}}}]});
+        assert_eq!(
+            youtube_health_answer(&bad_only),
+            YouTubeHealthAnswer::Problem {
+                kind: PlatformHealthKind::Problem,
+                critical: false,
+                description: None
+            }
+        );
+        let warning = json!({"items":[{"status":{"streamStatus":"active",
+            "healthStatus":{"status":"ok","configurationIssues":[
+                {"type":"bitrateLow","severity":"warning","reason":"Video output low"}]}}}]});
+        assert_eq!(
+            youtube_health_answer(&warning),
+            YouTubeHealthAnswer::Warning {
+                description: Some("Video output low".to_string())
+            }
+        );
+        let good = json!({"items":[{"status":{"streamStatus":"active",
+            "healthStatus":{"status":"good"}}}]});
+        assert_eq!(youtube_health_answer(&good), YouTubeHealthAnswer::Fine);
+        assert_eq!(
+            youtube_health_answer(&json!({"items":[]})),
+            YouTubeHealthAnswer::Unknown
+        );
+
+        // One warning poll says nothing; two in a row say it.
+        let mut debounce = YouTubeHealthDebounce::default();
+        let warning_answer = || YouTubeHealthAnswer::Warning {
+            description: Some("Video output low".to_string()),
+        };
+        assert_eq!(debounce.observe(warning_answer(), "youtube", "b1"), None);
+        let second = debounce
+            .observe(warning_answer(), "youtube", "b1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.kind, PlatformHealthKind::Problem);
+        assert!(!second.critical);
+        assert_eq!(
+            second.dashboard_url.as_deref(),
+            Some("https://studio.youtube.com/video/b1/livestreaming")
+        );
+        assert_eq!(
+            debounce.observe(YouTubeHealthAnswer::Unknown, "youtube", "b1"),
+            None
+        );
+        assert_eq!(
+            debounce.observe(YouTubeHealthAnswer::Fine, "youtube", "b1"),
+            Some(None),
+            "good withdraws it"
+        );
+        assert_eq!(
+            debounce.observe(warning_answer(), "youtube", "b1"),
+            None,
+            "the streak restarts"
+        );
+        // A problem is reported at once, critical when viewers get no audio.
+        let problem = debounce
+            .observe(youtube_health_answer(&bad_no_audio), "youtube", "b1")
+            .unwrap()
+            .unwrap();
+        assert!(problem.critical);
+        assert_eq!(problem.kind, PlatformHealthKind::NoAudio);
+    }
+
+    #[tokio::test]
+    async fn the_breaker_keeps_the_watch_from_reading_at_all() {
+        let state = crate::agent_mcp::test_support::test_state();
+        assert!(youtube_reads_allowed(&state));
+        crate::youtube_quota::record_quota_exhausted(&state, "stream status");
+        assert!(
+            !youtube_reads_allowed(&state),
+            "the plan 094 breaker gates the health read with the watch"
         );
     }
 

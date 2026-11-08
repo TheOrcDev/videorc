@@ -32,6 +32,19 @@ const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::
 /// simply delays the next one.
 pub(crate) const COHOST_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 const COHOST_TICK_PATH: &str = "/api/ai/cohost/tick";
+/// Plan 223 D2: a push is best effort and never holds anything up.
+pub(crate) const ALERTS_NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// Plan 223 B2: the watchdog's AI chat read.
+pub(crate) const WATCHDOG_CHAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const WATCHDOG_CHAT_PATH: &str = "/api/ai/watchdog/chat";
+
+/// Why a watchdog chat read did not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchdogChatError {
+    /// 401 or 403: off for this account or deploy; the stream stops asking.
+    Refused(String),
+    Other(String),
+}
 /// The spotlight lane (plan 060 S3) is a fast lane: one evaluation-model call
 /// every few seconds while the streamer talks. A slow answer is worth nothing
 /// (the transcript has moved on), so the client gives up early and the engine
@@ -1839,6 +1852,96 @@ impl VideorcApiClient {
             message,
             retry_after.as_deref(),
         ))
+    }
+
+    /// The stream watchdog's phone push (plan 223 D2): `POST /api/alerts/notify`
+    /// with the alert's own words. A refusal is a string for the session log;
+    /// nothing here is ever a toast.
+    pub async fn post_alert_notify(
+        &self,
+        bearer_token: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<(), String> {
+        let response = self
+            .http
+            .post(self.endpoint(crate::watchdog::push::ALERTS_NOTIFY_PATH))
+            .bearer_auth(bearer_token)
+            .json(body)
+            .timeout(ALERTS_NOTIFY_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| format!("could not reach videorc.com: {error}"))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let (code, _message) = read_error_code_and_message(response).await;
+        Err(format!("videorc.com answered {} {code}", status.as_u16()))
+    }
+
+    /// The account's alert devices (plan 223 D2): ids and labels, never an
+    /// endpoint.
+    pub async fn get_alert_devices(
+        &self,
+        bearer_token: &str,
+    ) -> Result<crate::watchdog::push::AlertDevicesView> {
+        self.get_bearer_json(crate::watchdog::push::ALERTS_DEVICES_PATH, bearer_token)
+            .await
+    }
+
+    /// The watchdog's AI chat read (plan 223 B2): the last messages as text,
+    /// platform and a per-call author index, never ids or names. Answers the
+    /// raw class probabilities; the desktop keeps its own threshold.
+    pub async fn post_watchdog_chat(
+        &self,
+        bearer_token: &str,
+        session_client_id: &str,
+        messages: Vec<serde_json::Value>,
+    ) -> std::result::Result<Vec<(crate::watchdog::chat_signals::ChatClass, f64)>, WatchdogChatError>
+    {
+        let request = serde_json::json!({
+            "clientVersion": env!("CARGO_PKG_VERSION"),
+            "consentToProcessChat": true,
+            "messages": messages,
+            "seq": 0,
+            "sessionClientId": session_client_id,
+        });
+        let response = self
+            .http
+            .post(self.endpoint(WATCHDOG_CHAT_PATH))
+            .bearer_auth(bearer_token)
+            .json(&request)
+            .timeout(WATCHDOG_CHAT_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| {
+                WatchdogChatError::Other(format!("could not reach videorc.com: {error}"))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let (code, message) = read_error_code_and_message(response).await;
+            return Err(match status.as_u16() {
+                // Off for this account or this deploy: stop asking this stream.
+                401 | 403 => WatchdogChatError::Refused(format!("{code}: {message}")),
+                _ => WatchdogChatError::Other(format!("{} {code}: {message}", status.as_u16())),
+            });
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|error| WatchdogChatError::Other(format!("unreadable answer: {error}")))?;
+        let probabilities = &body["problem"]["probabilities"];
+        let read = |key: &str| probabilities.get(key).and_then(serde_json::Value::as_f64);
+        match (read("audio"), read("video"), read("lag")) {
+            (Some(audio), Some(video), Some(lag)) => Ok(vec![
+                (crate::watchdog::chat_signals::ChatClass::Audio, audio),
+                (crate::watchdog::chat_signals::ChatClass::Video, video),
+                (crate::watchdog::chat_signals::ChatClass::Lag, lag),
+            ]),
+            _ => Err(WatchdogChatError::Other(
+                "the answer carried no probabilities".to_string(),
+            )),
+        }
     }
 
     /// One spotlight call (plan 060 S3). Same failure mapping as the tick so

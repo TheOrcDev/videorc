@@ -3877,6 +3877,9 @@ pub(crate) async fn try_deliver_messages(
             .await;
         }
         state.emit_event("liveChat.message", message);
+        // Plan 223 B1: the watchdog's phrase match, after delivery, never
+        // waiting on anything.
+        crate::watchdog::observe_chat(state, message);
     }
     // A confirmed persisted snapshot, independent of the bounded paint buffer
     // and unread owner. Reconnect/lag readers hydrate it through the totals RPC.

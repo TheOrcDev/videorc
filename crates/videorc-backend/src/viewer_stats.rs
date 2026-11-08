@@ -591,6 +591,34 @@ async fn fetch_x_count(
             None,
         );
     }
+    // Plan 223 A4: `ENDED` while we stream opens `platform-health`; a count
+    // withdraws it. A failed lookup changes nothing.
+    match &outcome {
+        crate::x_live::XViewerCountOutcome::Ended => crate::watchdog::observe_platform_health(
+            state,
+            session_id,
+            "x",
+            Some(crate::watchdog::PlatformHealthSignal {
+                target_id: "x".to_string(),
+                label: "X".to_string(),
+                platform: "x".to_string(),
+                kind: crate::watchdog::PlatformHealthKind::Ended,
+                critical: true,
+                description: Some(
+                    "X reports the broadcast ended. Stop and go live again to start a new one."
+                        .to_string(),
+                ),
+                dashboard_url: Some(format!(
+                    "https://x.com/i/broadcasts/{}",
+                    config.broadcast_id
+                )),
+            }),
+        ),
+        crate::x_live::XViewerCountOutcome::Count(_) => {
+            crate::watchdog::observe_platform_health(state, session_id, "x", None)
+        }
+        _ => {}
+    }
     outcome.count()
 }
 
@@ -677,6 +705,10 @@ pub async fn run_viewer_sampler(
             config.token_source.clone(),
         );
         let mut deadline = ProviderDeadline::new();
+        // Plan 223 A4, A9: Kick's `is_live` misses after once live, behind
+        // the flag A9's measurement flips (`watchdog::KICK_LIVENESS_ALERTS`).
+        let mut kick_seen_live = false;
+        let mut kick_misses: u32 = 0;
         loop {
             deadline.wait(&state, false).await;
             let client = &client;
@@ -691,6 +723,29 @@ pub async fn run_viewer_sampler(
             .ok()
             .flatten();
             record_provider_sample(&state, &session_id, StreamPlatform::Kick, count);
+            if count.is_some() {
+                kick_seen_live = true;
+                kick_misses = 0;
+            } else if kick_seen_live {
+                kick_misses = kick_misses.saturating_add(1);
+            }
+            if crate::watchdog::KICK_LIVENESS_ALERTS && kick_seen_live {
+                let offline = kick_misses >= crate::watchdog::KICK_LIVENESS_MISSES;
+                crate::watchdog::observe_platform_health(
+                    &state,
+                    &session_id,
+                    "kick",
+                    offline.then(|| crate::watchdog::PlatformHealthSignal {
+                        target_id: "kick".to_string(),
+                        label: "Kick".to_string(),
+                        platform: "kick".to_string(),
+                        kind: crate::watchdog::PlatformHealthKind::Problem,
+                        critical: false,
+                        description: Some("Kick shows the channel offline.".to_string()),
+                        dashboard_url: Some("https://dashboard.kick.com/stream".to_string()),
+                    }),
+                );
+            }
         }
     };
     let x_work = async {

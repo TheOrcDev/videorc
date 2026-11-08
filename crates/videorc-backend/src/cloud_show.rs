@@ -385,6 +385,17 @@ pub struct CloudStatus {
     /// sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowance_past: Option<CloudAllowancePast>,
+    /// Plan 223 C3: the runner's program measurements while a show is live
+    /// or holding; absent otherwise and from an older runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<CloudProgram>,
+}
+
+/// `cloud.show.reconnectDestination { targetId }` (plan 223 C3).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconnectDestinationParams {
+    pub target_id: String,
 }
 
 /// `CloudStatus.allowancePast`: seconds on air past this month's cloud hours.
@@ -955,7 +966,39 @@ pub struct RunnerState {
     /// restarted runner the last one it relayed). `None` from an older runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold_image_set: Option<bool>,
+    /// Plan 223 C1: the program as the runner measures it, once a second.
+    /// Absent on `starting`, `ending` and `ended`, and from an older runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<CloudProgram>,
 }
+
+/// The runner's `program` block (plan 223 C1, `docs/wire-notes.md`): what
+/// leaves our servers, as numbers. Every field optional and skipped when
+/// absent; nothing here is stored or forwarded.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProgram {
+    /// RMS of the program audio over the last second, dBFS, floored at -100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_rms_db: Option<f64>,
+    /// Whole seconds in a row under -60 dBFS (climbs during a hold).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_silent_seconds: Option<u64>,
+    /// Whole seconds in a row whose composed frame averages 16/255 or darker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub black_seconds: Option<u64>,
+    /// Seconds since the last decoded frame while the feed's bytes still
+    /// arrive; present once that is 3 s or more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_seconds: Option<u64>,
+    /// How far the sound is behind the picture at the output, ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub av_skew_ms: Option<f64>,
+}
+
+// The frame and the status derive `Eq` for their change detection; a
+// parsed JSON number is never NaN, so the marker holds.
+impl Eq for CloudProgram {}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1294,7 +1337,35 @@ impl CloudShowRuntime {
             test: self.test.clone(),
             restart: self.restart.clone(),
             allowance_past: None,
+            program: runner.and_then(|runner| runner.program),
         }
+    }
+
+    /// Plan 223 C3: the runner's legs carry `session_id` (the destinations
+    /// were handed over), so a down leg's Reconnect is a real fix.
+    pub fn carries_session(&self, session_id: &str) -> bool {
+        self.show
+            .as_ref()
+            .is_some_and(|show| show.session_id.as_deref() == Some(session_id) && show.handed_over)
+    }
+
+    /// Plan 223 C3: the program block as the watchdog reads it, with the
+    /// hold flag its readers need. None while no runner carries this
+    /// session.
+    pub fn watchdog_signal(&self, session_id: &str) -> Option<crate::watchdog::CloudSignal> {
+        if !self.carries_session(session_id) {
+            return None;
+        }
+        let runner = self.runner.as_ref()?;
+        let program = runner.program.unwrap_or_default();
+        Some(crate::watchdog::CloudSignal {
+            hold_active: runner.hold.as_ref().is_some_and(|hold| hold.active),
+            audio_silent_seconds: program.audio_silent_seconds,
+            black_seconds: program.black_seconds,
+            frozen_seconds: program.frozen_seconds,
+            av_skew_ms: program.av_skew_ms,
+            feed_low_since: None,
+        })
     }
 
     /// A test is running (C6b): its task owns a show on the web.
@@ -1744,7 +1815,8 @@ enum LoopExit {
 /// What one reconnect round produced: a connect attempt's answer, or the
 /// lost report coming due while the attempt was still in flight.
 enum ReconnectRound<T> {
-    Attempt(std::result::Result<(T, RunnerState), HelloFailure>),
+    /// Boxed: the runner's state carries the program block now (plan 223).
+    Attempt(Box<std::result::Result<(T, RunnerState), HelloFailure>>),
     LostDue,
 }
 
@@ -2064,7 +2136,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     result = async {
                         tokio::time::sleep(Duration::from_secs(wait)).await;
                         connect_and_hello(connector, control).await
-                    } => ReconnectRound::Attempt(result),
+                    } => ReconnectRound::Attempt(Box::new(result)),
                     _ = until(lost_due) => ReconnectRound::LostDue,
                 }
             };
@@ -2080,7 +2152,7 @@ impl<W: CloudWebApi, C: ControlConnector> ControlLoop<W, C> {
                     // over, with the cooldown holding the next report.
                     continue;
                 }
-                ReconnectRound::Attempt(result) => result,
+                ReconnectRound::Attempt(result) => *result,
             };
             match result {
                 Ok((transport, welcome)) => {
@@ -2936,6 +3008,37 @@ impl<W: CloudWebApi, C: ControlConnector> CloudShowContext<W, C> {
         };
         self.hooks.emit_from(&self.slot);
         Ok(status)
+    }
+
+    /// Plan 223 C3, D8: Reconnect one destination of a cloud show. The
+    /// runner reads a `destinations.set` with one id as "start this leg over"
+    /// (an upsert since C2: a running leg is untouched). Nothing else is
+    /// sent, and no other platform notices.
+    pub async fn reconnect_destination(&self, target_id: &str) -> Result<CloudStatus> {
+        let (tx, destination) = {
+            let runtime = lock(&self.slot);
+            let Some(show) = runtime.show.as_ref() else {
+                bail!("No cloud show is running.");
+            };
+            let Some(destination) = show
+                .destinations
+                .iter()
+                .find(|destination| destination.id == target_id)
+                .cloned()
+            else {
+                bail!("That destination is not part of this show.");
+            };
+            let Some(tx) = runtime.control_tx.clone() else {
+                bail!("Videorc Cloud is not connected right now.");
+            };
+            (tx, destination)
+        };
+        let id = new_intent_id();
+        let frame = destinations_set_frame(&id, std::slice::from_ref(&destination));
+        if let Err(problem) = send_intent(&tx, frame, id, ACK_TIMEOUT).await {
+            bail!("Videorc Cloud did not take the reconnect: {problem}");
+        }
+        Ok(lock(&self.slot).status())
     }
 
     /// C5: at launch, ask the web for a live show and keep it as resumable.

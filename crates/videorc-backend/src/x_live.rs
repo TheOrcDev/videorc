@@ -1076,6 +1076,8 @@ async fn go_live(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XViewerCountOutcome {
     Count(u64),
+    /// Plan 223 A4: the broadcast's `state` is `ENDED` while we stream.
+    Ended,
     /// The broadcast came back without a concurrent-viewer field.
     NoField {
         keys: Vec<String>,
@@ -1098,6 +1100,7 @@ impl XViewerCountOutcome {
     pub fn log_reason(&self) -> Option<String> {
         match self {
             Self::Count(_) => None,
+            Self::Ended => Some("X reports the broadcast ended.".to_string()),
             Self::NoField { keys } => Some(format!(
                 "X broadcast had no concurrent-viewer field (keys: {}).",
                 if keys.is_empty() {
@@ -1183,6 +1186,15 @@ const X_CONCURRENT_VIEWER_KEYS: [&str; 5] = [
 /// count is a string.
 pub fn x_broadcast_viewer_outcome(body: &serde_json::Value) -> XViewerCountOutcome {
     let broadcast = crate::scheduled_x::payload(body);
+    // Plan 223 A4: an ended broadcast while we stream is the platform's word
+    // that viewers get nothing; the count no longer means anything.
+    if broadcast
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|state| state.eq_ignore_ascii_case("ENDED"))
+    {
+        return XViewerCountOutcome::Ended;
+    }
     for key in X_CONCURRENT_VIEWER_KEYS {
         let Some(count) = broadcast.get(key) else {
             continue;

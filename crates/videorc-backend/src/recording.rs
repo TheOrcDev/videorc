@@ -3175,6 +3175,25 @@ pub struct ActiveLivePreview {
 }
 
 impl ActiveRecording {
+    /// Plan 223: what the watchdog's tick needs from the session, read in
+    /// one go under the recording lock.
+    pub(crate) fn watchdog_facts(&self) -> crate::watchdog::SessionFacts {
+        crate::watchdog::SessionFacts {
+            live: self.mode.contains("stream"),
+            mic_muted: self
+                .native_audio
+                .as_ref()
+                .is_some_and(|audio| audio.processing_settings().muted),
+            targets: self
+                .stream_targets_snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .targets
+                .clone(),
+            ..Default::default()
+        }
+    }
+
     #[cfg(all(test, unix, debug_assertions))]
     pub(crate) fn install_source_switch_timing_for_test(&mut self) {
         self.source_switch_output_audio_timing = Some(vec![SourceSwitchOutputAudioTiming {
@@ -10993,13 +11012,61 @@ async fn stream_audio_levels_during_recording(state: AppState, session_id: Strin
                 .as_ref()
                 .is_some_and(|active| active.session_id == session_id)
             {
+                drop(recording);
+                crate::watchdog::session_ended(&state, &session_id);
                 return;
             }
         }
-        if let Some(event) = audio_levels_event(&session_id, handle.take_levels()) {
+        let levels = handle.take_levels();
+        crate::watchdog::observe_levels(&state, &session_id, &levels);
+        if ticks.is_multiple_of(AUDIO_LEVELS_LIVENESS_TICKS) {
+            watchdog_tick(&state, &session_id).await;
+        }
+        if let Some(event) = audio_levels_event(&session_id, levels) {
             state.emit_event("audio.levels", event);
         }
     }
+}
+
+/// Plan 223 A1: once a second the watchdog gets the session's facts (the
+/// applied mute, whether it streams, the destination legs), the cloud's
+/// program block, the active takeover and a luma sample of the stream
+/// leg's frame (A7), then runs its checks. Nothing here waits on the
+/// watchdog; the facts are gathered under the locks the loop already takes.
+async fn watchdog_tick(state: &AppState, session_id: &str) {
+    let facts = {
+        let recording = state.recording.lock().await;
+        match recording.as_ref() {
+            Some(active) if active.session_id == session_id => Some(active.watchdog_facts()),
+            _ => None,
+        }
+    };
+    let Some(mut facts) = facts else {
+        return;
+    };
+    {
+        let cloud = state
+            .cloud_show
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        facts.cloud_show = cloud.carries_session(session_id);
+        facts.cloud = cloud.watchdog_signal(session_id);
+    }
+    facts.takeover = state
+        .database
+        .active_stream_screen()
+        .ok()
+        .flatten()
+        .map(|screen| (screen.id, screen.image_path));
+    if facts.live
+        && crate::watchdog::program_luma_due(state)
+        && let Some(store) =
+            crate::compositor::compositor_program_frame_store_for_stream(state).await
+        && let Some(luma) = crate::preview_debug_sample::program_mean_luma(&store)
+    {
+        crate::watchdog::observe_program_luma(state, luma);
+    }
+    crate::watchdog::tick(state, session_id, facts);
 }
 
 /// The `audio.levels` payload for one window; None when the bus had no samples.
@@ -27054,7 +27121,7 @@ const CLOUD_FEED_TARGET_PREFIX: &str = "videorc-cloud-";
 /// Every stream leg's AAC rate (`-b:a 160k` in the stream args).
 const CLOUD_FEED_AUDIO_KBPS: u32 = 160;
 
-fn is_cloud_feed_target(target_id: &str) -> bool {
+pub(crate) fn is_cloud_feed_target(target_id: &str) -> bool {
     target_id.starts_with(CLOUD_FEED_TARGET_PREFIX)
 }
 
@@ -30248,6 +30315,9 @@ pub fn emit_health_event(
     // `ffmpeg-warning` code carries raw FFmpeg lines that can quote an RTMP
     // URL, whose path is the stream key.
     let message = &crate::state::redact_stream_urls(message);
+    // Plan 223: the watchdog reads the encoder's stall and bitrate notices
+    // and the 1064 silence watchdog as signals (its own events it ignores).
+    crate::watchdog::observe_health_event(state, session_id, code, message);
     // Plan 181: a buffer-only session has no `sessions` row, so its events
     // are stored without the session id instead of failing the foreign key.
     let session_id = session_id.filter(|id| !crate::replay_buffer::is_rowless_session(state, id));

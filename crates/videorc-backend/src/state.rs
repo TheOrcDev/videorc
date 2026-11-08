@@ -1223,6 +1223,10 @@ pub struct AppState {
     /// Know your viewers (plan 225): the per-session arrival set, the
     /// pending `!link` words and the detached store writes.
     pub community: crate::community_service::CommunitySlot,
+    /// The stream watchdog (plan 223): the alerts, the checks' clocks and
+    /// the settings. A std mutex: the audio-levels task and every health
+    /// event touch it and return.
+    pub watchdog: crate::watchdog::WatchdogSlot,
     /// The last seconds of live-caption finals for the co-host spotlight lane
     /// (plan 060 S3). A std mutex on purpose: the caption coordinator appends
     /// without ever waiting on the engine's async lock.
@@ -1322,6 +1326,8 @@ impl AppState {
     ) -> Self {
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
+        // Plan 223: the watchdog's settings, read once at startup.
+        let watchdog_settings = crate::watchdog::load_settings(&database);
         // Plan 172 D5: the default Buddy wears its bundled pack when it ships.
         let cohost_settings = crate::cohost_library::alive::default_buddy_alive(
             &database,
@@ -1453,6 +1459,7 @@ impl AppState {
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             community: crate::community_service::new_slot(),
+            watchdog: crate::watchdog::new_slot(watchdog_settings),
             live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),

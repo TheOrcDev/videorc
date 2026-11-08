@@ -1,0 +1,91 @@
+{
+  "$comment": "Plan 223 (the stream watchdog): the wire shapes. Rust (watchdog::tests::shared_watchdog_fixture_round_trips_without_nulls) and TypeScript (backend-rpc-contract.test.ts) each assert these round-trip field for field. Absent fields are omitted, never null: `micMuted` carries no platform or target, `cloudDown` carries both and a source line, `cloudState` is a cloud.state payload with the runner's program block.",
+  "version": 1,
+  "alerts": {
+    "sessionId": "session-fixture",
+    "alerts": [
+      {
+        "id": "watchdog:mic-muted:1",
+        "check": "mic-muted",
+        "severity": "critical",
+        "state": "open",
+        "since": "2026-11-08T12:04:00.000Z",
+        "title": "Your microphone is muted on the livestream",
+        "detail": "Muted for 0:42. Viewers hear no voice.",
+        "source": "desktop",
+        "fixes": [{ "kind": "unmute", "label": "Unmute" }]
+      },
+      {
+        "id": "watchdog:destination-down:youtube:2",
+        "check": "destination-down",
+        "severity": "warning",
+        "state": "acknowledged",
+        "since": "2026-11-08T12:05:00.000Z",
+        "lastRepeatAt": "2026-11-08T12:15:00.000Z",
+        "title": "YouTube has been down for 0:20",
+        "detail": "Videorc Cloud is retrying. Reconnect starts it over.",
+        "source": "cloud",
+        "platform": "youtube",
+        "targetId": "youtube",
+        "fixes": [{ "kind": "reconnect-destination", "label": "Reconnect YouTube" }]
+      },
+      {
+        "id": "watchdog:platform-health:youtube:3",
+        "check": "platform-health",
+        "severity": "critical",
+        "state": "snoozed",
+        "since": "2026-11-08T12:06:00.000Z",
+        "title": "YouTube reports no audio",
+        "detail": "The stream has no audio.",
+        "source": "platform",
+        "platform": "youtube",
+        "targetId": "youtube",
+        "fixes": [
+          {
+            "kind": "open-platform-dashboard",
+            "label": "Open YouTube dashboard",
+            "url": "https://studio.youtube.com/video/b1/livestreaming"
+          }
+        ],
+        "snoozedUntil": "2026-11-08T12:16:00.000Z"
+      }
+    ]
+  },
+  "emptyAlerts": { "alerts": [] },
+  "settings": {
+    "checks": {
+      "mic-muted": { "enabled": true },
+      "still-there": { "enabled": false }
+    },
+    "micMutedAfterSeconds": 30,
+    "systemNotifications": true,
+    "phonePush": false,
+    "aiChatRead": true
+  },
+  "settingsPatch": { "checks": { "chat-says": { "enabled": false } }, "micMutedAfterSeconds": 60 },
+  "snoozeParams": { "id": "watchdog:mic-muted:1", "scope": "ten-minutes" },
+  "devices": {
+    "devices": [
+      {
+        "id": "device-1",
+        "label": "iPhone (Safari)",
+        "createdAt": "2026-11-08T11:00:00.000Z",
+        "lastOkAt": "2026-11-08T12:04:05.000Z"
+      }
+    ]
+  },
+  "program": {
+    "audioRmsDb": -23.4,
+    "audioSilentSeconds": 0,
+    "blackSeconds": 0,
+    "avSkewMs": 21.5
+  },
+  "frozenProgram": { "audioSilentSeconds": 25, "blackSeconds": 12, "frozenSeconds": 4 },
+  "rejected": {
+    "alerts": [
+      { "id": "x", "check": "picture-stolen", "severity": "critical", "state": "open", "since": "2026-11-08T12:04:00.000Z", "title": "t", "detail": "d", "source": "desktop" },
+      { "id": "x", "check": "mic-muted", "severity": "loud", "state": "open", "since": "2026-11-08T12:04:00.000Z", "title": "t", "detail": "d", "source": "desktop" },
+      { "id": "x", "check": "mic-muted", "severity": "critical", "state": "open", "since": "2026-11-08T12:04:00.000Z", "title": "t", "detail": "d", "source": "desktop", "fixes": [{ "kind": "restart-computer", "label": "No" }] }
+    ]
+  }
+}

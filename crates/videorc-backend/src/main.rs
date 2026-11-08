@@ -182,6 +182,7 @@ mod virtual_camera_linux;
 mod virtual_camera_macos;
 mod virtual_camera_service;
 mod warm_microphone;
+mod watchdog;
 #[allow(dead_code)]
 mod windows_capture_owner;
 #[cfg(target_os = "windows")]
@@ -5988,7 +5989,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "discord.announce.update"
         | "discord.webhook.save"
         | "discord.webhook.remove"
-        | "discord.webhook.sendTest" => Some(DEFAULT_MUTATION_POLICY),
+        | "discord.webhook.sendTest"
+        | "watchdog.alert.acknowledge"
+        | "watchdog.alert.snooze"
+        | "watchdog.settings.set"
+        | "watchdog.idle.report"
+        | "cloud.show.reconnectDestination" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start"
         | "cloud.show.resume"
@@ -6107,6 +6113,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "virtualCamera.status"
         // Issue #1066: reads the camera control; never waits behind a set.
         | "camera.lowLight.get"
+        | "watchdog.alerts.list"
+        | "watchdog.settings.get"
+        | "watchdog.phone.devices"
         | "stream.targets.snapshot" => Some(Observation),
 
         "screens.active" => Some(DEFAULT_MUTATION_POLICY),
@@ -10385,6 +10394,82 @@ async fn handle_text_message_with_role(
             Ok(params) => community_rpc(command.id, community_service::import(state, params).await),
             Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
+        // --- The stream watchdog (plan 223) ---
+        "watchdog.alerts.list" => ServerResponse::ok(command.id, watchdog::alerts_view(state)),
+        "watchdog.alert.acknowledge" => {
+            match serde_json::from_value::<watchdog::AlertIdParams>(command.params) {
+                Ok(params) => match watchdog::acknowledge(state, &params.id) {
+                    Ok(view) => ServerResponse::ok(command.id, view),
+                    Err(error) => ServerResponse::error(command.id, "watchdog-alert-gone", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "watchdog.alert.snooze" => {
+            match serde_json::from_value::<watchdog::AlertSnoozeParams>(command.params) {
+                Ok(params) => match watchdog::snooze(state, &params.id, params.scope) {
+                    Ok(view) => ServerResponse::ok(command.id, view),
+                    Err(error) => ServerResponse::error(command.id, "watchdog-alert-gone", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "watchdog.settings.get" => ServerResponse::ok(command.id, watchdog::get_settings(state)),
+        "watchdog.settings.set" => {
+            match serde_json::from_value::<watchdog::WatchdogSettingsPatch>(command.params) {
+                Ok(patch) => match watchdog::set_settings(state, patch) {
+                    Ok(settings) => ServerResponse::ok(command.id, settings),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "watchdog-settings-invalid", error)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // The renderer relays main's `powerMonitor` idle time (still-there).
+        "watchdog.idle.report" => {
+            match serde_json::from_value::<watchdog::IdleReportParams>(command.params) {
+                Ok(params) => {
+                    watchdog::report_system_idle(
+                        state,
+                        std::time::Duration::from_secs(params.idle_seconds),
+                    );
+                    ServerResponse::ok(command.id, serde_json::json!({ "ok": true }))
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 223 D2: the phones that get alerts, from the web.
+        "watchdog.phone.devices" => {
+            let Some(bearer) = account::stored_session_token() else {
+                return ServerResponse::error(
+                    command.id,
+                    "watchdog-signed-out",
+                    "Sign in to see your phones.",
+                );
+            };
+            match videorc_api::VideorcApiClient::new() {
+                Ok(client) => match client.get_alert_devices(&bearer).await {
+                    Ok(devices) => ServerResponse::ok(command.id, devices),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "watchdog-devices-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "watchdog-devices-failed", error.to_string())
+                }
+            }
+        }
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
         }
@@ -11300,6 +11385,29 @@ async fn handle_text_message_with_role(
                     "cloud-unavailable",
                     "Videorc Cloud is unavailable in this build.",
                 ),
+            }
+        }
+        // Plan 223 C3: Reconnect one destination of a cloud show (D8).
+        "cloud.show.reconnectDestination" => {
+            match serde_json::from_value::<cloud_show::ReconnectDestinationParams>(command.params) {
+                Ok(params) => match cloud_context(state) {
+                    Some(context) => match context.reconnect_destination(&params.target_id).await {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-reconnect-failed",
+                            error.to_string(),
+                        ),
+                    },
+                    None => ServerResponse::error(
+                        command.id,
+                        "cloud-unavailable",
+                        "Videorc Cloud is unavailable in this build.",
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
             }
         }
         "cloud.show.end" => match cloud_context(state) {

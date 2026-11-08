@@ -6743,6 +6743,11 @@ pub struct AiCapabilities {
     /// Absent for Basic and on older web deploys, which means no cloud.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<AiCapabilitiesCloud>,
+    /// The stream watchdog's AI chat read (plan 223 B2): `chat` is 1 when
+    /// this user may call `POST /api/ai/watchdog/chat`. Older servers omit
+    /// it: the desktop keeps its free phrase match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<AiCapabilitiesWatchdog>,
     pub generated_at: String,
     pub limits: AiCapabilitiesLimits,
     pub models: AiCapabilitiesModels,
@@ -6750,6 +6755,15 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `watchdog` from `GET /api/ai/capabilities` (plan 223 B2): `chat` is 1
+/// when this user may call `POST /api/ai/watchdog/chat`, 0 otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesWatchdog {
+    #[serde(default)]
+    pub chat: u32,
 }
 
 /// `buddy` from `GET /api/ai/capabilities` (plan 209 S19): `act` is 1 when
