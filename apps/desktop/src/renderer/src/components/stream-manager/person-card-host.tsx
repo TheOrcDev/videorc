@@ -55,7 +55,9 @@ export default function PersonCardHost({
   const narrow = typeof window !== 'undefined' && window.innerWidth < PERSON_CARD_DIALOG_BELOW_PX
   const anchor =
     request?.messageId && typeof document !== 'undefined'
-      ? document.querySelector(`[data-message-id="${CSS.escape(request.messageId)}"]`)
+      ? document.querySelector(
+          `[data-pane="chat"] [data-message-id="${CSS.escape(request.messageId)}"]`
+        )
       : null
 
   // The Buddy pane's own locked notice, one reason and View Premium (plan

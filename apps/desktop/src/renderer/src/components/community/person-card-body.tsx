@@ -309,7 +309,7 @@ export function PersonCardBody({
       />
       {person.youtube ? (
         <Alert data-testid="person-card-youtube" variant="quiet">
-          <AlertTitle>{YOUTUBE_RETENTION_LINE}</AlertTitle>
+          <AlertTitle className="text-xs">{YOUTUBE_RETENTION_LINE}</AlertTitle>
         </Alert>
       ) : null}
       {showLinkHistory && (person.linkEvents ?? []).length > 0 ? (
@@ -502,15 +502,17 @@ function SuggestionRow({
       : `Might be the same as ${other.name} on ${platformLabel(other.platform)}`
   return (
     <Alert data-testid="person-card-suggestion" variant="default">
-      <AlertTitle>{title}</AlertTitle>
-      <AlertAction className="flex gap-1">
+      <AlertTitle className="text-xs">{title}</AlertTitle>
+      {/* The answers sit under the words, like a Buddy card's: an action
+          slot beside two buttons covered the title in a 320 px card. */}
+      <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
         <Button disabled={busy} size="xs" type="button" variant="outline" onClick={onAccept}>
           Same person
         </Button>
         <Button disabled={busy} size="xs" type="button" variant="ghost" onClick={onDismiss}>
           Not the same
         </Button>
-      </AlertAction>
+      </div>
     </Alert>
   )
 }
